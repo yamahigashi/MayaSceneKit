@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::parser::{parse_file, MayaBinaryParseError};
+use crate::parser::{MayaBinaryParseError, parse_file};
 
 mod decode;
 mod mb_to_ma;

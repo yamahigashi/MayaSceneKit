@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::parser::{Chunk, MayaBinaryFile};
 
+use super::SceneToolError;
 use super::decode::{decode_attr_payload, parse_section_chunks};
 use super::mb_to_ma::extract_head_metadata;
 use super::patterns::{CREATE_SCRIPT_RE, NODE_NAME_RE, SCRIPT_NODE_NAME_FALLBACK_RE};
@@ -11,7 +12,6 @@ use super::util::{
     escape_ma_string, find_subslice, split_lines_keepends, trim_ascii, trim_ascii_start,
     trim_end_newline,
 };
-use super::SceneToolError;
 
 pub(super) fn detect_scene_format(path: impl AsRef<Path>) -> Result<String, SceneToolError> {
     let scene_path = path.as_ref();

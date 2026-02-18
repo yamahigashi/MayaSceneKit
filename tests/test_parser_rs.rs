@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use maya_scene_kit::{parse_file, MayaBinaryParseError};
+use maya_scene_kit::{MayaBinaryParseError, parse_file};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

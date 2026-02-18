@@ -6,10 +6,10 @@ use clap::{Arg, ArgAction, Command};
 use regex::Regex;
 use serde_json::json;
 
-use crate::parser::{parse_file, Chunk, MayaBinaryParseError};
+use crate::parser::{Chunk, MayaBinaryParseError, parse_file};
 use crate::scene::{
-    collect_script_node_entries, convert_to_maya_ascii, dump_requires, dump_script_nodes,
-    remove_script_nodes, SceneToolError,
+    SceneToolError, collect_script_node_entries, convert_to_maya_ascii, dump_requires,
+    dump_script_nodes, remove_script_nodes,
 };
 
 pub fn main(argv: Vec<String>) -> i32 {
@@ -570,11 +570,7 @@ fn run_script_audit(
         println!("total_hits={}", all_hits.len());
     }
 
-    if all_hits.is_empty() {
-        0
-    } else {
-        10
-    }
+    if all_hits.is_empty() { 0 } else { 10 }
 }
 
 fn find_hits_in_body(

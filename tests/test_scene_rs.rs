@@ -15,14 +15,18 @@ fn script_check_ma() {
     let report = check_script_nodes(repo_root().join("tests/02/sphere.ma")).unwrap();
     assert_eq!(report.scene_format, "ma");
     assert!(report.count() >= 2);
-    assert!(report
-        .nodes
-        .iter()
-        .any(|n| n == "uiConfigurationScriptNode"));
-    assert!(report
-        .nodes
-        .iter()
-        .any(|n| n == "sceneConfigurationScriptNode"));
+    assert!(
+        report
+            .nodes
+            .iter()
+            .any(|n| n == "uiConfigurationScriptNode")
+    );
+    assert!(
+        report
+            .nodes
+            .iter()
+            .any(|n| n == "sceneConfigurationScriptNode")
+    );
 }
 
 #[test]
@@ -36,9 +40,11 @@ fn script_clean_ma() {
 
     let report = check_script_nodes(&output).unwrap();
     assert_eq!(report.count(), 0);
-    assert!(std::fs::read_to_string(&output)
-        .unwrap()
-        .contains("createNode mesh -n \"pSphereShape1\""));
+    assert!(
+        std::fs::read_to_string(&output)
+            .unwrap()
+            .contains("createNode mesh -n \"pSphereShape1\"")
+    );
 }
 
 #[test]
@@ -58,11 +64,13 @@ fn script_check_and_clean_mb() {
     assert_eq!(cleaned_report.count(), 0);
 
     let parsed = parse_file(&output).unwrap();
-    assert!(!parsed
-        .root
-        .children
-        .iter()
-        .any(|child| child.form_type.as_deref() == Some("SCRP")));
+    assert!(
+        !parsed
+            .root
+            .children
+            .iter()
+            .any(|child| child.form_type.as_deref() == Some("SCRP"))
+    );
 }
 
 #[test]
@@ -74,10 +82,12 @@ fn script_dump_ma() {
     let result = dump_script_nodes(&source, &output).unwrap();
     assert_eq!(result.scene_format, "ma");
     assert!(result.dumped_count() >= 2);
-    assert!(result
-        .dumped_nodes
-        .iter()
-        .any(|n| n == "uiConfigurationScriptNode"));
+    assert!(
+        result
+            .dumped_nodes
+            .iter()
+            .any(|n| n == "uiConfigurationScriptNode")
+    );
 
     let text = std::fs::read_to_string(output).unwrap();
     assert!(text.contains("# maya-scene-kit Script Node Dump"));
@@ -93,10 +103,12 @@ fn requires_dump_mb() {
     let result = dump_requires(&source, &output).unwrap();
     assert_eq!(result.scene_format, "mb");
     assert!(result.dumped_count() >= 1);
-    assert!(result
-        .requires
-        .iter()
-        .any(|r| r.starts_with("requires maya ")));
+    assert!(
+        result
+            .requires
+            .iter()
+            .any(|r| r.starts_with("requires maya "))
+    );
 
     let text = std::fs::read_to_string(output).unwrap();
     assert!(text.contains("# maya-scene-kit Requires Dump"));
