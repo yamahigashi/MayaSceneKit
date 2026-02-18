@@ -1,0 +1,106 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,x86_64-pc-windows-gnu
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Release build for Linux
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Release build for Windows
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+
+      - name: Package binaries
+        run: |
+          mkdir -p release
+          # Linux binary
+          cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit release/maya-scene-kit-linux
+          tar czf release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz -C release maya-scene-kit-linux
+          # Windows binary
+          cp target/x86_64-pc-windows-gnu/release/maya-scene-kit.exe release/maya-scene-kit-windows.exe
+          zip -j release/maya-scene-kit-${{ github.ref_name }}-windows.zip release/maya-scene-kit-windows.exe
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd release
+          sha256sum \
+            maya-scene-kit-${{ github.ref_name }}-linux.tar.gz \
+            maya-scene-kit-${{ github.ref_name }}-windows.zip \
+            > SHA256SUMS.txt
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maya-scene-kit-linux-${{ github.ref_name }}
+          path: release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maya-scene-kit-windows-${{ github.ref_name }}
+          path: release/maya-scene-kit-${{ github.ref_name }}-windows.zip
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maya-scene-kit-sha256-${{ github.ref_name }}
+          path: release/SHA256SUMS.txt
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maya-scene-kit-linux-${{ github.ref_name }}
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maya-scene-kit-windows-${{ github.ref_name }}
+
+      - name: Download checksum artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maya-scene-kit-sha256-${{ github.ref_name }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            maya-scene-kit-${{ github.ref_name }}-linux.tar.gz
+            maya-scene-kit-${{ github.ref_name }}-windows.zip
+            SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
