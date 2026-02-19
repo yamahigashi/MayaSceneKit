@@ -8,8 +8,9 @@ use serde_json::json;
 
 use crate::parser::{Chunk, MayaBinaryParseError, parse_file};
 use crate::scene::{
-    SceneToolError, collect_script_node_entries, convert_to_maya_ascii, dump_requires,
-    dump_script_nodes, remove_script_nodes,
+    PathKind, PathReplaceRule, SceneToolError, collect_scene_paths, collect_script_node_entries,
+    convert_to_maya_ascii, dump_requires, dump_script_nodes, remove_script_nodes,
+    replace_scene_paths,
 };
 
 pub fn main(argv: Vec<String>) -> i32 {
@@ -43,6 +44,19 @@ pub fn main(argv: Vec<String>) -> i32 {
             let out_dir = m.get_one::<PathBuf>("out-dir");
             let stdout = m.get_flag("stdout");
             run_dump(input, out, out_dir, stdout)
+        }
+        Some(("paths", m)) => {
+            let input = m.get_one::<PathBuf>("input").unwrap();
+            let kind = parse_path_kind(
+                m.get_one::<String>("kind")
+                    .map(|s| s.as_str())
+                    .unwrap_or("all"),
+            );
+            let out = m.get_one::<PathBuf>("out");
+            let out_dir = m.get_one::<PathBuf>("out-dir");
+            let stdout = m.get_flag("stdout");
+            let json_output = m.get_flag("json");
+            run_paths(input, kind, out, out_dir, stdout, json_output)
         }
         Some(("audit", m)) => {
             let input = m.get_one::<PathBuf>("input").unwrap();
@@ -82,6 +96,20 @@ pub fn main(argv: Vec<String>) -> i32 {
             let input = m.get_one::<PathBuf>("input").unwrap();
             let output = m.get_one::<PathBuf>("output").unwrap();
             run_script_clean(input, output)
+        }
+        Some(("replace", m)) => {
+            let input = m.get_one::<PathBuf>("input").unwrap();
+            let out = m.get_one::<PathBuf>("out");
+            let out_dir = m.get_one::<PathBuf>("out-dir");
+            let rules_raw = m
+                .get_many::<String>("rule")
+                .map(|v| v.map(|s| s.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let rule_files = m
+                .get_many::<PathBuf>("rule-file")
+                .map(|v| v.cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            run_replace_paths(input, out, out_dir, rules_raw, rule_files)
         }
         _ => 2,
     }
@@ -136,6 +164,46 @@ fn build_parser() -> Command {
                         .long("stdout")
                         .action(ArgAction::SetTrue)
                         .help("Write dump to stdout"),
+                ),
+        )
+        .subcommand(
+            Command::new("paths")
+                .about("Extract file/reference paths from file or directory")
+                .arg(
+                    Arg::new("input")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+                .arg(
+                    Arg::new("kind")
+                        .long("kind")
+                        .default_value("all")
+                        .value_parser(["all", "file", "reference"])
+                        .help("Path kind to extract"),
+                )
+                .arg(
+                    Arg::new("out")
+                        .long("out")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Output file (single input only)"),
+                )
+                .arg(
+                    Arg::new("out-dir")
+                        .long("out-dir")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Output directory (directory input only)"),
+                )
+                .arg(
+                    Arg::new("stdout")
+                        .long("stdout")
+                        .action(ArgAction::SetTrue)
+                        .help("Write extracted paths to stdout"),
+                )
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Output JSON"),
                 ),
         )
         .subcommand(
@@ -217,13 +285,52 @@ fn build_parser() -> Command {
                         .value_parser(clap::value_parser!(PathBuf)),
                 ),
         )
+        .subcommand(
+            Command::new("replace")
+                .about("Replace file/reference paths in scene files")
+                .arg(
+                    Arg::new("input")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+                .arg(
+                    Arg::new("rule")
+                        .long("rule")
+                        .action(ArgAction::Append)
+                        .num_args(1)
+                        .value_parser(clap::value_parser!(String))
+                        .help("Replacement rule: FROM=TO (repeatable)"),
+                )
+                .arg(
+                    Arg::new("rule-file")
+                        .long("rule-file")
+                        .action(ArgAction::Append)
+                        .num_args(1)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Rule file path (1 rule per line as FROM=TO, can be repeated)"),
+                )
+                .arg(
+                    Arg::new("out")
+                        .long("out")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Output file (single input only)"),
+                )
+                .arg(
+                    Arg::new("out-dir")
+                        .long("out-dir")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Output directory (directory input only)"),
+                ),
+        )
 }
 
 fn normalize_argv(argv: Vec<String>) -> Vec<String> {
     if argv.is_empty() {
         return argv;
     }
-    let commands = ["inspect", "dump", "audit", "to-ascii", "clean", "help"];
+    let commands = [
+        "inspect", "dump", "paths", "audit", "to-ascii", "clean", "replace", "help",
+    ];
     let first = &argv[0];
     if commands.contains(&first.as_str()) || first.starts_with('-') {
         return argv;
@@ -235,6 +342,14 @@ fn normalize_argv(argv: Vec<String>) -> Vec<String> {
             .collect();
     }
     argv
+}
+
+fn parse_path_kind(kind: &str) -> PathKind {
+    match kind {
+        "file" => PathKind::File,
+        "reference" => PathKind::Reference,
+        _ => PathKind::All,
+    }
 }
 
 fn run_inspect(path: &PathBuf, max_depth: Option<usize>, preview_bytes: usize) -> i32 {
@@ -373,6 +488,298 @@ fn run_dump(input: &Path, out: Option<&PathBuf>, out_dir: Option<&PathBuf>, stdo
             }
             0
         }
+    }
+}
+
+fn run_paths(
+    input: &Path,
+    kind: PathKind,
+    out: Option<&PathBuf>,
+    out_dir: Option<&PathBuf>,
+    stdout: bool,
+    json_output: bool,
+) -> i32 {
+    if out.is_some() && out_dir.is_some() {
+        eprintln!("error: --out and --out-dir are mutually exclusive");
+        return 2;
+    }
+
+    if stdout && (out.is_some() || out_dir.is_some()) {
+        eprintln!("error: --stdout cannot be used with --out/--out-dir");
+        return 2;
+    }
+
+    let files = match collect_scene_files(input) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            eprintln!("error: no .ma/.mb files found: {}", input.display());
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+
+    if files.len() == 1 {
+        let file = &files[0];
+        if let Some(out_dir) = out_dir {
+            eprintln!(
+                "error: --out-dir ({}) is for directory input. use --out for single file: {}",
+                out_dir.display(),
+                file.display()
+            );
+            return 2;
+        }
+
+        if let Some(out_file) = out {
+            match write_scene_paths(file, kind, out_file, json_output) {
+                Ok(()) => {
+                    println!("written={}", out_file.display());
+                    return 0;
+                }
+                Err(SceneToolError::Io(e)) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("scene error: {e}");
+                    return 1;
+                }
+            }
+        }
+
+        let rendered = if json_output {
+            render_scene_paths_json(file, kind)
+        } else {
+            render_scene_paths_text(file, kind)
+        };
+        match rendered {
+            Ok(text) => {
+                print!("{text}");
+                0
+            }
+            Err(SceneToolError::Io(e)) => {
+                eprintln!("error: {e}");
+                2
+            }
+            Err(e) => {
+                eprintln!("scene error: {e}");
+                1
+            }
+        }
+    } else {
+        if let Some(out_file) = out {
+            eprintln!(
+                "error: --out is for single file input. use --out-dir for directory input: {}",
+                out_file.display()
+            );
+            return 2;
+        }
+
+        if let Some(root) = out_dir {
+            if let Err(e) = fs::create_dir_all(root) {
+                eprintln!("error: {e}");
+                return 2;
+            }
+            for file in files {
+                let rel = file.strip_prefix(input).unwrap_or(file.as_path());
+                let mut out_path = root.join(rel);
+                let file_name = out_path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "scene".to_string());
+                out_path.set_file_name(if json_output {
+                    format!("{file_name}.scene_paths.json")
+                } else {
+                    format!("{file_name}.scene_paths.txt")
+                });
+                match write_scene_paths(&file, kind, &out_path, json_output) {
+                    Ok(()) => println!("written={}", out_path.display()),
+                    Err(SceneToolError::Io(e)) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("scene error: {e}");
+                        return 1;
+                    }
+                }
+            }
+            0
+        } else {
+            if json_output {
+                match render_scene_paths_collection_json(&files, kind, input) {
+                    Ok(text) => {
+                        print!("{text}");
+                        return 0;
+                    }
+                    Err(SceneToolError::Io(e)) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("scene error: {e}");
+                        return 1;
+                    }
+                }
+            }
+            for file in files {
+                match render_scene_paths_text(&file, kind) {
+                    Ok(text) => {
+                        println!("===== {} =====", file.display());
+                        print!("{text}");
+                    }
+                    Err(SceneToolError::Io(e)) => {
+                        eprintln!("error: {e}");
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("scene error: {e}");
+                        return 1;
+                    }
+                }
+            }
+            0
+        }
+    }
+}
+
+fn parse_replace_rules(raw: Vec<String>) -> Result<Vec<PathReplaceRule>, String> {
+    let mut out = Vec::new();
+    for r in raw {
+        let (from, to) = r
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --rule '{r}', expected FROM=TO"))?;
+        if from.is_empty() {
+            return Err(format!("invalid --rule '{r}', FROM must not be empty"));
+        }
+        out.push(PathReplaceRule {
+            from: from.to_string(),
+            to: to.to_string(),
+        });
+    }
+    if out.is_empty() {
+        return Err("no --rule specified".to_string());
+    }
+    Ok(out)
+}
+
+fn run_replace_paths(
+    input: &Path,
+    out: Option<&PathBuf>,
+    out_dir: Option<&PathBuf>,
+    rules_raw: Vec<String>,
+    rule_files: Vec<PathBuf>,
+) -> i32 {
+    if out.is_some() && out_dir.is_some() {
+        eprintln!("error: --out and --out-dir are mutually exclusive");
+        return 2;
+    }
+
+    let mut merged_rules = rules_raw;
+    for rule_file in rule_files {
+        let text = match fs::read_to_string(&rule_file) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: {}: {e}", rule_file.display());
+                return 2;
+            }
+        };
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            merged_rules.push(trimmed.to_string());
+        }
+    }
+
+    let rules = match parse_replace_rules(merged_rules) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+
+    let files = match collect_scene_files(input) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            eprintln!("error: no .ma/.mb files found: {}", input.display());
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+
+    if files.len() == 1 {
+        let src = &files[0];
+        if out_dir.is_some() {
+            eprintln!("error: --out-dir is for directory input");
+            return 2;
+        }
+        let Some(dst) = out else {
+            eprintln!("error: --out is required for single file input");
+            return 2;
+        };
+
+        match replace_scene_paths(src, dst, &rules) {
+            Ok(r) => {
+                println!(
+                    "written={} format={} replaced={}",
+                    r.output_path.display(),
+                    r.scene_format,
+                    r.replaced_count
+                );
+                0
+            }
+            Err(SceneToolError::Io(e)) => {
+                eprintln!("error: {e}");
+                2
+            }
+            Err(e) => {
+                eprintln!("scene error: {e}");
+                1
+            }
+        }
+    } else {
+        if out.is_some() {
+            eprintln!("error: --out is for single file input. use --out-dir");
+            return 2;
+        }
+        let Some(root) = out_dir else {
+            eprintln!("error: --out-dir is required for directory input");
+            return 2;
+        };
+        if let Err(e) = fs::create_dir_all(root) {
+            eprintln!("error: {e}");
+            return 2;
+        }
+
+        for src in files {
+            let rel = src.strip_prefix(input).unwrap_or(src.as_path());
+            let dst = root.join(rel);
+            match replace_scene_paths(&src, &dst, &rules) {
+                Ok(r) => println!(
+                    "written={} format={} replaced={}",
+                    r.output_path.display(),
+                    r.scene_format,
+                    r.replaced_count
+                ),
+                Err(SceneToolError::Io(e)) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("scene error: {e}");
+                    return 1;
+                }
+            }
+        }
+        0
     }
 }
 
@@ -670,6 +1077,149 @@ fn write_scene_dump(input: &Path, output: &Path) -> Result<(), SceneToolError> {
     }
     fs::write(output, text)?;
     Ok(())
+}
+
+fn write_scene_paths(
+    input: &Path,
+    kind: PathKind,
+    output: &Path,
+    json_output: bool,
+) -> Result<(), SceneToolError> {
+    let text = if json_output {
+        render_scene_paths_json(input, kind)?
+    } else {
+        render_scene_paths_text(input, kind)?
+    };
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, text)?;
+    Ok(())
+}
+
+fn render_scene_paths_text(input: &Path, kind: PathKind) -> Result<String, SceneToolError> {
+    let report = collect_scene_paths(input, kind)?;
+    let kind_label = match kind {
+        PathKind::All => "all",
+        PathKind::File => "file",
+        PathKind::Reference => "reference",
+    };
+    let mut out = format!(
+        "# maya-scene-kit Scene Paths\nsource: {}\nformat: {}\nkind: {}\ncount: {}\n",
+        report.scene_path.display(),
+        report.scene_format,
+        kind_label,
+        report.entries.len()
+    );
+
+    for e in report.entries {
+        let value = e
+            .value
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
+        out.push_str(&format!(
+            "- node_type={} node={} attr={} value=\"{}\"\n",
+            e.node_type, e.node_name, e.attr, value
+        ));
+        if let Some(meta) = e.meta {
+            let mut bits = Vec::new();
+            bits.push(format!("origin={}", meta.origin));
+            if let Some(v) = meta.short_name {
+                bits.push(format!("short_name={}", v));
+            }
+            if let Some(v) = meta.reference_node {
+                bits.push(format!("reference_node={}", v));
+            }
+            if let Some(v) = meta.format_hint {
+                bits.push(format!("format_hint={}", v));
+            }
+            if let Some(v) = meta.color_space {
+                bits.push(format!("color_space={}", v));
+            }
+            if !meta.raw_fields.is_empty() {
+                bits.push(format!("raw_fields={}", meta.raw_fields.join("|")));
+            }
+            out.push_str(&format!("  meta: {}\n", bits.join(" ")));
+        }
+    }
+    Ok(out)
+}
+
+fn render_scene_paths_json(input: &Path, kind: PathKind) -> Result<String, SceneToolError> {
+    let report = collect_scene_paths(input, kind)?;
+    let kind_label = match kind {
+        PathKind::All => "all",
+        PathKind::File => "file",
+        PathKind::Reference => "reference",
+    };
+    let doc = json!({
+        "source": report.scene_path.display().to_string(),
+        "format": report.scene_format,
+        "kind": kind_label,
+        "count": report.entries.len(),
+        "entries": report.entries.into_iter().map(|e| json!({
+            "node_type": e.node_type,
+            "node": e.node_name,
+            "attr": e.attr,
+            "value": e.value,
+            "meta": e.meta.as_ref().map(|m| json!({
+                "origin": m.origin,
+                "short_name": m.short_name,
+                "reference_node": m.reference_node,
+                "format_hint": m.format_hint,
+                "color_space": m.color_space,
+                "raw_fields": m.raw_fields,
+            })),
+        })).collect::<Vec<_>>()
+    });
+    serde_json::to_string_pretty(&doc)
+        .map(|s| format!("{s}\n"))
+        .map_err(|e| SceneToolError::Message(format!("failed to render json: {e}")))
+}
+
+fn render_scene_paths_collection_json(
+    files: &[PathBuf],
+    kind: PathKind,
+    input: &Path,
+) -> Result<String, SceneToolError> {
+    let kind_label = match kind {
+        PathKind::All => "all",
+        PathKind::File => "file",
+        PathKind::Reference => "reference",
+    };
+    let mut items = Vec::new();
+    for file in files {
+        let report = collect_scene_paths(file, kind)?;
+        items.push(json!({
+            "source": report.scene_path.display().to_string(),
+            "format": report.scene_format,
+            "count": report.entries.len(),
+            "entries": report.entries.into_iter().map(|e| json!({
+                "node_type": e.node_type,
+                "node": e.node_name,
+                "attr": e.attr,
+                "value": e.value,
+                "meta": e.meta.as_ref().map(|m| json!({
+                    "origin": m.origin,
+                    "short_name": m.short_name,
+                    "reference_node": m.reference_node,
+                    "format_hint": m.format_hint,
+                    "color_space": m.color_space,
+                    "raw_fields": m.raw_fields,
+                })),
+            })).collect::<Vec<_>>()
+        }));
+    }
+    let doc = json!({
+        "input": input.display().to_string(),
+        "kind": kind_label,
+        "file_count": items.len(),
+        "files": items,
+    });
+    serde_json::to_string_pretty(&doc)
+        .map(|s| format!("{s}\n"))
+        .map_err(|e| SceneToolError::Message(format!("failed to render json: {e}")))
 }
 
 fn render_scene_dump_text(input: &Path) -> Result<String, SceneToolError> {

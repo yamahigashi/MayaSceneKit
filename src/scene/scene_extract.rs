@@ -12,6 +12,7 @@ use super::util::{
     escape_ma_string, find_subslice, split_lines_keepends, trim_ascii, trim_ascii_start,
     trim_end_newline,
 };
+use super::{PathReplaceRule, ScenePathEntry, ScenePathMeta};
 
 pub(super) fn detect_scene_format(path: impl AsRef<Path>) -> Result<String, SceneToolError> {
     let scene_path = path.as_ref();
@@ -542,4 +543,747 @@ pub(super) fn decode_best_effort_script_text(payload: &[u8]) -> String {
     }
 
     String::from_utf8_lossy(&raw).trim().to_string()
+}
+
+pub(super) fn extract_scene_paths_from_ma(data: &[u8]) -> Vec<ScenePathEntry> {
+    let lines = split_lines_keepends(data);
+    let mut out = Vec::new();
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = &lines[i];
+        if !is_top_level_command(line) {
+            i += 1;
+            continue;
+        }
+        let line_text = String::from_utf8_lossy(line);
+        if !line_text.trim_start().starts_with("createNode ") {
+            i += 1;
+            continue;
+        }
+
+        let node_type = parse_create_node_type(&line_text);
+        let node_name = extract_script_node_name_from_create(line, i);
+        let mut j = i + 1;
+        while j < lines.len() {
+            if is_top_level_command(&lines[j]) {
+                break;
+            }
+            j += 1;
+        }
+
+        if node_type == "file" || node_type == "reference" {
+            for k in i + 1..j {
+                let t = String::from_utf8_lossy(&lines[k]).to_string();
+                if let Some((attr, value)) = parse_setattr_string_line(&t) {
+                    if node_type == "file" && attr == ".ftn" {
+                        out.push(ScenePathEntry {
+                            node_type: "file".to_string(),
+                            node_name: node_name.clone(),
+                            attr,
+                            value,
+                            meta: None,
+                        });
+                    } else if node_type == "reference" && is_reference_attr(&attr) {
+                        out.push(ScenePathEntry {
+                            node_type: "reference".to_string(),
+                            node_name: node_name.clone(),
+                            attr,
+                            value,
+                            meta: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        i = j;
+    }
+
+    out
+}
+
+pub(super) fn extract_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<ScenePathEntry> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for child in &mb.root.children {
+        let form = child.form_type.as_deref().unwrap_or("");
+        let payload = &mb.data[child.payload_offset..child.payload_end];
+
+        if form == "FREF" {
+            for e in extract_reference_entries_from_fref_payload(payload, child.offset) {
+                let key = (
+                    e.node_type.clone(),
+                    e.node_name.clone(),
+                    e.attr.clone(),
+                    e.value.clone(),
+                );
+                if seen.insert(key) {
+                    out.push(e);
+                }
+            }
+            continue;
+        }
+        if form == "RTFT" {
+            for e in extract_file_entries_from_rtft_payload(payload, child.offset) {
+                let key = (
+                    e.node_type.clone(),
+                    e.node_name.clone(),
+                    e.attr.clone(),
+                    e.value.clone(),
+                );
+                if seen.insert(key) {
+                    out.push(e);
+                }
+            }
+            continue;
+        }
+
+        let inner = if payload.len() >= 4 {
+            &payload[4..]
+        } else {
+            &[]
+        };
+        let chunks = parse_section_chunks(inner);
+
+        let mut node_name = format!("node@0x{:X}", child.offset);
+        let mut node_type_hint = if form == "RTFT" {
+            "file".to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        for (tag, p) in &chunks {
+            if tag == "CREA" {
+                if let Some(n) = extract_node_name_from_crea_payload(p) {
+                    node_name = n;
+                }
+                break;
+            }
+        }
+
+        for (_tag, p) in &chunks {
+            let Some((attr_name, _kind, value_raw)) = decode_attr_payload(p) else {
+                continue;
+            };
+            let value = decode_raw_string_value(&value_raw);
+            if value.is_empty() {
+                continue;
+            }
+
+            if attr_name == "ftn" || attr_name == ".ftn" {
+                let e = ScenePathEntry {
+                    node_type: "file".to_string(),
+                    node_name: node_name.clone(),
+                    attr: normalize_attr_name(&attr_name),
+                    value,
+                    meta: None,
+                };
+                let key = (
+                    e.node_type.clone(),
+                    e.node_name.clone(),
+                    e.attr.clone(),
+                    e.value.clone(),
+                );
+                if seen.insert(key) {
+                    out.push(e);
+                }
+                continue;
+            }
+
+            if is_reference_attr_name(&attr_name) {
+                if node_type_hint == "unknown" {
+                    node_type_hint = "reference".to_string();
+                }
+                let e = ScenePathEntry {
+                    node_type: "reference".to_string(),
+                    node_name: node_name.clone(),
+                    attr: normalize_attr_name(&attr_name),
+                    value,
+                    meta: None,
+                };
+                let key = (
+                    e.node_type.clone(),
+                    e.node_name.clone(),
+                    e.attr.clone(),
+                    e.value.clone(),
+                );
+                if seen.insert(key) {
+                    out.push(e);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn extract_file_entries_from_rtft_payload(payload: &[u8], offset: usize) -> Vec<ScenePathEntry> {
+    if payload.len() < 4 {
+        return Vec::new();
+    }
+    let inner = &payload[4..];
+    let chunks = parse_section_chunks(inner);
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut node_name = format!("<RTFT@0x{offset:X}>");
+    let mut color_space: Option<String> = None;
+    let mut paths: Vec<String> = Vec::new();
+    let mut attrs: Vec<String> = Vec::new();
+
+    for (tag, chunk_payload) in &chunks {
+        if tag == "CREA" {
+            if let Some(n) = extract_node_name_from_crea_payload(chunk_payload) {
+                node_name = n;
+            }
+            continue;
+        }
+        if tag != "STR " {
+            continue;
+        }
+        let Some((attr_name, _kind, value_raw)) = decode_attr_payload(chunk_payload) else {
+            continue;
+        };
+        let value = decode_raw_string_value(&value_raw);
+        if value.is_empty() {
+            continue;
+        }
+
+        if attr_name == "ftn" || attr_name == ".ftn" {
+            paths.push(value.clone());
+        } else if attr_name == "cs" || attr_name == ".cs" {
+            color_space = Some(value.clone());
+        }
+        attrs.push(format!("{attr_name}={value}"));
+    }
+
+    paths
+        .into_iter()
+        .map(|path| ScenePathEntry {
+            node_type: "file".to_string(),
+            node_name: node_name.clone(),
+            attr: ".ftn".to_string(),
+            value: path,
+            meta: Some(ScenePathMeta {
+                origin: "rtft".to_string(),
+                short_name: Some(node_name.clone()),
+                reference_node: None,
+                format_hint: None,
+                color_space: color_space.clone(),
+                raw_fields: attrs.clone(),
+            }),
+        })
+        .collect()
+}
+
+fn extract_reference_entries_from_fref_payload(
+    payload: &[u8],
+    offset: usize,
+) -> Vec<ScenePathEntry> {
+    if payload.len() < 4 {
+        return Vec::new();
+    }
+    let inner = &payload[4..];
+    let chunks = parse_section_chunks(inner);
+
+    let mut out = Vec::new();
+    for (tag, chunk_payload) in chunks {
+        if tag != "FREF" {
+            continue;
+        }
+        if let Some(entry) = decode_reference_from_fref_chunk(&chunk_payload, offset) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+fn decode_reference_from_fref_chunk(payload: &[u8], offset: usize) -> Option<ScenePathEntry> {
+    let fields = extract_nul_terminated_ascii_fields(payload);
+    if fields.is_empty() {
+        return None;
+    }
+
+    let (path_idx, path) = fields
+        .iter()
+        .enumerate()
+        .find_map(|(idx, s)| normalize_path_candidate(s).map(|p| (idx, p)))?;
+
+    let node_name = fields
+        .iter()
+        .skip(path_idx + 1)
+        .find(|s| is_reference_node_name(s))
+        .cloned()
+        .or_else(|| fields.iter().find(|s| is_reference_node_name(s)).cloned())
+        .unwrap_or_else(|| format!("<FREF@0x{offset:X}>"));
+
+    let short_name = fields
+        .iter()
+        .skip(path_idx + 1)
+        .find(|s| !is_reference_node_name(s) && !s.contains('|'))
+        .cloned();
+    let format_hint = fields
+        .iter()
+        .find(|s| s.as_str() == "mayaBinary" || s.as_str() == "mayaAscii")
+        .cloned();
+
+    Some(ScenePathEntry {
+        node_type: "reference".to_string(),
+        node_name: node_name.clone(),
+        attr: ".fn".to_string(),
+        value: path,
+        meta: Some(ScenePathMeta {
+            origin: "fref".to_string(),
+            short_name,
+            reference_node: Some(node_name),
+            format_hint,
+            color_space: None,
+            raw_fields: fields,
+        }),
+    })
+}
+
+fn extract_nul_terminated_ascii_fields(data: &[u8]) -> Vec<String> {
+    data.split(|b| *b == 0)
+        .filter_map(|raw| {
+            let cleaned: Vec<u8> = raw
+                .iter()
+                .copied()
+                .filter(|b| (32..=126).contains(b))
+                .collect();
+            if cleaned.is_empty() {
+                None
+            } else {
+                let s = String::from_utf8_lossy(&cleaned).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            }
+        })
+        .collect()
+}
+
+fn normalize_path_candidate(token: &str) -> Option<String> {
+    let t = token.trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '|');
+    if t.is_empty() {
+        return None;
+    }
+    if looks_like_scene_path(t) {
+        return Some(t.to_string());
+    }
+    None
+}
+
+fn looks_like_scene_path(s: &str) -> bool {
+    if !(s.contains('/') || s.contains('\\')) {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    lower.ends_with(".ma") || lower.ends_with(".mb")
+}
+
+fn is_reference_node_name(s: &str) -> bool {
+    if s.len() < 3 || s.contains('|') || s.contains(' ') {
+        return false;
+    }
+    s.ends_with("RN")
+}
+
+#[derive(Debug, Clone)]
+struct RawSectionChunk {
+    tag: String,
+    aux: u32,
+    payload: Vec<u8>,
+}
+
+pub(super) fn replace_scene_paths_in_ma(
+    data: &[u8],
+    rules: &[PathReplaceRule],
+) -> (Vec<u8>, usize) {
+    if rules.is_empty() {
+        return (data.to_vec(), 0);
+    }
+    let lines = split_lines_keepends(data);
+    let mut out = String::new();
+    let mut total = 0usize;
+
+    for line in lines {
+        let line_text = String::from_utf8_lossy(&line).to_string();
+        if let Some((attr, value)) = parse_setattr_string_line(&line_text) {
+            if attr == ".ftn" || is_reference_attr(&attr) {
+                let (new_value, c) = apply_replace_rules(&value, rules);
+                if c > 0 {
+                    total += c;
+                    let indent = line_text
+                        .chars()
+                        .take_while(|c| *c == ' ' || *c == '\t')
+                        .collect::<String>();
+                    out.push_str(&format!(
+                        "{indent}setAttr \"{attr}\" -type \"string\" \"{}\";\n",
+                        escape_ma_string(&new_value)
+                    ));
+                    continue;
+                }
+            }
+        }
+        out.push_str(&line_text);
+    }
+
+    (out.into_bytes(), total)
+}
+
+pub(super) fn replace_scene_paths_in_mb(
+    data: &[u8],
+    root: &Chunk,
+    rules: &[PathReplaceRule],
+) -> (Vec<u8>, usize) {
+    if rules.is_empty() || root.children.is_empty() {
+        return (data.to_vec(), 0);
+    }
+
+    let children = &root.children;
+    let mut payload_parts: Vec<u8> = Vec::new();
+    payload_parts.extend_from_slice(root.form_type.as_deref().unwrap_or("Maya").as_bytes());
+
+    let first_child_start = children[0].offset;
+    let prefix_start = root.payload_offset + 4;
+    if first_child_start > prefix_start {
+        payload_parts.extend_from_slice(&data[prefix_start..first_child_start]);
+    }
+
+    let mut total = 0usize;
+    for (idx, child) in children.iter().enumerate() {
+        let next_offset = if idx + 1 < children.len() {
+            children[idx + 1].offset
+        } else {
+            root.payload_end
+        };
+        let original_span = &data[child.offset..next_offset];
+        let form = child.form_type.as_deref().unwrap_or("");
+
+        if form == "RTFT" {
+            if let Some((rewritten, count)) = rewrite_rtft_child(child, data, rules) {
+                payload_parts.extend_from_slice(&rewritten);
+                total += count;
+                continue;
+            }
+        } else if form == "FREF" {
+            if let Some((rewritten, count)) = rewrite_fref_child(child, data, rules) {
+                payload_parts.extend_from_slice(&rewritten);
+                total += count;
+                continue;
+            }
+        }
+
+        payload_parts.extend_from_slice(original_span);
+    }
+
+    if total == 0 {
+        return (data.to_vec(), 0);
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(root.tag.as_bytes());
+    out.extend_from_slice(&root.aux.to_be_bytes());
+    out.extend_from_slice(&(payload_parts.len() as u64).to_be_bytes());
+    out.extend_from_slice(&payload_parts);
+    (out, total)
+}
+
+fn rewrite_rtft_child(
+    child: &Chunk,
+    data: &[u8],
+    rules: &[PathReplaceRule],
+) -> Option<(Vec<u8>, usize)> {
+    let payload = &data[child.payload_offset..child.payload_end];
+    if payload.len() < 4 {
+        return None;
+    }
+    let inner = &payload[4..];
+    let (chunks, align) = parse_section_chunks_full_auto(inner);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    let mut total = 0usize;
+    let mut new_chunks = Vec::new();
+
+    for mut ch in chunks {
+        if ch.tag == "STR " {
+            if let Some((attr_name, kind, value_raw)) = decode_attr_payload(&ch.payload) {
+                if attr_name == "ftn" || attr_name == ".ftn" {
+                    let value = decode_raw_string_value(&value_raw);
+                    let (new_value, c) = apply_replace_rules(&value, rules);
+                    if c > 0 {
+                        ch.payload =
+                            encode_attr_payload_string(&attr_name, kind, new_value.as_bytes());
+                        total += c;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        new_chunks.push(ch);
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let mut new_payload = Vec::new();
+    new_payload.extend_from_slice(b"RTFT");
+    new_payload.extend_from_slice(&encode_section_chunks_full(&new_chunks, align));
+    let encoded_child = encode_chunk(child.tag.as_str(), child.aux, &new_payload, 4);
+    Some((encoded_child, total))
+}
+
+fn rewrite_fref_child(
+    child: &Chunk,
+    data: &[u8],
+    rules: &[PathReplaceRule],
+) -> Option<(Vec<u8>, usize)> {
+    let payload = &data[child.payload_offset..child.payload_end];
+    if payload.len() < 4 {
+        return None;
+    }
+    let inner = &payload[4..];
+    let (chunks, align) = parse_section_chunks_full_auto(inner);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    let mut total = 0usize;
+    let mut new_chunks = Vec::new();
+
+    for mut ch in chunks {
+        if ch.tag == "FREF" {
+            let (rewritten, c) = replace_first_path_field_in_nul_payload(&ch.payload, rules);
+            if c > 0 {
+                ch.payload = rewritten;
+                total += c;
+                changed = true;
+            }
+        }
+        new_chunks.push(ch);
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let mut new_payload = Vec::new();
+    new_payload.extend_from_slice(b"FREF");
+    new_payload.extend_from_slice(&encode_section_chunks_full(&new_chunks, align));
+    let encoded_child = encode_chunk(child.tag.as_str(), child.aux, &new_payload, 4);
+    Some((encoded_child, total))
+}
+
+fn replace_first_path_field_in_nul_payload(
+    payload: &[u8],
+    rules: &[PathReplaceRule],
+) -> (Vec<u8>, usize) {
+    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+    if parts.is_empty() {
+        return (payload.to_vec(), 0);
+    }
+    let mut replaced_count = 0usize;
+    let mut replaced_index: Option<usize> = None;
+    let mut replaced_value: Vec<u8> = Vec::new();
+
+    for (idx, raw) in parts.iter().enumerate() {
+        let text = String::from_utf8_lossy(raw).trim().to_string();
+        if text.is_empty() || !looks_like_scene_path(&text) {
+            continue;
+        }
+        let (new_text, c) = apply_replace_rules(&text, rules);
+        if c > 0 {
+            replaced_count = c;
+            replaced_index = Some(idx);
+            replaced_value = new_text.into_bytes();
+        }
+        break;
+    }
+
+    let Some(idx) = replaced_index else {
+        return (payload.to_vec(), 0);
+    };
+
+    let mut out = Vec::new();
+    for i in 0..parts.len() {
+        if i == idx {
+            out.extend_from_slice(&replaced_value);
+        } else {
+            out.extend_from_slice(parts[i]);
+        }
+        if i + 1 < parts.len() {
+            out.push(0);
+        }
+    }
+    (out, replaced_count)
+}
+
+fn apply_replace_rules(input: &str, rules: &[PathReplaceRule]) -> (String, usize) {
+    let mut cur = input.to_string();
+    let mut total = 0usize;
+    for r in rules {
+        if r.from.is_empty() {
+            continue;
+        }
+        let count = cur.matches(&r.from).count();
+        if count > 0 {
+            cur = cur.replace(&r.from, &r.to);
+            total += count;
+        }
+    }
+    (cur, total)
+}
+
+fn parse_section_chunks_full_auto(data: &[u8]) -> (Vec<RawSectionChunk>, usize) {
+    let parsed8 = parse_section_chunks_full_with_alignment(data, 8);
+    let parsed4 = parse_section_chunks_full_with_alignment(data, 4);
+    if parsed8.len() >= parsed4.len() {
+        (parsed8, 8)
+    } else {
+        (parsed4, 4)
+    }
+}
+
+fn parse_section_chunks_full_with_alignment(data: &[u8], alignment: usize) -> Vec<RawSectionChunk> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor + 16 <= data.len() {
+        let tag_bytes = &data[cursor..cursor + 4];
+        if !tag_bytes.iter().all(|b| (32..=126).contains(b)) {
+            break;
+        }
+        let aux = u32::from_be_bytes(data[cursor + 4..cursor + 8].try_into().unwrap());
+        let size = u64::from_be_bytes(data[cursor + 8..cursor + 16].try_into().unwrap()) as usize;
+        let payload_start = cursor + 16;
+        let payload_end = payload_start + size;
+        if payload_end > data.len() {
+            break;
+        }
+        out.push(RawSectionChunk {
+            tag: String::from_utf8_lossy(tag_bytes).to_string(),
+            aux,
+            payload: data[payload_start..payload_end].to_vec(),
+        });
+        cursor += align_len(16 + size, alignment);
+    }
+    out
+}
+
+fn encode_section_chunks_full(chunks: &[RawSectionChunk], alignment: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for ch in chunks {
+        out.extend_from_slice(&encode_chunk(&ch.tag, ch.aux, &ch.payload, alignment));
+    }
+    out
+}
+
+fn encode_chunk(tag: &str, aux: u32, payload: &[u8], alignment: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(tag.as_bytes());
+    out.extend_from_slice(&aux.to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    out.extend_from_slice(payload);
+    let pad = align_len(out.len(), alignment) - out.len();
+    out.resize(out.len() + pad, 0);
+    out
+}
+
+fn align_len(v: usize, alignment: usize) -> usize {
+    if alignment <= 1 {
+        return v;
+    }
+    let rem = v % alignment;
+    if rem == 0 { v } else { v + (alignment - rem) }
+}
+
+fn encode_attr_payload_string(attr_name: &str, kind: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(attr_name.as_bytes());
+    out.push(0);
+    out.push(kind);
+    out.extend_from_slice(value);
+    out.push(0);
+    out
+}
+
+fn parse_create_node_type(line: &str) -> String {
+    let s = line.trim_start();
+    let Some(rest) = s.strip_prefix("createNode ") else {
+        return String::new();
+    };
+    rest.split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn parse_setattr_string_line(line: &str) -> Option<(String, String)> {
+    let s = line.trim_start();
+    if !s.starts_with("setAttr ") || !s.contains("-type \"string\"") {
+        return None;
+    }
+
+    let mut cursor = s.find('"')?;
+    let (attr_lit, next) = parse_ma_quoted_literal(s, cursor);
+    let attr = attr_lit?;
+    cursor = next;
+
+    let marker_pos = s[cursor..].find("-type \"string\"")?;
+    cursor += marker_pos + "-type \"string\"".len();
+    while cursor < s.len() && s[cursor..].chars().next().unwrap().is_whitespace() {
+        cursor += s[cursor..].chars().next().unwrap().len_utf8();
+    }
+    if cursor >= s.len() || !s[cursor..].starts_with('"') {
+        return None;
+    }
+    let (value_lit, _) = parse_ma_quoted_literal(s, cursor);
+    let value = unescape_ma_string_literal(&value_lit?);
+    Some((attr, value))
+}
+
+fn is_reference_attr(attr: &str) -> bool {
+    attr == ".fn" || attr.starts_with(".fn[") || attr == ".f"
+}
+
+fn is_reference_attr_name(attr_name: &str) -> bool {
+    attr_name == "fn" || attr_name.starts_with("fn[") || attr_name == "f"
+}
+
+fn normalize_attr_name(attr_name: &str) -> String {
+    if attr_name.starts_with('.') {
+        attr_name.to_string()
+    } else {
+        format!(".{attr_name}")
+    }
+}
+
+fn decode_raw_string_value(raw: &[u8]) -> String {
+    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..end]).trim().to_string()
+}
+
+fn extract_node_name_from_crea_payload(payload: &[u8]) -> Option<String> {
+    let hay = String::from_utf8_lossy(&payload[..std::cmp::min(payload.len(), 512)]);
+    for caps in super::patterns::NODE_TOKEN_RE.captures_iter(&hay) {
+        let token = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+        if token.is_empty() {
+            continue;
+        }
+        if token.len() == 1 {
+            continue;
+        }
+        if ["application", "product", "version", "cutIdentifier", "osv"].contains(&token) {
+            continue;
+        }
+        return Some(token.to_string());
+    }
+    None
 }
