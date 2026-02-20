@@ -9,7 +9,6 @@ Main use cases:
 - Rewrite file/reference paths (`replace`)
 - Audit script bodies against NG rules (`audit`)
 - Inspect `.mb` chunk structure (`inspect`)
-- Convert `.mb -> .ma` on a best-effort basis (`to-ascii`, experimental)
 
 ## Installation
 
@@ -106,20 +105,9 @@ maya-scene-kit inspect tests/02/sphere.mb --max-depth 2
 maya-scene-kit inspect tests/02/sphere.mb --preview-bytes 32
 ```
 
-### `to-ascii` (`.mb -> .ma` conversion)
-
-```bash
-maya-scene-kit to-ascii tests/02/sphere.mb /tmp/sphere_best_effort.ma
-```
-
-**Experimental**
-
-`to-ascii` is an experimental feature. It is best-effort, so generated `.ma` output may be incomplete or invalid.
-
 ## Current Scope
 
 - IFF chunk parsing for `.mb` (`tag / offset / aux / size`)
 - Script node detection/removal/extraction for `.ma/.mb`
 - Requires extraction for `.ma/.mb`
 - File/reference path extraction for `.ma/.mb`
-- Best-effort `.mb -> .ma` conversion (partial recovery of major chunks/attributes/links)

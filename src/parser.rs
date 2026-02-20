@@ -58,6 +58,12 @@ impl MayaBinaryFile {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkHeaderFormat {
+    FourByte,
+    EightByte,
+}
+
 pub fn parse_file(path: impl AsRef<Path>) -> Result<MayaBinaryFile, MayaBinaryParseError> {
     let p = path.as_ref();
     let data = fs::read(p)?;
@@ -70,12 +76,22 @@ pub fn parse_file(path: impl AsRef<Path>) -> Result<MayaBinaryFile, MayaBinaryPa
 }
 
 fn parse_stream(data: &[u8]) -> Result<Chunk, MayaBinaryParseError> {
-    if data.len() < 16 {
+    if data.len() < 8 {
         return Err(MayaBinaryParseError::Message(
             "File is too small to be a Maya Binary stream.".to_string(),
         ));
     }
-    let (root, next) = parse_chunk(data, 0, data.len(), 1, 0)?;
+    let root_tag = read_tag(data, 0)?;
+    let root_format = match root_tag.as_str() {
+        "FOR4" => ChunkHeaderFormat::FourByte,
+        "FOR8" => ChunkHeaderFormat::EightByte,
+        _ => {
+            return Err(MayaBinaryParseError::Message(format!(
+                "Unexpected root chunk '{root_tag}'."
+            )));
+        }
+    };
+    let (root, next) = parse_chunk(data, 0, data.len(), 1, 0, root_format)?;
     if root.tag != "FOR4" && root.tag != "FOR8" {
         return Err(MayaBinaryParseError::Message(format!(
             "Unexpected root chunk '{}'.",
@@ -97,18 +113,29 @@ fn parse_chunk(
     limit: usize,
     sibling_alignment: usize,
     depth: usize,
+    header_format: ChunkHeaderFormat,
 ) -> Result<(Chunk, usize), MayaBinaryParseError> {
-    if offset + 16 > limit {
+    let header_size = header_size(header_format);
+    if offset + header_size > limit {
         return Err(MayaBinaryParseError::Message(format!(
             "Chunk header exceeds container: offset=0x{offset:X}, limit=0x{limit:X}"
         )));
     }
 
     let tag = read_tag(data, offset)?;
-    let aux = read_u32be(data, offset + 4)?;
-    let size = read_u64be(data, offset + 8)? as usize;
-    let payload_offset = offset + 16;
-    let payload_end = payload_offset + size;
+    let (aux, size, payload_offset) = match header_format {
+        ChunkHeaderFormat::FourByte => (0, read_u32be(data, offset + 4)? as usize, offset + 8),
+        ChunkHeaderFormat::EightByte => (
+            read_u32be(data, offset + 4)?,
+            read_u64be(data, offset + 8)? as usize,
+            offset + 16,
+        ),
+    };
+    let payload_end = payload_offset.checked_add(size).ok_or_else(|| {
+        MayaBinaryParseError::Message(format!(
+            "Chunk payload overflow for '{tag}' at 0x{offset:X}: size=0x{size:X}"
+        ))
+    })?;
     if payload_end > limit {
         return Err(MayaBinaryParseError::Message(format!(
             "Chunk payload exceeds container for '{tag}' at 0x{offset:X}: payload_end=0x{payload_end:X}, limit=0x{limit:X}"
@@ -128,10 +155,17 @@ fn parse_chunk(
         form_type = Some(read_tag(data, payload_offset)?);
         if should_expand_group(depth, form_type.as_deref()) {
             let child_alignment = child_alignment(&tag, form_type.as_deref());
+            let child_header_format = child_header_format(&tag, header_format);
             let mut cursor = payload_offset + 4;
             while cursor < payload_end {
-                let (child, next_cursor) =
-                    parse_chunk(data, cursor, payload_end, child_alignment, depth + 1)?;
+                let (child, next_cursor) = parse_chunk(
+                    data,
+                    cursor,
+                    payload_end,
+                    child_alignment,
+                    depth + 1,
+                    child_header_format,
+                )?;
                 children.push(child);
                 cursor = next_cursor;
             }
@@ -144,7 +178,12 @@ fn parse_chunk(
         }
     }
 
-    let next_offset = payload_offset + align(size, sibling_alignment);
+    let aligned_size = align(size, sibling_alignment);
+    let next_offset = payload_offset.checked_add(aligned_size).ok_or_else(|| {
+        MayaBinaryParseError::Message(format!(
+            "Alignment overflow for '{tag}' at 0x{offset:X}: payload_offset=0x{payload_offset:X}, aligned_size=0x{aligned_size:X}"
+        ))
+    })?;
     if next_offset > limit {
         return Err(MayaBinaryParseError::Message(format!(
             "Alignment overflow for '{tag}' at 0x{offset:X}: next=0x{next_offset:X}, limit=0x{limit:X}"
@@ -165,6 +204,23 @@ fn parse_chunk(
         },
         next_offset,
     ))
+}
+
+fn header_size(header_format: ChunkHeaderFormat) -> usize {
+    match header_format {
+        ChunkHeaderFormat::FourByte => 8,
+        ChunkHeaderFormat::EightByte => 16,
+    }
+}
+
+fn child_header_format(tag: &str, fallback: ChunkHeaderFormat) -> ChunkHeaderFormat {
+    if tag.ends_with('4') {
+        ChunkHeaderFormat::FourByte
+    } else if tag.ends_with('8') {
+        ChunkHeaderFormat::EightByte
+    } else {
+        fallback
+    }
 }
 
 fn should_expand_group(depth: usize, form_type: Option<&str>) -> bool {

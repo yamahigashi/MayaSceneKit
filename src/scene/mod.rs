@@ -6,13 +6,14 @@ use thiserror::Error;
 
 use crate::parser::{MayaBinaryParseError, parse_file};
 
+#[allow(dead_code)]
 mod decode;
-mod mb_to_ma;
+#[allow(dead_code)]
 mod patterns;
 mod scene_extract;
+#[allow(dead_code)]
 mod util;
 
-use self::mb_to_ma::build_best_effort_ma;
 use self::scene_extract::{
     build_requires_dump_text, build_script_dump_text,
     detect_scene_format as detect_scene_format_impl, extract_requires_from_ma,
@@ -192,60 +193,6 @@ pub fn replace_scene_paths(
             scene_format,
             replaced_count,
         });
-    }
-
-    Err(SceneToolError::Message(format!(
-        "Unsupported scene format: {}",
-        src.display()
-    )))
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RecoveredNode {
-    pub(super) node_type: String,
-    pub(super) name: String,
-    pub(super) parent: Option<String>,
-    pub(super) uid: Option<String>,
-    pub(super) attrs: Vec<String>,
-    pub(super) startup: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RecoveredScript {
-    pub(super) name: String,
-    pub(super) body: String,
-}
-
-pub fn convert_to_maya_ascii(
-    input_path: impl AsRef<Path>,
-    output_path: impl AsRef<Path>,
-    keep_all_links: bool,
-) -> Result<PathBuf, SceneToolError> {
-    let src = input_path.as_ref();
-    let dst = output_path.as_ref();
-    let scene_format = detect_scene_format(src)?;
-
-    if scene_format == "ma" {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(dst, fs::read(src)?)?;
-        return Ok(dst.to_path_buf());
-    }
-
-    if scene_format == "mb" {
-        let mb = parse_file(src)?;
-        let maya_ascii = build_best_effort_ma(
-            &mb,
-            src,
-            &dst.file_name().unwrap_or_default().to_string_lossy(),
-            keep_all_links,
-        );
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(dst, maya_ascii)?;
-        return Ok(dst.to_path_buf());
     }
 
     Err(SceneToolError::Message(format!(
@@ -472,6 +419,7 @@ pub fn detect_scene_format(path: impl AsRef<Path>) -> Result<String, SceneToolEr
     detect_scene_format_impl(path)
 }
 
+#[allow(dead_code)]
 pub(super) fn looks_like_radians(values: &[f64]) -> bool {
     let threshold = 2.0 * PI + 0.2;
     values

@@ -5,8 +5,7 @@ use std::path::Path;
 use crate::parser::{Chunk, MayaBinaryFile};
 
 use super::SceneToolError;
-use super::decode::{decode_attr_payload, parse_section_chunks};
-use super::mb_to_ma::extract_head_metadata;
+use super::decode::{decode_attr_payload, decode_plug_to_requires, parse_section_chunks};
 use super::patterns::{CREATE_SCRIPT_RE, NODE_NAME_RE, SCRIPT_NODE_NAME_FALLBACK_RE};
 use super::util::{
     escape_ma_string, find_subslice, split_lines_keepends, trim_ascii, trim_ascii_start,
@@ -330,12 +329,7 @@ pub(super) fn remove_script_nodes_from_mb(data: &[u8], root: &Chunk) -> (Vec<u8>
         payload_parts.extend_from_slice(&data[start..end]);
     }
 
-    let mut out = Vec::new();
-    out.extend_from_slice(root.tag.as_bytes());
-    out.extend_from_slice(&root.aux.to_be_bytes());
-    out.extend_from_slice(&(payload_parts.len() as u64).to_be_bytes());
-    out.extend_from_slice(&payload_parts);
-    (out, removed_names)
+    (encode_root_chunk(root, &payload_parts), removed_names)
 }
 
 pub(super) fn extract_mb_script_node_name(payload: &[u8]) -> Option<String> {
@@ -397,31 +391,61 @@ pub(super) fn extract_requires_from_ma(data: &[u8]) -> Vec<String> {
 }
 
 pub(super) fn extract_requires_from_mb(mb: &MayaBinaryFile) -> Vec<String> {
-    let metadata = extract_head_metadata(mb);
-    let vers = metadata
-        .get("vers")
-        .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
+    let (vers, requires_from_plug) = extract_head_requires_metadata(mb);
     let mut out = vec![format!("requires maya \"{}\";", escape_ma_string(&vers))];
     let mut seen: HashSet<String> = out.iter().cloned().collect();
 
-    if let Some(requires) = metadata.get("requires_list") {
-        for req in requires.split('\n') {
-            let t = req.trim();
-            if t.is_empty() {
-                continue;
-            }
-            let mut text = t.split_whitespace().collect::<Vec<_>>().join(" ");
-            if !text.ends_with(';') {
-                text.push(';');
-            }
-            if seen.insert(text.clone()) {
-                out.push(text);
-            }
+    for req in requires_from_plug {
+        let t = req.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let mut text = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.ends_with(';') {
+            text.push(';');
+        }
+        if seen.insert(text.clone()) {
+            out.push(text);
         }
     }
 
     out
+}
+
+fn extract_head_requires_metadata(mb: &MayaBinaryFile) -> (String, Vec<String>) {
+    let mut vers = "unknown".to_string();
+    let mut requires = Vec::new();
+    let mut seen_requires = HashSet::new();
+
+    for head in &mb.root.children {
+        if head.form_type.as_deref() != Some("HEAD") || !head.children_parsed {
+            continue;
+        }
+        for chunk in &head.children {
+            let raw = &mb.data[chunk.payload_offset..chunk.payload_end];
+            match chunk.tag.as_str() {
+                "VERS" => {
+                    let text = String::from_utf8_lossy(raw)
+                        .trim_end_matches('\0')
+                        .trim()
+                        .to_string();
+                    if !text.is_empty() {
+                        vers = text;
+                    }
+                }
+                "PLUG" => {
+                    if let Some(req) = decode_plug_to_requires(raw) {
+                        if seen_requires.insert(req.clone()) {
+                            requires.push(req);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (vers, requires)
 }
 
 pub(super) fn build_script_dump_text(
@@ -897,6 +921,20 @@ struct RawSectionChunk {
     payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkHeaderFormat {
+    FourByte,
+    EightByte,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedRawSectionChunks {
+    chunks: Vec<RawSectionChunk>,
+    consumed: usize,
+    alignment: usize,
+    header_format: ChunkHeaderFormat,
+}
+
 pub(super) fn replace_scene_paths_in_ma(
     data: &[u8],
     rules: &[PathReplaceRule],
@@ -983,12 +1021,7 @@ pub(super) fn replace_scene_paths_in_mb(
         return (data.to_vec(), 0);
     }
 
-    let mut out = Vec::new();
-    out.extend_from_slice(root.tag.as_bytes());
-    out.extend_from_slice(&root.aux.to_be_bytes());
-    out.extend_from_slice(&(payload_parts.len() as u64).to_be_bytes());
-    out.extend_from_slice(&payload_parts);
-    (out, total)
+    (encode_root_chunk(root, &payload_parts), total)
 }
 
 fn rewrite_rtft_child(
@@ -1001,7 +1034,7 @@ fn rewrite_rtft_child(
         return None;
     }
     let inner = &payload[4..];
-    let (chunks, align) = parse_section_chunks_full_auto(inner);
+    let (chunks, align, inner_header_format) = parse_section_chunks_full_auto(inner);
     if chunks.is_empty() {
         return None;
     }
@@ -1034,8 +1067,18 @@ fn rewrite_rtft_child(
 
     let mut new_payload = Vec::new();
     new_payload.extend_from_slice(b"RTFT");
-    new_payload.extend_from_slice(&encode_section_chunks_full(&new_chunks, align));
-    let encoded_child = encode_chunk(child.tag.as_str(), child.aux, &new_payload, 4);
+    new_payload.extend_from_slice(&encode_section_chunks_full(
+        &new_chunks,
+        align,
+        inner_header_format,
+    ));
+    let encoded_child = encode_chunk(
+        child.tag.as_str(),
+        child.aux,
+        &new_payload,
+        4,
+        chunk_header_format_from_chunk(child),
+    );
     Some((encoded_child, total))
 }
 
@@ -1049,7 +1092,7 @@ fn rewrite_fref_child(
         return None;
     }
     let inner = &payload[4..];
-    let (chunks, align) = parse_section_chunks_full_auto(inner);
+    let (chunks, align, inner_header_format) = parse_section_chunks_full_auto(inner);
     if chunks.is_empty() {
         return None;
     }
@@ -1076,8 +1119,18 @@ fn rewrite_fref_child(
 
     let mut new_payload = Vec::new();
     new_payload.extend_from_slice(b"FREF");
-    new_payload.extend_from_slice(&encode_section_chunks_full(&new_chunks, align));
-    let encoded_child = encode_chunk(child.tag.as_str(), child.aux, &new_payload, 4);
+    new_payload.extend_from_slice(&encode_section_chunks_full(
+        &new_chunks,
+        align,
+        inner_header_format,
+    ));
+    let encoded_child = encode_chunk(
+        child.tag.as_str(),
+        child.aux,
+        &new_payload,
+        4,
+        chunk_header_format_from_chunk(child),
+    );
     Some((encoded_child, total))
 }
 
@@ -1141,29 +1194,59 @@ fn apply_replace_rules(input: &str, rules: &[PathReplaceRule]) -> (String, usize
     (cur, total)
 }
 
-fn parse_section_chunks_full_auto(data: &[u8]) -> (Vec<RawSectionChunk>, usize) {
-    let parsed8 = parse_section_chunks_full_with_alignment(data, 8);
-    let parsed4 = parse_section_chunks_full_with_alignment(data, 4);
-    if parsed8.len() >= parsed4.len() {
-        (parsed8, 8)
-    } else {
-        (parsed4, 4)
+fn parse_section_chunks_full_auto(data: &[u8]) -> (Vec<RawSectionChunk>, usize, ChunkHeaderFormat) {
+    let mut best = parse_section_chunks_full_with_layout(data, 8, ChunkHeaderFormat::EightByte);
+    for candidate in [
+        parse_section_chunks_full_with_layout(data, 4, ChunkHeaderFormat::EightByte),
+        parse_section_chunks_full_with_layout(data, 8, ChunkHeaderFormat::FourByte),
+        parse_section_chunks_full_with_layout(data, 4, ChunkHeaderFormat::FourByte),
+    ] {
+        if is_better_raw_section_candidate(&candidate, &best) {
+            best = candidate;
+        }
     }
+    (best.chunks, best.alignment, best.header_format)
 }
 
-fn parse_section_chunks_full_with_alignment(data: &[u8], alignment: usize) -> Vec<RawSectionChunk> {
+fn parse_section_chunks_full_with_layout(
+    data: &[u8],
+    alignment: usize,
+    header_format: ChunkHeaderFormat,
+) -> ParsedRawSectionChunks {
     let mut out = Vec::new();
     let mut cursor = 0usize;
+    let header_size = chunk_header_size(header_format);
+    let size_offset = match header_format {
+        ChunkHeaderFormat::FourByte => 4,
+        ChunkHeaderFormat::EightByte => 8,
+    };
 
-    while cursor + 16 <= data.len() {
+    while cursor + header_size <= data.len() {
         let tag_bytes = &data[cursor..cursor + 4];
         if !tag_bytes.iter().all(|b| (32..=126).contains(b)) {
             break;
         }
-        let aux = u32::from_be_bytes(data[cursor + 4..cursor + 8].try_into().unwrap());
-        let size = u64::from_be_bytes(data[cursor + 8..cursor + 16].try_into().unwrap()) as usize;
-        let payload_start = cursor + 16;
-        let payload_end = payload_start + size;
+        let aux = if header_format == ChunkHeaderFormat::EightByte {
+            u32::from_be_bytes(data[cursor + 4..cursor + 8].try_into().unwrap())
+        } else {
+            0
+        };
+        let size = match header_format {
+            ChunkHeaderFormat::FourByte => u32::from_be_bytes(
+                data[cursor + size_offset..cursor + size_offset + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize,
+            ChunkHeaderFormat::EightByte => u64::from_be_bytes(
+                data[cursor + size_offset..cursor + size_offset + 8]
+                    .try_into()
+                    .unwrap(),
+            ) as usize,
+        };
+        let payload_start = cursor + header_size;
+        let Some(payload_end) = payload_start.checked_add(size) else {
+            break;
+        };
         if payload_end > data.len() {
             break;
         }
@@ -1172,28 +1255,127 @@ fn parse_section_chunks_full_with_alignment(data: &[u8], alignment: usize) -> Ve
             aux,
             payload: data[payload_start..payload_end].to_vec(),
         });
-        cursor += align_len(16 + size, alignment);
+        let step = align_len(header_size + size, alignment);
+        let Some(next_cursor) = cursor.checked_add(step) else {
+            break;
+        };
+        if next_cursor <= cursor {
+            break;
+        }
+        cursor = next_cursor;
     }
-    out
+
+    ParsedRawSectionChunks {
+        chunks: out,
+        consumed: cursor,
+        alignment,
+        header_format,
+    }
 }
 
-fn encode_section_chunks_full(chunks: &[RawSectionChunk], alignment: usize) -> Vec<u8> {
+fn encode_section_chunks_full(
+    chunks: &[RawSectionChunk],
+    alignment: usize,
+    header_format: ChunkHeaderFormat,
+) -> Vec<u8> {
     let mut out = Vec::new();
     for ch in chunks {
-        out.extend_from_slice(&encode_chunk(&ch.tag, ch.aux, &ch.payload, alignment));
+        out.extend_from_slice(&encode_chunk(
+            &ch.tag,
+            ch.aux,
+            &ch.payload,
+            alignment,
+            header_format,
+        ));
     }
     out
 }
 
-fn encode_chunk(tag: &str, aux: u32, payload: &[u8], alignment: usize) -> Vec<u8> {
+fn encode_chunk(
+    tag: &str,
+    aux: u32,
+    payload: &[u8],
+    alignment: usize,
+    header_format: ChunkHeaderFormat,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(tag.as_bytes());
-    out.extend_from_slice(&aux.to_be_bytes());
-    out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    append_chunk_header(&mut out, tag, aux, payload.len(), header_format);
     out.extend_from_slice(payload);
     let pad = align_len(out.len(), alignment) - out.len();
     out.resize(out.len() + pad, 0);
     out
+}
+
+fn encode_root_chunk(root: &Chunk, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    append_chunk_header(
+        &mut out,
+        root.tag.as_str(),
+        root.aux,
+        payload.len(),
+        chunk_header_format_from_chunk(root),
+    );
+    out.extend_from_slice(payload);
+    out
+}
+
+fn append_chunk_header(
+    out: &mut Vec<u8>,
+    tag: &str,
+    aux: u32,
+    payload_len: usize,
+    header_format: ChunkHeaderFormat,
+) {
+    out.extend_from_slice(tag.as_bytes());
+    match header_format {
+        ChunkHeaderFormat::FourByte => {
+            let size = u32::try_from(payload_len)
+                .expect("FOR4 chunk payload length exceeds 32-bit size field");
+            out.extend_from_slice(&size.to_be_bytes());
+        }
+        ChunkHeaderFormat::EightByte => {
+            out.extend_from_slice(&aux.to_be_bytes());
+            out.extend_from_slice(&(payload_len as u64).to_be_bytes());
+        }
+    }
+}
+
+fn chunk_header_size(header_format: ChunkHeaderFormat) -> usize {
+    match header_format {
+        ChunkHeaderFormat::FourByte => 8,
+        ChunkHeaderFormat::EightByte => 16,
+    }
+}
+
+fn chunk_header_format_from_chunk(chunk: &Chunk) -> ChunkHeaderFormat {
+    if chunk
+        .payload_offset
+        .checked_sub(chunk.offset)
+        .unwrap_or_default()
+        == 8
+    {
+        ChunkHeaderFormat::FourByte
+    } else {
+        ChunkHeaderFormat::EightByte
+    }
+}
+
+fn is_better_raw_section_candidate(a: &ParsedRawSectionChunks, b: &ParsedRawSectionChunks) -> bool {
+    raw_section_candidate_score(a) > raw_section_candidate_score(b)
+}
+
+fn raw_section_candidate_score(candidate: &ParsedRawSectionChunks) -> (usize, usize, usize, usize) {
+    let header_rank = match candidate.header_format {
+        ChunkHeaderFormat::EightByte => 1,
+        ChunkHeaderFormat::FourByte => 0,
+    };
+    let alignment_rank = usize::from(candidate.alignment == 8);
+    (
+        candidate.chunks.len(),
+        candidate.consumed,
+        header_rank,
+        alignment_rank,
+    )
 }
 
 fn align_len(v: usize, alignment: usize) -> usize {

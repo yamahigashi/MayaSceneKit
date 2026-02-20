@@ -9,8 +9,7 @@ use serde_json::json;
 use crate::parser::{Chunk, MayaBinaryParseError, parse_file};
 use crate::scene::{
     PathKind, PathReplaceRule, SceneToolError, collect_scene_paths, collect_script_node_entries,
-    convert_to_maya_ascii, dump_requires, dump_script_nodes, remove_script_nodes,
-    replace_scene_paths,
+    dump_requires, dump_script_nodes, remove_script_nodes, replace_scene_paths,
 };
 
 pub fn main(argv: Vec<String>) -> i32 {
@@ -85,12 +84,6 @@ pub fn main(argv: Vec<String>) -> i32 {
                 only_hit_nodes,
                 max_preview,
             )
-        }
-        Some(("to-ascii", m)) => {
-            let input = m.get_one::<PathBuf>("input").unwrap();
-            let output = m.get_one::<PathBuf>("output").unwrap();
-            let keep_all_links = m.get_flag("keep-all-links");
-            run_to_ascii(input, output, keep_all_links)
         }
         Some(("clean", m)) => {
             let input = m.get_one::<PathBuf>("input").unwrap();
@@ -255,24 +248,6 @@ fn build_parser() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("to-ascii")
-                .arg(
-                    Arg::new("input")
-                        .required(true)
-                        .value_parser(clap::value_parser!(PathBuf)),
-                )
-                .arg(
-                    Arg::new("output")
-                        .required(true)
-                        .value_parser(clap::value_parser!(PathBuf)),
-                )
-                .arg(
-                    Arg::new("keep-all-links")
-                        .long("keep-all-links")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-        .subcommand(
             Command::new("clean")
                 .arg(
                     Arg::new("input")
@@ -329,7 +304,7 @@ fn normalize_argv(argv: Vec<String>) -> Vec<String> {
         return argv;
     }
     let commands = [
-        "inspect", "dump", "paths", "audit", "to-ascii", "clean", "replace", "help",
+        "inspect", "dump", "paths", "audit", "clean", "replace", "help",
     ];
     let first = &argv[0];
     if commands.contains(&first.as_str()) || first.starts_with('-') {
@@ -1026,23 +1001,6 @@ fn preview_window(text: &str, start: usize, end: usize, max_preview: usize) -> S
         .replace('\r', "\\r")
         .replace('\t', "\\t");
     s
-}
-
-fn run_to_ascii(input: &PathBuf, output: &PathBuf, keep_all_links: bool) -> i32 {
-    match convert_to_maya_ascii(input, output, keep_all_links) {
-        Ok(path) => {
-            println!("written: {}", path.display());
-            0
-        }
-        Err(SceneToolError::Io(e)) => {
-            eprintln!("error: {e}");
-            2
-        }
-        Err(e) => {
-            eprintln!("scene error: {e}");
-            1
-        }
-    }
 }
 
 fn run_script_clean(input: &PathBuf, output: &PathBuf) -> i32 {

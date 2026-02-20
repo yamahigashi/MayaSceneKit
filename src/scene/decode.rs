@@ -254,40 +254,114 @@ pub(super) fn sanitize_token(raw: &[u8]) -> String {
 }
 
 pub(super) fn parse_section_chunks(data: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let parsed8 = parse_section_chunks_with_alignment(data, 8);
-    let parsed4 = parse_section_chunks_with_alignment(data, 4);
-    if parsed8.len() >= parsed4.len() {
-        parsed8
-    } else {
-        parsed4
+    let mut best = parse_section_chunks_with_layout(data, 8, SectionHeaderFormat::EightByte);
+    for candidate in [
+        parse_section_chunks_with_layout(data, 4, SectionHeaderFormat::EightByte),
+        parse_section_chunks_with_layout(data, 8, SectionHeaderFormat::FourByte),
+        parse_section_chunks_with_layout(data, 4, SectionHeaderFormat::FourByte),
+    ] {
+        if is_better_section_candidate(&candidate, &best) {
+            best = candidate;
+        }
     }
+    best.chunks
 }
 
-pub(super) fn parse_section_chunks_with_alignment(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionHeaderFormat {
+    FourByte,
+    EightByte,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSectionChunks {
+    chunks: Vec<(String, Vec<u8>)>,
+    consumed: usize,
+    alignment: usize,
+    header_format: SectionHeaderFormat,
+}
+
+fn parse_section_chunks_with_layout(
     data: &[u8],
     alignment: usize,
-) -> Vec<(String, Vec<u8>)> {
+    header_format: SectionHeaderFormat,
+) -> ParsedSectionChunks {
     let mut chunks = Vec::new();
     let mut cursor = 0usize;
     let data_len = data.len();
+    let header_size = section_header_size(header_format);
+    let size_offset = match header_format {
+        SectionHeaderFormat::FourByte => 4,
+        SectionHeaderFormat::EightByte => 8,
+    };
 
-    while cursor + 16 <= data_len {
+    while cursor + header_size <= data_len {
         let tag_bytes = &data[cursor..cursor + 4];
         if !tag_bytes.iter().all(|b| (32..=126).contains(b)) {
             break;
         }
-        let size = u64::from_be_bytes(data[cursor + 8..cursor + 16].try_into().unwrap()) as usize;
-        let payload_start = cursor + 16;
-        let payload_end = payload_start + size;
+        let size = match header_format {
+            SectionHeaderFormat::FourByte => u32::from_be_bytes(
+                data[cursor + size_offset..cursor + size_offset + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize,
+            SectionHeaderFormat::EightByte => u64::from_be_bytes(
+                data[cursor + size_offset..cursor + size_offset + 8]
+                    .try_into()
+                    .unwrap(),
+            ) as usize,
+        };
+        let payload_start = cursor + header_size;
+        let Some(payload_end) = payload_start.checked_add(size) else {
+            break;
+        };
         if payload_end > data_len {
             break;
         }
         let tag = String::from_utf8_lossy(tag_bytes).to_string();
         chunks.push((tag, data[payload_start..payload_end].to_vec()));
-        cursor += align(16 + size, alignment);
+        let step = align(header_size + size, alignment);
+        let Some(next_cursor) = cursor.checked_add(step) else {
+            break;
+        };
+        if next_cursor <= cursor {
+            break;
+        }
+        cursor = next_cursor;
     }
 
-    chunks
+    ParsedSectionChunks {
+        chunks,
+        consumed: cursor,
+        alignment,
+        header_format,
+    }
+}
+
+fn section_header_size(header_format: SectionHeaderFormat) -> usize {
+    match header_format {
+        SectionHeaderFormat::FourByte => 8,
+        SectionHeaderFormat::EightByte => 16,
+    }
+}
+
+fn is_better_section_candidate(a: &ParsedSectionChunks, b: &ParsedSectionChunks) -> bool {
+    section_candidate_score(a) > section_candidate_score(b)
+}
+
+fn section_candidate_score(candidate: &ParsedSectionChunks) -> (usize, usize, usize, usize) {
+    let header_rank = match candidate.header_format {
+        SectionHeaderFormat::EightByte => 1,
+        SectionHeaderFormat::FourByte => 0,
+    };
+    let alignment_rank = usize::from(candidate.alignment == 8);
+    (
+        candidate.chunks.len(),
+        candidate.consumed,
+        header_rank,
+        alignment_rank,
+    )
 }
 
 pub(super) fn decode_attr_chunk_to_setattr(tag: &str, payload: &[u8]) -> Option<String> {
