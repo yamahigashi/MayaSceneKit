@@ -1,0 +1,12 @@
+schema_id: schema.fref.reference_file.v1
+handler: fref.reference_file
+fields:
+  - name: path
+    kind: cstring
+  - name: namespace
+    kind: cstring
+  - name: reference_node
+    kind: cstring
+  - name: tail_raw
+    kind: bytes_rest
+    allow_empty: true

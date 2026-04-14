@@ -1,0 +1,10 @@
+schema_id: schema.attr.str.v1
+handler: attr.string
+fields:
+  - name: attr_name
+    kind: cstring
+  - name: kind
+    kind: u8
+  - name: value_raw
+    kind: bytes_rest
+    allow_empty: true

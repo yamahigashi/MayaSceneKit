@@ -1,0 +1,6 @@
+schema_id: schema.slct.target.v1
+handler: slct.target
+fields:
+  - name: target
+    kind: cstring
+    allow_eof_termination: true

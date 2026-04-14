@@ -1,0 +1,12 @@
+schema_id: schema.attr.str_array.v1
+handler: attr.string_array
+fields:
+  - name: attr_name
+    kind: cstring
+  - name: kind
+    kind: u8
+  - name: declared_count
+    kind: u32be
+  - name: values
+    kind: cstring_list_rest
+    min_items: 0

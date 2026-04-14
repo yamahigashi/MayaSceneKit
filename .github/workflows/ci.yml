@@ -13,16 +13,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions-rs/toolchain@v1
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
       with:
-        toolchain: stable
-        override: true
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v6
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy,rustfmt
     - uses: Swatinem/rust-cache@v2
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --locked
+    - name: Build GUI
+      run: cargo build -p maya-scene-kit-gui --release --locked
+    - name: Build Python wheel
+      run: uv run --with maturin maturin build --release --manifest-path crates/maya-scene-kit-python/Cargo.toml
     - name: Check formatting
-      run: cargo fmt -- --check
+      run: cargo fmt --all --check
     - name: Run clippy
-      run: cargo clippy -- -D warnings
-
+      run: cargo clippy --workspace --all-targets --locked -- -D warnings

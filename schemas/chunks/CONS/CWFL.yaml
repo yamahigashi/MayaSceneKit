@@ -1,0 +1,10 @@
+schema_id: schema.cons.cwfl.v1
+handler: cons.cwfl
+fields:
+  - name: mode
+    kind: u8
+  - name: src
+    kind: cstring
+  - name: dst
+    kind: cstring
+    allow_eof_termination: true

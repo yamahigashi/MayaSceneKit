@@ -1,113 +1,198 @@
 # maya-scene-kit
 
-`maya-scene-kit` is a standalone CLI for working with Maya scene files (`.mb` / `.ma`) without requiring a Maya runtime.
+`maya-scene-kit` is an open-source toolkit for inspecting, auditing, and rewriting
+Maya scene files (`.mb` / `.ma`) without requiring a Maya runtime.
 
-Main use cases:
-- Remove script nodes (`clean`)
-- Export requires + script bodies (`dump`)
-- Extract file/reference paths (`paths`)
-- Rewrite file/reference paths (`replace`)
-- Audit script bodies against NG rules (`audit`)
-- Inspect `.mb` chunk structure (`inspect`)
+It currently ships three practical entry points:
 
-## Installation
+- GUI for interactive review and staged edits
+- CLI for batch inspection and automation
+- Python bindings for embedding scene checks into other tools
 
-Download the binary for your OS from GitHub Releases.
+## Project Status
+
+| Surface | Best for | Distribution | Status |
+| --- | --- | --- | --- |
+| GUI | Interactive review, staged clean/replace/to-ascii workflows | Release artifacts + source build | Public surface |
+| CLI | Batch inspection, CI, scripting, release binaries | GitHub Releases | Most stable public surface |
+| Python | Tool integration and automation | Release artifacts + source build | Public surface |
+| Rust crates | Internal workspace architecture | Source only | Not a stable public library API |
+
+- Public release artifacts: CLI, GUI, and Python bindings
+- The repository currently includes source-build workflows for GUI and Python
+- Workspace crates: public source, but not yet a stable public API
+
+Related docs:
+
+- [Python usage](docs/python_usage.md)
+- [Advanced usage](docs/advanced_usage.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+
+## Quick Starts
+
+### GUI
+
+Download the release archive for your OS from GitHub Releases and extract it.
+The release bundle contains both `maya-scene-kit` and `maya-scene-kit-gui`.
+
+Example:
+
+```powershell
+maya-scene-kit-gui.exe
+```
+
+Use the GUI when you want to load files or folders, inspect audit findings, review
+dump and path data, stage edits, and save results without dropping into the CLI.
+
+### CLI
+
+Download the release archive for your OS from GitHub Releases and extract it.
+The same bundle includes the CLI and GUI executables.
 
 1. Open the Releases page
-2. Download the `maya-scene-kit` executable (for Windows, `.exe`)
-3. Place it in any folder and run it
+2. Download the `maya-scene-kit` archive for your platform
+3. Extract it anywhere and run `maya-scene-kit --help`
 
-Example (Windows):
+Release archives currently contain:
+
+- the `maya-scene-kit` executable
+- the `maya-scene-kit-gui` executable
+- `LICENSE`
+- `THIRD_PARTY_NOTICES.md`
+- `README.md`
+
+Example:
 
 ```powershell
 maya-scene-kit.exe --help
 ```
 
-## Basic Usage
+### Python
+
+Python bindings live in `crates/maya-scene-kit-python`.
+Download the release wheel from GitHub Releases and install it directly.
+
+```powershell
+uv pip install --system .\maya_scene_kit-0.1.0-*.whl
+```
+
+Quick smoke test:
+
+```powershell
+python -c "import maya_scene_kit; print(maya_scene_kit.inspect_mb('tests/02/sphere.mb', max_depth=0)['scene_format'])"
+```
+
+See [docs/python_usage.md](docs/python_usage.md) for source builds, editable installs,
+and API examples.
+
+## Typical Workflows
+
+### GUI workflow
+
+The GUI is aimed at interactive scene triage and staged rewrite work:
+
+1. Add one or more files, or scan a folder
+2. Run audit and inspect the result table
+3. Review requires, script dump, and extracted paths
+4. Stage `clean`, `replace`, or `to-ascii`
+5. Save selected outputs
+
+### Python workflow
+
+The Python bindings are useful when another tool wants to inspect a scene before
+handing it off to a downstream open or import step.
+
+This is an operational pattern built on the current API surface, not a dedicated
+callback API:
+
+```python
+from maya_scene_kit import audit
+
+report = audit("scene.mb", max_preview=120)
+
+if report["blocked_on_uncertainty"]:
+    raise RuntimeError("scene requires manual review before open")
+
+if report["disposition"] not in {"allow", "allow_with_notice"}:
+    raise RuntimeError(f"audit blocked scene: {report['disposition']}")
+
+# Your tool decides what to do next.
+# For example: open the file in a DCC, queue it for review, or copy it to a safe area.
+```
+
+Other Python entry points include `inspect_mb`, `collect_paths`, `dump_requires`,
+`dump_scripts`, `preview_clean`, `clean`, `preview_replace`, `replace`, and
+`to_ascii`.
+
+### CLI workflow
+
+For untrusted or unknown scenes, start with `audit` or `dump`.
+`clean` and `replace` currently run in `forensic` mode only because the strict
+IR-native mutator path is not complete yet.
+If a scene relies on script nodes for render setup or other initialization,
+removing them can change behavior.
+
+Representative commands:
+
+```bash
+maya-scene-kit audit input.mb
+maya-scene-kit dump input.mb --out /tmp/scene_dump.txt
+maya-scene-kit paths input.mb --kind reference --json
+maya-scene-kit inspect input.mb --max-depth 2
+maya-scene-kit clean input.mb output_clean.mb
+maya-scene-kit replace input.mb --rule "V:/dcc=X:/dcc" --out output.mb
+maya-scene-kit to-ascii input.mb output.ma --mode best-effort
+```
+
+## Command Summary
 
 ```bash
 maya-scene-kit <command> [options]
 ```
 
-## Common Tasks
+Current CLI commands:
 
-### `clean` (remove script nodes and save)
+- `inspect`: inspect Maya Binary chunk structure
+- `dump`: dump `requires` plus script nodes from a file or directory
+- `paths`: extract file and reference paths from a file or directory
+- `audit`: audit execution-capable surfaces
+- `to-ascii`: convert Maya Binary (`.mb`) scenes to Maya ASCII (`.ma`)
+- `clean`: remove script nodes and save in forensic mode
+- `replace`: replace file and reference paths in forensic mode
 
-```bash
-maya-scene-kit clean input.mb output_clean.mb
-maya-scene-kit clean input.ma output_clean.ma
-```
+## Execution Modes
 
-### `dump` (export requires + script together)
+Commands that mutate, gate, or convert scenes run in one of three modes:
 
-```bash
-# Print one file to stdout
-maya-scene-kit dump tests/02/sphere.mb
+- `strict`: succeeds only when the relevant surface is validated authoritatively
+- `best-effort`: allows partial structured recovery, but does not claim full validation
+- `forensic`: allows heuristic or transport-level handling and reports that the result is not validated
 
-# Save one file to disk
-maya-scene-kit dump tests/02/sphere.mb --out /tmp/sphere_scene_dump.txt
+Public reports expose `validation_state` as one of:
 
-# Recursively process a directory and write outputs
-maya-scene-kit dump tests --out-dir /tmp/scene_dump_dir
-```
+- `validated`
+- `partial`
+- `unsupported`
+- `invalid`
+- `copied_unvalidated`
 
-### `audit` (match script bodies against NG rules)
+`audit` is conservative by design:
 
-```bash
-maya-scene-kit audit tests/02/sphere.mb --rule "python(" --rule "eval"
-maya-scene-kit audit tests --rule-file /tmp/ng_rules.txt --ignore-case
-maya-scene-kit audit tests/02/sphere.mb --rule "python\\(" --regex --json
-```
-
-- If no rules are specified, default rules are used: `python(` / `eval` / `exec`.
-- If you omit the command and pass only `<file-or-dir>`, `audit` runs by default.
-
-### `paths` (extract file/reference paths)
-
-```bash
-# Extract all path-like entries from one file
-maya-scene-kit paths tests/02/sphere.ma
-
-# Extract only file node paths
-maya-scene-kit paths tests --kind file
-
-# Extract only reference node paths and save outputs by directory
-maya-scene-kit paths tests --kind reference --out-dir /tmp/scene_paths_dir
-
-# JSON output (includes origin metadata for FREF-based references)
-maya-scene-kit paths --kind reference --json tests/02/sphere.mb
-```
-
-### `replace` (rewrite path strings in `.ma/.mb`)
-
-```bash
-# Single file output
-maya-scene-kit replace input.mb --rule "V:/dcc=X:/dcc" --out output.mb
-
-# Multiple rules
-maya-scene-kit replace input.mb \
-  --rule "V:/dcc=X:/dcc" \
-  --rule "rig/=asset/" \
-  --out output.mb
-
-# Rules from file (one FROM=TO per line, '#' comments allowed)
-maya-scene-kit replace input.mb --rule-file /tmp/replace_rules.txt --out output.mb
-
-# Directory input (recursive) -> mirrored output directory
-maya-scene-kit replace scenes --rule "old_root/=new_root/" --out-dir /tmp/rewritten_scenes
-```
-
-### `inspect` (show chunk structure)
-
-```bash
-maya-scene-kit inspect tests/02/sphere.mb --max-depth 2
-maya-scene-kit inspect tests/02/sphere.mb --preview-bytes 32
-```
+- `.ma` execution surfaces are audited directly
+- `.mb` strict audit remains fail-closed until binary surface extraction is authoritative
+- parse failures on autorun Python surfaces are treated conservatively in strict-capable paths
 
 ## Current Scope
 
 - IFF chunk parsing for `.mb` (`tag / offset / aux / size`)
-- Script node detection/removal/extraction for `.ma/.mb`
+- Script node detection, removal, and extraction for `.ma/.mb`
+- Execution-surface audit and report generation for `.ma/.mb`
 - Requires extraction for `.ma/.mb`
-- File/reference path extraction for `.ma/.mb`
+- File and reference path extraction for `.ma/.mb`
+- File and reference path rewrite for `.ma/.mb`
+- `.mb` to `.ma` conversion via `to-ascii`
+
+For deeper reference material, including `--node-info` overlays, `plugin_node_info`
+generation, and `to-ascii --issues-json`, see [docs/advanced_usage.md](docs/advanced_usage.md).

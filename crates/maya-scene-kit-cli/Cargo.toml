@@ -1,0 +1,25 @@
+[package]
+name = "maya-scene-kit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Command-line interface for inspecting, auditing, and rewriting Maya scene files."
+
+[[bin]]
+name = "maya-scene-kit"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["std"] }
+maya-scene-kit-observe = { path = "../maya-scene-kit-observe" }
+maya-scene-kit-audit = { path = "../maya-scene-kit-audit" }
+maya-scene-kit-edit = { path = "../maya-scene-kit-edit" }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

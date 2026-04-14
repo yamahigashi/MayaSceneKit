@@ -1,0 +1,89 @@
+tokens:
+  aBOL:
+    value_spec:
+      kind: attr_type
+      value: bool
+    min_value: "0"
+    max_value: "1"
+  aDBL:
+    value_spec:
+      kind: attr_type
+      value: double
+  aFLT:
+    value_spec:
+      kind: attr_type
+      value: float
+  aFL3:
+    value_spec:
+      kind: attr_type
+      value: float3
+  aFL2:
+    value_spec:
+      kind: attr_type
+      value: float2
+  aLNG:
+    value_spec:
+      kind: attr_type
+      value: long
+  aDB3:
+    value_spec:
+      kind: attr_type
+      value: double3
+  aDB2:
+    value_spec:
+      kind: attr_type
+      value: double2
+  aLI3:
+    value_spec:
+      kind: attr_type
+      value: long3
+  aLI2:
+    value_spec:
+      kind: attr_type
+      value: long2
+  aSI3:
+    value_spec:
+      kind: attr_type
+      value: short3
+  aSI2:
+    value_spec:
+      kind: attr_type
+      value: short2
+  aCPD:
+    value_spec:
+      kind: attr_type
+      value: compound
+  aINT:
+    value_spec:
+      kind: attr_type
+      value: long
+  aLI1:
+    value_spec:
+      kind: attr_type
+      value: long
+  aSI1:
+    value_spec:
+      kind: attr_type
+      value: short
+    soft_range_layout: leading_double_pair_after_u32
+  aSTR:
+    value_spec:
+      kind: data_type
+      value: string
+  aTYP:
+    value_spec:
+      kind: data_type
+      value: string
+  aMSG:
+    value_spec:
+      kind: attr_type
+      value: message
+  aTIM:
+    value_spec:
+      kind: attr_type
+      value: time
+  aENM:
+    value_spec:
+      kind: attr_type
+      value: enum
+    enum_names_layout: cstring_list_until_marker_or_nul_run
