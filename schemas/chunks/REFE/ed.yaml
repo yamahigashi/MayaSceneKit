@@ -1,0 +1,24 @@
+schema_id: schema.refe.ed.v1
+layouts:
+  - name: TwoLists
+    group_list_count: 2
+  - name: OneList
+    group_list_count: 1
+  - name: Headerless
+    group_list_count: 0
+records:
+  - opcode: 0
+    mode: triplet_inline
+    emit: op0
+  - opcode: 1
+    mode: marker
+    emit: op1
+  - opcode: 2
+    mode: triplet_prefixed
+    emit: op2
+  - opcode: 3
+    mode: triplet_prefixed
+    emit: op3
+  - opcode: 5
+    mode: counted_cstring_args
+    emit: op5

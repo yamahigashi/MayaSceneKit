@@ -1,0 +1,10 @@
+schema_id: schema.cons.rela.v1
+handler: cons.rela
+fields:
+  - name: kind
+    kind: cstring
+  - name: head
+    kind: cstring
+  - name: tail
+    kind: cstring_list_rest
+    min_items: 2

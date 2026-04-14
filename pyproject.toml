@@ -1,0 +1,11 @@
+[project]
+name = "mayascenekit"
+version = "0.1.0"
+description = "Development environment metadata for the maya-scene-kit workspace."
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/yamahigashi/MayaSceneKit"
+Issues = "https://github.com/yamahigashi/MayaSceneKit/issues"

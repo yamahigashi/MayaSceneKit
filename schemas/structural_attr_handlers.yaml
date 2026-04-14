@@ -1,0 +1,8 @@
+handlers:
+  - handler: attr.nurbs_curve
+    kind_equals: 32
+    min_value_len: 25
+    attr_name_suffix: "cc"
+    u32be_checks:
+      - offset: 8
+        max: 2

@@ -1,0 +1,10 @@
+schema_id: schema.refe.attr_payload.v1
+handler: refe.attr_payload
+fields:
+  - name: attr_name
+    kind: cstring
+  - name: kind
+    kind: u8
+  - name: value_raw
+    kind: bytes_rest
+    allow_empty: true

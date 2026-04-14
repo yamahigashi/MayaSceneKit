@@ -16,13 +16,24 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cross-compilation dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
+          sudo apt-get install -y \
+            binutils-mingw-w64-x86-64 \
+            gcc-mingw-w64-x86-64 \
+            g++-mingw-w64-x86-64
 
       - name: Add Rust targets
         run: |
@@ -31,23 +42,40 @@ jobs:
           rustup target list --installed
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
-      - name: Release build for Linux
-        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - name: Release build for Linux binaries
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu -p maya-scene-kit-cli -p maya-scene-kit-gui
 
-      - name: Release build for Windows
-        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+      - name: Release build for Windows binaries
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu -p maya-scene-kit-cli -p maya-scene-kit-gui
+
+      - name: Build Python wheel
+        run: uv run --with maturin maturin build --release --manifest-path crates/maya-scene-kit-python/Cargo.toml
 
       - name: Package binaries
         run: |
           mkdir -p release
-          # Linux binary
-          cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit release/maya-scene-kit-linux
-          tar czf release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz -C release maya-scene-kit-linux
-          # Windows binary
-          cp target/x86_64-pc-windows-gnu/release/maya-scene-kit.exe release/maya-scene-kit-windows.exe
-          zip -j release/maya-scene-kit-${{ github.ref_name }}-windows.zip release/maya-scene-kit-windows.exe
+          linux_dir="release/maya-scene-kit-${{ github.ref_name }}-linux"
+          windows_dir="release/maya-scene-kit-${{ github.ref_name }}-windows"
+          mkdir -p "$linux_dir" "$windows_dir"
+
+          # Linux binary archive contents
+          cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit "$linux_dir/maya-scene-kit"
+          cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit-gui "$linux_dir/maya-scene-kit-gui"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$linux_dir/"
+          tar czf release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz -C release "maya-scene-kit-${{ github.ref_name }}-linux"
+
+          # Windows binary archive contents
+          cp target/x86_64-pc-windows-gnu/release/maya-scene-kit.exe "$windows_dir/maya-scene-kit.exe"
+          cp target/x86_64-pc-windows-gnu/release/maya-scene-kit-gui.exe "$windows_dir/maya-scene-kit-gui.exe"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$windows_dir/"
+          (
+            cd release
+            zip -r "maya-scene-kit-${{ github.ref_name }}-windows.zip" "maya-scene-kit-${{ github.ref_name }}-windows"
+          )
+
+          cp target/wheels/maya_scene_kit-*.whl release/
 
       - name: Generate SHA256 checksums
         run: |
@@ -55,6 +83,7 @@ jobs:
           sha256sum \
             maya-scene-kit-${{ github.ref_name }}-linux.tar.gz \
             maya-scene-kit-${{ github.ref_name }}-windows.zip \
+            maya_scene_kit-*.whl \
             > SHA256SUMS.txt
 
       - name: Upload Linux artifact
@@ -68,6 +97,12 @@ jobs:
         with:
           name: maya-scene-kit-windows-${{ github.ref_name }}
           path: release/maya-scene-kit-${{ github.ref_name }}-windows.zip
+
+      - name: Upload Python wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maya-scene-kit-python-${{ github.ref_name }}
+          path: release/maya_scene_kit-*.whl
 
       - name: Upload checksum artifact
         uses: actions/upload-artifact@v4
@@ -90,6 +125,11 @@ jobs:
         with:
           name: maya-scene-kit-windows-${{ github.ref_name }}
 
+      - name: Download Python wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maya-scene-kit-python-${{ github.ref_name }}
+
       - name: Download checksum artifact
         uses: actions/download-artifact@v4
         with:
@@ -105,6 +145,7 @@ jobs:
           files: |
             maya-scene-kit-${{ github.ref_name }}-linux.tar.gz
             maya-scene-kit-${{ github.ref_name }}-windows.zip
+            maya_scene_kit-*.whl
             SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

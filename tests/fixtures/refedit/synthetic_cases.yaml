@@ -1,0 +1,81 @@
+schema_version: 1
+description: >
+  Synthetic REFE.ed payload fixtures derived from production-like shapes.
+  All names and paths are anonymized.
+cases:
+  - id: rig_like_op5_with_placeholder_empty
+    description: >
+      Duplicate zero/non-zero group headers with the same name and Op5
+      records that carry placeholder and trailing empty arguments.
+    root_node: asset_bodyRN
+    group_lists:
+      - - name: asset_bodyRN
+          expected_count: 0
+        - name: asset_bodyRN
+          expected_count: 3
+    records:
+      - op: op5
+        sub: 3
+        args:
+          - asset_bodyRN
+          - "|asset_body:body|asset_body:world_ctl|asset_body:global_C0_ctl.rotateOrder"
+          - asset_bodyRN.placeHolderList[1]
+          - ""
+      - op: op5
+        sub: 3
+        args:
+          - asset_bodyRN
+          - "|asset_body:body|asset_body:world_ctl|asset_body:global_C0_ctl.translate"
+          - asset_bodyRN.placeHolderList[2]
+          - ""
+      - op: op5
+        sub: 3
+        args:
+          - asset_bodyRN
+          - "|asset_body:body|asset_body:world_ctl|asset_body:global_C0_ctl.rotatePivot"
+          - asset_bodyRN.placeHolderList[3]
+          - ""
+    expected:
+      has_unknown_tail: false
+      expected_group_count: 2
+      required_group_names:
+        - asset_bodyRN
+
+  - id: rig_like_op5_sub1_root_retained
+    description: >
+      Sub=1 Op5 record with only root argument must be preserved as data,
+      not normalized out.
+    root_node: asset_bodyRN
+    group_lists:
+      - - name: asset_bodyRN
+          expected_count: 1
+    records:
+      - op: op5
+        sub: 1
+        args:
+          - asset_bodyRN
+    expected:
+      has_unknown_tail: false
+      expected_group_count: 1
+      required_group_names:
+        - asset_bodyRN
+
+  - id: chara_like_pipe_unknown_tail
+    description: >
+      Header list is parsed, then record stream begins with a pipe-prefixed
+      payload that should be preserved as unknown tail (opcode 0x7C).
+    root_node: CharacterRN
+    group_lists:
+      - - name: Character:Model:ScaleRN
+          expected_count: 0
+        - name: CharacterRN
+          expected_count: 39
+    records: []
+    raw_tail_ascii: "|CharacterRNfosterParent1|Character:L_Hand_MIK_Ctrl_pointConstraint"
+    expected:
+      has_unknown_tail: true
+      unknown_opcode_hex: "0x7C"
+      expected_group_count: 2
+      required_group_names:
+        - Character:Model:ScaleRN
+        - CharacterRN

@@ -1,0 +1,24 @@
+[package]
+name = "maya-scene-kit-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Rule-based audit plans, findings, and verdicts for Maya scene files."
+
+[lib]
+name = "maya_scene_kit_audit"
+path = "src/lib.rs"
+
+[dependencies]
+maya-scene-kit-observe = { path = "../maya-scene-kit-observe" }
+regex = "1"
+rustpython-parser = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+encoding_rs = "0.8"
+serde_yaml = "0.9"
+tempfile = "3"

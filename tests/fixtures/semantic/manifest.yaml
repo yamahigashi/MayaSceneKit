@@ -1,0 +1,27 @@
+cases:
+  - id: sphere_pair
+    ma: tests/02/sphere.ma
+    mb: tests/02/sphere.mb
+    expected_script_nodes:
+      - sceneConfigurationScriptNode
+      - uiConfigurationScriptNode
+    expected_reference_path_count: 0
+    expected_file_path_count: 0
+    requires_contains:
+      - maya
+  - id: formatting_distorted_script
+    ma: tests/fixtures/semantic/formatting_distorted_script.ma
+    expected_script_nodes:
+      - scrambledScript
+    expected_reference_path_count: 0
+    expected_file_path_count: 0
+    requires_contains:
+      - maya
+  - id: custom_unknown_node
+    ma: tests/fixtures/semantic/custom_unknown_node.ma
+    expected_script_nodes: []
+    expected_reference_path_count: 0
+    expected_file_path_count: 0
+    requires_contains:
+      - maya
+      - myCustomPlugin
