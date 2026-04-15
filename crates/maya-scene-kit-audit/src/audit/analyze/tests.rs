@@ -89,6 +89,7 @@ fn parser_backed_lookup_matches_call_name_case_insensitively() {
             chunk_form: None,
             chunk_tag: None,
             chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
         },
         derivation: AuditSurfaceDerivation::Observed,
         mel: Some(Arc::new(MelSurfaceFacts {
@@ -128,6 +129,7 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
             chunk_form: None,
             chunk_tag: None,
             chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
         },
         derivation: AuditSurfaceDerivation::Observed,
         mel: Some(Arc::new(collect_mel_surface_facts(
@@ -168,6 +170,7 @@ fn bare_identifier_callback_flag_emits_review_signal_only() {
             chunk_form: None,
             chunk_tag: None,
             chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
         },
         derivation: AuditSurfaceDerivation::Observed,
         mel: Some(Arc::new(collect_mel_surface_facts(
@@ -203,6 +206,7 @@ fn empty_braced_callback_flag_is_ignored() {
             chunk_form: None,
             chunk_tag: None,
             chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
         },
         derivation: AuditSurfaceDerivation::Observed,
         mel: Some(Arc::new(collect_mel_surface_facts(
@@ -233,6 +237,7 @@ fn bare_mel_variable_is_not_obfuscation_marker() {
             chunk_form: None,
             chunk_tag: None,
             chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
         },
         derivation: AuditSurfaceDerivation::Observed,
         mel: Some(Arc::new(MelSurfaceFacts {

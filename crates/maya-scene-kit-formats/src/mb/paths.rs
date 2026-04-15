@@ -607,17 +607,16 @@ fn parse_fref_record(payload: &[u8]) -> Option<FrefRecord> {
     let raw_fields = extract_nul_terminated_ascii_fields(payload);
     let path = raw_fields
         .first()
-        .map(|value| value.trim().to_string())
+        .map(|value| strip_leading_control_bytes(value))
         .filter(|value| !value.is_empty())?;
     let namespace = raw_fields
         .get(1)
-        .map(|value| value.trim().to_string())
+        .map(|value| strip_leading_control_bytes(value))
         .filter(|value| !value.is_empty())?;
     let reference_node = raw_fields
         .get(2)
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+        .map(|value| strip_leading_control_bytes(value))
+        .filter(|value| !value.is_empty());
     let format_hint = raw_fields
         .iter()
         .find_map(|token| normalize_reference_file_type_token(token))
@@ -642,11 +641,9 @@ fn parse_frdi_record(payload: &[u8]) -> Option<FrefRecord> {
         .iter()
         .map(|v| strip_leading_control_bytes(v))
         .collect();
-    let path_idx = fields.iter().position(|value| {
-        let lower = value.to_ascii_lowercase();
-        (lower.contains(".mb") || lower.contains(".ma"))
-            && (value.contains('/') || value.contains('\\'))
-    })?;
+    let path_idx = fields
+        .iter()
+        .position(|value| looks_like_frdi_dependency_path(value))?;
     let path = fields[path_idx].clone();
     if path.is_empty() {
         return None;
@@ -680,6 +677,12 @@ fn parse_frdi_record(payload: &[u8]) -> Option<FrefRecord> {
         reference_options,
         raw_fields,
     })
+}
+
+fn looks_like_frdi_dependency_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    (lower.contains(".mb") || lower.contains(".ma") || lower.contains(".fbx"))
+        && (value.contains('/') || value.contains('\\'))
 }
 
 fn decode_attr_triplet(payload: &[u8]) -> Option<(String, u8, Vec<u8>)> {
@@ -835,6 +838,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_fref_record_accepts_fbx_export_tail_metadata() {
+        let payload = b"assets/example/ExampleAsset.fbx\0Source\0\x01\x01SourceRN\0\0\0\0\0VERS|2020|\0FBX export\0";
+        let record = parse_fref_record(payload).expect("fref record");
+        assert_eq!(record.path, "assets/example/ExampleAsset.fbx");
+        assert_eq!(record.reference_node, "SourceRN");
+        assert_eq!(record.short_name.as_deref(), Some("Source"));
+        assert_eq!(record.reference_options.as_deref(), Some("VERS|2020|"));
+    }
+
+    #[test]
     fn parse_fref_record_rejects_missing_namespace_slot() {
         let payload = b"rig/charA_v001.mb\0\0charARN\0mayaBinary\0";
         assert!(parse_fref_record(payload).is_none());
@@ -858,6 +871,20 @@ mod tests {
         assert_eq!(meta.trace_form.as_deref(), Some("FRDI"));
         assert_eq!(meta.trace_tag.as_deref(), Some("FRDI"));
         assert_eq!(meta.trace_node_offset, Some(0x4321));
+    }
+
+    #[test]
+    fn decode_reference_from_frdi_chunk_accepts_fbx_dependency_path() {
+        let payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|\0FBX export\0";
+        let entry =
+            decode_reference_from_frdi_chunk(payload, 0x7A8, Some(8), Some(16)).expect("entry");
+
+        assert_eq!(entry.value, "assets/example/ExampleAsset.fbx");
+        assert_eq!(entry.node_name, "Import_00_Example:SourceRN");
+        let meta = entry.meta.expect("meta");
+        assert_eq!(meta.short_name.as_deref(), Some("Source"));
+        assert_eq!(meta.reference_options.as_deref(), Some("VERS|2020|"));
+        assert_eq!(meta.trace_node_offset, Some(0x7A8));
     }
 
     #[test]

@@ -2529,6 +2529,7 @@ fn audit_clean_target_maps_top_level_proc_definition_to_range_delete() {
         chunk_form: None,
         chunk_tag: None,
         chunk_node_offset: None,
+        ..ExecutionOrigin::without_chunk_address()
     };
 
     let target = audit_clean_target(ExecutionSurfaceKind::TopLevelProcDefinition, &origin);
@@ -2557,6 +2558,7 @@ fn audit_clean_target_maps_top_level_other_statement_to_range_delete() {
         chunk_form: None,
         chunk_tag: None,
         chunk_node_offset: None,
+        ..ExecutionOrigin::without_chunk_address()
     };
 
     let target = audit_clean_target(ExecutionSurfaceKind::TopLevelOtherStatement, &origin);
@@ -2625,6 +2627,7 @@ fn audit_clean_target_maps_raw_chunk_text_to_mb_owner_form() {
         chunk_form: Some("SCRP".to_string()),
         chunk_tag: Some("STR ".to_string()),
         chunk_node_offset: Some(0xCFC),
+        ..ExecutionOrigin::without_chunk_address()
     };
 
     let target = audit_clean_target(ExecutionSurfaceKind::RawChunkText, &origin);
@@ -2651,6 +2654,7 @@ fn audit_clean_target_prefers_mb_owner_form_for_script_node_body() {
         chunk_form: Some("SCRP".to_string()),
         chunk_tag: Some("STR ".to_string()),
         chunk_node_offset: Some(0xCFC),
+        ..ExecutionOrigin::without_chunk_address()
     };
 
     let target = audit_clean_target(ExecutionSurfaceKind::ScriptNodeBody, &origin);

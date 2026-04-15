@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::scene::{
     AuditEvidence, AuditFinding, AuditFindingDetail, AuditNotice, AuditReport, AuditReviewDetail,
     AuditReviewSignal, DependencyFactDetail, ExecutionCoverageIssueDetail, ExecutionEffectClass,
-    ExecutionReason, ExecutionReasonTemplate, ExecutionUnitSummary, StaticAuditFindingDetail,
-    StaticAuditReviewDetail, StaticExecutionReason,
+    ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate, ExecutionUnitSummary,
+    StaticAuditFindingDetail, StaticAuditReviewDetail, StaticExecutionReason,
 };
 
 pub(in crate::cli) fn render_unit_summary_text(
@@ -73,19 +73,12 @@ pub(in crate::cli) fn render_grouped_audit_hit_text(
             "attr={}",
             surface.origin.attr_name.as_deref().unwrap_or("-")
         ),
-        format!(
-            "chunk={}:{}@{}",
-            surface.origin.chunk_form.as_deref().unwrap_or("-"),
-            surface.origin.chunk_tag.as_deref().unwrap_or("-"),
-            surface
-                .origin
-                .chunk_node_offset
-                .map(|value| value.to_string())
-                .as_deref()
-                .unwrap_or("-")
-        ),
-        format!("msg=\"{}\"", render_audit_finding_detail(&hit.detail)),
     ]);
+    parts.extend(render_chunk_address_fields(&surface.origin));
+    parts.push(format!(
+        "msg=\"{}\"",
+        render_audit_finding_detail(&hit.detail)
+    ));
     if !hit.evidence.is_empty() {
         parts.push(format!(
             "evidence=\"{}\"",
@@ -123,19 +116,12 @@ pub(in crate::cli) fn render_grouped_review_signal_text(
             "attr={}",
             surface.origin.attr_name.as_deref().unwrap_or("-")
         ),
-        format!(
-            "chunk={}:{}@{}",
-            surface.origin.chunk_form.as_deref().unwrap_or("-"),
-            surface.origin.chunk_tag.as_deref().unwrap_or("-"),
-            surface
-                .origin
-                .chunk_node_offset
-                .map(|value| value.to_string())
-                .as_deref()
-                .unwrap_or("-")
-        ),
-        format!("msg=\"{}\"", render_audit_review_detail(&review.detail)),
     ]);
+    parts.extend(render_chunk_address_fields(&surface.origin));
+    parts.push(format!(
+        "msg=\"{}\"",
+        render_audit_review_detail(&review.detail)
+    ));
     if !review.evidence.is_empty() {
         parts.push(format!(
             "evidence=\"{}\"",
@@ -151,6 +137,35 @@ pub(in crate::cli) fn render_grouped_review_signal_text(
         parts.push(format!("preview=\"{}\"", surface.preview));
     }
     parts.join(" ")
+}
+
+fn render_chunk_address_fields(origin: &ExecutionOrigin) -> Vec<String> {
+    let mut fields = vec![format!(
+        "chunk={}:{}@{}",
+        origin.chunk_form.as_deref().unwrap_or("-"),
+        origin.chunk_tag.as_deref().unwrap_or("-"),
+        origin
+            .chunk_node_offset
+            .map(|value| value.to_string())
+            .as_deref()
+            .unwrap_or("-")
+    )];
+    let Some(owner_offset) = origin.chunk_node_offset else {
+        return fields;
+    };
+    let Some(payload_offset) = origin.chunk_payload_offset else {
+        return fields;
+    };
+    let payload_size = origin.chunk_payload_size.unwrap_or_default();
+    let payload_end = payload_offset.saturating_add(payload_size);
+    fields.push(format!("addr=0x{owner_offset:08X}"));
+    fields.push(format!(
+        "payload=0x{payload_offset:08X}..0x{payload_end:08X}"
+    ));
+    if let Some(aux) = origin.chunk_aux {
+        fields.push(format!("aux=0x{aux:08X}"));
+    }
+    fields
 }
 
 pub(in crate::cli) fn render_audit_notice_text(scene_path: &str, notice: &AuditNotice) -> String {
@@ -186,6 +201,8 @@ pub(in crate::cli) fn group_audit_hit_indexes(report: &AuditReport) -> Vec<(usiz
             chunk_form: surface.origin.chunk_form.as_deref(),
             chunk_tag: surface.origin.chunk_tag.as_deref(),
             chunk_node_offset: surface.origin.chunk_node_offset,
+            chunk_payload_offset: surface.origin.chunk_payload_offset,
+            chunk_payload_size: surface.origin.chunk_payload_size,
             preview: surface.preview.as_str(),
         };
         if let Some(group_index) = indexes.get(&key).copied() {
@@ -221,6 +238,8 @@ pub(in crate::cli) fn group_review_signal_indexes(report: &AuditReport) -> Vec<(
             chunk_form: surface.origin.chunk_form.as_deref(),
             chunk_tag: surface.origin.chunk_tag.as_deref(),
             chunk_node_offset: surface.origin.chunk_node_offset,
+            chunk_payload_offset: surface.origin.chunk_payload_offset,
+            chunk_payload_size: surface.origin.chunk_payload_size,
             preview: surface.preview.as_str(),
         };
         if let Some(group_index) = indexes.get(&key).copied() {
@@ -489,6 +508,8 @@ struct GroupedAuditHitKey<'a> {
     chunk_form: Option<&'a str>,
     chunk_tag: Option<&'a str>,
     chunk_node_offset: Option<usize>,
+    chunk_payload_offset: Option<usize>,
+    chunk_payload_size: Option<usize>,
     preview: &'a str,
 }
 
@@ -505,5 +526,7 @@ struct GroupedReviewSignalKey<'a> {
     chunk_form: Option<&'a str>,
     chunk_tag: Option<&'a str>,
     chunk_node_offset: Option<usize>,
+    chunk_payload_offset: Option<usize>,
+    chunk_payload_size: Option<usize>,
     preview: &'a str,
 }

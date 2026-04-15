@@ -74,10 +74,7 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
             }
         };
 
-        let path = field_text(&fields, "path")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let path = sanitize_reference_slot(&field_text(&fields, "path").unwrap_or_default());
         if path.is_empty() {
             return DecodeAttempt::Handled(vec![make_unknown_event(
                 format!("{} missing required path", schema.schema_id),
@@ -89,11 +86,10 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
 
         // Canonical FREF slot semantics: [path, namespace, reference_node, ...tail].
         // Keep legacy field name fallback for external schema packs.
-        let namespace_slot = field_text(&fields, "namespace")
+        let namespace_slot_raw = field_text(&fields, "namespace")
             .or_else(|| field_text(&fields, "reference_node"))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+            .unwrap_or_default();
+        let namespace_slot = sanitize_reference_slot(&namespace_slot_raw);
         if namespace_slot.is_empty() {
             return DecodeAttempt::Handled(vec![make_unknown_event(
                 format!("{} missing required namespace slot", schema.schema_id),
@@ -103,11 +99,10 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
             )]);
         }
 
-        let reference_node_slot = field_text(&fields, "reference_node")
+        let reference_node_slot_raw = field_text(&fields, "reference_node")
             .or_else(|| field_text(&fields, "short_name"))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+            .unwrap_or_default();
+        let reference_node_slot = sanitize_reference_slot(&reference_node_slot_raw);
         let reference_node = if reference_node_slot.is_empty() {
             namespace_slot.clone()
         } else {
@@ -201,10 +196,20 @@ fn parse_fref_tail_fields(raw: &[u8]) -> Result<FrefTailFields, String> {
             continue;
         }
 
-        return Err(format!("unexpected token '{token}'"));
+        // Observed FREF payloads may include non-semantic exporter labels such as
+        // "FBX export" after the VERS options token. They do not affect the
+        // reference file identity, so keep the reference event instead of
+        // downgrading the whole chunk to unknown raw text.
     }
 
     Ok(fields)
+}
+
+fn sanitize_reference_slot(value: &str) -> String {
+    value
+        .trim_start_matches(|c: char| c.is_control())
+        .trim()
+        .to_string()
 }
 
 fn parse_frdi_fields(raw: &[u8]) -> Option<FrdiFields> {
@@ -221,11 +226,9 @@ fn parse_frdi_fields(raw: &[u8]) -> Option<FrdiFields> {
         return None;
     }
 
-    let path_idx = fields.iter().position(|value| {
-        let lower = value.to_ascii_lowercase();
-        (lower.contains(".mb") || lower.contains(".ma"))
-            && (value.contains('/') || value.contains('\\'))
-    })?;
+    let path_idx = fields
+        .iter()
+        .position(|value| looks_like_frdi_dependency_path(value))?;
     let path = fields[path_idx].clone();
     if path.is_empty() {
         return None;
@@ -262,6 +265,12 @@ fn parse_frdi_fields(raw: &[u8]) -> Option<FrdiFields> {
         file_type,
         options,
     })
+}
+
+fn looks_like_frdi_dependency_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    (lower.contains(".mb") || lower.contains(".ma") || lower.contains(".fbx"))
+        && (value.contains('/') || value.contains('\\'))
 }
 
 #[cfg(test)]
@@ -358,6 +367,34 @@ mod tests {
     }
 
     #[test]
+    fn fref_schema_accepts_fbx_export_tail_metadata() {
+        let decoder = ReferenceFamilyDecoder;
+        let payload = b"assets/example/ExampleAsset.fbx\0Source\0\x01\x01SourceRN\0\0\0\0\0VERS|2020|\0FBX export\0";
+
+        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&context(payload)) else {
+            panic!("expected handled");
+        };
+
+        assert_eq!(events.len(), 1);
+        let DecodedEvent::ReferenceFile {
+            path,
+            reference_node,
+            namespace,
+            file_type,
+            options,
+        } = &events[0]
+        else {
+            panic!("expected reference file event");
+        };
+
+        assert_eq!(path, "assets/example/ExampleAsset.fbx");
+        assert_eq!(reference_node, "SourceRN");
+        assert_eq!(namespace.as_deref(), Some("Source"));
+        assert_eq!(file_type.as_deref(), None);
+        assert_eq!(options.as_deref(), Some("VERS|2020|"));
+    }
+
+    #[test]
     fn frdi_chunk_decodes_reference_file_event() {
         let decoder = ReferenceFamilyDecoder;
         let payload = b"\x01\x04\0\x02scenes/TestScene_0000.mb\0Model\0\x01\0Example:ModelRN\0VERS|2020|\0mayaBinary\0";
@@ -382,6 +419,34 @@ mod tests {
         assert_eq!(reference_node, "Example:ModelRN");
         assert_eq!(namespace.as_deref(), Some("Model"));
         assert_eq!(file_type.as_deref(), Some("mayaBinary"));
+        assert_eq!(options.as_deref(), Some("VERS|2020|"));
+    }
+
+    #[test]
+    fn frdi_chunk_decodes_fbx_dependency_file_event() {
+        let decoder = ReferenceFamilyDecoder;
+        let payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|\0FBX export\0";
+
+        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&frdi_context(payload)) else {
+            panic!("expected handled");
+        };
+
+        assert_eq!(events.len(), 1);
+        let DecodedEvent::ReferenceFile {
+            path,
+            reference_node,
+            namespace,
+            file_type,
+            options,
+        } = &events[0]
+        else {
+            panic!("expected reference file event");
+        };
+
+        assert_eq!(path, "assets/example/ExampleAsset.fbx");
+        assert_eq!(reference_node, "Import_00_Example:SourceRN");
+        assert_eq!(namespace.as_deref(), Some("Source"));
+        assert_eq!(file_type.as_deref(), None);
         assert_eq!(options.as_deref(), Some("VERS|2020|"));
     }
 }

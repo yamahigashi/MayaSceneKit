@@ -150,6 +150,7 @@ fn collect_ma_coverage(
                             chunk_form: None,
                             chunk_tag: None,
                             chunk_node_offset: None,
+                            ..ExecutionOrigin::without_chunk_address()
                         },
                     });
                 }
@@ -269,6 +270,7 @@ fn collect_ma_script_node_surfaces(
                 chunk_form: None,
                 chunk_tag: None,
                 chunk_node_offset: None,
+                ..ExecutionOrigin::without_chunk_address()
             },
         });
     }
@@ -375,6 +377,11 @@ fn collect_mb_coverage(
                 chunk_form: Some(raw.chunk_ref.form.clone()),
                 chunk_tag: Some(raw.chunk_ref.tag.clone()),
                 chunk_node_offset: Some(raw.chunk_ref.node_offset),
+                chunk_aux: raw.chunk_ref.chunk_aux,
+                chunk_payload_offset: Some(raw.payload_span.start),
+                chunk_payload_size: Some(raw.payload_span.len()),
+                chunk_child_alignment: raw.chunk_ref.child_alignment,
+                chunk_child_header_size: raw.chunk_ref.child_header_size,
             },
         });
     }
@@ -514,6 +521,7 @@ fn collect_mb_native_script_surfaces(
                     chunk_form: Some("SCRP".to_string()),
                     chunk_tag: Some("STR ".to_string()),
                     chunk_node_offset: Some(child.offset),
+                    ..ExecutionOrigin::without_chunk_address()
                 },
             });
         }
@@ -543,6 +551,7 @@ fn push_command_surface(
             chunk_form: None,
             chunk_tag: None,
             chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
         },
     });
 }
