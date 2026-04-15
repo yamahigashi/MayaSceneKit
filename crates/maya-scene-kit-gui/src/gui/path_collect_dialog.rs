@@ -1,7 +1,8 @@
 use super::path_edit::{
     normalize_path_edit_targets, parse_path_collect_folder_input, path_collect_default_folder,
     path_collect_destination_supports_rewrite_mode, path_collect_supported_for_edit_targets,
-    scene_path_string, shared_workspace_root_for_targets,
+    path_file_collect_supported_for_edit_targets, scene_path_string,
+    shared_workspace_root_for_targets,
 };
 use super::*;
 
@@ -17,7 +18,13 @@ impl GuiShell {
         if edit_targets.is_empty() {
             return;
         }
-        if !path_collect_supported_for_edit_targets(&self.rows, &edit_targets) {
+        let can_collect = match rewrite_mode {
+            PathCollectRewriteMode::CopyOnly => {
+                path_file_collect_supported_for_edit_targets(&self.rows, &edit_targets)
+            }
+            _ => path_collect_supported_for_edit_targets(&self.rows, &edit_targets),
+        };
+        if !can_collect {
             return;
         }
         let Some(workspace_root) = shared_workspace_root_for_targets(&self.rows, &edit_targets)
@@ -230,6 +237,7 @@ fn build_path_collect_dialog(
     let title = dialog_state
         .as_ref()
         .map(|state| match state.rewrite_mode {
+            PathCollectRewriteMode::CopyOnly => i18n.text("dialog.path_collect_copy_only_title"),
             PathCollectRewriteMode::Absolute => i18n.text("dialog.path_collect_absolute_title"),
             PathCollectRewriteMode::WorkspaceDoubleSlashRelative => {
                 i18n.text("dialog.path_collect_workspace_double_slash_relative_title")
