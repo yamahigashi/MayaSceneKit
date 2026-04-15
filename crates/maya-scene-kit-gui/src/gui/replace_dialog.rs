@@ -1,6 +1,20 @@
 use super::*;
 use maya_scene_kit_edit::scene::OperationMode;
 
+const REPLACE_DIALOG_HORIZONTAL_MARGIN: Pixels = px(48.0);
+const REPLACE_DIALOG_VERTICAL_MARGIN: Pixels = px(96.0);
+const REPLACE_DIALOG_PREVIEW_MAX_HEIGHT: Pixels = px(320.0);
+const REPLACE_PREVIEW_HEADER_HEIGHT: Pixels = px(40.0);
+const REPLACE_PREVIEW_ROW_HEIGHT: Pixels = px(34.0);
+const REPLACE_PREVIEW_ROW_HEIGHT_F: f32 = 34.0;
+const REPLACE_PREVIEW_COLUMN_MIN_WIDTH: Pixels = px(180.0);
+
+struct ReplaceDialogLayout {
+    width: Pixels,
+    max_height: Pixels,
+    preview_max_height: Pixels,
+}
+
 impl GuiShell {
     pub(super) fn replace_dialog_current_rule(&self, cx: &App) -> (String, String) {
         (
@@ -71,6 +85,31 @@ impl GuiShell {
             .into_iter()
             .filter_map(|index| self.rows.get(index).map(|row| row.id))
             .collect::<Vec<_>>();
+        self.open_replace_dialog_for_rows(captured_row_ids, None, window, cx);
+    }
+
+    pub(super) fn open_replace_dialog_for_path_targets(
+        &mut self,
+        edit_targets: PathEditTargets,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit_targets = super::path_edit::normalize_path_edit_targets(edit_targets);
+        let mut path_targets = BTreeMap::<u64, BTreeSet<usize>>::new();
+        for (row_id, entry_index) in edit_targets {
+            path_targets.entry(row_id).or_default().insert(entry_index);
+        }
+        let captured_row_ids = path_targets.keys().copied().collect::<Vec<_>>();
+        self.open_replace_dialog_for_rows(captured_row_ids, Some(path_targets), window, cx);
+    }
+
+    fn open_replace_dialog_for_rows(
+        &mut self,
+        captured_row_ids: Vec<u64>,
+        path_targets: Option<BTreeMap<u64, BTreeSet<usize>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !bulk_enabled(captured_row_ids.len()) {
             self.status_message = Some(BannerMessage::SelectFilesFirst);
             cx.notify();
@@ -92,6 +131,7 @@ impl GuiShell {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.replace_dialog = Some(ReplaceDialogState {
             captured_row_ids,
+            path_targets,
             path_type_filter: default_path_type_filter(),
             replace_mode: PathReplaceMode::Literal,
             preview_sort: ReplaceDialogSort {
@@ -115,10 +155,14 @@ impl GuiShell {
         let Some(signature) = self.replace_dialog_current_signature(cx) else {
             return;
         };
-        let Some((captured_row_ids, existing_cache)) = self
-            .replace_dialog
-            .as_ref()
-            .map(|dialog| (dialog.captured_row_ids.clone(), dialog.source_cache.clone()))
+        let Some((captured_row_ids, path_targets, existing_cache)) =
+            self.replace_dialog.as_ref().map(|dialog| {
+                (
+                    dialog.captured_row_ids.clone(),
+                    dialog.path_targets.clone(),
+                    dialog.source_cache.clone(),
+                )
+            })
         else {
             return;
         };
@@ -143,6 +187,9 @@ impl GuiShell {
                     *row_id,
                     row.path.clone(),
                     workspace_relative_display_path(&row.path, &self.state),
+                    path_targets
+                        .as_ref()
+                        .and_then(|targets| targets.get(row_id).cloned()),
                     existing_cache.get(row_id).cloned(),
                 ))
             })
@@ -170,7 +217,9 @@ impl GuiShell {
                             let mut planned_overrides = Vec::new();
                             let mut resolved_cache = BTreeMap::new();
 
-                            for (row_id, path, scene_name, cached_entry) in targets {
+                            for (row_id, path, scene_name, row_path_targets, cached_entry) in
+                                targets
+                            {
                                 let cache_entry = match cached_entry {
                                     Some(entry) => entry,
                                     None => match collect_scene_paths_with_options(
@@ -207,6 +256,11 @@ impl GuiShell {
                                         previewable_row_ids.push(row_id);
                                         let mut row_overrides = Vec::new();
                                         for item in preview.items {
+                                            if row_path_targets.as_ref().is_some_and(|targets| {
+                                                !targets.contains(&item.entry_index)
+                                            }) {
+                                                continue;
+                                            }
                                             let path_kind =
                                                 path_type_for_node_type(&item.node_type);
                                             if !signature.path_type_filter.contains(&path_kind) {
@@ -304,6 +358,7 @@ impl GuiShell {
                     .flatten()
             })
             .collect::<Vec<_>>();
+        let path_order_snapshot = self.capture_path_order_snapshot();
         let before = self.capture_row_edit_states(&target_indices);
 
         for (row_id, overrides) in planned_overrides {
@@ -357,6 +412,7 @@ impl GuiShell {
             }
         }
         self.push_edit_history(before);
+        self.preserve_path_order_after_path_mutation(path_order_snapshot);
         self.refresh_app_menus(window, cx);
 
         self.clear_replace_dialog_state(window, cx);
@@ -447,6 +503,7 @@ fn build_replace_dialog(
         .as_ref()
         .map(|state| state.captured_row_ids.len())
         .unwrap_or_default();
+    let layout = replace_dialog_layout(window);
     let summary = if let Some(dialog_state) = dialog_state.as_ref() {
         if dialog_state.is_previewing {
             i18n.text("dialog.replace_previewing")
@@ -472,8 +529,8 @@ fn build_replace_dialog(
 
     let mut dialog = dialog
         .title(i18n.text("dialog.replace_path_title"))
-        .width(px(860.0))
-        .max_w(px(960.0))
+        .width(layout.width)
+        .max_h(layout.max_height)
         .overlay_closable(false)
         .on_cancel({
             let view = view.clone();
@@ -489,18 +546,22 @@ fn build_replace_dialog(
                 let i18n = shell.i18n();
                 let can_apply = shell.replace_dialog_can_apply(cx);
                 vec![
-                    Button::new("replace-cancel")
-                        .label(i18n.text("action.cancel"))
-                        .ghost()
-                        .on_click({
-                            let view = view.clone();
-                            move |_, window, cx| {
-                                view.update(cx, |shell, cx| {
-                                    shell.clear_replace_dialog_state(window, cx);
-                                });
-                                window.close_dialog(cx);
-                            }
-                        })
+                    div()
+                        .debug_selector(|| "replace-dialog-close".to_string())
+                        .child(
+                            Button::new("replace-cancel")
+                                .label(i18n.text("action.cancel"))
+                                .ghost()
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, window, cx| {
+                                        view.update(cx, |shell, cx| {
+                                            shell.clear_replace_dialog_state(window, cx);
+                                        });
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        )
                         .into_any_element(),
                     Button::new("replace-apply")
                         .label(i18n.text("action.apply"))
@@ -518,7 +579,9 @@ fn build_replace_dialog(
 
     dialog = dialog.child(
         div()
+            .debug_selector(|| "replace-dialog-body".to_string())
             .w_full()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_3()
@@ -659,10 +722,38 @@ fn build_replace_dialog(
                 &i18n,
                 selected_count,
                 view.clone(),
+                layout.preview_max_height,
             )),
     );
 
     dialog
+}
+
+fn replace_dialog_layout(window: &Window) -> ReplaceDialogLayout {
+    let window_paddings = gpui_component::window_paddings(window);
+    let viewport = window.viewport_size()
+        - size(
+            window_paddings.left + window_paddings.right,
+            window_paddings.top + window_paddings.bottom,
+        );
+    let available_width =
+        clamp_replace_dialog_dimension(viewport.width, REPLACE_DIALOG_HORIZONTAL_MARGIN);
+    let available_height =
+        clamp_replace_dialog_dimension(viewport.height, REPLACE_DIALOG_VERTICAL_MARGIN);
+
+    ReplaceDialogLayout {
+        width: available_width,
+        max_height: available_height,
+        preview_max_height: REPLACE_DIALOG_PREVIEW_MAX_HEIGHT.min(available_height),
+    }
+}
+
+fn clamp_replace_dialog_dimension(viewport: Pixels, margin: Pixels) -> Pixels {
+    if viewport > margin {
+        viewport - margin
+    } else {
+        viewport.max(px(0.0))
+    }
 }
 
 fn render_replace_dialog_preview(
@@ -670,6 +761,7 @@ fn render_replace_dialog_preview(
     i18n: &I18n,
     selected_count: usize,
     view: Entity<GuiShell>,
+    preview_max_height: Pixels,
 ) -> AnyElement {
     let Some(dialog_state) = dialog_state else {
         return div()
@@ -708,48 +800,67 @@ fn render_replace_dialog_preview(
             .child(i18n.text("dialog.replace_no_matches"))
             .into_any_element()
     } else {
+        let table_content_height = (REPLACE_PREVIEW_HEADER_HEIGHT
+            + px(REPLACE_PREVIEW_ROW_HEIGHT_F * rendered_items.len() as f32))
+        .max(REPLACE_PREVIEW_HEADER_HEIGHT + REPLACE_PREVIEW_ROW_HEIGHT);
+        let before_items = rendered_items.clone();
+        let after_items = rendered_items;
+
         div()
             .rounded_md()
             .border_1()
             .border_color(rgb(BORDER))
+            .w_full()
+            .max_h(preview_max_height)
+            .min_h_0()
+            .overflow_y_scrollbar()
             .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL_ALT_BG))
-                    .flex()
-                    .gap_3()
-                    .text_sm()
-                    .font_weight(FontWeight::BOLD)
-                    .child(render_replace_preview_sort_header(
-                        i18n.text("label.before"),
-                        ReplaceDialogSortKey::Before,
-                        dialog_state.preview_sort,
-                        view.clone(),
-                    ))
-                    .child(render_replace_preview_sort_header(
-                        i18n.text("label.after"),
-                        ReplaceDialogSortKey::After,
-                        dialog_state.preview_sort,
-                        view.clone(),
-                    )),
+                div().w_full().h(table_content_height).min_h_0().child(
+                    h_resizable("replace-preview-columns")
+                        .child(
+                            resizable_panel()
+                                .size(px(420.0))
+                                .size_range(REPLACE_PREVIEW_COLUMN_MIN_WIDTH..Pixels::MAX)
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(replace_preview_column_header(
+                                            i18n.text("label.before"),
+                                            ReplaceDialogSortKey::Before,
+                                            dialog_state.preview_sort,
+                                            view.clone(),
+                                        ))
+                                        .children(before_items.into_iter().map(|item| {
+                                            replace_preview_column_cell(item.before_value)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(420.0))
+                                .size_range(REPLACE_PREVIEW_COLUMN_MIN_WIDTH..Pixels::MAX)
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(replace_preview_column_header(
+                                            i18n.text("label.after"),
+                                            ReplaceDialogSortKey::After,
+                                            dialog_state.preview_sort,
+                                            view.clone(),
+                                        ))
+                                        .children(after_items.into_iter().map(|item| {
+                                            replace_preview_column_cell(item.after_value)
+                                        })),
+                                ),
+                        ),
+                ),
             )
-            .child(div().max_h(px(320.0)).overflow_y_scrollbar().children(
-                rendered_items.into_iter().map(|item| {
-                    div()
-                        .px_3()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(rgb(BORDER))
-                        .flex()
-                        .gap_3()
-                        .text_sm()
-                        .child(div().flex_1().truncate().child(item.before_value.clone()))
-                        .child(div().flex_1().truncate().child(item.after_value.clone()))
-                }),
-            ))
             .into_any_element()
     };
 
@@ -840,6 +951,37 @@ fn replace_dialog_path_type_filter_button(
                 cx.notify();
             });
         })
+}
+
+fn replace_preview_column_header(
+    label: String,
+    key: ReplaceDialogSortKey,
+    sort: ReplaceDialogSort,
+    view: Entity<GuiShell>,
+) -> impl IntoElement {
+    div()
+        .h(REPLACE_PREVIEW_HEADER_HEIGHT)
+        .px_3()
+        .border_b_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(PANEL_ALT_BG))
+        .flex()
+        .items_center()
+        .text_sm()
+        .font_weight(FontWeight::BOLD)
+        .child(render_replace_preview_sort_header(label, key, sort, view))
+}
+
+fn replace_preview_column_cell(text: String) -> impl IntoElement {
+    div()
+        .h(REPLACE_PREVIEW_ROW_HEIGHT)
+        .px_3()
+        .border_b_1()
+        .border_color(rgb(BORDER))
+        .flex()
+        .items_center()
+        .text_sm()
+        .child(div().flex_1().min_w_0().truncate().child(text))
 }
 
 pub(super) fn render_replace_dialog_preview_rows(

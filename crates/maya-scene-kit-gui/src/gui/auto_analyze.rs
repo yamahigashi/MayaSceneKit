@@ -34,6 +34,12 @@ impl GuiShell {
         self.persist();
     }
 
+    pub(super) fn toggle_file_list_dirty_filter(&mut self, cx: &mut Context<Self>) {
+        self.state.file_list_dirty_only = !self.state.file_list_dirty_only;
+        self.refresh_file_table(cx);
+        self.persist();
+    }
+
     pub(super) fn apply_path_search_query(&mut self, cx: &mut Context<Self>) {
         self.path_search_query = self.path_search_input.read(cx).value().to_string();
         self.refresh_path_table(cx);

@@ -289,6 +289,7 @@ pub(super) fn build_audit_table_model(
     rows: &[AuditResultRow],
     selected_keys: &BTreeSet<AuditResultRowKey>,
     filter: &BTreeSet<AuditSeverityFilter>,
+    dirty_only: bool,
     dedup: bool,
     search_query: &str,
     sort: AuditTableSort,
@@ -313,7 +314,10 @@ pub(super) fn build_audit_table_model(
         row: AuditResultRow,
     }
 
-    let filtered = filter_audit_result_rows(rows, filter);
+    let filtered = filter_audit_result_rows(rows, filter)
+        .into_iter()
+        .filter(|row| !dirty_only || row.dirty)
+        .collect::<Vec<_>>();
     let mut display_rows = Vec::new();
     if dedup {
         let mut groups = Vec::<DedupAuditGroup>::new();
@@ -341,6 +345,7 @@ pub(super) fn build_audit_table_model(
             let group = &mut groups[group_ix];
             group.row_keys.push(row.key.clone());
             group.scene_names.insert(row.scene_name.clone());
+            group.row.dirty |= row.dirty;
         }
 
         let i18n = I18n::new(locale);
@@ -454,6 +459,7 @@ pub(super) fn build_job_history_log_lines(i18n: &I18n, entries: &[JobHistoryEntr
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn build_path_table_model(
     rows: &[SceneRow],
     selected: &[usize],
@@ -466,6 +472,36 @@ pub(super) fn build_path_table_model(
     path_form_filter: &BTreeSet<PathFormFilter>,
     path_resolution_filter: &BTreeSet<PathResolutionBadge>,
     sort: PathTableSort,
+) -> PathTableModel {
+    build_path_table_model_with_order_snapshot(
+        rows,
+        selected,
+        state,
+        active_path_edit,
+        selected_path_rows,
+        dedup,
+        search_query,
+        path_type_filter,
+        path_form_filter,
+        path_resolution_filter,
+        sort,
+        None,
+    )
+}
+
+pub(super) fn build_path_table_model_with_order_snapshot(
+    rows: &[SceneRow],
+    selected: &[usize],
+    state: &PersistedState,
+    active_path_edit: Option<PathEditTargets>,
+    selected_path_rows: &BTreeSet<PathEditTargets>,
+    dedup: bool,
+    search_query: &str,
+    path_type_filter: &BTreeSet<PathTypeFilter>,
+    path_form_filter: &BTreeSet<PathFormFilter>,
+    path_resolution_filter: &BTreeSet<PathResolutionBadge>,
+    sort: PathTableSort,
+    order_snapshot: Option<&PathOrderSnapshot>,
 ) -> PathTableModel {
     struct DedupPathGroup {
         kind: PathTypeFilter,
@@ -610,6 +646,7 @@ pub(super) fn build_path_table_model(
                     let edit_targets = vec![(row.id, entry_index)];
                     path_rows.push(PathTableRow {
                         edit_targets: edit_targets.clone(),
+                        captured_order: path_order_for_targets(order_snapshot, &edit_targets),
                         path_kind,
                         owner_deletable: path_owner_delete_supported_for_entry(row, entry_index),
                         owner_deleted: super::path_edit::path_owner_delete_staged_for_entry(
@@ -658,6 +695,7 @@ pub(super) fn build_path_table_model(
                 }
                 path_rows.push(PathTableRow {
                     edit_targets: Vec::new(),
+                    captured_order: None,
                     path_kind,
                     owner_deletable: false,
                     owner_deleted: false,
@@ -703,6 +741,7 @@ pub(super) fn build_path_table_model(
             }
             path_rows.push(PathTableRow {
                 edit_targets: edit_targets.clone(),
+                captured_order: path_order_for_targets(order_snapshot, &edit_targets),
                 path_kind: group.kind,
                 owner_deletable: group.owner_deletable,
                 owner_deleted: group.owner_deleted,
@@ -727,6 +766,17 @@ pub(super) fn build_path_table_model(
         has_report_rows,
         show_scene_column: contributing_sources > 1,
     }
+}
+
+fn path_order_for_targets(
+    snapshot: Option<&PathOrderSnapshot>,
+    edit_targets: &PathEditTargets,
+) -> Option<usize> {
+    let snapshot = snapshot?;
+    edit_targets
+        .iter()
+        .filter_map(|target| snapshot.order_by_target.get(target).copied())
+        .min()
 }
 
 pub(super) fn path_owner_delete_supported_for_entry(row: &SceneRow, entry_index: usize) -> bool {
@@ -1057,13 +1107,18 @@ pub(super) fn compute_visible_row_indices_for(
 fn file_list_filters_match(row: &SceneRow, state: &PersistedState) -> bool {
     let findings_match = row.effective_findings_count() > 0;
     let missing_match = missing_path_count_for_row(row).is_some_and(|count| count > 0);
+    let dirty_match = row.dirty();
 
-    match (state.file_list_findings_only, state.file_list_missing_only) {
-        (true, true) => findings_match || missing_match,
-        (true, false) => findings_match,
-        (false, true) => missing_match,
-        (false, false) => true,
+    if !state.file_list_findings_only
+        && !state.file_list_missing_only
+        && !state.file_list_dirty_only
+    {
+        return true;
     }
+
+    (state.file_list_findings_only && findings_match)
+        || (state.file_list_missing_only && missing_match)
+        || (state.file_list_dirty_only && dirty_match)
 }
 
 pub(super) fn build_file_copy_payload(rows: &[SceneRow], row_id: u64) -> Option<String> {
@@ -1351,6 +1406,10 @@ pub(super) fn compare_rows_for_sort(
 }
 
 pub(super) fn sort_path_rows(rows: &mut [PathTableRow], sort: PathTableSort) {
+    if matches!(sort.key, PathSortKey::CapturedOrder) {
+        rows.sort_by(|left, right| compare_path_rows_for_sort(left, right, sort));
+        return;
+    }
     if matches!(sort.direction, ColumnSort::Default) {
         return;
     }
@@ -1376,12 +1435,34 @@ pub(super) fn compare_path_rows_for_sort(
         PathSortKey::Scene => left.scene.cmp(&right.scene),
         PathSortKey::Node => left.node.cmp(&right.node),
         PathSortKey::Path => left.value.cmp(&right.value),
-    }
-    .then_with(|| left.scene.cmp(&right.scene))
-    .then_with(|| left.node.cmp(&right.node))
-    .then_with(|| left.value.cmp(&right.value));
+        PathSortKey::CapturedOrder => {
+            return compare_captured_path_order(left, right, sort.direction);
+        }
+    };
+    let ordering = ordering
+        .then_with(|| left.scene.cmp(&right.scene))
+        .then_with(|| left.node.cmp(&right.node))
+        .then_with(|| left.value.cmp(&right.value));
 
     match sort.direction {
+        ColumnSort::Ascending => ordering,
+        ColumnSort::Descending => ordering.reverse(),
+        ColumnSort::Default => std::cmp::Ordering::Equal,
+    }
+}
+
+fn compare_captured_path_order(
+    left: &PathTableRow,
+    right: &PathTableRow,
+    direction: ColumnSort,
+) -> std::cmp::Ordering {
+    let ordering = match (left.captured_order, right.captured_order) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    };
+    match direction {
         ColumnSort::Ascending => ordering,
         ColumnSort::Descending => ordering.reverse(),
         ColumnSort::Default => std::cmp::Ordering::Equal,
@@ -1704,6 +1785,7 @@ pub(super) fn operation_label_for_job_history(i18n: &I18n, operation: &str) -> S
         "replace" => operation_label(i18n, RowOperation::Replace),
         "to-ascii" => operation_label(i18n, RowOperation::ToAscii),
         "save" => operation_label(i18n, RowOperation::Save),
+        "path-collect" => i18n.text("log.path_collect"),
         other => other.to_string(),
     }
 }

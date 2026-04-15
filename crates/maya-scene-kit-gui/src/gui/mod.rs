@@ -162,6 +162,7 @@ struct GuiShell {
     audit_rows: Vec<AuditTableRow>,
     file_sort: FileTableSort,
     path_sort: PathTableSort,
+    path_order_snapshot: Option<PathOrderSnapshot>,
     audit_sort: AuditTableSort,
     next_row_id: u64,
     selection_anchor: Option<usize>,
@@ -183,8 +184,10 @@ struct GuiShell {
     path_selection_anchor: Option<PathEditTargets>,
     suppress_next_path_focus_out_clear: bool,
     path_table_dedup: bool,
+    path_dirty_only: bool,
     path_search_query: String,
     audit_table_dedup: bool,
+    audit_dirty_only: bool,
     audit_search_query: String,
     selected_audit_keys: BTreeSet<AuditResultRowKey>,
     audit_selection_anchor: Option<AuditResultRowKey>,
@@ -197,6 +200,7 @@ struct GuiShell {
     max_bytes_dialog: Option<MaxBytesDialogState>,
     ignore_folder_names_dialog: Option<IgnoreFolderNamesDialogState>,
     replace_dialog: Option<ReplaceDialogState>,
+    path_collect_dialog: Option<PathCollectDialogState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -289,6 +293,11 @@ impl AutoAnalyzeQueueState {
 }
 
 type PathEditTargets = Vec<(u64, usize)>;
+
+#[derive(Clone, Debug, Default)]
+struct PathOrderSnapshot {
+    order_by_target: BTreeMap<(u64, usize), usize>,
+}
 
 #[derive(Clone)]
 struct GuiEditHistoryEntry {
@@ -542,6 +551,7 @@ struct FileTableDelegate {
 #[derive(Clone)]
 struct PathTableRow {
     edit_targets: PathEditTargets,
+    captured_order: Option<usize>,
     path_kind: PathTypeFilter,
     owner_deletable: bool,
     owner_deleted: bool,
@@ -624,6 +634,7 @@ struct ReplaceDialogSourceCacheEntry {
 #[derive(Clone, Debug)]
 struct ReplaceDialogState {
     captured_row_ids: Vec<u64>,
+    path_targets: Option<BTreeMap<u64, BTreeSet<usize>>>,
     path_type_filter: BTreeSet<PathTypeFilter>,
     replace_mode: PathReplaceMode,
     preview_sort: ReplaceDialogSort,
@@ -634,12 +645,28 @@ struct ReplaceDialogState {
     preview: Option<ReplaceDialogPreviewState>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathCollectRewriteMode {
+    Absolute,
+    WorkspaceDoubleSlashRelative,
+    PlainRelative,
+}
+
+#[derive(Clone, Debug)]
+struct PathCollectDialogState {
+    edit_targets: PathEditTargets,
+    rewrite_mode: PathCollectRewriteMode,
+    workspace_root: PathBuf,
+    folder_input: Entity<InputState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PathSortKey {
     Kind,
     Scene,
     Node,
     Path,
+    CapturedOrder,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1109,6 +1136,7 @@ mod ignore_dialog;
 mod jobs;
 mod max_bytes_dialog;
 mod menu;
+mod path_collect_dialog;
 mod path_edit;
 mod render;
 mod replace_dialog;

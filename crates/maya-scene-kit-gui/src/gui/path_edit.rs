@@ -8,6 +8,28 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 impl GuiShell {
+    pub(super) fn capture_path_order_snapshot(&self) -> Option<PathOrderSnapshot> {
+        let model = self.current_path_table_model();
+        let mut order_by_target = BTreeMap::new();
+        for (row_ix, row) in model.rows.iter().enumerate() {
+            for target in &row.edit_targets {
+                order_by_target.entry(*target).or_insert(row_ix);
+            }
+        }
+        (!order_by_target.is_empty()).then_some(PathOrderSnapshot { order_by_target })
+    }
+
+    pub(super) fn preserve_path_order_after_path_mutation(
+        &mut self,
+        snapshot: Option<PathOrderSnapshot>,
+    ) {
+        self.path_order_snapshot = snapshot;
+        self.path_sort = PathTableSort {
+            key: PathSortKey::CapturedOrder,
+            direction: ColumnSort::Ascending,
+        };
+    }
+
     pub(super) fn current_path_value(&self, row: &SceneRow, entry_index: usize) -> Option<String> {
         let report = row.display_paths_report()?;
         let entry = report.entries.get(entry_index)?;
@@ -419,6 +441,65 @@ impl GuiShell {
     pub(super) fn convert_path_targets_to_workspace_relative(
         &mut self,
         edit_targets: PathEditTargets,
+        rewrite_mode: PathCollectRewriteMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit_targets = normalize_path_edit_targets(edit_targets);
+        if edit_targets.is_empty() {
+            return;
+        }
+        if !path_value_edit_supported_for_edit_targets(&self.rows, &edit_targets) {
+            return;
+        }
+
+        let mut row_targets: BTreeMap<usize, BTreeMap<usize, String>> = BTreeMap::new();
+        for (row_id, entry_index) in edit_targets {
+            let Some(row_index) = self.index_of_row_id(row_id) else {
+                continue;
+            };
+            if self.rows[row_index].is_processing() {
+                continue;
+            }
+            let Some(next_value) = workspace_relative_override_value_for_entry(
+                &self.rows[row_index],
+                entry_index,
+                rewrite_mode,
+            ) else {
+                continue;
+            };
+            row_targets
+                .entry(row_index)
+                .or_default()
+                .insert(entry_index, next_value);
+        }
+        if row_targets.is_empty() {
+            return;
+        }
+
+        let planned_edits = row_targets
+            .into_iter()
+            .map(|(row_index, overrides)| {
+                let mut next_overrides = self.rows[row_index].path_overrides.clone();
+                for (entry_index, next_value) in overrides {
+                    next_overrides.insert(entry_index, next_value);
+                }
+                (row_index, next_overrides)
+            })
+            .collect::<Vec<_>>();
+
+        if let Err(err) = self.apply_path_override_updates(planned_edits, window, cx) {
+            self.status_message = Some(BannerMessage::InlinePathEditFailed(err));
+            return;
+        }
+        self.refresh_file_table(cx);
+        self.persist();
+        cx.notify();
+    }
+
+    pub(super) fn convert_path_targets_to_absolute(
+        &mut self,
+        edit_targets: PathEditTargets,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -439,7 +520,7 @@ impl GuiShell {
                 continue;
             }
             let Some(next_value) =
-                workspace_relative_override_value_for_entry(&self.rows[row_index], entry_index)
+                absolute_override_value_for_entry(&self.rows[row_index], entry_index)
             else {
                 continue;
             };
@@ -472,8 +553,152 @@ impl GuiShell {
         cx.notify();
     }
 
+    pub(super) fn collect_path_targets_to_folder(
+        &mut self,
+        edit_targets: PathEditTargets,
+        destination_folder: PathBuf,
+        rewrite_mode: PathCollectRewriteMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let edit_targets = normalize_path_edit_targets(edit_targets);
+        if edit_targets.is_empty() {
+            return;
+        }
+        let Some(workspace_root) = shared_workspace_root_for_targets(&self.rows, &edit_targets)
+        else {
+            self.status_message = Some(BannerMessage::Raw(
+                self.i18n().text("banner.path_collect_requires_workspace"),
+            ));
+            cx.notify();
+            return;
+        };
+        if !path_collect_destination_supports_rewrite_mode(
+            &destination_folder,
+            &workspace_root,
+            rewrite_mode,
+        ) {
+            self.status_message = Some(BannerMessage::Raw(
+                self.i18n().text("banner.path_collect_folder_invalid"),
+            ));
+            cx.notify();
+            return;
+        }
+        if !path_collect_supported_for_edit_targets(&self.rows, &edit_targets) {
+            return;
+        }
+
+        let mut plans = Vec::new();
+        for (row_id, entry_index) in edit_targets {
+            let Some(row_index) = self.index_of_row_id(row_id) else {
+                continue;
+            };
+            let Some(source_path) =
+                resolved_target_file_path_for_entry(&self.rows[row_index], entry_index)
+            else {
+                continue;
+            };
+            let Some(file_name) = source_path.file_name() else {
+                self.status_message = Some(BannerMessage::Raw(format!(
+                    "path has no file name: {}",
+                    source_path.display()
+                )));
+                cx.notify();
+                return;
+            };
+            let destination_path = destination_folder.join(file_name);
+            let next_value =
+                collected_path_rewrite_value(&destination_path, &workspace_root, rewrite_mode);
+            plans.push(PathCollectPlan {
+                row_id,
+                entry_index,
+                row_index,
+                source_path,
+                destination_path,
+                next_value,
+            });
+        }
+
+        if plans.is_empty() {
+            return;
+        }
+
+        let result = match collect_target_files(&plans) {
+            Ok(result) => result,
+            Err(err) => {
+                self.status_message = Some(BannerMessage::Raw(err));
+                cx.notify();
+                return;
+            }
+        };
+
+        let mut row_targets: BTreeMap<usize, Vec<&PathCollectPlan>> = BTreeMap::new();
+        for plan in &plans {
+            row_targets.entry(plan.row_index).or_default().push(plan);
+        }
+
+        let mut planned_edits = Vec::new();
+        for (row_index, row_plans) in row_targets {
+            let mut next_overrides = self.rows[row_index].path_overrides.clone();
+            for plan in row_plans {
+                let Some(current_value) =
+                    self.current_path_value(&self.rows[row_index], plan.entry_index)
+                else {
+                    continue;
+                };
+                if plan.next_value == current_value {
+                    next_overrides.remove(&plan.entry_index);
+                } else {
+                    next_overrides.insert(plan.entry_index, plan.next_value.clone());
+                }
+            }
+            planned_edits.push((row_index, next_overrides));
+        }
+
+        let planned_edits = planned_edits
+            .into_iter()
+            .filter(|(row_index, next_overrides)| {
+                self.rows[*row_index].path_overrides != *next_overrides
+            })
+            .collect::<Vec<_>>();
+
+        if planned_edits.is_empty() {
+            self.record_job(
+                "path-collect",
+                workspace_root,
+                Some(destination_folder),
+                format!("{} file(s) copied, {} reused", result.copied, result.reused),
+                false,
+            );
+            self.persist();
+            cx.notify();
+            return;
+        }
+
+        if let Err(err) = self.apply_path_override_updates(planned_edits, window, cx) {
+            self.status_message = Some(BannerMessage::InlinePathEditFailed(err));
+            return;
+        }
+
+        self.record_job(
+            "path-collect",
+            workspace_root,
+            Some(destination_folder),
+            format!(
+                "{} file(s) copied, {} reused, {} path(s) staged",
+                result.copied,
+                result.reused,
+                plans.len()
+            ),
+            false,
+        );
+        self.refresh_file_table(cx);
+        self.persist();
+        cx.notify();
+    }
+
     pub(super) fn current_path_table_model(&self) -> PathTableModel {
-        build_path_table_model(
+        let mut model = build_path_table_model_with_order_snapshot(
             &self.rows,
             &self.selected_indices(),
             &self.state,
@@ -485,7 +710,12 @@ impl GuiShell {
             &self.path_form_filter,
             &self.path_resolution_filter,
             self.path_sort,
-        )
+            self.path_order_snapshot.as_ref(),
+        );
+        if self.path_dirty_only {
+            model.rows.retain(|row| row.dirty);
+        }
+        model
     }
 
     pub(super) fn current_audit_table_model(&self) -> AuditTableModel {
@@ -493,6 +723,7 @@ impl GuiShell {
             &self.audit_all_rows,
             &self.selected_audit_keys,
             &self.audit_severity_filter,
+            self.audit_dirty_only,
             self.audit_table_dedup,
             &self.audit_search_query,
             self.audit_sort,
@@ -750,6 +981,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let path_order_snapshot = self.capture_path_order_snapshot();
         let row_indices = planned_edits
             .iter()
             .map(|(row_index, _)| *row_index)
@@ -879,6 +1111,7 @@ impl GuiShell {
         if let Some(before) = before {
             self.push_edit_history(before);
         }
+        self.preserve_path_order_after_path_mutation(path_order_snapshot);
         self.refresh_app_menus(window, cx);
 
         Ok(())
@@ -1434,8 +1667,18 @@ impl GuiShell {
         self.refresh_path_table(cx);
     }
 
+    pub(super) fn toggle_path_dirty_filter(&mut self, cx: &mut Context<Self>) {
+        self.path_dirty_only = !self.path_dirty_only;
+        self.refresh_path_table(cx);
+    }
+
     pub(super) fn toggle_audit_table_dedup(&mut self, cx: &mut Context<Self>) {
         self.audit_table_dedup = !self.audit_table_dedup;
+        self.refresh_audit_table(cx);
+    }
+
+    pub(super) fn toggle_audit_dirty_filter(&mut self, cx: &mut Context<Self>) {
+        self.audit_dirty_only = !self.audit_dirty_only;
         self.refresh_audit_table(cx);
     }
 
@@ -1711,6 +1954,7 @@ pub(super) fn path_value_edit_supported_for_edit_targets(
 pub(super) fn workspace_relative_override_value_for_entry(
     row: &SceneRow,
     entry_index: usize,
+    rewrite_mode: PathCollectRewriteMode,
 ) -> Option<String> {
     let workspace_root = row.scene_workspace_root.as_deref()?;
     let current_value = effective_path_value_for_entry(row, entry_index)?;
@@ -1721,18 +1965,187 @@ pub(super) fn workspace_relative_override_value_for_entry(
     let resolved_path = resolution.resolved_path.as_deref()?;
     resolved_path.strip_prefix(workspace_root).ok()?;
 
-    let value_style = match resolution.style {
-        ScenePathValueStyle::DoubleSlashWorkspaceRelative => {
-            ScenePathValueStyle::DoubleSlashWorkspaceRelative
-        }
-        _ => ScenePathValueStyle::PlainRelative,
-    };
+    let value_style = path_collect_rewrite_value_style(rewrite_mode)?;
     let next_value =
         write_back_selected_scene_path(resolved_path, Some(workspace_root), value_style);
     (next_value != current_value).then_some(next_value)
 }
 
-fn resolved_target_file_path_for_entry(row: &SceneRow, entry_index: usize) -> Option<PathBuf> {
+pub(super) fn absolute_override_value_for_entry(
+    row: &SceneRow,
+    entry_index: usize,
+) -> Option<String> {
+    let current_value = effective_path_value_for_entry(row, entry_index)?;
+    let fallback = row.path_resolution_fallback(entry_index, &current_value);
+    let resolution = row
+        .path_resolution(entry_index, &current_value)
+        .or(fallback.as_ref())?;
+    let resolved_path = resolution.resolved_path.as_deref()?;
+    let next_value = scene_path_string(resolved_path);
+    (next_value != current_value).then_some(next_value)
+}
+
+pub(super) fn path_collect_supported_for_edit_targets(
+    rows: &[SceneRow],
+    edit_targets: &PathEditTargets,
+) -> bool {
+    shared_workspace_root_for_targets(rows, edit_targets).is_some()
+        && path_value_edit_supported_for_edit_targets(rows, edit_targets)
+        && !edit_targets.is_empty()
+        && edit_targets.iter().all(|(row_id, entry_index)| {
+            rows.iter()
+                .find(|row| row.id == *row_id)
+                .and_then(|row| resolved_target_file_path_for_entry(row, *entry_index))
+                .is_some()
+        })
+}
+
+pub(super) fn path_collect_default_folder(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("sourceimages")
+}
+
+pub(super) fn parse_path_collect_folder_input(
+    input: &str,
+    workspace_root: &Path,
+) -> Option<PathBuf> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(workspace_root.join(path))
+    }
+}
+
+pub(super) fn collected_path_rewrite_value(
+    destination_path: &Path,
+    workspace_root: &Path,
+    rewrite_mode: PathCollectRewriteMode,
+) -> String {
+    match rewrite_mode {
+        PathCollectRewriteMode::Absolute => scene_path_string(destination_path),
+        PathCollectRewriteMode::WorkspaceDoubleSlashRelative => write_back_selected_scene_path(
+            destination_path,
+            Some(workspace_root),
+            ScenePathValueStyle::DoubleSlashWorkspaceRelative,
+        ),
+        PathCollectRewriteMode::PlainRelative => write_back_selected_scene_path(
+            destination_path,
+            Some(workspace_root),
+            ScenePathValueStyle::PlainRelative,
+        ),
+    }
+}
+
+pub(super) fn path_collect_destination_supports_rewrite_mode(
+    destination_folder: &Path,
+    workspace_root: &Path,
+    rewrite_mode: PathCollectRewriteMode,
+) -> bool {
+    match rewrite_mode {
+        PathCollectRewriteMode::Absolute => true,
+        PathCollectRewriteMode::WorkspaceDoubleSlashRelative
+        | PathCollectRewriteMode::PlainRelative => {
+            destination_folder.strip_prefix(workspace_root).is_ok()
+        }
+    }
+}
+
+fn path_collect_rewrite_value_style(
+    rewrite_mode: PathCollectRewriteMode,
+) -> Option<ScenePathValueStyle> {
+    match rewrite_mode {
+        PathCollectRewriteMode::Absolute => None,
+        PathCollectRewriteMode::WorkspaceDoubleSlashRelative => {
+            Some(ScenePathValueStyle::DoubleSlashWorkspaceRelative)
+        }
+        PathCollectRewriteMode::PlainRelative => Some(ScenePathValueStyle::PlainRelative),
+    }
+}
+
+pub(super) fn collect_target_files(plans: &[PathCollectPlan]) -> Result<PathCollectResult, String> {
+    let mut by_destination = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
+    for plan in plans {
+        by_destination
+            .entry(plan.destination_path.clone())
+            .or_default()
+            .insert(plan.source_path.clone());
+    }
+
+    let mut copied = 0usize;
+    let mut reused = 0usize;
+    for (destination_path, source_paths) in by_destination {
+        let Some(source_path) = source_paths.iter().next().cloned() else {
+            continue;
+        };
+        if !source_path.is_file() {
+            return Err(format!(
+                "source file is unavailable: {}",
+                source_path.display()
+            ));
+        }
+
+        let source_bytes = fs::read(&source_path)
+            .map_err(|err| format!("failed to read {}: {err}", source_path.display()))?;
+        for other_source in source_paths.iter().skip(1) {
+            if !other_source.is_file() {
+                return Err(format!(
+                    "source file is unavailable: {}",
+                    other_source.display()
+                ));
+            }
+            let other_bytes = fs::read(other_source)
+                .map_err(|err| format!("failed to read {}: {err}", other_source.display()))?;
+            if other_bytes != source_bytes {
+                return Err(format!(
+                    "multiple source files map to {} with different contents",
+                    destination_path.display()
+                ));
+            }
+        }
+
+        if destination_path.exists() {
+            let destination_bytes = fs::read(&destination_path)
+                .map_err(|err| format!("failed to read {}: {err}", destination_path.display()))?;
+            if destination_bytes != source_bytes {
+                return Err(format!(
+                    "destination already exists with different contents: {}",
+                    destination_path.display()
+                ));
+            }
+            reused += 1;
+            continue;
+        }
+
+        if source_path == destination_path {
+            reused += 1;
+            continue;
+        }
+
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        }
+        fs::copy(&source_path, &destination_path).map_err(|err| {
+            format!(
+                "failed to copy {} to {}: {err}",
+                source_path.display(),
+                destination_path.display()
+            )
+        })?;
+        copied += 1;
+    }
+
+    Ok(PathCollectResult { copied, reused })
+}
+
+pub(super) fn resolved_target_file_path_for_entry(
+    row: &SceneRow,
+    entry_index: usize,
+) -> Option<PathBuf> {
     let current_value = effective_path_value_for_entry(row, entry_index)?;
     let resolution = row
         .path_resolution(entry_index, &current_value)
@@ -1740,6 +2153,22 @@ fn resolved_target_file_path_for_entry(row: &SceneRow, entry_index: usize) -> Op
         .or_else(|| row.path_resolution_fallback(entry_index, &current_value))?;
     let resolved_path = resolution.resolved_path?;
     resolved_path.is_file().then_some(resolved_path)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PathCollectPlan {
+    pub row_id: u64,
+    pub entry_index: usize,
+    pub row_index: usize,
+    pub source_path: PathBuf,
+    pub destination_path: PathBuf,
+    pub next_value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PathCollectResult {
+    pub copied: usize,
+    pub reused: usize,
 }
 
 fn effective_path_value_for_entry(row: &SceneRow, entry_index: usize) -> Option<String> {

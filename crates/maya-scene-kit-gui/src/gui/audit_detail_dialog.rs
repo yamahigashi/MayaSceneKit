@@ -2,6 +2,16 @@ use super::*;
 
 const AUDIT_DETAIL_PREVIEW_HEIGHT: Pixels = px(320.0);
 const AUDIT_DETAIL_EVIDENCE_HEIGHT: Pixels = px(180.0);
+const AUDIT_DETAIL_DIALOG_WIDTH: Pixels = px(960.0);
+const AUDIT_DETAIL_DIALOG_MAX_WIDTH: Pixels = px(1040.0);
+const AUDIT_DETAIL_DIALOG_HORIZONTAL_MARGIN: Pixels = px(48.0);
+const AUDIT_DETAIL_DIALOG_VERTICAL_MARGIN: Pixels = px(96.0);
+
+struct AuditDetailDialogLayout {
+    width: Pixels,
+    max_width: Pixels,
+    max_height: Pixels,
+}
 
 impl GuiShell {
     pub(super) fn open_audit_detail_dialog(
@@ -105,11 +115,13 @@ fn build_audit_detail_dialog(
     let detail = dialog_state
         .as_ref()
         .and_then(|state| resolve_audit_detail_view_model(&shell.audit_rows, &state.key));
+    let layout = audit_detail_dialog_layout(window);
 
     dialog
         .title(i18n.text("dialog.audit_detail_title"))
-        .width(px(960.0))
-        .max_w(px(1040.0))
+        .width(layout.width)
+        .max_w(layout.max_width)
+        .max_h(layout.max_height)
         .overlay_closable(false)
         .on_cancel({
             let view = view.clone();
@@ -193,18 +205,22 @@ fn build_audit_detail_dialog(
                         .into_any_element(),
                 );
                 buttons.push(
-                    Button::new("audit-detail-close")
-                        .label(i18n.text("action.cancel"))
-                        .ghost()
-                        .on_click({
-                            let view = view.clone();
-                            move |_, window, cx| {
-                                view.update(cx, |shell, cx| {
-                                    shell.clear_audit_detail_dialog_state(cx)
-                                });
-                                window.close_dialog(cx);
-                            }
-                        })
+                    div()
+                        .debug_selector(|| "audit-detail-close".to_string())
+                        .child(
+                            Button::new("audit-detail-close")
+                                .label(i18n.text("action.cancel"))
+                                .ghost()
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, window, cx| {
+                                        view.update(cx, |shell, cx| {
+                                            shell.clear_audit_detail_dialog_state(cx)
+                                        });
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        )
                         .into_any_element(),
                 );
                 buttons
@@ -243,7 +259,9 @@ fn render_audit_detail_dialog_body(
     let meta = format!("{}  |  {}", detail.code, detail.sink);
 
     div()
+        .debug_selector(|| "audit-detail-body".to_string())
         .w_full()
+        .min_h_0()
         .flex()
         .flex_col()
         .gap_3()
@@ -329,6 +347,33 @@ fn render_audit_detail_dialog_body(
                 )),
         )
         .into_any_element()
+}
+
+fn audit_detail_dialog_layout(window: &Window) -> AuditDetailDialogLayout {
+    let window_paddings = gpui_component::window_paddings(window);
+    let viewport = window.viewport_size()
+        - size(
+            window_paddings.left + window_paddings.right,
+            window_paddings.top + window_paddings.bottom,
+        );
+    let available_width =
+        clamp_dialog_dimension(viewport.width, AUDIT_DETAIL_DIALOG_HORIZONTAL_MARGIN);
+    let available_height =
+        clamp_dialog_dimension(viewport.height, AUDIT_DETAIL_DIALOG_VERTICAL_MARGIN);
+
+    AuditDetailDialogLayout {
+        width: AUDIT_DETAIL_DIALOG_WIDTH.min(available_width),
+        max_width: AUDIT_DETAIL_DIALOG_MAX_WIDTH.min(available_width),
+        max_height: available_height,
+    }
+}
+
+fn clamp_dialog_dimension(viewport: Pixels, margin: Pixels) -> Pixels {
+    if viewport > margin {
+        viewport - margin
+    } else {
+        viewport.max(px(0.0))
+    }
 }
 
 fn render_audit_detail_text_panel(input: &Entity<InputState>, height: Pixels) -> AnyElement {

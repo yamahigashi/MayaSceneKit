@@ -10,6 +10,7 @@ use std::{
 use encoding_rs::SHIFT_JIS;
 use gpui::{
     AppContext, Axis, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
+    size,
 };
 use gpui_component::{Root, table::ColumnSort};
 use maya_scene_kit_audit::{
@@ -34,23 +35,27 @@ use super::{
     AutoAnalyzeParallelismPreference, AutoAnalyzePriority, AutoAnalyzeQueueState,
     BackupLocationPreference, DirtyKind, FileSortKey, FileStatus, FileTableSelectAll,
     FileTableSort, MenuAutoAnalyzeParallelism32, MenuEditRedo, MenuEditUndo,
-    MenuToggleIgnoreFolderNames, PathEditKeyboardOutcome, PathFormFilter, PathResolutionBadge,
-    PathSortKey, PathTableSort, PathTypeFilter, ReplaceDialogPreviewSignature,
-    ReplaceDialogPreviewState, ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState,
-    RowJobResult, RowOperation, SceneRow, analyze_row, analyze_row_with_options,
-    apply_path_overrides_to_report, apply_persisted_column_widths, audit_clean_target,
-    audit_context_menu_state, audit_table_columns, backup_file_name, build_audit_clipboard_payload,
-    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
-    build_file_table_rows, build_job_history_log_lines, build_path_table_model,
+    MenuToggleIgnoreFolderNames, PathCollectRewriteMode, PathEditKeyboardOutcome, PathFormFilter,
+    PathOrderSnapshot, PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter,
+    ReplaceDialogPreviewSignature, ReplaceDialogPreviewState, ReplaceDialogSort,
+    ReplaceDialogSortKey, ReplaceDialogState, RowJobResult, RowOperation, SceneRow, analyze_row,
+    analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
+    audit_clean_target, audit_context_menu_state, audit_table_columns, backup_file_name,
+    build_audit_clipboard_payload, build_audit_result_rows, build_audit_table_model,
+    build_file_copy_payload, build_file_table_rows, build_job_history_log_lines,
+    build_path_table_model, build_path_table_model_with_order_snapshot,
     clean_targets_for_removed_script_nodes, collect_scene_files_recursively,
     compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
     default_path_form_filter, default_path_resolution_filter, default_path_sort,
     default_path_type_filter, detect_format, filter_audit_result_rows, merge_column_widths,
     missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
-        path_value_edit_supported_for_edit_targets, path_value_edit_supported_for_entry,
-        resolved_target_file_paths_for_edit_targets, shared_workspace_root_for_targets,
-        workspace_relative_override_value_for_entry, write_back_selected_scene_path,
+        PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
+        collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
+        path_collect_destination_supports_rewrite_mode, path_value_edit_supported_for_edit_targets,
+        path_value_edit_supported_for_entry, resolved_target_file_paths_for_edit_targets,
+        shared_workspace_root_for_targets, workspace_relative_override_value_for_entry,
+        write_back_selected_scene_path,
     },
     path_edit_keyboard_outcome, path_overrides_from_replace_preview, path_table_columns,
     path_text_highlights, persisted_column_widths, reconcile_workspace_rows, render_banner_message,
@@ -87,6 +92,7 @@ fn test_state(root: &Path, search_query: &str) -> PersistedState {
         status_filter: StatusFilter::All,
         file_list_findings_only: false,
         file_list_missing_only: false,
+        file_list_dirty_only: false,
         search_query: search_query.to_string(),
         workspace_files: Vec::new(),
         recent_inputs: Vec::new(),
@@ -119,6 +125,7 @@ fn display_audit_rows(rows: Vec<AuditResultRow>) -> Vec<super::AuditTableRow> {
             AuditSeverityFilter::Low,
             AuditSeverityFilter::MediumPlus,
         ]),
+        false,
         false,
         "",
         default_audit_sort(),
@@ -1423,6 +1430,7 @@ fn replace_dialog_state_can_apply_only_for_matching_preview_rule() {
     };
     let state = ReplaceDialogState {
         captured_row_ids: vec![1, 2],
+        path_targets: None,
         path_type_filter: default_path_type_filter(),
         replace_mode: PathReplaceMode::Literal,
         preview_sort: ReplaceDialogSort {
@@ -1464,6 +1472,7 @@ fn replace_dialog_state_can_apply_only_for_matching_preview_rule() {
 fn replace_dialog_state_invalidate_preview_clears_applyability() {
     let mut state = ReplaceDialogState {
         captured_row_ids: vec![1],
+        path_targets: None,
         path_type_filter: default_path_type_filter(),
         replace_mode: PathReplaceMode::Literal,
         preview_sort: ReplaceDialogSort {
@@ -1972,6 +1981,65 @@ fn compute_visible_rows_combines_findings_missing_filters_with_or_logic() {
 }
 
 #[test]
+fn compute_visible_rows_combines_dirty_with_findings_missing_filters_using_or_logic() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("textures")).expect("mkdir textures");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(workspace.join("textures/existing.tx"), "tx").expect("write existing");
+    let dirty = workspace.join("dirty.ma");
+    let findings = workspace.join("findings.ma");
+    let missing = workspace.join("missing.ma");
+    let hidden = workspace.join("hidden.ma");
+    for path in [&dirty, &findings, &missing, &hidden] {
+        fs::write(
+            path,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "createNode file -n \"file1\";\n",
+                "    setAttr \".ftn\" -type \"string\" \"textures/existing.tx\";\n",
+            ),
+        )
+        .expect("write scene");
+    }
+    fs::write(
+        &missing,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/missing.tx\";\n",
+        ),
+    )
+    .expect("write missing scene");
+
+    let mut dirty_row = test_row(1, &dirty);
+    dirty_row
+        .path_overrides
+        .insert(0, "textures/dirty.tx".to_string());
+    let mut findings_row = test_row(2, &findings);
+    findings_row.findings = 1;
+    let mut missing_row = test_row(3, &missing);
+    missing_row.paths_report = Some(collect_scene_paths(&missing, PathKind::All).expect("paths"));
+    missing_row.refresh_path_resolution_cache();
+    let hidden_row = test_row(4, &hidden);
+
+    let mut state = test_state(workspace.as_path(), "");
+    state.file_list_findings_only = true;
+    state.file_list_missing_only = true;
+    state.file_list_dirty_only = true;
+    let visible = compute_visible_row_indices_for(
+        &[dirty_row, findings_row, missing_row, hidden_row],
+        &state,
+        FileTableSort {
+            key: FileSortKey::Name,
+            direction: ColumnSort::Ascending,
+        },
+    );
+
+    assert_eq!(visible, vec![0, 1, 2]);
+}
+
+#[test]
 fn compute_visible_rows_combines_or_filters_with_search() {
     let dir = tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
@@ -2047,6 +2115,7 @@ fn visible_path_selection_targets_only_returns_visible_rows() {
     let rows = vec![
         super::PathTableRow {
             edit_targets: vec![(1, 0)],
+            captured_order: None,
             path_kind: PathTypeFilter::File,
             owner_deletable: false,
             owner_deleted: false,
@@ -2063,6 +2132,7 @@ fn visible_path_selection_targets_only_returns_visible_rows() {
         },
         super::PathTableRow {
             edit_targets: vec![(1, 1)],
+            captured_order: None,
             path_kind: PathTypeFilter::File,
             owner_deletable: false,
             owner_deleted: false,
@@ -2079,6 +2149,7 @@ fn visible_path_selection_targets_only_returns_visible_rows() {
         },
         super::PathTableRow {
             edit_targets: vec![(2, 0)],
+            captured_order: None,
             path_kind: PathTypeFilter::Reference,
             owner_deletable: false,
             owner_deleted: false,
@@ -2195,6 +2266,30 @@ fn filter_audit_result_rows_keeps_only_selected_severities() {
 }
 
 #[test]
+fn build_audit_table_model_dirty_filter_combines_with_severity_filter() {
+    let clean_low = test_audit_row(1, 0, "clean_low.ma", "clean low", &["node: clean"]);
+    let mut dirty_low = test_audit_row(2, 0, "dirty_low.ma", "dirty low", &["node: dirty"]);
+    let mut dirty_info = test_audit_row(3, 0, "dirty_info.ma", "dirty info", &["node: info"]);
+    dirty_low.dirty = true;
+    dirty_info.dirty = true;
+    dirty_info.severity = AuditSeverity::Info;
+
+    let model = build_audit_table_model(
+        &[clean_low, dirty_low, dirty_info],
+        &BTreeSet::new(),
+        &BTreeSet::from([AuditSeverityFilter::Low]),
+        true,
+        false,
+        "",
+        default_audit_sort(),
+        SupportedLocale::English,
+    );
+
+    assert_eq!(model.rows.len(), 1);
+    assert_eq!(model.rows[0].scene_name, "dirty_low.ma");
+}
+
+#[test]
 fn build_audit_table_model_dedups_only_exact_matches() {
     let rows = vec![
         test_audit_row(1, 0, "first.ma", "shared summary", &["node: scriptNode1"]),
@@ -2206,6 +2301,7 @@ fn build_audit_table_model_dedups_only_exact_matches() {
         &rows,
         &BTreeSet::new(),
         &BTreeSet::from([AuditSeverityFilter::Low]),
+        false,
         true,
         "",
         default_audit_sort(),
@@ -2232,6 +2328,7 @@ fn build_audit_table_model_search_matches_deduped_scene_names() {
         &rows,
         &BTreeSet::new(),
         &BTreeSet::from([AuditSeverityFilter::Low]),
+        false,
         true,
         "beta",
         default_audit_sort(),
@@ -2256,6 +2353,7 @@ fn build_audit_table_model_sorts_by_summary() {
         &rows,
         &BTreeSet::new(),
         &BTreeSet::from([AuditSeverityFilter::Low]),
+        false,
         false,
         "",
         AuditTableSort {
@@ -3005,6 +3103,36 @@ fn audit_detail_dialog_ignores_overlay_click(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn audit_detail_dialog_stays_within_resized_window(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let (mut row, key) = dump_script_audit_fixture();
+    row.selected = true;
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.rows = vec![row];
+        shell.refresh_file_table(cx);
+        shell.toggle_audit_severity(AuditSeverityFilter::Info, cx);
+        shell.open_audit_detail_dialog(key, window, cx);
+        assert!(shell.audit_detail_dialog.is_some());
+    });
+
+    visual_cx.simulate_resize(size(px(640.0), px(420.0)));
+
+    let close_bounds = visual_cx
+        .debug_bounds("audit-detail-close")
+        .expect("close button bounds");
+    let body_bounds = visual_cx
+        .debug_bounds("audit-detail-body")
+        .expect("dialog body bounds");
+    let viewport_bounds = visual_cx.update(|window, _| window.bounds());
+
+    assert!(close_bounds.right() <= viewport_bounds.right());
+    assert!(close_bounds.bottom() <= viewport_bounds.bottom());
+    assert!(body_bounds.size.width > px(0.0));
+    assert!(body_bounds.size.height > px(0.0));
+}
+
+#[gpui::test]
 fn audit_detail_dialog_sync_refreshes_stale_input_text(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let (mut row, key) = dump_script_audit_fixture();
@@ -3058,6 +3186,103 @@ fn audit_detail_dialog_sync_refreshes_stale_input_text(cx: &mut TestAppContext) 
             state.evidence_input.read(cx).value().to_string(),
             state.evidence_text
         );
+    });
+}
+
+#[gpui::test]
+fn replace_dialog_stays_within_resized_window(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let _dir = seed_file_table_selection_test_state(&shell, visual_cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.rows[0].selected = true;
+        shell.rows[2].selected = true;
+        shell.refresh_file_table(cx);
+        shell.open_replace_dialog(window, cx);
+        assert!(shell.replace_dialog.is_some());
+    });
+
+    visual_cx.simulate_resize(size(px(640.0), px(420.0)));
+
+    let close_bounds = visual_cx
+        .debug_bounds("replace-dialog-close")
+        .expect("replace dialog close bounds");
+    let body_bounds = visual_cx
+        .debug_bounds("replace-dialog-body")
+        .expect("replace dialog body bounds");
+    let viewport_bounds = visual_cx.update(|window, _| window.bounds());
+
+    assert!(close_bounds.right() <= viewport_bounds.right());
+    assert!(close_bounds.bottom() <= viewport_bounds.bottom());
+    assert!(body_bounds.size.width > px(0.0));
+    assert!(body_bounds.size.height > px(0.0));
+}
+
+#[gpui::test]
+fn replace_dialog_captures_only_selected_files(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let _dir = seed_file_table_selection_test_state(&shell, visual_cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.rows[0].selected = true;
+        shell.rows[1].selected = false;
+        shell.rows[2].selected = true;
+        shell.open_replace_dialog(window, cx);
+
+        let dialog = shell.replace_dialog.as_ref().expect("replace dialog");
+        assert_eq!(dialog.captured_row_ids, vec![1, 3]);
+    });
+}
+
+#[gpui::test]
+fn replace_dialog_from_path_targets_replaces_only_selected_paths(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/old_a.tx\";\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/old_b.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &scene);
+        row.selected = true;
+        row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+        shell.rows = vec![row];
+
+        shell.open_replace_dialog_for_path_targets(vec![(1, 1)], window, cx);
+        shell
+            .replace_from_input
+            .update(cx, |input, cx| input.set_value("old", window, cx));
+        shell
+            .replace_to_input
+            .update(cx, |input, cx| input.set_value("new", window, cx));
+        shell.run_replace_preview(window, cx);
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        let dialog = shell.replace_dialog.as_ref().expect("replace dialog");
+        assert_eq!(
+            dialog.path_targets,
+            Some(BTreeMap::from([(1, BTreeSet::from([1]))]))
+        );
+        let preview = dialog.preview.as_ref().expect("preview");
+        assert_eq!(preview.items.len(), 1);
+        assert_eq!(preview.items[0].before_value, "textures/old_b.tx");
+        assert_eq!(preview.items[0].after_value, "textures/new_b.tx");
+        assert_eq!(preview.planned_overrides.len(), 1);
+        assert_eq!(preview.planned_overrides[0].0, 1);
+        assert_eq!(preview.planned_overrides[0].1.len(), 1);
+        assert_eq!(preview.planned_overrides[0].1[0].entry_index, 1);
     });
 }
 
@@ -3418,6 +3643,10 @@ fn ignore_folder_names_dialog_apply_updates_state_and_rescans_workspace(cx: &mut
     fs::write(&ignored, "").expect("write ignored");
 
     shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.ignore_folder_names_enabled = true;
+        shell
+            .state
+            .set_ignored_folder_names(vec!["backup".to_string(), "autosave".to_string()]);
         shell.set_workspace_folder(dir.path().to_path_buf(), window, cx);
         assert_eq!(shell.rows.len(), 2);
 
@@ -3675,6 +3904,7 @@ fn replace_dialog_preview_rows_show_only_matches_when_query_exists() {
         },
         &ReplaceDialogState {
             captured_row_ids: vec![1],
+            path_targets: None,
             path_type_filter: default_path_type_filter(),
             replace_mode: PathReplaceMode::Literal,
             preview_sort: ReplaceDialogSort {
@@ -4259,6 +4489,80 @@ fn select_path_edit_file_falls_back_to_os_default_without_scene_context(cx: &mut
 }
 
 #[gpui::test]
+fn path_collect_folder_button_uses_input_directory_and_updates_input(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let scene_dir = workspace.join("scenes");
+    let texture_dir = workspace.join("textures");
+    let initial_dir = workspace.join("current-output");
+    let selected_dir = workspace.join("selected-output");
+    fs::create_dir_all(&scene_dir).expect("create scenes");
+    fs::create_dir_all(&texture_dir).expect("create textures");
+    fs::create_dir_all(&initial_dir).expect("create initial output");
+    fs::create_dir_all(&selected_dir).expect("create selected output");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let texture = texture_dir.join("hero.tx");
+    fs::write(&texture, "tx").expect("texture");
+    let scene = scene_dir.join("scene.ma");
+    write_single_file_path_scene(&scene, "textures/hero.tx");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+
+            shell.open_path_collect_dialog(
+                vec![(1, 0)],
+                PathCollectRewriteMode::PlainRelative,
+                window,
+                cx,
+            );
+            let dialog = shell
+                .path_collect_dialog
+                .as_ref()
+                .expect("path collect dialog");
+            dialog.folder_input.update(cx, |input, cx| {
+                input.set_value(initial_dir.to_string_lossy().replace('\\', "/"), window, cx);
+            });
+            shell.select_path_collect_folder(window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    assert!(visual_cx.did_prompt_for_paths());
+    visual_cx.simulate_path_prompt_selection(|options| {
+        assert!(!options.files);
+        assert!(options.directories);
+        assert_eq!(
+            options.initial_directory.as_deref(),
+            Some(initial_dir.as_path())
+        );
+        Some(vec![selected_dir.clone()])
+    });
+    visual_cx.run_until_parked();
+    visual_cx
+        .executor()
+        .advance_clock(Duration::from_millis(300));
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        let dialog = shell
+            .path_collect_dialog
+            .as_ref()
+            .expect("path collect dialog");
+        assert_eq!(
+            dialog.folder_input.read(app).value().as_ref(),
+            selected_dir.to_string_lossy().replace('\\', "/")
+        );
+    });
+}
+
+#[gpui::test]
 fn convert_workspace_relative_preserves_owner_delete_staging_on_other_rows(
     cx: &mut TestAppContext,
 ) {
@@ -4314,7 +4618,12 @@ fn convert_workspace_relative_preserves_owner_delete_staging_on_other_rows(
             row.refresh_path_resolution_cache();
             shell.rows = vec![row];
 
-            shell.convert_path_targets_to_workspace_relative(vec![(1, 1)], window, cx);
+            shell.convert_path_targets_to_workspace_relative(
+                vec![(1, 1)],
+                PathCollectRewriteMode::PlainRelative,
+                window,
+                cx,
+            );
         });
     });
     visual_cx.run_until_parked();
@@ -4684,8 +4993,10 @@ fn path_context_menu_state_keeps_workspace_relative_for_non_deleted_rows() {
 
     let state = path_context_menu_state(&[row], &vec![(1, 1)]);
 
-    assert!(state.can_convert_to_workspace_relative);
-    assert!(!state.show_disabled_convert_to_workspace_relative);
+    assert!(state.can_convert_to_workspace_double_slash_relative);
+    assert!(!state.show_disabled_convert_to_workspace_double_slash_relative);
+    assert!(state.can_convert_to_plain_relative);
+    assert!(!state.show_disabled_convert_to_plain_relative);
 }
 
 #[test]
@@ -5093,7 +5404,7 @@ fn workspace_relative_override_value_for_entry_converts_absolute_values_inside_w
     row.refresh_path_resolution_cache();
 
     assert_eq!(
-        workspace_relative_override_value_for_entry(&row, 0),
+        workspace_relative_override_value_for_entry(&row, 0, PathCollectRewriteMode::PlainRelative),
         Some("sourceimages/hero.tx".to_string()),
     );
 }
@@ -5121,7 +5432,10 @@ fn workspace_relative_override_value_for_entry_skips_existing_relative_values() 
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
     row.refresh_path_resolution_cache();
 
-    assert_eq!(workspace_relative_override_value_for_entry(&row, 0), None);
+    assert_eq!(
+        workspace_relative_override_value_for_entry(&row, 0, PathCollectRewriteMode::PlainRelative),
+        None
+    );
 }
 
 #[test]
@@ -5149,9 +5463,220 @@ fn workspace_relative_override_value_for_entry_normalizes_double_slash_style_wit
 
     let workspace_display = workspace.to_string_lossy().replace('\\', "/");
     assert_eq!(
-        workspace_relative_override_value_for_entry(&row, 0),
+        workspace_relative_override_value_for_entry(
+            &row,
+            0,
+            PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+        ),
         Some(format!("{workspace_display}//sourceimages/hero.tx")),
     );
+}
+
+#[test]
+fn absolute_override_value_for_entry_converts_workspace_relative_values() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let texture = workspace.join("sourceimages/hero.tx");
+    fs::write(&texture, "tx").expect("write texture");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/hero.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+    row.refresh_path_resolution_cache();
+
+    assert_eq!(
+        absolute_override_value_for_entry(&row, 0),
+        Some(texture.to_string_lossy().replace('\\', "/")),
+    );
+}
+
+#[test]
+fn absolute_override_value_for_entry_uses_missing_workspace_candidate() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let missing = workspace.join("sourceimages/missing.tx");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/missing.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+    row.refresh_path_resolution_cache();
+
+    assert_eq!(
+        absolute_override_value_for_entry(&row, 0),
+        Some(missing.to_string_lossy().replace('\\', "/")),
+    );
+}
+
+#[test]
+fn path_collect_folder_input_defaults_and_resolves_relative_values() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+
+    assert_eq!(
+        path_collect_default_folder(&workspace),
+        workspace.join("sourceimages")
+    );
+    assert_eq!(
+        parse_path_collect_folder_input("sourceimages", &workspace),
+        Some(workspace.join("sourceimages"))
+    );
+    assert_eq!(parse_path_collect_folder_input(" ", &workspace), None);
+}
+
+#[test]
+fn collected_path_rewrite_value_supports_absolute_and_workspace_relative() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let destination = workspace.join("sourceimages/hero.tx");
+
+    assert_eq!(
+        collected_path_rewrite_value(&destination, &workspace, PathCollectRewriteMode::Absolute),
+        destination.to_string_lossy().replace('\\', "/")
+    );
+    assert_eq!(
+        collected_path_rewrite_value(
+            &destination,
+            &workspace,
+            PathCollectRewriteMode::PlainRelative,
+        ),
+        "sourceimages/hero.tx"
+    );
+    assert_eq!(
+        collected_path_rewrite_value(
+            &destination,
+            &workspace,
+            PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+        ),
+        format!(
+            "{}//sourceimages/hero.tx",
+            workspace.to_string_lossy().replace('\\', "/")
+        )
+    );
+}
+
+#[test]
+fn path_collect_destination_validates_relative_mode_workspace_boundary() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let inside_workspace = workspace.join("sourceimages");
+    let outside_workspace = dir.path().join("external");
+
+    assert!(path_collect_destination_supports_rewrite_mode(
+        &inside_workspace,
+        &workspace,
+        PathCollectRewriteMode::PlainRelative,
+    ));
+    assert!(!path_collect_destination_supports_rewrite_mode(
+        &outside_workspace,
+        &workspace,
+        PathCollectRewriteMode::PlainRelative,
+    ));
+    assert!(path_collect_destination_supports_rewrite_mode(
+        &inside_workspace,
+        &workspace,
+        PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+    ));
+    assert!(!path_collect_destination_supports_rewrite_mode(
+        &outside_workspace,
+        &workspace,
+        PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+    ));
+    assert!(path_collect_destination_supports_rewrite_mode(
+        &outside_workspace,
+        &workspace,
+        PathCollectRewriteMode::Absolute,
+    ));
+}
+
+#[test]
+fn collect_target_files_reuses_matching_destination_and_rejects_conflict() {
+    let dir = tempdir().expect("tmpdir");
+    let source = dir.path().join("source.tx");
+    let matching_destination = dir.path().join("matching/source.tx");
+    let conflicting_destination = dir.path().join("conflict/source.tx");
+    fs::create_dir_all(matching_destination.parent().unwrap()).expect("mkdir matching");
+    fs::create_dir_all(conflicting_destination.parent().unwrap()).expect("mkdir conflict");
+    fs::write(&source, "same").expect("write source");
+    fs::write(&matching_destination, "same").expect("write matching");
+    fs::write(&conflicting_destination, "different").expect("write conflicting");
+
+    let reused = collect_target_files(&[PathCollectPlan {
+        row_id: 1,
+        entry_index: 0,
+        row_index: 0,
+        source_path: source.clone(),
+        destination_path: matching_destination,
+        next_value: "sourceimages/source.tx".to_string(),
+    }])
+    .expect("reuse matching destination");
+    assert_eq!(reused.copied, 0);
+    assert_eq!(reused.reused, 1);
+
+    let err = collect_target_files(&[PathCollectPlan {
+        row_id: 1,
+        entry_index: 0,
+        row_index: 0,
+        source_path: source,
+        destination_path: conflicting_destination,
+        next_value: "sourceimages/source.tx".to_string(),
+    }])
+    .expect_err("conflicting destination should fail");
+    assert!(err.contains("different contents"));
+}
+
+#[test]
+fn collect_target_files_rejects_duplicate_basenames_with_different_contents() {
+    let dir = tempdir().expect("tmpdir");
+    let first = dir.path().join("a/hero.tx");
+    let second = dir.path().join("b/hero.tx");
+    let destination = dir.path().join("sourceimages/hero.tx");
+    fs::create_dir_all(first.parent().unwrap()).expect("mkdir first");
+    fs::create_dir_all(second.parent().unwrap()).expect("mkdir second");
+    fs::write(&first, "first").expect("write first");
+    fs::write(&second, "second").expect("write second");
+
+    let err = collect_target_files(&[
+        PathCollectPlan {
+            row_id: 1,
+            entry_index: 0,
+            row_index: 0,
+            source_path: first,
+            destination_path: destination.clone(),
+            next_value: "sourceimages/hero.tx".to_string(),
+        },
+        PathCollectPlan {
+            row_id: 1,
+            entry_index: 1,
+            row_index: 0,
+            source_path: second,
+            destination_path: destination,
+            next_value: "sourceimages/hero.tx".to_string(),
+        },
+    ])
+    .expect_err("duplicate basename conflict should fail");
+    assert!(err.contains("different contents"));
 }
 
 #[test]
@@ -5204,6 +5729,50 @@ fn build_path_table_model_marks_double_slash_workspace_relative_rows() {
 }
 
 #[gpui::test]
+fn path_dirty_filter_keeps_only_dirty_path_rows(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(workspace.join("sourceimages/first.tx"), "first").expect("write first");
+    fs::write(workspace.join("sourceimages/second.tx"), "second").expect("write second");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/first.tx\";\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/second.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    visual_cx.update(|_, app| {
+        shell.update(app, |shell, _| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+            row.path_overrides
+                .insert(1, "sourceimages/second_v2.tx".to_string());
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+            shell.path_dirty_only = true;
+        });
+    });
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        let table = shell.current_path_table_model();
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].node, "file2 [file]");
+        assert!(table.rows[0].dirty);
+    });
+}
+
+#[gpui::test]
 fn convert_workspace_relative_rewrites_double_slash_style_with_workspace_root(
     cx: &mut TestAppContext,
 ) {
@@ -5233,7 +5802,12 @@ fn convert_workspace_relative_rewrites_double_slash_style_with_workspace_root(
             row.refresh_path_resolution_cache();
             shell.rows = vec![row];
 
-            shell.convert_path_targets_to_workspace_relative(vec![(1, 0)], window, cx);
+            shell.convert_path_targets_to_workspace_relative(
+                vec![(1, 0)],
+                PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+                window,
+                cx,
+            );
         });
     });
     visual_cx.run_until_parked();
@@ -5244,6 +5818,170 @@ fn convert_workspace_relative_rewrites_double_slash_style_with_workspace_root(
         assert_eq!(
             shell.rows[0].path_overrides.get(&0),
             Some(&format!("{workspace_display}//sourceimages/hero.tx")),
+        );
+    });
+}
+
+#[gpui::test]
+fn convert_absolute_rewrites_workspace_relative_path(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let texture = workspace.join("sourceimages/hero.tx");
+    fs::write(&texture, "tx").expect("write texture");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/hero.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+            shell.path_sort = PathTableSort {
+                key: PathSortKey::Node,
+                direction: ColumnSort::Ascending,
+            };
+
+            shell.convert_path_targets_to_absolute(vec![(1, 0)], window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].path_overrides.get(&0),
+            Some(&texture.to_string_lossy().replace('\\', "/")),
+        );
+        assert!(matches!(shell.path_sort.key, PathSortKey::CapturedOrder));
+        assert_eq!(shell.path_sort.direction, ColumnSort::Ascending);
+        assert!(shell.path_order_snapshot.is_some());
+    });
+}
+
+#[gpui::test]
+fn path_mutation_preserves_pre_mutation_visible_order(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("scenes")).expect("mkdir scenes");
+    fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let a_texture = workspace.join("sourceimages/a_first.tx");
+    let z_texture = workspace.join("sourceimages/z_last.tx");
+    fs::write(&a_texture, "a").expect("write a texture");
+    fs::write(&z_texture, "z").expect("write z texture");
+    let scene = workspace.join("scenes/scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"fileZ\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/z_last.tx\";\n",
+            "createNode file -n \"fileA\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/a_first.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+    let z_absolute = z_texture.to_string_lossy().replace('\\', "/");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+            shell.path_sort = PathTableSort {
+                key: PathSortKey::Path,
+                direction: ColumnSort::Ascending,
+            };
+
+            let before = shell.current_path_table_model();
+            assert_eq!(before.rows[0].value, "sourceimages/a_first.tx");
+            assert_eq!(before.rows[1].value, "sourceimages/z_last.tx");
+
+            shell.convert_path_targets_to_absolute(vec![(1, 0)], window, cx);
+
+            let after = shell.current_path_table_model();
+            assert_eq!(after.rows[0].value, "sourceimages/a_first.tx");
+            assert_eq!(after.rows[1].value, z_absolute);
+            assert!(matches!(shell.path_sort.key, PathSortKey::CapturedOrder));
+            assert!(shell.path_order_snapshot.is_some());
+
+            shell.set_path_sort(PathSortKey::Path, ColumnSort::Ascending, cx);
+            assert!(shell.path_order_snapshot.is_none());
+        });
+    });
+}
+
+#[gpui::test]
+fn collect_path_targets_copies_files_and_stages_relative_paths(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let external = dir.path().join("external");
+    fs::create_dir_all(&external).expect("mkdir external");
+    fs::create_dir_all(workspace.join("scenes")).expect("mkdir scenes");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let texture = external.join("hero.tx");
+    fs::write(&texture, "tx").expect("write texture");
+    let scene = workspace.join("scenes/scene.ma");
+    let texture_value = texture.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &scene,
+        format!(
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "createNode file -n \"file1\";\n",
+                "    setAttr \".ftn\" -type \"string\" \"{texture_value}\";\n",
+            ),
+            texture_value = texture_value
+        ),
+    )
+    .expect("write scene");
+    let destination_folder = workspace.join("sourceimages");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+
+            shell.collect_path_targets_to_folder(
+                vec![(1, 0)],
+                destination_folder.clone(),
+                PathCollectRewriteMode::PlainRelative,
+                window,
+                cx,
+            );
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].path_overrides.get(&0),
+            Some(&"sourceimages/hero.tx".to_string()),
+        );
+        assert_eq!(
+            fs::read_to_string(destination_folder.join("hero.tx")).expect("read copied"),
+            "tx"
         );
     });
 }
@@ -5489,6 +6227,104 @@ fn build_path_table_model_sorts_rows_by_path_value() {
     assert_eq!(table.rows.len(), 2);
     assert_eq!(table.rows[0].value, "textures/a_first.tx");
     assert_eq!(table.rows[1].value, "textures/z_last.tx");
+}
+
+#[test]
+fn build_path_table_model_uses_captured_order_snapshot() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"fileB\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/z_last.tx\";\n",
+            "createNode file -n \"fileA\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/a_first.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+    let snapshot = PathOrderSnapshot {
+        order_by_target: BTreeMap::from([((1, 1), 0), ((1, 0), 1)]),
+    };
+
+    let table = build_path_table_model_with_order_snapshot(
+        &[row],
+        &[0],
+        &test_state(dir.path(), ""),
+        None,
+        &BTreeSet::new(),
+        false,
+        "",
+        &default_path_type_filter(),
+        &default_path_form_filter(),
+        &default_path_resolution_filter(),
+        PathTableSort {
+            key: PathSortKey::CapturedOrder,
+            direction: ColumnSort::Ascending,
+        },
+        Some(&snapshot),
+    );
+
+    assert_eq!(table.rows.len(), 2);
+    assert_eq!(table.rows[0].value, "textures/a_first.tx");
+    assert_eq!(table.rows[0].captured_order, Some(0));
+    assert_eq!(table.rows[1].value, "textures/z_last.tx");
+    assert_eq!(table.rows[1].captured_order, Some(1));
+}
+
+#[test]
+fn build_path_table_model_uses_captured_order_for_dedup_groups() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"fileSharedB\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/shared.tx\";\n",
+            "createNode file -n \"fileOther\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/other.tx\";\n",
+            "createNode file -n \"fileSharedC\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/shared.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+    let snapshot = PathOrderSnapshot {
+        order_by_target: BTreeMap::from([((1, 1), 0), ((1, 2), 1), ((1, 0), 2)]),
+    };
+
+    let table = build_path_table_model_with_order_snapshot(
+        &[row],
+        &[0],
+        &test_state(dir.path(), ""),
+        None,
+        &BTreeSet::new(),
+        true,
+        "",
+        &default_path_type_filter(),
+        &default_path_form_filter(),
+        &default_path_resolution_filter(),
+        PathTableSort {
+            key: PathSortKey::CapturedOrder,
+            direction: ColumnSort::Ascending,
+        },
+        Some(&snapshot),
+    );
+
+    assert_eq!(table.rows.len(), 2);
+    assert_eq!(table.rows[0].value, "textures/other.tx");
+    assert_eq!(table.rows[0].captured_order, Some(0));
+    assert_eq!(table.rows[1].value, "textures/shared.tx");
+    assert_eq!(table.rows[1].captured_order, Some(1));
 }
 
 #[test]

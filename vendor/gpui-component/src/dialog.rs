@@ -225,9 +225,15 @@ impl Dialog {
         self
     }
 
-    /// Set the top offset of the dialog, defaults to None, will use the 1/10 of the viewport height.
+    /// Set the top offset of the dialog. By default, dialogs are centered in the viewport.
     pub fn margin_top(mut self, margin_top: Pixels) -> Self {
         self.margin_top = Some(margin_top);
+        self
+    }
+
+    /// Center the dialog in the viewport instead of using a fixed top offset.
+    pub fn centered(mut self) -> Self {
+        self.margin_top = None;
         self
     }
 
@@ -364,8 +370,11 @@ impl RenderOnce for Dialog {
             size: view_size,
         };
         let offset_top = px(layer_ix as f32 * 16.);
+        let centered = self.margin_top.is_none();
+        let max_width = self.max_width.unwrap_or(self.width);
+        let dialog_width = self.width.min(max_width).min(view_size.width);
         let y = self.margin_top.unwrap_or(view_size.height / 10.) + offset_top;
-        let x = bounds.center().x - self.width / 2.;
+        let x = bounds.center().x - dialog_width / 2.;
 
         let base_size = window.text_style().font_size;
         let rem_size = window.rem_size();
@@ -396,6 +405,9 @@ impl RenderOnce for Dialog {
                     .occlude()
                     .w(view_size.width)
                     .h(view_size.height)
+                    .when(centered, |this| {
+                        this.flex().items_center().justify_center()
+                    })
                     .when(self.overlay_visible, |this| {
                         this.bg(overlay_color(self.overlay, cx))
                     })
@@ -442,6 +454,7 @@ impl RenderOnce for Dialog {
                             .border_color(cx.theme().border)
                             .rounded(cx.theme().radius_lg)
                             .min_h_24()
+                            .max_h(view_size.height)
                             .pt(paddings.top)
                             .pb(paddings.bottom)
                             .gap(paddings.top.min(px(16.)))
@@ -481,12 +494,12 @@ impl RenderOnce for Dialog {
                                 })
                             })
                             // There style is high priority, can't be overridden.
-                            .absolute()
+                            .when(!centered, |this| this.absolute())
                             .occlude()
                             .relative()
-                            .left(x)
-                            .top(y)
-                            .w(self.width)
+                            .when(centered, |this| this.mt(offset_top))
+                            .when(!centered, |this| this.left(x).top(y))
+                            .w(dialog_width)
                             .when_some(self.max_width, |this, w| this.max_w(w))
                             .when_some(self.title, |this, title| {
                                 this.child(
@@ -557,7 +570,11 @@ impl RenderOnce for Dialog {
                                         spread_radius: px(-6.),
                                     },
                                 ];
-                                this.top(y + y_offset).shadow(shadow)
+                                if centered {
+                                    this.mt(offset_top + y_offset).shadow(shadow)
+                                } else {
+                                    this.top(y + y_offset).shadow(shadow)
+                                }
                             }),
                     )
                     .with_animation("fade-in", animation, move |this, delta| this.opacity(delta)),
