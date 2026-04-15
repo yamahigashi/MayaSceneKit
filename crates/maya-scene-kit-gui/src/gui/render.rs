@@ -14,6 +14,7 @@ impl GuiShell {
                 &self.search_input,
                 self.state.file_list_findings_only,
                 self.state.file_list_missing_only,
+                self.state.file_list_dirty_only,
                 self.state.workspace_auto_analyze,
                 view.clone(),
             ))
@@ -377,6 +378,7 @@ fn file_panel_header(
     search_input: &Entity<InputState>,
     findings_only: bool,
     missing_only: bool,
+    dirty_only: bool,
     auto_analyze_enabled: bool,
     view: Entity<GuiShell>,
 ) -> impl IntoElement {
@@ -433,6 +435,16 @@ fn file_panel_header(
                     0x8a3a32,
                     move |shell, cx| {
                         shell.toggle_file_list_missing_filter(cx);
+                    },
+                    view.clone(),
+                ))
+                .child(file_list_filter_button(
+                    i18n.text("label.dirty"),
+                    dirty_only,
+                    WARN_SOFT,
+                    0x8a6116,
+                    move |shell, cx| {
+                        shell.toggle_file_list_dirty_filter(cx);
                     },
                     view,
                 ))

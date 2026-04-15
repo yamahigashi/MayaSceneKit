@@ -54,6 +54,12 @@ pub(super) fn render_audit_filter_bar(
                 )
             }),
         )
+        .child(dirty_filter_button(
+            i18n.text("label.dirty"),
+            shell.audit_dirty_only,
+            move |shell, cx| shell.toggle_audit_dirty_filter(cx),
+            view.clone(),
+        ))
         .child(action_button(
             "audit-table-dedup",
             dedup_label,
@@ -130,6 +136,12 @@ pub(super) fn render_paths_filter_bar(
                     )
                 }),
         )
+        .child(dirty_filter_button(
+            i18n.text("label.dirty"),
+            shell.path_dirty_only,
+            move |shell, cx| shell.toggle_path_dirty_filter(cx),
+            view.clone(),
+        ))
         .child(action_button(
             "path-table-dedup",
             dedup_label,
@@ -392,6 +404,37 @@ pub(super) fn audit_filter_button(
         .on_mouse_up(MouseButton::Left, move |_, _, cx| {
             view.update(cx, |shell, cx| {
                 shell.toggle_audit_severity(filter, cx);
+                cx.notify();
+            });
+        })
+}
+
+pub(super) fn dirty_filter_button(
+    label: String,
+    selected: bool,
+    on_click: impl Fn(&mut GuiShell, &mut Context<GuiShell>) + 'static,
+    view: Entity<GuiShell>,
+) -> impl IntoElement {
+    let background = if selected { WARN_SOFT } else { PANEL_BG };
+    let foreground = if selected { 0x8a6116 } else { MUTED };
+    let border = if selected { 0x8a6116 } else { BORDER };
+
+    div()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(border))
+        .bg(rgb(background))
+        .text_sm()
+        .text_color(rgb(foreground))
+        .child(label)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            view.update(cx, |shell, cx| {
+                on_click(shell, cx);
                 cx.notify();
             });
         })

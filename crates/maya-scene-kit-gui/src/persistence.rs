@@ -97,6 +97,7 @@ mod tests {
             status_filter: StatusFilter::Dirty,
             file_list_findings_only: true,
             file_list_missing_only: false,
+            file_list_dirty_only: true,
             search_query: "env".to_string(),
             workspace_files: vec![PersistedWorkspaceFile {
                 path: PathBuf::from("tests/02/sphere.mb"),
@@ -207,6 +208,7 @@ mod tests {
 
         assert!(!restored.file_list_findings_only);
         assert!(!restored.file_list_missing_only);
+        assert!(!restored.file_list_dirty_only);
         assert!(restored.file_table_column_widths.is_empty());
         assert!(restored.path_table_column_widths.is_empty());
         assert!(restored.audit_table_column_widths.is_empty());

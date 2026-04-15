@@ -387,6 +387,7 @@ impl GuiShell {
         direction: ColumnSort,
         cx: &mut Context<Self>,
     ) {
+        self.path_order_snapshot = None;
         self.path_sort = PathTableSort { key, direction };
         self.refresh_path_table(cx);
     }

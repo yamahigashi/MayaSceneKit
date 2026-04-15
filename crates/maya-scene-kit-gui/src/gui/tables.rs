@@ -2,6 +2,7 @@ use gpui_component::menu::PopupMenu;
 
 use super::{
     path_edit::{
+        absolute_override_value_for_entry, path_collect_supported_for_edit_targets,
         path_edit_targets_id, path_owner_delete_supported_for_edit_targets,
         resolved_target_file_paths_for_edit_targets, workspace_relative_override_value_for_entry,
     },
@@ -472,27 +473,74 @@ pub(super) fn audit_context_menu_state(rows: &[AuditTableRow]) -> AuditContextMe
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PathContextMenuState {
-    pub can_convert_to_workspace_relative: bool,
-    pub show_disabled_convert_to_workspace_relative: bool,
+    pub can_convert_to_absolute: bool,
+    pub show_disabled_convert_to_absolute: bool,
+    pub can_convert_to_workspace_double_slash_relative: bool,
+    pub show_disabled_convert_to_workspace_double_slash_relative: bool,
+    pub can_convert_to_plain_relative: bool,
+    pub show_disabled_convert_to_plain_relative: bool,
+    pub can_collect_files: bool,
+    pub show_disabled_collect_files: bool,
 }
 
 pub(super) fn path_context_menu_state(
     rows: &[SceneRow],
     edit_targets: &PathEditTargets,
 ) -> PathContextMenuState {
-    let has_workspace_relative_target = edit_targets.iter().any(|(row_id, entry_index)| {
+    let has_workspace_double_slash_relative_target =
+        edit_targets.iter().any(|(row_id, entry_index)| {
+            rows.iter()
+                .find(|row| row.id == *row_id)
+                .and_then(|row| {
+                    workspace_relative_override_value_for_entry(
+                        row,
+                        *entry_index,
+                        PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+                    )
+                })
+                .is_some()
+        });
+    let has_plain_relative_target = edit_targets.iter().any(|(row_id, entry_index)| {
         rows.iter()
             .find(|row| row.id == *row_id)
-            .and_then(|row| workspace_relative_override_value_for_entry(row, *entry_index))
+            .and_then(|row| {
+                workspace_relative_override_value_for_entry(
+                    row,
+                    *entry_index,
+                    PathCollectRewriteMode::PlainRelative,
+                )
+            })
+            .is_some()
+    });
+    let has_absolute_target = edit_targets.iter().any(|(row_id, entry_index)| {
+        rows.iter()
+            .find(|row| row.id == *row_id)
+            .and_then(|row| absolute_override_value_for_entry(row, *entry_index))
+            .is_some()
+    });
+    let has_collectable_file_target = edit_targets.iter().any(|(row_id, entry_index)| {
+        rows.iter()
+            .find(|row| row.id == *row_id)
+            .and_then(|row| {
+                super::path_edit::resolved_target_file_path_for_entry(row, *entry_index)
+            })
             .is_some()
     });
     let can_edit_path_values =
         super::path_edit::path_value_edit_supported_for_edit_targets(rows, edit_targets);
+    let can_collect_files = path_collect_supported_for_edit_targets(rows, edit_targets);
 
     PathContextMenuState {
-        can_convert_to_workspace_relative: has_workspace_relative_target && can_edit_path_values,
-        show_disabled_convert_to_workspace_relative: has_workspace_relative_target
-            && !can_edit_path_values,
+        can_convert_to_absolute: has_absolute_target && can_edit_path_values,
+        show_disabled_convert_to_absolute: has_absolute_target && !can_edit_path_values,
+        can_convert_to_workspace_double_slash_relative: has_workspace_double_slash_relative_target
+            && can_edit_path_values,
+        show_disabled_convert_to_workspace_double_slash_relative:
+            has_workspace_double_slash_relative_target && !can_edit_path_values,
+        can_convert_to_plain_relative: has_plain_relative_target && can_edit_path_values,
+        show_disabled_convert_to_plain_relative: has_plain_relative_target && !can_edit_path_values,
+        can_collect_files,
+        show_disabled_collect_files: has_collectable_file_target && !can_collect_files,
     }
 }
 
@@ -1206,7 +1254,18 @@ impl TableDelegate for PathTableDelegate {
 
         let copy_label = I18n::new(self.locale).text("action.copy_path_name");
         let copy_file_label = I18n::new(self.locale).text("action.copy_file");
-        let convert_label = I18n::new(self.locale).text("action.convert_to_workspace_relative");
+        let convert_absolute_label = I18n::new(self.locale).text("action.convert_to_absolute");
+        let convert_workspace_double_slash_relative_label =
+            I18n::new(self.locale).text("action.convert_to_workspace_double_slash_relative");
+        let convert_plain_relative_label =
+            I18n::new(self.locale).text("action.convert_to_plain_relative");
+        let collect_absolute_label =
+            I18n::new(self.locale).text("action.collect_files_to_absolute");
+        let collect_workspace_double_slash_relative_label =
+            I18n::new(self.locale).text("action.collect_files_to_workspace_double_slash_relative");
+        let collect_plain_relative_label =
+            I18n::new(self.locale).text("action.collect_files_to_plain_relative");
+        let replace_label = I18n::new(self.locale).text("action.replace_path");
         let undo_label = I18n::new(self.locale).text("action.discard_changes");
         let delete_owner_label = I18n::new(self.locale).text("action.delete_owner_nodes");
         let edit_targets = row.edit_targets.clone();
@@ -1214,6 +1273,16 @@ impl TableDelegate for PathTableDelegate {
             let copied_path = row.value.clone();
             move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copied_path.clone()));
+            }
+        }));
+        let menu = menu.item(PopupMenuItem::new(replace_label).on_click({
+            let view = view.clone();
+            let edit_targets = edit_targets.clone();
+            move |_, window, cx| {
+                view.update(cx, |shell, cx| {
+                    let selected_targets = shell.context_path_targets(&edit_targets);
+                    shell.open_replace_dialog_for_path_targets(selected_targets, window, cx);
+                });
             }
         }));
         if edit_targets.is_empty() {
@@ -1245,13 +1314,13 @@ impl TableDelegate for PathTableDelegate {
         } else {
             menu
         };
-        let menu = if path_menu_state.can_convert_to_workspace_relative {
-            menu.item(PopupMenuItem::new(convert_label).on_click({
+        let menu = if path_menu_state.can_convert_to_absolute {
+            menu.item(PopupMenuItem::new(convert_absolute_label).on_click({
                 let view = view.clone();
                 let selected_targets = selected_targets.clone();
                 move |_, window, cx| {
                     view.update(cx, |shell, cx| {
-                        shell.convert_path_targets_to_workspace_relative(
+                        shell.convert_path_targets_to_absolute(
                             selected_targets.clone(),
                             window,
                             cx,
@@ -1259,8 +1328,107 @@ impl TableDelegate for PathTableDelegate {
                     });
                 }
             }))
-        } else if path_menu_state.show_disabled_convert_to_workspace_relative {
-            menu.item(PopupMenuItem::new(convert_label).disabled(true))
+        } else if path_menu_state.show_disabled_convert_to_absolute {
+            menu.item(PopupMenuItem::new(convert_absolute_label).disabled(true))
+        } else {
+            menu
+        };
+        let menu = if path_menu_state.can_convert_to_workspace_double_slash_relative {
+            menu.item(
+                PopupMenuItem::new(convert_workspace_double_slash_relative_label).on_click({
+                    let view = view.clone();
+                    let selected_targets = selected_targets.clone();
+                    move |_, window, cx| {
+                        view.update(cx, |shell, cx| {
+                            shell.convert_path_targets_to_workspace_relative(
+                                selected_targets.clone(),
+                                PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }),
+            )
+        } else if path_menu_state.show_disabled_convert_to_workspace_double_slash_relative {
+            menu.item(
+                PopupMenuItem::new(convert_workspace_double_slash_relative_label).disabled(true),
+            )
+        } else {
+            menu
+        };
+        let menu = if path_menu_state.can_convert_to_plain_relative {
+            menu.item(PopupMenuItem::new(convert_plain_relative_label).on_click({
+                let view = view.clone();
+                let selected_targets = selected_targets.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.convert_path_targets_to_workspace_relative(
+                            selected_targets.clone(),
+                            PathCollectRewriteMode::PlainRelative,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            }))
+        } else if path_menu_state.show_disabled_convert_to_plain_relative {
+            menu.item(PopupMenuItem::new(convert_plain_relative_label).disabled(true))
+        } else {
+            menu
+        };
+        let menu = if path_menu_state.can_collect_files {
+            menu.item(PopupMenuItem::new(collect_absolute_label).on_click({
+                let view = view.clone();
+                let selected_targets = selected_targets.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.open_path_collect_dialog(
+                            selected_targets.clone(),
+                            PathCollectRewriteMode::Absolute,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            }))
+            .item(
+                PopupMenuItem::new(collect_workspace_double_slash_relative_label).on_click({
+                    let view = view.clone();
+                    let selected_targets = selected_targets.clone();
+                    move |_, window, cx| {
+                        view.update(cx, |shell, cx| {
+                            shell.open_path_collect_dialog(
+                                selected_targets.clone(),
+                                PathCollectRewriteMode::WorkspaceDoubleSlashRelative,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }),
+            )
+            .item(PopupMenuItem::new(collect_plain_relative_label).on_click({
+                let view = view.clone();
+                let selected_targets = selected_targets.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.open_path_collect_dialog(
+                            selected_targets.clone(),
+                            PathCollectRewriteMode::PlainRelative,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            }))
+        } else if path_menu_state.show_disabled_collect_files {
+            menu.item(PopupMenuItem::new(collect_absolute_label).disabled(true))
+                .item(
+                    PopupMenuItem::new(collect_workspace_double_slash_relative_label)
+                        .disabled(true),
+                )
+                .item(PopupMenuItem::new(collect_plain_relative_label).disabled(true))
         } else {
             menu
         };

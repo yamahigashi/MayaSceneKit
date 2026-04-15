@@ -212,6 +212,7 @@ impl GuiShell {
             audit_rows: Vec::new(),
             file_sort,
             path_sort,
+            path_order_snapshot: None,
             audit_sort,
             next_row_id,
             selection_anchor: None,
@@ -233,8 +234,10 @@ impl GuiShell {
             path_selection_anchor: None,
             suppress_next_path_focus_out_clear: false,
             path_table_dedup: false,
+            path_dirty_only: false,
             path_search_query: String::new(),
             audit_table_dedup: false,
+            audit_dirty_only: false,
             audit_search_query: String::new(),
             selected_audit_keys: BTreeSet::new(),
             audit_selection_anchor: None,
@@ -247,6 +250,7 @@ impl GuiShell {
             max_bytes_dialog: None,
             ignore_folder_names_dialog: None,
             replace_dialog: None,
+            path_collect_dialog: None,
             _subscriptions: subscriptions,
         }
     }
