@@ -42,8 +42,9 @@ pub fn main(argv: Vec<String>) -> i32 {
             let path = m.get_one::<PathBuf>("path").unwrap();
             let max_depth = m.get_one::<usize>("max-depth").copied();
             let preview_bytes = *m.get_one::<usize>("preview-bytes").unwrap_or(&24);
+            let at = m.get_one::<String>("at").map(|value| value.as_str());
             let max_bytes = m.get_one::<usize>("max-bytes").copied();
-            run_inspect(path, max_depth, preview_bytes, max_bytes)
+            run_inspect(path, max_depth, preview_bytes, at, max_bytes)
         }
         Some(("dump", m)) => {
             let input = m.get_one::<PathBuf>("input").unwrap();
@@ -359,6 +360,7 @@ mod tests {
                     chunk_form: None,
                     chunk_tag: None,
                     chunk_node_offset: None,
+                    ..crate::scene::ExecutionOrigin::without_chunk_address()
                 },
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
@@ -372,6 +374,71 @@ mod tests {
         );
         let json = render_audit_hit_json("a.ma", &report, &hit);
         assert!(json.get("preview").is_some());
+    }
+
+    #[test]
+    fn render_audit_hit_includes_raw_chunk_addresses() {
+        let hit = AuditHit {
+            code: AuditFindingCode::UnknownExecutionLanguage,
+            severity: crate::scene::AuditSeverity::High,
+            surface_index: 0,
+            sink: crate::scene::AuditSinkKind::None,
+            rule: None,
+            detail: AuditFindingDetail::Static {
+                value: StaticAuditFindingDetail::ExecutionSurfaceLanguageCouldNotBeInferred,
+            },
+            evidence: vec![],
+        };
+        let report = crate::scene::AuditReport {
+            scene_path: PathBuf::from("a.mb"),
+            scene_format: SceneFormat::Mb,
+            profile: crate::scene::AuditProfile::StrictDefault,
+            validation_state: crate::scene::ValidationState::Validated,
+            effective_rules: vec![],
+            surface_count: 1,
+            coverage_state: crate::scene::ExecutionCoverageState::Incomplete,
+            coverage_issues: vec![],
+            blocked_on_uncertainty: true,
+            disposition: crate::scene::AuditDisposition::DenyUncertain,
+            unit_summaries: vec![],
+            dependency_facts: vec![],
+            unknown_semantics: vec![],
+            digests: crate::scene::SceneDigestSet {
+                scene_sha256: String::new(),
+                schema_bundle_sha256: None,
+                policy_bundle_sha256: None,
+            },
+            notices: vec![],
+            surfaces: vec![crate::scene::AuditSurface {
+                origin: crate::scene::ExecutionOrigin {
+                    lang: crate::scene::ExecutionLanguage::Unknown,
+                    trigger: crate::scene::ExecutionTrigger::FileOpen,
+                    surface_kind: crate::scene::ExecutionSurfaceKind::RawChunkText,
+                    node_name: None,
+                    attr_name: None,
+                    source_range: None,
+                    source_kind: None,
+                    chunk_form: Some("FRDI".to_string()),
+                    chunk_tag: Some("FRDI".to_string()),
+                    chunk_node_offset: Some(0x7A8),
+                    chunk_aux: Some(0x2C010000),
+                    chunk_payload_offset: Some(0x7CC),
+                    chunk_payload_size: Some(0xFF),
+                    chunk_child_alignment: Some(8),
+                    chunk_child_header_size: Some(16),
+                },
+                preview: "Source".to_string(),
+                derivation: crate::scene::AuditSurfaceDerivation::Observed,
+            }],
+            review_signals: vec![],
+            findings: vec![hit.clone()],
+        };
+
+        let rendered = render_audit_hit_text(&report, &hit);
+        assert!(rendered.contains("chunk=FRDI:FRDI@1960"));
+        assert!(rendered.contains("addr=0x000007A8"));
+        assert!(rendered.contains("payload=0x000007CC..0x000008CB"));
+        assert!(rendered.contains("aux=0x2C010000"));
     }
 
     #[test]
@@ -428,6 +495,7 @@ mod tests {
                     chunk_form: None,
                     chunk_tag: None,
                     chunk_node_offset: None,
+                    ..crate::scene::ExecutionOrigin::without_chunk_address()
                 },
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
@@ -456,6 +524,7 @@ mod tests {
                 chunk_form: None,
                 chunk_tag: None,
                 chunk_node_offset: None,
+                ..ExecutionOrigin::without_chunk_address()
             },
             effect: ExecutionEffectClass::HookRegistration,
             semantic_class: ExecutionSemanticClass::General,
@@ -531,6 +600,7 @@ mod tests {
                     chunk_form: None,
                     chunk_tag: None,
                     chunk_node_offset: None,
+                    ..crate::scene::ExecutionOrigin::without_chunk_address()
                 },
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
@@ -597,6 +667,7 @@ mod tests {
                     chunk_form: None,
                     chunk_tag: None,
                     chunk_node_offset: None,
+                    ..crate::scene::ExecutionOrigin::without_chunk_address()
                 },
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
@@ -672,6 +743,7 @@ mod tests {
                     chunk_form: None,
                     chunk_tag: None,
                     chunk_node_offset: None,
+                    ..crate::scene::ExecutionOrigin::without_chunk_address()
                 },
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,

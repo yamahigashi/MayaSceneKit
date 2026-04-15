@@ -161,6 +161,14 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "node_name": summary.origin.node_name.clone(),
                                 "attr_name": summary.origin.attr_name.clone(),
                                 "source_kind": summary.origin.source_kind.clone(),
+                                "chunk_form": summary.origin.chunk_form.clone(),
+                                "chunk_tag": summary.origin.chunk_tag.clone(),
+                                "chunk_node_offset": summary.origin.chunk_node_offset,
+                                "chunk_aux": summary.origin.chunk_aux,
+                                "chunk_payload_offset": summary.origin.chunk_payload_offset,
+                                "chunk_payload_size": summary.origin.chunk_payload_size,
+                                "chunk_child_alignment": summary.origin.chunk_child_alignment,
+                                "chunk_child_header_size": summary.origin.chunk_child_header_size,
                             }
                         })
                     })
@@ -184,6 +192,14 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "node_name": origin.node_name.clone(),
                                 "attr_name": origin.attr_name.clone(),
                                 "source_kind": origin.source_kind.clone(),
+                                "chunk_form": origin.chunk_form.clone(),
+                                "chunk_tag": origin.chunk_tag.clone(),
+                                "chunk_node_offset": origin.chunk_node_offset,
+                                "chunk_aux": origin.chunk_aux,
+                                "chunk_payload_offset": origin.chunk_payload_offset,
+                                "chunk_payload_size": origin.chunk_payload_size,
+                                "chunk_child_alignment": origin.chunk_child_alignment,
+                                "chunk_child_header_size": origin.chunk_child_header_size,
                             })),
                         })
                     })
@@ -248,6 +264,11 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "chunk_form": origin.chunk_form.clone(),
                                 "chunk_tag": origin.chunk_tag.clone(),
                                 "chunk_node_offset": origin.chunk_node_offset,
+                                "chunk_aux": origin.chunk_aux,
+                                "chunk_payload_offset": origin.chunk_payload_offset,
+                                "chunk_payload_size": origin.chunk_payload_size,
+                                "chunk_child_alignment": origin.chunk_child_alignment,
+                                "chunk_child_header_size": origin.chunk_child_header_size,
                             })),
                         })
                     })

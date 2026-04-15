@@ -483,6 +483,90 @@ fn audit_sphere_pair_reviews_for_proc_callback_flags_without_mb_unknown_surface_
 }
 
 #[test]
+fn audit_mb_frdi_fbx_source_metadata_is_not_raw_execution_surface() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("frdi_fbx_source.mb");
+    let frdi_payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|\0FBX export\0";
+    std::fs::write(
+        &source,
+        build_mb_root(&[build_mb_form(
+            "FRDI",
+            &[build_mb_chunk("FRDI", frdi_payload)],
+        )]),
+    )
+    .expect("write mb fixture");
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_parse_diagnostics"),
+        "unexpected MEL diagnostics finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "unknown_execution_language"),
+        "unexpected unknown language finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report.coverage_issues.iter().all(|issue| !matches!(
+            issue.detail,
+            ExecutionCoverageIssueDetail::SurfaceDiagnostics { .. }
+        )),
+        "unexpected surface diagnostics coverage issue: {:?}",
+        report.coverage_issues
+    );
+}
+
+#[test]
+fn audit_mb_fref_fbx_source_metadata_is_not_raw_execution_surface() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("fref_fbx_source.mb");
+    let fref_payload = b"assets/example/ExampleAsset.fbx\0Source\0\x01\x01SourceRN\0\0\0\0\0VERS|2020|\0FBX export\0";
+    std::fs::write(
+        &source,
+        build_mb_root(&[build_mb_form(
+            "FREF",
+            &[build_mb_chunk("FREF", fref_payload)],
+        )]),
+    )
+    .expect("write mb fixture");
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_parse_diagnostics"),
+        "unexpected MEL diagnostics finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "unknown_execution_language"),
+        "unexpected unknown language finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report.coverage_issues.iter().all(|issue| !matches!(
+            issue.detail,
+            ExecutionCoverageIssueDetail::SurfaceDiagnostics { .. }
+        )),
+        "unexpected surface diagnostics coverage issue: {:?}",
+        report.coverage_issues
+    );
+}
+
+#[test]
 fn audit_inline_print_callback_is_review_without_callback_finding() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("inline_print_callback.ma");

@@ -26,6 +26,12 @@ pub(super) fn build_parser() -> Command {
                         .default_value("24")
                         .value_parser(clap::value_parser!(usize)),
                 )
+                .arg(
+                    Arg::new("at")
+                        .long("at")
+                        .value_parser(clap::value_parser!(String))
+                        .help("Inspect the chunk chain at a decimal or 0x-prefixed byte offset"),
+                )
                 .arg(max_bytes_arg()),
         )
         .subcommand(

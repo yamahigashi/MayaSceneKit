@@ -29,6 +29,11 @@ pub(in crate::cli) fn render_audit_hit_json(
             "chunk_form": surface.origin.chunk_form.clone(),
             "chunk_tag": surface.origin.chunk_tag.clone(),
             "chunk_node_offset": surface.origin.chunk_node_offset,
+            "chunk_aux": surface.origin.chunk_aux,
+            "chunk_payload_offset": surface.origin.chunk_payload_offset,
+            "chunk_payload_size": surface.origin.chunk_payload_size,
+            "chunk_child_alignment": surface.origin.chunk_child_alignment,
+            "chunk_child_header_size": surface.origin.chunk_child_header_size,
         }
     })
 }
@@ -56,6 +61,11 @@ pub(in crate::cli) fn render_review_signal_json(
             "chunk_form": surface.origin.chunk_form.clone(),
             "chunk_tag": surface.origin.chunk_tag.clone(),
             "chunk_node_offset": surface.origin.chunk_node_offset,
+            "chunk_aux": surface.origin.chunk_aux,
+            "chunk_payload_offset": surface.origin.chunk_payload_offset,
+            "chunk_payload_size": surface.origin.chunk_payload_size,
+            "chunk_child_alignment": surface.origin.chunk_child_alignment,
+            "chunk_child_header_size": surface.origin.chunk_child_header_size,
         }
     })
 }

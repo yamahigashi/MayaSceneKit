@@ -29,6 +29,38 @@ pub struct ExecutionOrigin {
     pub chunk_tag: Option<String>,
     /// Chunk node offset when raw MB provenance is available.
     pub chunk_node_offset: Option<usize>,
+    /// Raw chunk aux value when raw MB provenance is available.
+    pub chunk_aux: Option<u32>,
+    /// Absolute payload start offset when raw MB provenance is available.
+    pub chunk_payload_offset: Option<usize>,
+    /// Payload size in bytes when raw MB provenance is available.
+    pub chunk_payload_size: Option<usize>,
+    /// Child alignment hint used to decode the owning MB section.
+    pub chunk_child_alignment: Option<usize>,
+    /// Child header-size hint used to decode the owning MB section.
+    pub chunk_child_header_size: Option<usize>,
+}
+
+impl ExecutionOrigin {
+    pub fn without_chunk_address() -> Self {
+        Self {
+            lang: ExecutionLanguage::Unknown,
+            trigger: ExecutionTrigger::Unknown,
+            surface_kind: ExecutionSurfaceKind::RawChunkText,
+            node_name: None,
+            attr_name: None,
+            source_kind: None,
+            source_range: None,
+            chunk_form: None,
+            chunk_tag: None,
+            chunk_node_offset: None,
+            chunk_aux: None,
+            chunk_payload_offset: None,
+            chunk_payload_size: None,
+            chunk_child_alignment: None,
+            chunk_child_header_size: None,
+        }
+    }
 }
 
 /// Script language inferred for an observed execution surface.
