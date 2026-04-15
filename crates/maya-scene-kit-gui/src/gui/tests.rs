@@ -4067,7 +4067,7 @@ fn build_path_table_model_marks_overridden_entries_as_dirty() {
 }
 
 #[gpui::test]
-fn path_context_undo_targets_only_clear_clicked_row_in_same_file(cx: &mut TestAppContext) {
+fn path_context_undo_targets_clear_all_selected_rows_in_same_file(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");
     let scene = dir.path().join("scene.ma");
@@ -4100,23 +4100,14 @@ fn path_context_undo_targets_only_clear_clicked_row_in_same_file(cx: &mut TestAp
             let undo_targets = shell.context_undo_path_targets(&vec![(1, 0)]);
             shell.undo_path_edit_targets(undo_targets, window, cx);
 
-            assert_eq!(
-                shell.rows[0].path_overrides.get(&0),
-                None,
-                "clicked row override should be cleared"
-            );
-            assert_eq!(
-                shell.rows[0].path_overrides.get(&1),
-                Some(&"textures/spec_edited.tx".to_string()),
-                "other selected row in the same file should remain dirty"
-            );
-            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Replace));
+            assert!(shell.rows[0].path_overrides.is_empty());
+            assert_eq!(shell.rows[0].dirty_kind, None);
         });
     });
 }
 
 #[gpui::test]
-fn path_context_undo_delete_owner_targets_only_clear_clicked_row_in_same_file(
+fn path_context_undo_delete_owner_targets_clear_all_selected_rows_in_same_file(
     cx: &mut TestAppContext,
 ) {
     let (shell, visual_cx) = open_test_shell(cx);
@@ -4155,13 +4146,10 @@ fn path_context_undo_delete_owner_targets_only_clear_clicked_row_in_same_file(
         let shell = shell.read(app);
         assert_eq!(
             shell.rows[0].pending_path_owner_delete_targets,
-            BTreeSet::from([PathOwnerDeleteTarget {
-                node_type: "file".to_string(),
-                node_name: "file2".to_string(),
-            }]),
-            "clicked row owner-delete target should be removed without clearing siblings",
+            BTreeSet::new(),
+            "discard should clear all selected owner-delete targets",
         );
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert_eq!(shell.rows[0].dirty_kind, None);
     });
 }
 
@@ -5979,6 +5967,62 @@ fn collect_path_targets_copies_files_and_stages_relative_paths(cx: &mut TestAppC
             shell.rows[0].path_overrides.get(&0),
             Some(&"sourceimages/hero.tx".to_string()),
         );
+        assert_eq!(
+            fs::read_to_string(destination_folder.join("hero.tx")).expect("read copied"),
+            "tx"
+        );
+    });
+}
+
+#[gpui::test]
+fn collect_path_targets_copy_only_does_not_stage_path_overrides(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let external = dir.path().join("external");
+    fs::create_dir_all(&external).expect("mkdir external");
+    fs::create_dir_all(workspace.join("scenes")).expect("mkdir scenes");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let texture = external.join("hero.tx");
+    fs::write(&texture, "tx").expect("write texture");
+    let scene = workspace.join("scenes/scene.ma");
+    let texture_value = texture.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &scene,
+        format!(
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "createNode file -n \"file1\";\n",
+                "    setAttr \".ftn\" -type \"string\" \"{texture_value}\";\n",
+            ),
+            texture_value = texture_value
+        ),
+    )
+    .expect("write scene");
+    let destination_folder = workspace.join("sourceimages");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+
+            shell.collect_path_targets_to_folder(
+                vec![(1, 0)],
+                destination_folder.clone(),
+                PathCollectRewriteMode::CopyOnly,
+                window,
+                cx,
+            );
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(shell.rows[0].path_overrides.is_empty());
         assert_eq!(
             fs::read_to_string(destination_folder.join("hero.tx")).expect("read copied"),
             "tx"

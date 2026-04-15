@@ -647,6 +647,7 @@ struct ReplaceDialogState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PathCollectRewriteMode {
+    CopyOnly,
     Absolute,
     WorkspaceDoubleSlashRelative,
     PlainRelative,

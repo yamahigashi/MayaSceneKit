@@ -3,7 +3,8 @@ use gpui_component::menu::PopupMenu;
 use super::{
     path_edit::{
         absolute_override_value_for_entry, path_collect_supported_for_edit_targets,
-        path_edit_targets_id, path_owner_delete_supported_for_edit_targets,
+        path_edit_targets_id, path_file_collect_supported_for_edit_targets,
+        path_owner_delete_staged_for_entry, path_owner_delete_supported_for_edit_targets,
         resolved_target_file_paths_for_edit_targets, workspace_relative_override_value_for_entry,
     },
     *,
@@ -479,6 +480,8 @@ pub(super) struct PathContextMenuState {
     pub show_disabled_convert_to_workspace_double_slash_relative: bool,
     pub can_convert_to_plain_relative: bool,
     pub show_disabled_convert_to_plain_relative: bool,
+    pub can_collect_files_to_folder: bool,
+    pub show_disabled_collect_files_to_folder: bool,
     pub can_collect_files: bool,
     pub show_disabled_collect_files: bool,
 }
@@ -528,6 +531,8 @@ pub(super) fn path_context_menu_state(
     });
     let can_edit_path_values =
         super::path_edit::path_value_edit_supported_for_edit_targets(rows, edit_targets);
+    let can_collect_files_to_folder =
+        path_file_collect_supported_for_edit_targets(rows, edit_targets);
     let can_collect_files = path_collect_supported_for_edit_targets(rows, edit_targets);
 
     PathContextMenuState {
@@ -539,6 +544,9 @@ pub(super) fn path_context_menu_state(
             has_workspace_double_slash_relative_target && !can_edit_path_values,
         can_convert_to_plain_relative: has_plain_relative_target && can_edit_path_values,
         show_disabled_convert_to_plain_relative: has_plain_relative_target && !can_edit_path_values,
+        can_collect_files_to_folder,
+        show_disabled_collect_files_to_folder: has_collectable_file_target
+            && !can_collect_files_to_folder,
         can_collect_files,
         show_disabled_collect_files: has_collectable_file_target && !can_collect_files,
     }
@@ -1261,6 +1269,7 @@ impl TableDelegate for PathTableDelegate {
             I18n::new(self.locale).text("action.convert_to_plain_relative");
         let collect_absolute_label =
             I18n::new(self.locale).text("action.collect_files_to_absolute");
+        let collect_to_folder_label = I18n::new(self.locale).text("action.collect_files_to_folder");
         let collect_workspace_double_slash_relative_label =
             I18n::new(self.locale).text("action.collect_files_to_workspace_double_slash_relative");
         let collect_plain_relative_label =
@@ -1269,51 +1278,60 @@ impl TableDelegate for PathTableDelegate {
         let undo_label = I18n::new(self.locale).text("action.discard_changes");
         let delete_owner_label = I18n::new(self.locale).text("action.delete_owner_nodes");
         let edit_targets = row.edit_targets.clone();
-        let menu = menu.item(PopupMenuItem::new(copy_label).on_click({
-            let copied_path = row.value.clone();
-            move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copied_path.clone()));
-            }
-        }));
-        let menu = menu.item(PopupMenuItem::new(replace_label).on_click({
-            let view = view.clone();
-            let edit_targets = edit_targets.clone();
-            move |_, window, cx| {
-                view.update(cx, |shell, cx| {
-                    let selected_targets = shell.context_path_targets(&edit_targets);
-                    shell.open_replace_dialog_for_path_targets(selected_targets, window, cx);
-                });
-            }
-        }));
+
         if edit_targets.is_empty() {
-            return menu;
+            return menu.item(PopupMenuItem::new(copy_label).on_click({
+                let copied_path = row.value.clone();
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copied_path.clone()));
+                }
+            }));
         }
+
         let selected_targets =
             view.update(cx, |shell, _| shell.context_path_targets(&edit_targets));
         let has_copyable_file = view.update(cx, |shell, _| {
-            !resolved_target_file_paths_for_edit_targets(&shell.rows, &edit_targets).is_empty()
+            !resolved_target_file_paths_for_edit_targets(&shell.rows, &selected_targets).is_empty()
         });
         let path_menu_state = view.update(cx, |shell, _| {
             path_context_menu_state(&shell.rows, &selected_targets)
+        });
+        let has_dirty_context_targets = view.update(cx, |shell, _| {
+            selected_targets.iter().any(|(row_id, entry_index)| {
+                shell
+                    .rows
+                    .iter()
+                    .find(|row| row.id == *row_id)
+                    .is_some_and(|row| {
+                        row.path_overrides.contains_key(entry_index)
+                            || path_owner_delete_staged_for_entry(row, *entry_index)
+                    })
+            })
         });
         let can_delete_owner_targets = row.owner_deletable
             && view.update(cx, |shell, _| {
                 path_owner_delete_supported_for_edit_targets(&shell.rows, &selected_targets)
             });
-        let menu = if has_copyable_file {
-            menu.item(PopupMenuItem::new(copy_file_label).on_click({
+
+        let menu = menu
+            .item(PopupMenuItem::new(copy_label).on_click({
+                let copied_path = row.value.clone();
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copied_path.clone()));
+                }
+            }))
+            .item(PopupMenuItem::new(replace_label).on_click({
                 let view = view.clone();
                 let edit_targets = edit_targets.clone();
                 move |_, window, cx| {
                     view.update(cx, |shell, cx| {
                         let selected_targets = shell.context_path_targets(&edit_targets);
-                        shell.copy_path_target_files_to_clipboard(selected_targets, window, cx);
+                        shell.open_replace_dialog_for_path_targets(selected_targets, window, cx);
                     });
                 }
             }))
-        } else {
-            menu
-        };
+            .separator();
+
         let menu = if path_menu_state.can_convert_to_absolute {
             menu.item(PopupMenuItem::new(convert_absolute_label).on_click({
                 let view = view.clone();
@@ -1377,6 +1395,42 @@ impl TableDelegate for PathTableDelegate {
         } else {
             menu
         };
+        let menu = menu.separator();
+        let menu = if has_copyable_file {
+            menu.item(PopupMenuItem::new(copy_file_label).on_click({
+                let view = view.clone();
+                let edit_targets = edit_targets.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        let selected_targets = shell.context_path_targets(&edit_targets);
+                        shell.copy_path_target_files_to_clipboard(selected_targets, window, cx);
+                    });
+                }
+            }))
+        } else {
+            menu
+        };
+        let menu = if path_menu_state.can_collect_files_to_folder {
+            menu.item(PopupMenuItem::new(collect_to_folder_label).on_click({
+                let view = view.clone();
+                let selected_targets = selected_targets.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.open_path_collect_dialog(
+                            selected_targets.clone(),
+                            PathCollectRewriteMode::CopyOnly,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            }))
+        } else if path_menu_state.show_disabled_collect_files_to_folder {
+            menu.item(PopupMenuItem::new(collect_to_folder_label).disabled(true))
+        } else {
+            menu
+        };
+        let menu = menu.separator();
         let menu = if path_menu_state.can_collect_files {
             menu.item(PopupMenuItem::new(collect_absolute_label).on_click({
                 let view = view.clone();
@@ -1432,36 +1486,26 @@ impl TableDelegate for PathTableDelegate {
         } else {
             menu
         };
-        if !row.dirty {
-            if !can_delete_owner_targets {
-                return menu;
-            }
-            return menu.item(PopupMenuItem::new(delete_owner_label).on_click({
+
+        let menu = if has_dirty_context_targets || can_delete_owner_targets {
+            menu.separator()
+        } else {
+            menu
+        };
+        let menu = if has_dirty_context_targets {
+            menu.item(PopupMenuItem::new(undo_label).on_click({
                 let view = view.clone();
                 let edit_targets = edit_targets.clone();
                 move |_, window, cx| {
                     view.update(cx, |shell, cx| {
-                        let selected_rows = if shell.selected_path_rows.contains(&edit_targets) {
-                            shell.selected_path_rows.iter().cloned().collect::<Vec<_>>()
-                        } else {
-                            vec![edit_targets.clone()]
-                        };
-                        shell.run_delete_selected_path_owner_nodes(selected_rows, window, cx);
+                        let undo_targets = shell.context_undo_path_targets(&edit_targets);
+                        shell.undo_context_path_targets(undo_targets, window, cx);
                     });
                 }
-            }));
-        }
-
-        let menu = menu.item(PopupMenuItem::new(undo_label).on_click({
-            let view = view.clone();
-            let edit_targets = edit_targets.clone();
-            move |_, window, cx| {
-                view.update(cx, |shell, cx| {
-                    let undo_targets = shell.context_undo_path_targets(&edit_targets);
-                    shell.undo_context_path_targets(undo_targets, window, cx);
-                });
-            }
-        }));
+            }))
+        } else {
+            menu
+        };
         if !can_delete_owner_targets {
             return menu;
         }

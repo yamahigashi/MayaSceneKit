@@ -330,7 +330,7 @@ impl GuiShell {
         &self,
         edit_targets: &PathEditTargets,
     ) -> PathEditTargets {
-        normalize_path_edit_targets(edit_targets.clone())
+        self.context_path_targets(edit_targets)
     }
 
     pub(super) fn context_delete_owner_rows(
@@ -584,7 +584,13 @@ impl GuiShell {
             cx.notify();
             return;
         }
-        if !path_collect_supported_for_edit_targets(&self.rows, &edit_targets) {
+        let can_collect = match rewrite_mode {
+            PathCollectRewriteMode::CopyOnly => {
+                path_file_collect_supported_for_edit_targets(&self.rows, &edit_targets)
+            }
+            _ => path_collect_supported_for_edit_targets(&self.rows, &edit_targets),
+        };
+        if !can_collect {
             return;
         }
 
@@ -631,6 +637,19 @@ impl GuiShell {
                 return;
             }
         };
+
+        if rewrite_mode == PathCollectRewriteMode::CopyOnly {
+            self.record_job(
+                "path-collect",
+                workspace_root,
+                Some(destination_folder),
+                format!("{} file(s) copied, {} reused", result.copied, result.reused),
+                false,
+            );
+            self.persist();
+            cx.notify();
+            return;
+        }
 
         let mut row_targets: BTreeMap<usize, Vec<&PathCollectPlan>> = BTreeMap::new();
         for plan in &plans {
@@ -1989,8 +2008,15 @@ pub(super) fn path_collect_supported_for_edit_targets(
     rows: &[SceneRow],
     edit_targets: &PathEditTargets,
 ) -> bool {
-    shared_workspace_root_for_targets(rows, edit_targets).is_some()
+    path_file_collect_supported_for_edit_targets(rows, edit_targets)
         && path_value_edit_supported_for_edit_targets(rows, edit_targets)
+}
+
+pub(super) fn path_file_collect_supported_for_edit_targets(
+    rows: &[SceneRow],
+    edit_targets: &PathEditTargets,
+) -> bool {
+    shared_workspace_root_for_targets(rows, edit_targets).is_some()
         && !edit_targets.is_empty()
         && edit_targets.iter().all(|(row_id, entry_index)| {
             rows.iter()
@@ -2026,6 +2052,7 @@ pub(super) fn collected_path_rewrite_value(
     rewrite_mode: PathCollectRewriteMode,
 ) -> String {
     match rewrite_mode {
+        PathCollectRewriteMode::CopyOnly => scene_path_string(destination_path),
         PathCollectRewriteMode::Absolute => scene_path_string(destination_path),
         PathCollectRewriteMode::WorkspaceDoubleSlashRelative => write_back_selected_scene_path(
             destination_path,
@@ -2046,6 +2073,7 @@ pub(super) fn path_collect_destination_supports_rewrite_mode(
     rewrite_mode: PathCollectRewriteMode,
 ) -> bool {
     match rewrite_mode {
+        PathCollectRewriteMode::CopyOnly => true,
         PathCollectRewriteMode::Absolute => true,
         PathCollectRewriteMode::WorkspaceDoubleSlashRelative
         | PathCollectRewriteMode::PlainRelative => {
@@ -2058,6 +2086,7 @@ fn path_collect_rewrite_value_style(
     rewrite_mode: PathCollectRewriteMode,
 ) -> Option<ScenePathValueStyle> {
     match rewrite_mode {
+        PathCollectRewriteMode::CopyOnly => None,
         PathCollectRewriteMode::Absolute => None,
         PathCollectRewriteMode::WorkspaceDoubleSlashRelative => {
             Some(ScenePathValueStyle::DoubleSlashWorkspaceRelative)
