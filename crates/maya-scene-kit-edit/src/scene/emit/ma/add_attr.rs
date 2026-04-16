@@ -1,4 +1,4 @@
-use maya_scene_kit_observe::scene::{AddAttrOp, AddAttrValueSpec, FlagState};
+use maya_scene_kit_observe::scene::model::{AddAttrOp, AddAttrValueSpec, FlagState};
 
 use crate::scene::emit::ma::format::{escape_ma_string, format_numeric_value};
 

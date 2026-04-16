@@ -25,18 +25,26 @@ pub mod scene {
         write_output_bytes_atomic,
     };
     pub use maya_scene_kit_observe::scene::{
+        LoadOptions, Loader, MbParseBudget, ObservationBundle, check_script_nodes_with_options,
+        collect_scene_paths, collect_scene_paths_with_options,
+    };
+    pub use maya_scene_kit_observe::scene::dump::SceneDumpReport;
+    pub use maya_scene_kit_observe::scene::evidence::{
         DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
         EffectCertainty, ExecutionCoverageIssue, ExecutionCoverageIssueDetail,
         ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass,
         ExecutionLanguage, ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate,
         ExecutionSemanticClass, ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary,
-        LoadOptions, Loader, MbInspectNode, MbInspectOptions, MbInspectReport, MbParseBudget,
-        ObservationBundle, PathKind, SceneDigestSet, SceneDumpReport, ScenePathEntry,
-        ScenePathMeta, ScenePathsReport, ScriptNodeEntry, StaticExecutionReason,
-        UnknownSemanticDetail, UnknownSemanticFact, check_script_nodes_with_options,
-        collect_scene_paths, collect_scene_paths_with_options, inspect_mb,
+        SceneDigestSet, StaticExecutionReason, UnknownSemanticDetail, UnknownSemanticFact,
+    };
+    pub use maya_scene_kit_observe::scene::inspect::{
+        MbInspectNode, MbInspectOptions, MbInspectReport, inspect_mb,
         inspect_mb_with_max_parse_bytes,
     };
+    pub use maya_scene_kit_observe::scene::paths::{
+        PathKind, ScenePathEntry, ScenePathMeta, ScenePathsReport,
+    };
+    pub use maya_scene_kit_observe::scene::scripts::ScriptNodeEntry;
 
     pub fn audit_script_nodes_with_options(
         path: impl AsRef<Path>,

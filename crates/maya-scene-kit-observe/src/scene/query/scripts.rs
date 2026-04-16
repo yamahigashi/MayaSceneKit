@@ -1,5 +1,6 @@
 use crate::scene::{
-    ScriptNodeEntry, SceneToolError, ir,
+    SceneToolError, ir,
+    scripts::ScriptNodeEntry,
     source::{ObservationBundle, ObservationData},
 };
 

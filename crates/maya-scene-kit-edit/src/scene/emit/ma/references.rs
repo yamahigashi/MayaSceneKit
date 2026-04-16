@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use maya_scene_kit_observe::scene::ReferenceFileOp;
+use maya_scene_kit_observe::scene::model::ReferenceFileOp;
 
 use crate::{
     reference_semantics::{

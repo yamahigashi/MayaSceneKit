@@ -1,6 +1,7 @@
 use std::{collections::HashMap, f64::consts::PI};
 
-use maya_scene_kit_observe::scene::{AngularAttrKind, NumericValue, SetAttrOp, SetAttrValue};
+use maya_scene_kit_observe::scene::model::{NumericValue, SetAttrOp, SetAttrValue};
+use maya_scene_kit_observe::scene::recovery::AngularAttrKind;
 
 use crate::{
     scene::emit::ma::{

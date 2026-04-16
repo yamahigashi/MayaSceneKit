@@ -5,7 +5,11 @@ use maya_scene_kit_formats::{
     mel,
 };
 
-use crate::scene::{ScenePathEntry, ScenePathMeta, ScriptNodeEntry, source::MaObservationData};
+use crate::scene::{
+    paths::{ScenePathEntry, ScenePathMeta},
+    scripts::ScriptNodeEntry,
+    source::MaObservationData,
+};
 
 impl MaObservationData {
     pub(crate) fn top_level(&self) -> &mel::MelAuditTopLevelFacts {

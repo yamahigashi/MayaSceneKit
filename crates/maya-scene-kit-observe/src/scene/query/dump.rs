@@ -1,5 +1,6 @@
 use crate::scene::{
-    SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind, SceneToolError,
+    SceneToolError,
+    dump::{SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind},
     source::{ObservationBundle, ObservationData},
 };
 

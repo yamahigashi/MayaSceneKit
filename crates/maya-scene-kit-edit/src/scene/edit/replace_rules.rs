@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedPathOverride {
     pub(super) entry_index: usize,
-    pub(super) entry: maya_scene_kit_observe::scene::ScenePathEntry,
+    pub(super) entry: maya_scene_kit_observe::scene::paths::ScenePathEntry,
     pub(super) after_value: String,
 }
 

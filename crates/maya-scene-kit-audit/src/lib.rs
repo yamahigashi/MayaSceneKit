@@ -2,13 +2,14 @@ pub mod audit;
 mod public;
 
 pub mod scene {
-    pub use maya_scene_kit_observe::scene::{
+    pub use maya_scene_kit_observe::scene::{LoadOptions, Loader, ObservationBundle, SceneToolError};
+    pub use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
+    pub use maya_scene_kit_observe::scene::evidence::{
         DependencyFact, DependencyFactKind, DependencyRiskClass, EffectCertainty,
         ExecutionCoverageIssue, ExecutionCoverageIssueKind, ExecutionCoverageState,
         ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin, ExecutionSemanticClass,
-        ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, LoadOptions, Loader,
-        ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError, UnknownSemanticFact,
-        ValidationState,
+        ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet,
+        UnknownSemanticFact,
     };
 
     pub use crate::public::audit::{

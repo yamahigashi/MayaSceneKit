@@ -5,8 +5,7 @@ use rustpython_parser::{Parse, ast};
 use sha2::{Digest, Sha256};
 
 use super::{
-    MelSurfaceFacts, ObservationBundle, ObservationData, ObservedExecutionCatalog,
-    ObservedExecutionSurface, dependency,
+    MelSurfaceFacts, ObservedExecutionCatalog, ObservedExecutionSurface, dependency,
     effect_registry::{
         classify_mel_command, classify_mel_command_with_semantics, classify_python_call_target,
         effect_rank,
@@ -18,7 +17,7 @@ use crate::scene::{
     ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage,
     ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass,
     ExecutionUnitSummary, SceneDigestSet, SceneFormat, SceneToolError, StaticExecutionReason,
-    UnknownSemanticDetail, UnknownSemanticFact,
+    UnknownSemanticDetail, UnknownSemanticFact, source::{ObservationBundle, ObservationData},
 };
 
 #[derive(Debug, Clone)]
@@ -494,7 +493,7 @@ fn summarize_execution_unit(
 }
 
 fn should_model_as_execution_unit(origin: &ExecutionOrigin) -> bool {
-    use crate::scene::ExecutionSurfaceKind;
+    use crate::scene::evidence::ExecutionSurfaceKind;
 
     match origin.surface_kind {
         ExecutionSurfaceKind::ScriptNodeBody

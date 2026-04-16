@@ -431,7 +431,7 @@ mod tests {
     use crate::scene::{
         EffectCertainty, ExecutionEffectClass, ExecutionReason, ExecutionSemanticClass,
         StaticExecutionReason,
-        observe::{
+        execution::{
             MelSurfaceCommandMode, MelSurfaceNormalizedArg, MelSurfaceNormalizedCommand,
             MelSurfaceNormalizedFlag, MelSurfaceNormalizedItem,
         },

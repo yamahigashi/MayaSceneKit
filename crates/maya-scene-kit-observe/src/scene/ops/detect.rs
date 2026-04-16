@@ -1,6 +1,6 @@
 use std::{fs::File, io::Read, path::Path};
 
-use crate::scene::{SceneFormat, SceneToolError};
+use crate::scene::{SceneToolError, core::SceneFormat};
 
 pub(crate) fn detect_scene_format(path: impl AsRef<Path>) -> Result<SceneFormat, SceneToolError> {
     let scene_path = path.as_ref();

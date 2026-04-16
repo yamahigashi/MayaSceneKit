@@ -43,10 +43,15 @@ use maya_scene_kit_edit::scene::{
     stage_scene_edits_in_report_with_bytes_with_options, stage_scene_edits_with_options,
 };
 use maya_scene_kit_observe::scene::{
-    ExecutionOrigin, ExecutionSurfaceKind, LoadOptions, Loader, PathKind, SceneDumpReport,
-    SceneDumpRequireEntry, SceneDumpRequireKind, SceneFormat, ScenePathResolution,
-    ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport, ValidationState,
-    collect_scene_paths_with_options, find_scene_workspace_root, resolve_scene_path_value,
+    LoadOptions, Loader, collect_scene_paths_with_options,
+    find_scene_workspace_root, resolve_scene_path_value,
+};
+use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
+use maya_scene_kit_observe::scene::dump::{SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind};
+use maya_scene_kit_observe::scene::evidence::{ExecutionOrigin, ExecutionSurfaceKind};
+use maya_scene_kit_observe::scene::paths::{
+    PathKind, ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle,
+    ScenePathsReport,
 };
 
 use crate::{

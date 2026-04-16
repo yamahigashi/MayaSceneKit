@@ -4,7 +4,6 @@ use crate::{
     mb::{MayaBinaryParseError, MbParseBudget, parse_bytes_with_budget, parse_file_with_budget},
     scene::{
         SceneToolError,
-        context::SchemaInputs,
         integrity::{SceneIntegritySummary, summarize_mb_read_integrity_parts},
         ir::{DecodedChunkRecord, RawChunkRecord, SceneBuildOutput, TypeIdResolverStatus},
         mb_extract,
@@ -12,23 +11,23 @@ use crate::{
             builder, collect_decode_quality_records, collect_decoded_chunk_records,
             collect_raw_chunk_records_with_budget,
         },
-        runtime_assets::RuntimeAssets,
-        SceneDumpRequireEntry, ScenePathEntry,
-        schema::typeid_map::TypeIdTypeNameResolver,
+        dump::SceneDumpRequireEntry,
+        paths::ScenePathEntry,
+        schema::SchemaContext,
+        source::mb,
     },
 };
 
 pub(crate) struct MbDecodedArtifacts {
     pub(crate) raw_chunks: Vec<RawChunkRecord>,
     pub(crate) decoded_chunks: Vec<DecodedChunkRecord>,
-    pub(crate) decode_qualities: Vec<crate::scene::DecodeQualityRecord>,
+    pub(crate) decode_qualities: Vec<crate::scene::ir::DecodeQualityRecord>,
 }
 
 pub(crate) struct MbReadSession {
     pub(crate) mb: crate::mb::MayaBinaryFile,
-    assets: RuntimeAssets,
+    schema_context: Arc<SchemaContext>,
     budget: MbParseBudget,
-    typeid_resolver: TypeIdTypeNameResolver,
     decoded: OnceLock<Result<Arc<MbDecodedArtifacts>, MayaBinaryParseError>>,
     build: OnceLock<Result<Arc<SceneBuildOutput>, MayaBinaryParseError>>,
     integrity: OnceLock<Result<SceneIntegritySummary, MayaBinaryParseError>>,
@@ -40,37 +39,33 @@ pub(crate) struct MbReadSession {
 impl MbReadSession {
     pub(crate) fn load_raw(
         path: &std::path::Path,
-        schema_inputs: &SchemaInputs<'_>,
+        schema_context: Arc<SchemaContext>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
         let mb = parse_file_with_budget(path, budget)?;
-        Self::from_mb(mb, schema_inputs, budget)
+        Self::from_mb(mb, schema_context, budget)
     }
 
     pub(crate) fn load_raw_bytes(
         path: &std::path::Path,
         bytes: Vec<u8>,
-        schema_inputs: &SchemaInputs<'_>,
+        schema_context: Arc<SchemaContext>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
         let mut mb = parse_bytes_with_budget(bytes, budget)?;
         mb.path = Some(path.to_path_buf());
-        Self::from_mb(mb, schema_inputs, budget)
+        Self::from_mb(mb, schema_context, budget)
     }
 
     fn from_mb(
         mb: crate::mb::MayaBinaryFile,
-        schema_inputs: &SchemaInputs<'_>,
+        schema_context: Arc<SchemaContext>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
-        let assets = RuntimeAssets::from_schema_inputs(schema_inputs);
-        assets.validate_schema_inputs()?;
-        let typeid_resolver = assets.build_typeid_typename_resolver()?;
         Ok(Self {
             mb,
-            assets,
+            schema_context,
             budget: *budget,
-            typeid_resolver,
             decoded: OnceLock::new(),
             build: OnceLock::new(),
             integrity: OnceLock::new(),
@@ -90,8 +85,8 @@ impl MbReadSession {
             Arc::clone(&self.mb.data),
             decoded.raw_chunks.clone(),
             decoded.decoded_chunks.clone(),
-            Some(&self.typeid_resolver),
-            self.assets.registry(),
+            Some(self.schema_context.typeid_resolver()),
+            self.schema_context.registry(),
             TypeIdResolverStatus::Provided,
         )));
         let _ = self.build.set(build);
@@ -131,7 +126,7 @@ impl MbReadSession {
 
         let build = self.build()?;
         let raw_entries = maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&self.mb);
-        let entries = crate::scene::observe::mb::collect_mb_scene_paths(
+        let entries = mb::collect_mb_scene_paths(
             &self.mb,
             &build.scene.nodes,
             &build.scene.reference_files,
@@ -156,7 +151,7 @@ impl MbReadSession {
         let decoded_chunks = collect_decoded_chunk_records(
             &raw_chunks,
             self.mb.data.as_ref(),
-            self.assets.registry(),
+            self.schema_context.registry(),
         );
         let decode_qualities = collect_decode_quality_records(&decoded_chunks);
         let decoded = Ok(Arc::new(MbDecodedArtifacts {

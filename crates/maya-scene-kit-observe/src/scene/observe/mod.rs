@@ -1,42 +1,5 @@
-pub(crate) mod catalog;
-mod dependency;
-mod effect_registry;
-pub(crate) mod inspect;
-pub(crate) mod mb;
-mod mel_surface;
-mod surfaces;
-
-use std::sync::Arc;
-
-pub use self::mel_surface::{
-        MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceCommandMode, MelSurfaceDiagnostic,
-        MelSurfaceDiagnosticStage, MelSurfaceFacts, MelSurfaceNormalizedArg,
-        MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag, MelSurfaceNormalizedItem,
-        MelSurfaceValidationDiagnostic, collect_mel_surface_facts,
-        collect_mel_surface_facts_shared,
-};
-use crate::scene::{
-    DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionUnitSummary,
-    SceneDigestSet, UnknownSemanticFact, source::{ObservationBundle, ObservationData},
-};
-pub use self::surfaces::ExecutionSurface;
-
-#[derive(Debug, Clone)]
-pub struct ObservedExecutionSurface {
-    pub surface: ExecutionSurface,
-    pub mel: Option<Arc<MelSurfaceFacts>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ObservedExecutionCatalog {
-    pub surfaces: Vec<ObservedExecutionSurface>,
-    pub unit_summaries: Vec<ExecutionUnitSummary>,
-    pub dependency_facts: Vec<DependencyFact>,
-    pub unknown_semantics: Vec<UnknownSemanticFact>,
-    pub digests: SceneDigestSet,
-    pub coverage_state: ExecutionCoverageState,
-    pub coverage_issues: Vec<ExecutionCoverageIssue>,
-}
+#[cfg(test)]
+pub(crate) use crate::scene::execution::{catalog, dependency, surfaces};
 
 #[cfg(test)]
 mod tests {
@@ -45,17 +8,20 @@ mod tests {
     use maya_scene_kit_formats::ma as format_ma;
 
     use super::{
-        catalog, dependency, mb, surfaces,
+        catalog, dependency, surfaces,
     };
     use crate::{
         mb::{MbParseBudget, MbParseBudgetLimit},
         scene::{
             DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
             ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
-            LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit, PathKind,
-            SceneDumpRequireKind, SceneFormat, ScenePathResolutionStatus, ScenePathValueStyle,
-            SceneToolError, ValidationState, collect_scene_dump, collect_scene_paths,
-            find_scene_workspace_root, resolve_scene_path_value, source::ma as observe_ma,
+            LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit, SceneToolError,
+            ValidationState, collect_scene_dump, collect_scene_paths, find_scene_workspace_root,
+            resolve_scene_path_value,
+            core::SceneFormat,
+            dump::SceneDumpRequireKind,
+            paths::{PathKind, ScenePathResolutionStatus, ScenePathValueStyle},
+            source::{ma as observe_ma, mb},
         },
     };
 
@@ -761,9 +727,12 @@ mod tests {
     fn collect_mb_scene_paths_falls_back_to_root_owner_trace_without_raw_file_entries() {
         let source = repo_root().join("tests/fixtures/mb/owner_delete/file_owner_delete.mb");
         let options = LoadOptions::default();
+        let schema_context =
+            crate::scene::schema::SchemaContext::from_inputs(&options.schema_inputs())
+                .expect("schema context");
         let session = crate::scene::mb_read_session::MbReadSession::load_raw(
             &source,
-            &options.schema_inputs(),
+            std::sync::Arc::new(schema_context),
             options.mb_parse_budget(),
         )
         .expect("load session");

@@ -5,7 +5,7 @@ impl Materializer {
         &self,
         paths: &[PathBuf],
     ) -> Result<(), SceneToolError> {
-        maya_scene_kit_observe::scene::validate_additional_node_info_paths(
+        maya_scene_kit_observe::scene::recovery::validate_additional_node_info_paths(
             &self
                 .options
                 .clone()
@@ -75,12 +75,14 @@ impl Materializer {
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy();
-            let recovery =
-                maya_scene_kit_observe::scene::recover_mb_scene(src, self.options.load_options())?;
+            let recovery = maya_scene_kit_observe::scene::recovery::recover_mb_scene(
+                src,
+                self.options.load_options(),
+            )?;
             let result = ops::render_best_effort_ma(ops::BestEffortRenderData {
                 metadata: recovery.header,
-                scene_model: recovery.build.scene,
-                artifacts: recovery.build.artifacts,
+                scene_model: recovery.scene,
+                forensics: recovery.forensics,
                 issues: recovery.issues,
                 source_path: src,
                 output_name: output_name.as_ref(),

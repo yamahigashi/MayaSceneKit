@@ -1,21 +1,28 @@
 pub(crate) mod analyze;
-mod context;
+pub mod core;
 pub(crate) mod decode;
+pub mod dump;
+pub mod evidence;
 mod error;
 pub mod execution;
+pub mod forensics;
 mod integrity;
 pub mod inspect;
 pub(crate) mod ir;
 mod mb_extract;
 mod mb_read_session;
-mod observe;
+pub mod model;
 mod ops;
 mod patterns;
+pub mod paths;
 pub(crate) mod query;
 mod recover;
-mod runtime_assets;
+pub mod recovery;
+pub mod scripts;
 pub(crate) mod source;
 pub(crate) mod schema;
+#[cfg(test)]
+mod observe;
 
 pub(crate) mod public {
     mod core;
@@ -44,15 +51,7 @@ pub(crate) mod public {
             ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport,
         },
         recovery::{
-            AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, AngularAttrKind, ChunkRef,
-            ChunkTrace, Confidence, CreateNodeFlags, DecodeQualityRecord, FlagState, LinkOp,
-            MbRecoveryBundle, NodeRecoveryIssue, NumericValue, RawChunkRecord, RecoveredAttrOp,
-            RecoveredNode, RecoveryIssue, RecoveryIssueKind, RefEditData, RefEditGroup,
-            RefEditGroupSource, RefEditParseStats, RefEditRecord, RefEditUnknownTail,
-            ReferenceFileOp, SceneArtifacts, SceneBuildOutput, SceneModel, SchemaDecodeAttempt,
-            SchemaDecodeAttemptResult, SelectBlock, SelectBlockNote, SelectBlockOp,
-            SemanticProvenance, SetAttrOp, SetAttrValue, SkinWeightPair, SkinWeightRow,
-            TimeValuePair, TypeIdResolverStatus, recover_mb_scene,
+            AngularAttrKind, MbRecoveryBundle, recover_mb_scene,
             validate_additional_node_info_paths,
         },
         scripts::{ScriptNodeEntriesReport, ScriptNodeEntry, ScriptNodeReport},
@@ -70,26 +69,18 @@ pub use self::{
     },
     inspect::{inspect_mb, inspect_mb_with_max_parse_bytes},
     public::{
-        AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, AngularAttrKind, AsciiDecodePolicy,
-        ChunkRef, ChunkTrace, Confidence, CreateNodeFlags, DecodeQualityRecord, DependencyFact,
-        DependencyFactDetail, DependencyFactKind, DependencyRiskClass, EffectCertainty,
-        ExecutionCoverageIssue, ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind,
-        ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin,
-        ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass, ExecutionSourceRange,
-        ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, FlagState, LinkOp,
-        MbInspectNode, MbInspectOptions, MbInspectReport, MbRecoveryBundle, NodeRecoveryIssue,
-        NumericValue, OperationMode, PathKind, RawChunkRecord, RecoveredAttrOp, RecoveredNode,
-        RecoveryIssue, RecoveryIssueKind, RefEditData, RefEditGroup, RefEditGroupSource,
-        RefEditParseStats, RefEditRecord, RefEditUnknownTail, ReferenceFileOp, SceneArtifacts,
-        SceneBuildOutput, SceneDigestSet, SceneDumpReport, SceneDumpRequireEntry,
-        SceneDumpRequireKind, SceneFormat, SceneModel, ScenePathEntry, ScenePathMeta,
-        ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport,
-        SchemaDecodeAttempt, SchemaDecodeAttemptResult, ScriptNodeEntriesReport, ScriptNodeEntry,
-        ScriptNodeReport, SelectBlock, SelectBlockNote, SelectBlockOp, SemanticProvenance,
-        SetAttrOp, SetAttrValue, SkinWeightPair, SkinWeightRow, StaticExecutionReason,
-        TimeValuePair, TypeIdResolverStatus, UnknownSemanticDetail, UnknownSemanticFact,
-        ValidationState, recover_mb_scene, validate_additional_node_info_paths,
+        AsciiDecodePolicy, OperationMode, SceneFormat, ValidationState,
     },
+};
+
+pub(crate) use self::public::{
+    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
+    EffectCertainty, ExecutionCoverageIssue, ExecutionCoverageIssueDetail,
+    ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass,
+    ExecutionLanguage, ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate,
+    ExecutionSemanticClass, ExecutionSourceRange, ExecutionSurfaceKind, ExecutionTrigger,
+    ExecutionUnitSummary, SceneDigestSet, StaticExecutionReason, UnknownSemanticDetail,
+    UnknownSemanticFact,
 };
 
 pub use maya_scene_kit_formats::mb::{MbParseBudget, MbParseBudgetLimit};

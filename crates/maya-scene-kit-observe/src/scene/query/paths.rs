@@ -1,6 +1,7 @@
 use crate::scene::{
-    PathKind, ScenePathEntry, SceneToolError,
-    source::{ObservationBundle, ObservationData},
+    SceneToolError,
+    paths::{PathKind, ScenePathEntry},
+    source::{ObservationBundle, ObservationData, mb},
 };
 
 pub(crate) fn scene_paths(
@@ -16,12 +17,9 @@ pub(crate) fn scene_paths(
         .into_iter()
         .filter(|entry| match kind {
             PathKind::All => true,
-            PathKind::File => {
-                crate::scene::observe::mb::canonical_scene_path_entry_kind(entry) == PathKind::File
-            }
+            PathKind::File => mb::canonical_scene_path_entry_kind(entry) == PathKind::File,
             PathKind::Reference => {
-                crate::scene::observe::mb::canonical_scene_path_entry_kind(entry)
-                    == PathKind::Reference
+                mb::canonical_scene_path_entry_kind(entry) == PathKind::Reference
             }
         })
         .collect())

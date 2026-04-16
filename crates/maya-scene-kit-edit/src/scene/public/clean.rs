@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use maya_scene_kit_observe::scene::ExecutionSourceRange;
+use maya_scene_kit_observe::scene::evidence::ExecutionSourceRange;
 
 use super::{OperationMode, SceneFormat, ValidationState, staging::StagedSceneArtifact};
 

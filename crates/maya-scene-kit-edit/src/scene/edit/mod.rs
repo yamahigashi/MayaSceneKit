@@ -8,9 +8,10 @@ use maya_scene_kit_formats::ma::{
     requires, rewrite, scripts, types::PathReplaceRule as MaPathReplaceRule,
 };
 use maya_scene_kit_observe::scene::{
-    ExecutionSourceRange, LoadOptions, MelParseBudget, PathKind, ScenePathsReport,
-    collect_scene_paths_with_options,
+    LoadOptions, MelParseBudget, collect_scene_paths_with_options,
 };
+use maya_scene_kit_observe::scene::evidence::ExecutionSourceRange;
+use maya_scene_kit_observe::scene::paths::{PathKind, ScenePathsReport};
 use regex::Regex;
 
 use crate::{

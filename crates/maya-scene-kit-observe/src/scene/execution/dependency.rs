@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 
-use super::{ObservationBundle, ObservationData, catalog::ObservedExecutionSurfaceCore, mb};
+use super::catalog::ObservedExecutionSurfaceCore;
 use crate::scene::{
-    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass, PathKind,
+    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
     SceneToolError,
+    paths::PathKind,
+    source::{ObservationBundle, ObservationData, mb},
 };
 
 pub(super) fn collect_dependency_facts(
@@ -132,7 +134,9 @@ pub(super) fn collect_dependency_facts(
             }
         }
 
-        if surface.origin.surface_kind == crate::scene::ExecutionSurfaceKind::FileCommandCallback {
+        if surface.origin.surface_kind
+            == crate::scene::evidence::ExecutionSurfaceKind::FileCommandCallback
+        {
             let source_kind = surface.origin.source_kind.as_deref().unwrap_or_default();
             push_dependency_fact_if_unique(
                 &mut facts,
@@ -154,7 +158,7 @@ pub(super) fn collect_dependency_facts(
     Ok(facts)
 }
 
-pub(super) fn build_scene_path_dependency_fact(
+pub(crate) fn build_scene_path_dependency_fact(
     kind: DependencyFactKind,
     node_type: &str,
     attr: &str,
@@ -172,7 +176,7 @@ pub(super) fn build_scene_path_dependency_fact(
     }
 }
 
-pub(super) fn classify_dependency_risk(value: &str) -> DependencyRiskClass {
+pub(crate) fn classify_dependency_risk(value: &str) -> DependencyRiskClass {
     let trimmed = value.trim();
     let bytes = trimmed.as_bytes();
     if bytes.starts_with(b"\\\\")

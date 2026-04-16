@@ -14,10 +14,6 @@ impl RawChunkRecord {
     pub fn payload<'a>(&self, source: &'a [u8]) -> &'a [u8] {
         self.payload_span.slice(source)
     }
-
-    pub fn materialize_payload(&self, source: &[u8]) -> Vec<u8> {
-        self.payload(source).to_vec()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

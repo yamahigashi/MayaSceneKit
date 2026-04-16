@@ -11,11 +11,15 @@ use maya_scene_kit_audit::{
     },
 };
 use maya_scene_kit_observe::scene::{
-    DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail, ExecutionCoverageState,
-    ExecutionLanguage, LoadOptions, Loader, MbParseBudget, MelParseBudget, PathKind,
-    SceneToolError, ValidationState, check_script_nodes, collect_scene_paths,
-    collect_script_node_entries,
+    LoadOptions, Loader, MbParseBudget, MelParseBudget, SceneToolError,
+    check_script_nodes, collect_scene_paths, collect_script_node_entries,
 };
+use maya_scene_kit_observe::scene::core::ValidationState;
+use maya_scene_kit_observe::scene::evidence::{
+    DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail,
+    ExecutionCoverageState, ExecutionLanguage,
+};
+use maya_scene_kit_observe::scene::paths::PathKind;
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }

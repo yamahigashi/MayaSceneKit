@@ -1,7 +1,7 @@
 use crate::{
-    mb::HeadMetadata,
     unit_semantics::{DEFAULT_TICKS_PER_SECOND, normalize_angular_unit, normalize_time_unit},
 };
+use maya_scene_kit_observe::scene::model::RecoveredHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AngularRenderUnit {
@@ -66,7 +66,7 @@ fn parse_time_render_unit(unit: &str) -> Option<TimeRenderUnit> {
     }
 }
 
-pub(crate) fn build_time_render_context(metadata: &HeadMetadata) -> Option<TimeRenderContext> {
+pub(crate) fn build_time_render_context(metadata: &RecoveredHeader) -> Option<TimeRenderContext> {
     let unit = metadata.tuni.as_deref().and_then(parse_time_render_unit)?;
     let ticks_per_second = metadata
         .tdur
@@ -80,7 +80,7 @@ pub(crate) fn build_time_render_context(metadata: &HeadMetadata) -> Option<TimeR
     })
 }
 
-pub(crate) fn build_angular_render_unit(metadata: &HeadMetadata) -> AngularRenderUnit {
+pub(crate) fn build_angular_render_unit(metadata: &RecoveredHeader) -> AngularRenderUnit {
     metadata
         .auni
         .as_deref()

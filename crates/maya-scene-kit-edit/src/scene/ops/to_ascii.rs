@@ -1,14 +1,10 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
-};
+use std::{collections::{BTreeMap, HashMap}, path::Path};
 
-use maya_scene_kit_observe::scene::{
-    AngularAttrKind, NodeRecoveryIssue, SceneArtifacts, SceneModel,
-};
+use maya_scene_kit_observe::scene::forensics::{NodeRecoveryIssue, RecoveryForensics};
+use maya_scene_kit_observe::scene::model::{RecoveredHeader, RecoveredScene};
+use maya_scene_kit_observe::scene::recovery::AngularAttrKind;
 
 use crate::{
-    mb::HeadMetadata,
     scene::{DecodeQuality, RawChunkDump, emit::ma::document, public::map::map_decode_quality},
 };
 
@@ -31,9 +27,9 @@ pub(in crate::scene) struct DecodeQualityDistributionEntry {
 }
 
 pub(in crate::scene) struct BestEffortRenderData<'a> {
-    pub(in crate::scene) metadata: HeadMetadata,
-    pub(in crate::scene) scene_model: SceneModel,
-    pub(in crate::scene) artifacts: SceneArtifacts,
+    pub(in crate::scene) metadata: RecoveredHeader,
+    pub(in crate::scene) scene_model: RecoveredScene,
+    pub(in crate::scene) forensics: RecoveryForensics,
     pub(in crate::scene) issues: Vec<NodeRecoveryIssue>,
     pub(in crate::scene) source_path: &'a Path,
     pub(in crate::scene) output_name: &'a str,
@@ -47,20 +43,20 @@ pub(in crate::scene) fn render_best_effort_ma(
     let BestEffortRenderData {
         metadata,
         scene_model,
-        artifacts,
+        forensics,
         issues,
         source_path,
         output_name,
         angular_attrs_by_node,
         embed_metadata,
     } = data;
-    let raw_chunk_count = artifacts.raw_chunks.len();
-    let raw_payload_size_total = artifacts
+    let raw_chunk_count = forensics.raw_chunks.len();
+    let raw_payload_size_total = forensics
         .raw_chunks
         .iter()
-        .map(|chunk| chunk.chunk_ref.payload_size)
+        .map(|chunk| chunk.payload.len())
         .sum::<usize>();
-    let raw_chunks = artifacts
+    let raw_chunks = forensics
         .raw_chunks
         .iter()
         .map(|raw| RawChunkDump {
@@ -70,10 +66,10 @@ pub(in crate::scene) fn render_best_effort_ma(
             trace_chunk_aux: raw.chunk_ref.chunk_aux,
             trace_child_alignment: raw.chunk_ref.child_alignment,
             trace_child_header_size: raw.chunk_ref.child_header_size,
-            payload: raw.materialize_payload(artifacts.raw_source.as_ref()),
+            payload: raw.payload.clone(),
         })
         .collect();
-    let decode_quality_distribution = build_decode_quality_distribution(&artifacts);
+    let decode_quality_distribution = build_decode_quality_distribution(&forensics);
 
     BestEffortBuildResult {
         maya_ascii: document::render_best_effort_maya_ascii(
@@ -93,10 +89,10 @@ pub(in crate::scene) fn render_best_effort_ma(
 }
 
 fn build_decode_quality_distribution(
-    artifacts: &SceneArtifacts,
+    forensics: &RecoveryForensics,
 ) -> Vec<DecodeQualityDistributionEntry> {
     let mut grouped: BTreeMap<(DecodeQuality, String, String), usize> = BTreeMap::new();
-    for record in &artifacts.decode_qualities {
+    for record in &forensics.decode_qualities {
         *grouped
             .entry((
                 map_decode_quality(record.quality.clone()),

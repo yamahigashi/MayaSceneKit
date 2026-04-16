@@ -18,10 +18,13 @@ use maya_scene_kit_edit::scene::{
 };
 use maya_scene_kit_formats::mb::parse_file;
 use maya_scene_kit_observe::scene::{
-    ExecutionSourceRange, LoadOptions, Loader, OperationMode, PathKind, SceneFormat,
-    SceneToolError, ScriptNodeEntry, ValidationState, check_script_nodes, collect_scene_paths,
-    collect_script_node_entries, detect_scene_format,
+    LoadOptions, Loader, SceneToolError,
+    check_script_nodes, collect_scene_paths, collect_script_node_entries, detect_scene_format,
 };
+use maya_scene_kit_observe::scene::core::{OperationMode, SceneFormat, ValidationState};
+use maya_scene_kit_observe::scene::evidence::ExecutionSourceRange;
+use maya_scene_kit_observe::scene::paths::{PathKind, ScenePathsReport};
+use maya_scene_kit_observe::scene::scripts::ScriptNodeEntry;
 use serde::Deserialize;
 use tempfile::tempdir;
 
@@ -618,7 +621,7 @@ fn composite_stage_from_replaced_bytes_preserves_replace_overrides() {
             replaced.artifact.bytes.clone(),
         )
         .expect("observe replaced bytes");
-    let current_report = maya_scene_kit_observe::scene::ScenePathsReport {
+    let current_report = ScenePathsReport {
         scene_path: observed.scene_path().to_path_buf(),
         scene_format: observed.scene_format(),
         validation_state: observed.validation_state(),
