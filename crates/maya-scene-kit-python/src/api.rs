@@ -118,9 +118,6 @@ pub(crate) fn collect_paths_json(
 pub(crate) fn audit_json(
     path: &str,
     rules: &[String],
-    _rule_files: &[String],
-    _ignore_case: bool,
-    _regex_mode: bool,
     max_preview: usize,
     include_digests: bool,
     node_info_paths: &[String],
@@ -331,18 +328,8 @@ mod tests {
     #[test]
     fn audit_json_reports_disposition() {
         let source = repo_root().join("tests/02/sphere.mb");
-        let value = audit_json(
-            &source.display().to_string(),
-            &[],
-            &[],
-            false,
-            false,
-            96,
-            true,
-            &[],
-            None,
-        )
-        .expect("audit");
+        let value =
+            audit_json(&source.display().to_string(), &[], 96, true, &[], None).expect("audit");
 
         assert!(value["disposition"].is_string());
         assert!(value["notices"].is_array());
@@ -352,18 +339,8 @@ mod tests {
     #[test]
     fn audit_json_returns_blocked_report_for_budget_exceed() {
         let source = repo_root().join("tests/02/sphere.ma");
-        let value = audit_json(
-            &source.display().to_string(),
-            &[],
-            &[],
-            false,
-            false,
-            96,
-            true,
-            &[],
-            Some(1),
-        )
-        .expect("budget blocked audit");
+        let value = audit_json(&source.display().to_string(), &[], 96, true, &[], Some(1))
+            .expect("budget blocked audit");
 
         assert_eq!(value["disposition"], "review");
         assert_eq!(value["blocked_on_uncertainty"], true);

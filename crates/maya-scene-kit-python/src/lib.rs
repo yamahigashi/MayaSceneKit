@@ -49,9 +49,6 @@ fn collect_paths(
 #[pyfunction(signature = (
     path,
     rules = Vec::<String>::new(),
-    rule_files = Vec::<String>::new(),
-    ignore_case = false,
-    regex = false,
     max_preview = 96,
     include_digests = true,
     node_info_paths = Vec::<String>::new(),
@@ -61,9 +58,6 @@ fn audit(
     py: Python<'_>,
     path: String,
     rules: Vec<String>,
-    rule_files: Vec<String>,
-    ignore_case: bool,
-    regex: bool,
     max_preview: usize,
     include_digests: bool,
     node_info_paths: Vec<String>,
@@ -74,9 +68,6 @@ fn audit(
         api::audit_json(
             &path,
             &rules,
-            &rule_files,
-            ignore_case,
-            regex,
             max_preview,
             include_digests,
             &node_info_paths,
@@ -209,5 +200,29 @@ fn scene_tool_error_category(err: &SceneToolError) -> &'static str {
         SceneToolError::MelParseBudgetExceeded { .. } => "mel_parse_budget_exceeded",
         SceneToolError::MbParseBudgetExceeded { .. } => "mb_parse_budget_exceeded",
         SceneToolError::Parse(_) => "parse",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_signature_exposes_supported_arguments_only() {
+        Python::with_gil(|py| {
+            let module = PyModule::new(py, "maya_scene_kit_native").expect("module");
+            maya_scene_kit_native(&module).expect("init module");
+            let inspect = PyModule::import(py, "inspect").expect("inspect");
+            let signature = inspect
+                .call_method1("signature", (module.getattr("audit").expect("audit"),))
+                .expect("signature")
+                .extract::<String>()
+                .expect("signature text");
+
+            assert_eq!(
+                signature,
+                "(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None)"
+            );
+        });
     }
 }
