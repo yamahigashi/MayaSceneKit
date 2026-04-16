@@ -2,8 +2,7 @@ use std::collections::HashSet;
 
 use super::catalog::ObservedExecutionSurfaceCore;
 use crate::scene::{
-    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
-    SceneToolError,
+    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass, SceneToolError,
     paths::PathKind,
     source::{ObservationBundle, ObservationData, mb},
 };

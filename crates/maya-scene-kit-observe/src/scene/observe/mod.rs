@@ -7,20 +7,19 @@ mod tests {
 
     use maya_scene_kit_formats::ma as format_ma;
 
-    use super::{
-        catalog, dependency, surfaces,
-    };
+    use super::{catalog, dependency, surfaces};
     use crate::{
         mb::{MbParseBudget, MbParseBudgetLimit},
         scene::{
             DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
             ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
             LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit, SceneToolError,
-            ValidationState, collect_scene_dump, collect_scene_paths, find_scene_workspace_root,
-            resolve_scene_path_value,
+            ValidationState, collect_scene_dump, collect_scene_paths,
             core::SceneFormat,
             dump::SceneDumpRequireKind,
+            find_scene_workspace_root,
             paths::{PathKind, ScenePathResolutionStatus, ScenePathValueStyle},
+            resolve_scene_path_value,
             source::{ma as observe_ma, mb},
         },
     };

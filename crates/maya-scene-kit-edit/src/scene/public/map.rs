@@ -1,8 +1,6 @@
-use maya_scene_kit_observe::scene::{
-    forensics::{
-        Confidence as InternalConfidence, NodeRecoveryIssue, RecoveryIssueKind,
-        SchemaDecodeAttemptResult, SemanticProvenance as InternalSemanticProvenance,
-    },
+use maya_scene_kit_observe::scene::forensics::{
+    Confidence as InternalConfidence, NodeRecoveryIssue, RecoveryIssueKind,
+    SchemaDecodeAttemptResult, SemanticProvenance as InternalSemanticProvenance,
 };
 
 use super::{

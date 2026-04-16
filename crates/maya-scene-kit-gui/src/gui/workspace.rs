@@ -185,7 +185,8 @@ impl GuiShell {
     ) {
         let mut files = Vec::new();
         collect_scene_files_recursively(&folder, &mut files, &self.state);
-        self.rows = build_rows_from_paths(files, &mut self.next_row_id);
+        let rows = build_rows_from_paths(files, &mut self.next_row_id);
+        self.replace_rows(rows);
         self.clear_selection();
         self.clear_edit_history();
         self.cancel_all_auto_analysis();
@@ -207,7 +208,7 @@ impl GuiShell {
     }
 
     pub(super) fn clear_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.rows.clear();
+        self.clear_rows();
         self.visible_rows.clear();
         self.clear_edit_history();
         self.cancel_all_auto_analysis();
@@ -236,7 +237,8 @@ impl GuiShell {
         let mut files = Vec::new();
         collect_scene_files_recursively(&root, &mut files, &self.state);
         let existing_rows = std::mem::take(&mut self.rows);
-        self.rows = reconcile_workspace_rows(existing_rows, files, &mut self.next_row_id);
+        let rows = reconcile_workspace_rows(existing_rows, files, &mut self.next_row_id);
+        self.replace_rows(rows);
         self.clear_edit_history();
         self.selection_anchor = self.rows.iter().position(|row| row.selected);
         self.active_path_edit = None;

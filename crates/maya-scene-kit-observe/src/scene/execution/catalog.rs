@@ -17,7 +17,8 @@ use crate::scene::{
     ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage,
     ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass,
     ExecutionUnitSummary, SceneDigestSet, SceneFormat, SceneToolError, StaticExecutionReason,
-    UnknownSemanticDetail, UnknownSemanticFact, source::{ObservationBundle, ObservationData},
+    UnknownSemanticDetail, UnknownSemanticFact,
+    source::{ObservationBundle, ObservationData},
 };
 
 #[derive(Debug, Clone)]

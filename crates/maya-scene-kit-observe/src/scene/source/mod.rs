@@ -1,6 +1,6 @@
-pub(crate) mod mb;
 pub(crate) mod loader;
 pub(crate) mod ma;
+pub(crate) mod mb;
 
 pub use self::loader::{LoadOptions, Loader, ObservationBundle};
 pub(crate) use self::loader::{MaObservationData, ObservationData};
@@ -18,9 +18,7 @@ pub fn detect_scene_format(path: impl AsRef<Path>) -> Result<SceneFormat, SceneT
     crate::scene::ops::detect_scene_format(path)
 }
 
-pub fn check_script_nodes(
-    path: impl AsRef<Path>,
-) -> Result<ScriptNodeReport, SceneToolError> {
+pub fn check_script_nodes(path: impl AsRef<Path>) -> Result<ScriptNodeReport, SceneToolError> {
     check_script_nodes_with_options(path, &LoadOptions::default())
 }
 
@@ -57,9 +55,7 @@ pub fn collect_script_node_entries_with_options(
     })
 }
 
-pub fn collect_scene_dump(
-    path: impl AsRef<Path>,
-) -> Result<SceneDumpReport, SceneToolError> {
+pub fn collect_scene_dump(path: impl AsRef<Path>) -> Result<SceneDumpReport, SceneToolError> {
     collect_scene_dump_with_options(path, &LoadOptions::default())
 }
 

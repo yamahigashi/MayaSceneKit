@@ -16,10 +16,8 @@ use crate::scene::{
     AuditNotice, AuditOptions, AuditProfile, AuditReport, AuditSeverity, AuditSinkKind,
     DependencyFact, DependencyRiskClass, EffectCertainty, ExecutionCoverageState,
     ExecutionEffectClass, ExecutionLanguage, ExecutionSemanticClass, ExecutionUnitSummary,
-    LoadOptions, ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError,
-    StaticAuditFindingDetail, ValidationState,
-    execution::ObservedExecutionCatalog,
-    Loader,
+    LoadOptions, Loader, ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError,
+    StaticAuditFindingDetail, ValidationState, execution::ObservedExecutionCatalog,
 };
 use maya_scene_kit_observe::scene::detect_scene_format;
 

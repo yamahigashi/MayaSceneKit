@@ -22,7 +22,6 @@ use maya_scene_kit_edit::scene::{
     PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem,
     ValidationState,
 };
-use maya_scene_kit_observe::scene::{LoadOptions, collect_scene_paths};
 use maya_scene_kit_observe::scene::core::SceneFormat;
 use maya_scene_kit_observe::scene::dump::SceneDumpRequireKind;
 use maya_scene_kit_observe::scene::evidence::{
@@ -32,6 +31,7 @@ use maya_scene_kit_observe::scene::evidence::{
 use maya_scene_kit_observe::scene::paths::{
     PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport,
 };
+use maya_scene_kit_observe::scene::{LoadOptions, collect_scene_paths};
 use tempfile::tempdir;
 
 use super::{
@@ -3681,6 +3681,57 @@ fn ignore_folder_names_dialog_apply_updates_state_and_rescans_workspace(cx: &mut
         );
         assert_eq!(shell.rows.len(), 1);
         assert!(shell.rows[0].path.ends_with("keep.ma"));
+    });
+}
+
+#[gpui::test]
+fn workspace_row_id_lookup_map_tracks_reload_and_clear(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let first = dir.path().join("first.ma");
+    let second = dir.path().join("second.mb");
+    fs::write(&first, "").expect("write first");
+    fs::write(&second, "").expect("write second");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.set_workspace_folder(dir.path().to_path_buf(), window, cx);
+
+        let first_row_id = shell
+            .rows
+            .iter()
+            .find(|row| row.path == first)
+            .map(|row| row.id)
+            .expect("first row id");
+        let second_row_id = shell
+            .rows
+            .iter()
+            .find(|row| row.path == second)
+            .map(|row| row.id)
+            .expect("second row id");
+        let first_index = shell
+            .rows
+            .iter()
+            .position(|row| row.id == first_row_id)
+            .expect("first row index");
+        let second_index = shell
+            .rows
+            .iter()
+            .position(|row| row.id == second_row_id)
+            .expect("second row index");
+
+        assert_eq!(shell.index_of_row_id(first_row_id), Some(first_index));
+        assert_eq!(shell.index_of_row_id(second_row_id), Some(second_index));
+
+        fs::remove_file(&first).expect("remove first");
+        shell.rescan_workspace_with_current_settings(window, cx);
+
+        assert_eq!(shell.rows.len(), 1);
+        assert_eq!(shell.index_of_row_id(first_row_id), None);
+        assert_eq!(shell.index_of_row_id(second_row_id), Some(0));
+
+        shell.clear_workspace(window, cx);
+
+        assert_eq!(shell.index_of_row_id(second_row_id), None);
     });
 }
 
