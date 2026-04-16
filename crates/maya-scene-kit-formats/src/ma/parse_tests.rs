@@ -1,6 +1,6 @@
 use super::{
     parse_ascii_scene, parse_ascii_scene_bytes,
-    parse_create_node::parse_top_level_rename_uid_command, parse_legacy::parse_ascii_scene_legacy,
+    parse_create_node::parse_top_level_rename_uid_command,
     parse_set_attr::parse_specialized_set_attr_command,
 };
 use crate::{
@@ -45,32 +45,6 @@ fn first_command(scene_text: &str, head: &str) -> mel::MelTopLevelCommandFact {
 
 fn opaque_typed_fixture() -> &'static str {
     include_str!("../../../../tests/fixtures/ma/opaque_typed_attrs.ma")
-}
-
-#[test]
-fn mel_backed_parser_matches_legacy_for_supported_scene_ir() {
-    let input = concat!(
-        "//Maya ASCII 2026 scene\n",
-        "//Last modified: Fri, Mar 21, 2026 12:00:00 PM\n",
-        "requires maya \"2026\";\n",
-        "requires -nodeType transform \"pluginA\" \"1.0\";\n",
-        "currentUnit -l \"cm\" -a \"deg\" -t \"film\";\n",
-        "fileInfo \"application\" \"maya\";\n",
-        "createNode transform -n \"node1\";\n",
-        "rename -uid \"12345678-1234-1234-1234-123456789abc\";\n",
-        "addAttr -ln \"state\" -sn \"st\" -at \"bool\" -dv 1;\n",
-        "setAttr \".t\" -type \"double3\" 1 2 3;\n",
-        "select -ne \"node1\";\n",
-        "setAttr \".tx\" 4;\n",
-        "connectAttr \"src.a\" \"dst.b\";\n",
-        "relationship \"link\" \"head\" \"tail\";\n",
-        "file -r -ns \"refNs\" -rfn \"refRN\" -typ \"mayaAscii\" \"C:/scenes/ref.ma\";\n",
-    );
-
-    let legacy = parse_ascii_scene_legacy(input).expect("legacy parse");
-    let mel_backed = parse_ascii_scene(input).expect("mel-backed parse");
-
-    assert_eq!(format!("{legacy:#?}"), format!("{mel_backed:#?}"));
 }
 
 #[test]

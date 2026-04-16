@@ -6,9 +6,6 @@ mod parse_add_attr;
 mod parse_create_node;
 #[path = "parse_driver.rs"]
 mod parse_driver;
-#[cfg(test)]
-#[path = "parse_legacy.rs"]
-mod parse_legacy;
 #[path = "parse_links.rs"]
 mod parse_links;
 #[path = "parse_references.rs"]
