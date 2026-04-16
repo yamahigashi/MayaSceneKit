@@ -287,12 +287,17 @@ fn render_audit_detail_dialog_body(
                             div()
                                 .flex()
                                 .items_center()
+                                .flex_1()
                                 .gap_2()
                                 .min_w_0()
                                 .child(badge(&detail.scene_name, PANEL_BG, MUTED))
                                 .child(
                                     div()
+                                        .flex_1()
                                         .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .truncate()
                                         .text_sm()
                                         .font_weight(FontWeight::BOLD)
                                         .child(detail.summary.clone()),

@@ -1169,12 +1169,14 @@ mod tests;
 
 fn badge(text: &str, background: u32, foreground: u32) -> impl IntoElement {
     div()
+        .flex_shrink_0()
         .px_2()
         .py_1()
         .rounded_sm()
         .bg(rgb(background))
         .text_sm()
         .text_color(rgb(foreground))
+        .whitespace_nowrap()
         .child(text.to_string())
 }
 
