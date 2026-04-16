@@ -3,9 +3,9 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 pub use crate::scene::forensics::{
-    ChunkRef, ChunkTrace, Confidence, DecodeQualityRecord, NodeRecoveryIssue, RecoveryForensics,
-    RecoveryIssue, RecoveryIssueKind, RawChunkRecord, SchemaDecodeAttempt, SchemaDecodeAttemptResult,
-    SemanticProvenance, TypeIdResolverStatus,
+    ChunkRef, ChunkTrace, Confidence, DecodeQualityRecord, NodeRecoveryIssue, RawChunkRecord,
+    RecoveryForensics, RecoveryIssue, RecoveryIssueKind, SchemaDecodeAttempt,
+    SchemaDecodeAttemptResult, SemanticProvenance, TypeIdResolverStatus,
 };
 pub use crate::scene::model::{
     AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, CreateNodeFlags, FlagState, LinkOp,

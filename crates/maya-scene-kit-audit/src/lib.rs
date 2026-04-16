@@ -2,7 +2,6 @@ pub mod audit;
 mod public;
 
 pub mod scene {
-    pub use maya_scene_kit_observe::scene::{LoadOptions, Loader, ObservationBundle, SceneToolError};
     pub use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
     pub use maya_scene_kit_observe::scene::evidence::{
         DependencyFact, DependencyFactKind, DependencyRiskClass, EffectCertainty,
@@ -10,6 +9,9 @@ pub mod scene {
         ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin, ExecutionSemanticClass,
         ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet,
         UnknownSemanticFact,
+    };
+    pub use maya_scene_kit_observe::scene::{
+        LoadOptions, Loader, ObservationBundle, SceneToolError,
     };
 
     pub use crate::public::audit::{
@@ -21,11 +23,9 @@ pub mod scene {
     };
 
     pub mod execution {
-        pub use maya_scene_kit_observe::scene::{
-            execution::{
-                ExecutionSurface, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts,
-                ObservedExecutionCatalog, ObservedExecutionSurface,
-            },
+        pub use maya_scene_kit_observe::scene::execution::{
+            ExecutionSurface, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts,
+            ObservedExecutionCatalog, ObservedExecutionSurface,
         };
     }
 }

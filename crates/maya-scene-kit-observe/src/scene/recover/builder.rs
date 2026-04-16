@@ -504,7 +504,9 @@ mod tests {
                 namespace: "Model".to_string(),
                 reference_node: "Example:ModelRN".to_string(),
                 file_type: "mayaBinary".to_string(),
-                options: Some("VERS|2020|INCL|D:/example/TestScene_0000_low.mb(|LUNI|cm|".to_string()),
+                options: Some(
+                    "VERS|2020|INCL|D:/example/TestScene_0000_low.mb(|LUNI|cm|".to_string(),
+                ),
                 namespace_defaulted: false,
                 file_type_defaulted: false,
                 path_inferred_from_parent_include: false,

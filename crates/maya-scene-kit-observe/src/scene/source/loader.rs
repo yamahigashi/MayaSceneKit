@@ -10,12 +10,16 @@ use maya_scene_kit_formats::mel::{MelParseBudget, first_mel_parse_budget_limit};
 use crate::{
     mb::MbParseBudget,
     scene::{
-        DependencyFact, ExecutionUnitSummary, SceneDigestSet, SceneToolError,
-        ValidationState, mb_read_session::MbReadSession, ops, query,
-        dump::SceneDumpRequireEntry,
-        execution::{ExecutionSurface, ObservedExecutionCatalog, ObservedExecutionSurface, catalog},
-        paths::{PathKind, ScenePathEntry},
+        DependencyFact, ExecutionUnitSummary, SceneDigestSet, SceneToolError, ValidationState,
         core::SceneFormat,
+        dump::SceneDumpRequireEntry,
+        execution::{
+            ExecutionSurface, ObservedExecutionCatalog, ObservedExecutionSurface, catalog,
+        },
+        mb_read_session::MbReadSession,
+        ops,
+        paths::{PathKind, ScenePathEntry},
+        query,
         schema::{SchemaContext, SchemaInputs},
         scripts::ScriptNodeEntry,
     },
@@ -164,10 +168,11 @@ impl Loader {
     }
 
     fn schema_context(&self) -> Result<&Arc<SchemaContext>, SceneToolError> {
-        match self
-            .schema_context
-            .get_or_init(|| SchemaContext::from_inputs(&self.options.schema_inputs()).map(Arc::new).map_err(|err| err.to_string()))
-        {
+        match self.schema_context.get_or_init(|| {
+            SchemaContext::from_inputs(&self.options.schema_inputs())
+                .map(Arc::new)
+                .map_err(|err| err.to_string())
+        }) {
             Ok(context) => Ok(context),
             Err(err) => Err(SceneToolError::Config(err.clone())),
         }

@@ -4,15 +4,15 @@ use crate::{
     mb::{MayaBinaryParseError, MbParseBudget, parse_bytes_with_budget, parse_file_with_budget},
     scene::{
         SceneToolError,
+        dump::SceneDumpRequireEntry,
         integrity::{SceneIntegritySummary, summarize_mb_read_integrity_parts},
         ir::{DecodedChunkRecord, RawChunkRecord, SceneBuildOutput, TypeIdResolverStatus},
         mb_extract,
+        paths::ScenePathEntry,
         recover::{
             builder, collect_decode_quality_records, collect_decoded_chunk_records,
             collect_raw_chunk_records_with_budget,
         },
-        dump::SceneDumpRequireEntry,
-        paths::ScenePathEntry,
         schema::SchemaContext,
         source::mb,
     },
@@ -125,7 +125,8 @@ impl MbReadSession {
         }
 
         let build = self.build()?;
-        let raw_entries = maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&self.mb);
+        let raw_entries =
+            maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&self.mb);
         let entries = mb::collect_mb_scene_paths(
             &self.mb,
             &build.scene.nodes,
@@ -135,7 +136,9 @@ impl MbReadSession {
             build.artifacts.raw_source.as_ref(),
         );
         let _ = self.scene_paths.set(Ok(Arc::from(entries)));
-        map_cached_arc_slice_parse_result(self.scene_paths.get().expect("mb scene paths initialized"))
+        map_cached_arc_slice_parse_result(
+            self.scene_paths.get().expect("mb scene paths initialized"),
+        )
     }
 
     pub(crate) fn budget(&self) -> &MbParseBudget {
@@ -160,7 +163,11 @@ impl MbReadSession {
             decode_qualities,
         }));
         let _ = self.decoded.set(decoded);
-        map_cached_parse_result(self.decoded.get().expect("mb decoded artifacts initialized"))
+        map_cached_parse_result(
+            self.decoded
+                .get()
+                .expect("mb decoded artifacts initialized"),
+        )
     }
 }
 

@@ -2,6 +2,25 @@ use super::*;
 use maya_scene_kit_edit::scene::OperationMode;
 
 impl GuiShell {
+    pub(super) fn rebuild_row_id_index(&mut self) {
+        self.row_id_to_index = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+    }
+
+    pub(super) fn replace_rows(&mut self, rows: Vec<SceneRow>) {
+        self.rows = rows;
+        self.rebuild_row_id_index();
+    }
+
+    pub(super) fn clear_rows(&mut self) {
+        self.rows.clear();
+        self.row_id_to_index.clear();
+    }
+
     pub(super) fn capture_row_edit_states(
         &self,
         row_indices: &[usize],
@@ -403,7 +422,11 @@ impl GuiShell {
     }
 
     pub(super) fn index_of_row_id(&self, id: u64) -> Option<usize> {
-        self.rows.iter().position(|row| row.id == id)
+        self.row_id_to_index
+            .get(&id)
+            .copied()
+            .filter(|index| self.rows.get(*index).is_some_and(|row| row.id == id))
+            .or_else(|| self.rows.iter().position(|row| row.id == id))
     }
 
     pub(super) fn visible_position_for_row_index(&self, index: usize) -> Option<usize> {

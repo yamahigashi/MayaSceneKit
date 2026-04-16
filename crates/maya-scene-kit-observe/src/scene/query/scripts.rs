@@ -11,7 +11,9 @@ pub(crate) fn script_node_entries(
         ObservationData::Ma { data } => Ok(crate::scene::source::ma::collect_ma_script_entries(
             data.script_entries(),
         )),
-        ObservationData::Mb { session } => Ok(collect_mb_script_entries(&session.build()?.scene.nodes)),
+        ObservationData::Mb { session } => {
+            Ok(collect_mb_script_entries(&session.build()?.scene.nodes))
+        }
     }
 }
 

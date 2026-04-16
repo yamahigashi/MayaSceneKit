@@ -200,12 +200,9 @@ impl From<crate::scene::ir::RecoveryIssue> for RecoveryIssue {
             refedit_unknown_tail_offset: value.refedit_unknown_tail_offset,
             refedit_unknown_tail_opcode_hex: value.refedit_unknown_tail_opcode_hex,
             refedit_unknown_tail_payload_size: value.refedit_unknown_tail_payload_size,
-            refedit_unknown_tail_payload_preview_hex: value.refedit_unknown_tail_payload_preview_hex,
-            decoder_attempts: value
-                .decoder_attempts
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            refedit_unknown_tail_payload_preview_hex: value
+                .refedit_unknown_tail_payload_preview_hex,
+            decoder_attempts: value.decoder_attempts.into_iter().map(Into::into).collect(),
             trace: value.trace.map(Into::into),
         }
     }

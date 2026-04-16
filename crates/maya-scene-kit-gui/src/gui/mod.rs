@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
@@ -42,16 +42,17 @@ use maya_scene_kit_edit::scene::{
     stage_replace_scene_paths_with_overrides_in_report_with_options,
     stage_scene_edits_in_report_with_bytes_with_options, stage_scene_edits_with_options,
 };
-use maya_scene_kit_observe::scene::{
-    LoadOptions, Loader, collect_scene_paths_with_options,
-    find_scene_workspace_root, resolve_scene_path_value,
-};
 use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
-use maya_scene_kit_observe::scene::dump::{SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind};
+use maya_scene_kit_observe::scene::dump::{
+    SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind,
+};
 use maya_scene_kit_observe::scene::evidence::{ExecutionOrigin, ExecutionSurfaceKind};
 use maya_scene_kit_observe::scene::paths::{
-    PathKind, ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle,
-    ScenePathsReport,
+    PathKind, ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport,
+};
+use maya_scene_kit_observe::scene::{
+    LoadOptions, Loader, collect_scene_paths_with_options, find_scene_workspace_root,
+    resolve_scene_path_value,
 };
 
 use crate::{
@@ -150,6 +151,7 @@ enum AppIconName {
 struct GuiShell {
     state: PersistedState,
     rows: Vec<SceneRow>,
+    row_id_to_index: HashMap<u64, usize>,
     visible_rows: Vec<usize>,
     menu_bar: TopMenuBar,
     focus_handle: FocusHandle,

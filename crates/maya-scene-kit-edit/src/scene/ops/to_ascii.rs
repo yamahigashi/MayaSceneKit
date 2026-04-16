@@ -1,11 +1,14 @@
-use std::{collections::{BTreeMap, HashMap}, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+};
 
 use maya_scene_kit_observe::scene::forensics::{NodeRecoveryIssue, RecoveryForensics};
 use maya_scene_kit_observe::scene::model::{RecoveredHeader, RecoveredScene};
 use maya_scene_kit_observe::scene::recovery::AngularAttrKind;
 
-use crate::{
-    scene::{DecodeQuality, RawChunkDump, emit::ma::document, public::map::map_decode_quality},
+use crate::scene::{
+    DecodeQuality, RawChunkDump, emit::ma::document, public::map::map_decode_quality,
 };
 
 #[derive(Debug, Clone)]

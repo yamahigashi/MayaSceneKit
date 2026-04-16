@@ -29,6 +29,11 @@ impl GuiShell {
         let path_edit_focus_handle = path_edit_input.read(cx).focus_handle(cx);
         let mut next_row_id = 1u64;
         let rows = load_rows_from_state(&state, &mut next_row_id);
+        let row_id_to_index = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
         let file_sort = FileTableSort {
             key: FileSortKey::Name,
             direction: ColumnSort::Ascending,
@@ -195,6 +200,7 @@ impl GuiShell {
         Self {
             state,
             rows,
+            row_id_to_index,
             visible_rows,
             menu_bar,
             focus_handle: cx.focus_handle(),

@@ -24,10 +24,6 @@ pub mod scene {
         remove_script_nodes_with_options, replace_scene_paths_with_options,
         write_output_bytes_atomic,
     };
-    pub use maya_scene_kit_observe::scene::{
-        LoadOptions, Loader, MbParseBudget, ObservationBundle, check_script_nodes_with_options,
-        collect_scene_paths, collect_scene_paths_with_options,
-    };
     pub use maya_scene_kit_observe::scene::dump::SceneDumpReport;
     pub use maya_scene_kit_observe::scene::evidence::{
         DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
@@ -45,6 +41,10 @@ pub mod scene {
         PathKind, ScenePathEntry, ScenePathMeta, ScenePathsReport,
     };
     pub use maya_scene_kit_observe::scene::scripts::ScriptNodeEntry;
+    pub use maya_scene_kit_observe::scene::{
+        LoadOptions, Loader, MbParseBudget, ObservationBundle, check_script_nodes_with_options,
+        collect_scene_paths, collect_scene_paths_with_options,
+    };
 
     pub fn audit_script_nodes_with_options(
         path: impl AsRef<Path>,
