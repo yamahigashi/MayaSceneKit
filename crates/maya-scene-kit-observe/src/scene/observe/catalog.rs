@@ -22,7 +22,7 @@ use crate::scene::{
 };
 
 #[derive(Debug, Clone)]
-pub(super) struct ObservedExecutionCore {
+pub(crate) struct ObservedExecutionCore {
     pub(super) surfaces: Vec<ObservedExecutionSurfaceCore>,
     pub(super) unit_summaries: Vec<ExecutionUnitSummaryCore>,
     pub(super) dependency_facts: Vec<DependencyFact>,
@@ -32,14 +32,14 @@ pub(super) struct ObservedExecutionCore {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ObservedExecutionSurfaceCore {
+pub(crate) struct ObservedExecutionSurfaceCore {
     pub(super) text: Arc<str>,
     pub(super) origin: ExecutionOrigin,
     pub(super) mel: Option<Arc<MelSurfaceFacts>>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ExecutionUnitSummaryCore {
+pub(crate) struct ExecutionUnitSummaryCore {
     pub(super) origin: ExecutionOrigin,
     pub(super) effect: ExecutionEffectClass,
     pub(super) semantic_class: ExecutionSemanticClass,
@@ -49,13 +49,13 @@ pub(super) struct ExecutionUnitSummaryCore {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct UnknownSemanticFactCore {
+pub(crate) struct UnknownSemanticFactCore {
     pub(super) origin: ExecutionOrigin,
     pub(super) detail: UnknownSemanticDetail,
     pub(super) preview: surfaces::PreviewWindowSpec,
 }
 
-pub(super) fn build_observed_execution_core(
+pub(crate) fn build_observed_execution_core(
     observation: &ObservationBundle,
 ) -> Result<ObservedExecutionCore, SceneToolError> {
     let mut coverage = match &observation.data {
@@ -139,7 +139,7 @@ pub(super) fn build_observed_execution_core(
     })
 }
 
-pub(super) fn materialize_observed_execution_catalog(
+pub(crate) fn materialize_observed_execution_catalog(
     core: &ObservedExecutionCore,
     max_preview: usize,
     digests: SceneDigestSet,
@@ -171,7 +171,7 @@ pub(super) fn materialize_observed_execution_catalog(
     }
 }
 
-pub(super) fn derive_coverage_state(
+pub(crate) fn derive_coverage_state(
     _scene_format: SceneFormat,
     coverage_issues: &[surfaces::ExecutionCoverageIssueRecord],
 ) -> ExecutionCoverageState {
@@ -188,7 +188,7 @@ pub(super) fn derive_coverage_state(
     }
 }
 
-pub(super) fn build_scene_digests(
+pub(crate) fn build_scene_digests(
     observation: &ObservationBundle,
 ) -> Result<SceneDigestSet, SceneToolError> {
     let bytes = match &observation.data {

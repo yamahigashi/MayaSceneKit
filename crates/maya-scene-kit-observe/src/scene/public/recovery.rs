@@ -48,7 +48,7 @@ pub fn recover_mb_scene(
     options: &LoadOptions,
 ) -> Result<MbRecoveryBundle, SceneToolError> {
     let path = path.as_ref();
-    let scene_format = crate::scene::observe::detect_scene_format(path)?;
+    let scene_format = crate::scene::detect_scene_format(path)?;
     if scene_format != SceneFormat::Mb {
         return Err(SceneToolError::UnsupportedSceneFormat {
             path: path.to_path_buf(),

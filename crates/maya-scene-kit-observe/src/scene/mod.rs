@@ -2,15 +2,19 @@ pub(crate) mod analyze;
 mod context;
 pub(crate) mod decode;
 mod error;
+pub mod execution;
 mod integrity;
+pub mod inspect;
 pub(crate) mod ir;
 mod mb_extract;
 mod mb_read_session;
-pub mod observe;
+mod observe;
 mod ops;
 mod patterns;
+pub(crate) mod query;
 mod recover;
 mod runtime_assets;
+pub(crate) mod source;
 pub(crate) mod schema;
 
 pub(crate) mod public {
@@ -57,13 +61,14 @@ pub(crate) mod public {
 
 pub use self::{
     error::SceneToolError,
-    observe::{
+    query::resolve::{find_scene_workspace_root, resolve_scene_path_value},
+    source::{
         LoadOptions, Loader, ObservationBundle, check_script_nodes,
         check_script_nodes_with_options, collect_scene_dump, collect_scene_dump_with_options,
         collect_scene_paths, collect_scene_paths_with_options, collect_script_node_entries,
-        collect_script_node_entries_with_options, detect_scene_format, find_scene_workspace_root,
-        inspect_mb, inspect_mb_with_max_parse_bytes, resolve_scene_path_value,
+        collect_script_node_entries_with_options, detect_scene_format,
     },
+    inspect::{inspect_mb, inspect_mb_with_max_parse_bytes},
     public::{
         AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, AngularAttrKind, AsciiDecodePolicy,
         ChunkRef, ChunkTrace, Confidence, CreateNodeFlags, DecodeQualityRecord, DependencyFact,

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use maya_scene_kit_observe::scene::observe::collect_mel_surface_facts;
+use maya_scene_kit_observe::scene::execution::collect_mel_surface_facts;
 
 use super::{
     AnalysisSurface, analyze_mel_surface,
@@ -13,7 +13,7 @@ use super::{
 use crate::scene::{
     AuditSeverity, AuditSurfaceDerivation, ExecutionLanguage, ExecutionOrigin,
     ExecutionSurfaceKind, ExecutionTrigger,
-    observe::{MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts},
+    execution::{MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts},
 };
 
 #[test]

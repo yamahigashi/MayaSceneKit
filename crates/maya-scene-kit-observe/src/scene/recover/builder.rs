@@ -37,6 +37,7 @@ pub(crate) fn build_scene_model(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn build_scene_model_with_budget(
     mb: &MayaBinaryFile,
     typeid_resolver: &TypeIdTypeNameResolver,
@@ -53,18 +54,14 @@ pub(crate) fn build_scene_model_with_budget(
     ))
 }
 
-fn build_scene_model_from_raw_chunks(
+pub(crate) fn build_scene_model_from_decoded_chunks(
     raw_source: Arc<[u8]>,
     raw_chunks: Vec<crate::scene::ir::RawChunkRecord>,
+    decoded_chunks: Vec<crate::scene::ir::DecodedChunkRecord>,
     typeid_resolver: Option<&TypeIdTypeNameResolver>,
-    registry: Arc<SchemaRegistry>,
+    _registry: Arc<SchemaRegistry>,
     typeid_resolver_status: TypeIdResolverStatus,
 ) -> SceneBuildOutput {
-    let decoded_chunks = recover::collect_decoded_chunk_records(
-        &raw_chunks,
-        raw_source.as_ref(),
-        Arc::clone(&registry),
-    );
     let decode_qualities = recover::collect_decode_quality_records(&decoded_chunks);
     let nodes = recover::recover_nodes(&decoded_chunks, typeid_resolver);
     SceneBuildOutput {
@@ -81,6 +78,28 @@ fn build_scene_model_from_raw_chunks(
         },
         typeid_resolver_status,
     }
+}
+
+fn build_scene_model_from_raw_chunks(
+    raw_source: Arc<[u8]>,
+    raw_chunks: Vec<crate::scene::ir::RawChunkRecord>,
+    typeid_resolver: Option<&TypeIdTypeNameResolver>,
+    registry: Arc<SchemaRegistry>,
+    typeid_resolver_status: TypeIdResolverStatus,
+) -> SceneBuildOutput {
+    let decoded_chunks = recover::collect_decoded_chunk_records(
+        &raw_chunks,
+        raw_source.as_ref(),
+        Arc::clone(&registry),
+    );
+    build_scene_model_from_decoded_chunks(
+        raw_source,
+        raw_chunks,
+        decoded_chunks,
+        typeid_resolver,
+        registry,
+        typeid_resolver_status,
+    )
 }
 
 #[cfg(test)]
