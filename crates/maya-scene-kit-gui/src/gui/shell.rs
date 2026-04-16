@@ -207,6 +207,7 @@ impl GuiShell {
             file_table,
             file_table_focus_handle,
             path_table,
+            path_table_summary: PathTableSummary::default(),
             audit_table,
             audit_all_rows: Vec::new(),
             audit_rows: Vec::new(),
