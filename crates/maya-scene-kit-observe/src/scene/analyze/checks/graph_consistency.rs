@@ -97,7 +97,7 @@ pub(crate) fn check_graph_consistency(
         }
         out.push(NodeRecoveryIssue {
             node_type: "reference".to_string(),
-            node_name: reference.reference_node.clone(),
+            node_name: reference.reference_node.to_string(),
             issue: RecoveryIssue::inferred_analysis(
                 ".fn",
                 format!("reference file record points at missing reference node '{node_name}'"),
@@ -115,10 +115,10 @@ pub(crate) fn check_graph_consistency(
                 continue;
             }
             out.push(NodeRecoveryIssue {
-                node_type: node.node_type.clone(),
+                node_type: node.node_type.to_string(),
                 node_name: node.name.clone(),
                 issue: RecoveryIssue::inferred_analysis(
-                    attr_name,
+                    attr_name.as_ref(),
                     format!("reference edit root references missing node '{root_name}'"),
                 ),
             });

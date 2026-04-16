@@ -203,12 +203,12 @@ mod tests {
         let model = &output.scene;
 
         assert!(model.nodes.iter().any(|n| n.name == "persp"));
-        assert!(model.nodes.iter().any(|n| n.node_type == "script"));
+        assert!(model.nodes.iter().any(|n| n.node_type.as_ref() == "script"));
         assert!(
             model
                 .nodes
                 .iter()
-                .filter(|node| node.node_type == "script")
+                .filter(|node| node.node_type.as_ref() == "script")
                 .flat_map(|node| node.attrs.iter())
                 .any(|attr| matches!(
                     attr,
@@ -259,7 +259,7 @@ mod tests {
             .scene
             .nodes
             .iter()
-            .filter(|node| node.node_type == "script" && node.name == "script1")
+            .filter(|node| node.node_type.as_ref() == "script" && node.name == "script1")
             .collect::<Vec<_>>();
 
         assert_eq!(script_nodes.len(), 2);
@@ -326,8 +326,8 @@ mod tests {
         let op = crate::scene::recover::references::reference_file_op_from_entry(entry)
             .expect("reference op");
         assert_eq!(op.path, "rig/charA_v001.mb");
-        assert_eq!(op.namespace, "charA");
-        assert_eq!(op.reference_node, "charARN");
+        assert_eq!(op.namespace.as_ref(), "charA");
+        assert_eq!(op.reference_node.as_ref(), "charARN");
         assert_eq!(op.options.as_deref(), Some("v=0"));
         assert!(matches!(op.confidence, Confidence::Exact));
         let trace = op.trace.expect("trace");
@@ -353,9 +353,9 @@ mod tests {
             },
             events: vec![DecodedEvent::ReferenceFile {
                 path: "scenes/TestScene_0000.mb".to_string(),
-                reference_node: "Example:ModelRN".to_string(),
-                namespace: Some("Model".to_string()),
-                file_type: Some("mayaBinary".to_string()),
+                reference_node: "Example:ModelRN".into(),
+                namespace: Some("Model".into()),
+                file_type: Some("mayaBinary".into()),
                 options: Some("VERS|2020|".to_string()),
             }],
             quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
@@ -364,8 +364,8 @@ mod tests {
         let refs = crate::scene::recover::references::recover_reference_files(&decoded);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].path, "scenes/TestScene_0000.mb");
-        assert_eq!(refs[0].namespace, "Model");
-        assert_eq!(refs[0].reference_node, "Example:ModelRN");
+        assert_eq!(refs[0].namespace.as_ref(), "Model");
+        assert_eq!(refs[0].reference_node.as_ref(), "Example:ModelRN");
         assert_eq!(refs[0].options.as_deref(), Some("VERS|2020|"));
         let trace = refs[0].trace.as_ref().expect("trace");
         assert_eq!(trace.form, "FRDI");
@@ -388,9 +388,9 @@ mod tests {
                 },
                 events: vec![DecodedEvent::ReferenceFile {
                     path: "rig.mb".to_string(),
-                    reference_node: "ExampleRN".to_string(),
-                    namespace: Some("Example".to_string()),
-                    file_type: Some("mayaBinary".to_string()),
+                    reference_node: "ExampleRN".into(),
+                    namespace: Some("Example".into()),
+                    file_type: Some("mayaBinary".into()),
                     options: Some("VERS|2020|".to_string()),
                 }],
                 quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
@@ -408,9 +408,9 @@ mod tests {
                 },
                 events: vec![DecodedEvent::ReferenceFile {
                     path: "rig.mb".to_string(),
-                    reference_node: "ExampleRN".to_string(),
-                    namespace: Some("Example".to_string()),
-                    file_type: Some("mayaBinary".to_string()),
+                    reference_node: "ExampleRN".into(),
+                    namespace: Some("Example".into()),
+                    file_type: Some("mayaBinary".into()),
                     options: Some("VERS|2020|".to_string()),
                 }],
                 quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
@@ -419,7 +419,7 @@ mod tests {
 
         let refs = crate::scene::recover::references::recover_reference_files(&decoded);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].reference_node, "ExampleRN");
+        assert_eq!(refs[0].reference_node.as_ref(), "ExampleRN");
         assert_eq!(refs[0].path, "rig.mb");
         assert_eq!(refs[0].options.as_deref(), Some("VERS|2020|"));
     }
@@ -487,9 +487,9 @@ mod tests {
         let mut refs = vec![
             ReferenceFileOp {
                 path: "D:/example/TestScene.mb".to_string(),
-                namespace: "Example".to_string(),
-                reference_node: "ExampleRN".to_string(),
-                file_type: "mayaBinary".to_string(),
+                namespace: "Example".into(),
+                reference_node: "ExampleRN".into(),
+                file_type: "mayaBinary".into(),
                 options: Some(
                     "VERS|2020|INCL|D:/example/TestScene_0000_Model.mb(|LUNI|cm|".to_string(),
                 ),
@@ -501,9 +501,9 @@ mod tests {
             },
             ReferenceFileOp {
                 path: "scenes/TestScene_0000_Model.mb".to_string(),
-                namespace: "Model".to_string(),
-                reference_node: "Example:ModelRN".to_string(),
-                file_type: "mayaBinary".to_string(),
+                namespace: "Model".into(),
+                reference_node: "Example:ModelRN".into(),
+                file_type: "mayaBinary".into(),
                 options: Some(
                     "VERS|2020|INCL|D:/example/TestScene_0000_low.mb(|LUNI|cm|".to_string(),
                 ),
@@ -515,9 +515,9 @@ mod tests {
             },
             ReferenceFileOp {
                 path: "scenes/TestScene_0000_low.mb".to_string(),
-                namespace: "Scale".to_string(),
-                reference_node: "Example:Model:ScaleRN".to_string(),
-                file_type: "mayaBinary".to_string(),
+                namespace: "Scale".into(),
+                reference_node: "Example:Model:ScaleRN".into(),
+                file_type: "mayaBinary".into(),
                 options: Some("VERS|2020|INCL|undef(|LUNI|cm|".to_string()),
                 namespace_defaulted: false,
                 file_type_defaulted: false,
@@ -527,9 +527,9 @@ mod tests {
             },
             ReferenceFileOp {
                 path: "scenes/TestScene_0000.mb".to_string(),
-                namespace: "Import_Model".to_string(),
-                reference_node: "Import:Import_ModelRN".to_string(),
-                file_type: "mayaBinary".to_string(),
+                namespace: "Import_Model".into(),
+                reference_node: "Import:Import_ModelRN".into(),
+                file_type: "mayaBinary".into(),
                 options: Some("VERS|2020|INCL|undef(|LUNI|cm|".to_string()),
                 namespace_defaulted: false,
                 file_type_defaulted: false,

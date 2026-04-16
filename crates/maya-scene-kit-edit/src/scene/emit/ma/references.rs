@@ -37,7 +37,8 @@ pub(crate) fn order_reference_file_ops_for_ma(reference_files: &[ReferenceFileOp
             return;
         }
         ordered.push(idx);
-        if let Some(children) = children_by_parent.get(&reference_files[idx].reference_node) {
+        if let Some(children) = children_by_parent.get(reference_files[idx].reference_node.as_ref())
+        {
             for child_idx in children {
                 visit_reference_subtree(
                     *child_idx,
@@ -52,7 +53,7 @@ pub(crate) fn order_reference_file_ops_for_ma(reference_files: &[ReferenceFileOp
 
     let known_nodes = reference_files
         .iter()
-        .map(|reference| reference.reference_node.as_str())
+        .map(|reference| reference.reference_node.as_ref())
         .collect::<HashSet<_>>();
     let mut children_by_parent: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, reference) in reference_files.iter().enumerate() {

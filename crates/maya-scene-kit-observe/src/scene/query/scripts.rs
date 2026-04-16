@@ -20,7 +20,7 @@ pub(crate) fn script_node_entries(
 fn collect_mb_script_entries(nodes: &[ir::RecoveredNode]) -> Vec<ScriptNodeEntry> {
     let mut entries = Vec::new();
     for node in nodes {
-        if node.node_type != "script" {
+        if node.node_type.as_ref() != "script" {
             continue;
         }
         let mut bodies = Vec::new();

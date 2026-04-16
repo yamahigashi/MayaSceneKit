@@ -96,7 +96,10 @@ impl ChunkDecoder for RefeFamilyDecoder {
                     context.registry,
                     &value_raw,
                 ) {
-                    Ok(data) => vec![DecodedEvent::RefEdit { attr_name, data }],
+                    Ok(data) => vec![DecodedEvent::RefEdit {
+                        attr_name: attr_name.into(),
+                        data,
+                    }],
                     Err(err) => vec![make_unknown_event(
                         format!("REFE.ed decode failed: {err}"),
                         &value_raw,

@@ -125,9 +125,9 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
 
         DecodeAttempt::Handled(vec![DecodedEvent::ReferenceFile {
             path,
-            reference_node,
-            namespace,
-            file_type: tail.file_type,
+            reference_node: reference_node.into(),
+            namespace: namespace.map(Into::into),
+            file_type: tail.file_type.map(Into::into),
             options: tail.options,
         }])
     }
@@ -142,9 +142,9 @@ fn decode_frdi_chunk(context: &ChunkDecodeContext<'_>) -> DecodeAttempt {
 
     DecodeAttempt::Handled(vec![DecodedEvent::ReferenceFile {
         path: fields.path,
-        reference_node: fields.reference_node,
-        namespace: Some(fields.namespace),
-        file_type: fields.file_type,
+        reference_node: fields.reference_node.into(),
+        namespace: Some(fields.namespace.into()),
+        file_type: fields.file_type.map(Into::into),
         options: fields.options,
     }])
 }
@@ -333,7 +333,7 @@ mod tests {
         };
 
         assert_eq!(path, "rig/charA_v001.mb");
-        assert_eq!(reference_node, "charARN");
+        assert_eq!(reference_node.as_ref(), "charARN");
         assert_eq!(namespace.as_deref(), Some("charA"));
         assert_eq!(file_type.as_deref(), Some("mayaBinary"));
         assert_eq!(options.as_deref(), Some("v=0"));
@@ -360,7 +360,7 @@ mod tests {
             panic!("expected reference file event");
         };
         assert_eq!(path, "rig/charA_v001.mb");
-        assert_eq!(reference_node, "charARN");
+        assert_eq!(reference_node.as_ref(), "charARN");
         assert_eq!(namespace.as_deref(), Some("charA"));
         assert_eq!(file_type.as_deref(), None);
         assert_eq!(options.as_deref(), Some("VERS|2026|"));
@@ -388,7 +388,7 @@ mod tests {
         };
 
         assert_eq!(path, "assets/example/ExampleAsset.fbx");
-        assert_eq!(reference_node, "SourceRN");
+        assert_eq!(reference_node.as_ref(), "SourceRN");
         assert_eq!(namespace.as_deref(), Some("Source"));
         assert_eq!(file_type.as_deref(), None);
         assert_eq!(options.as_deref(), Some("VERS|2020|"));
@@ -416,7 +416,7 @@ mod tests {
         };
 
         assert_eq!(path, "scenes/TestScene_0000.mb");
-        assert_eq!(reference_node, "Example:ModelRN");
+        assert_eq!(reference_node.as_ref(), "Example:ModelRN");
         assert_eq!(namespace.as_deref(), Some("Model"));
         assert_eq!(file_type.as_deref(), Some("mayaBinary"));
         assert_eq!(options.as_deref(), Some("VERS|2020|"));
@@ -444,7 +444,7 @@ mod tests {
         };
 
         assert_eq!(path, "assets/example/ExampleAsset.fbx");
-        assert_eq!(reference_node, "Import_00_Example:SourceRN");
+        assert_eq!(reference_node.as_ref(), "Import_00_Example:SourceRN");
         assert_eq!(namespace.as_deref(), Some("Source"));
         assert_eq!(file_type.as_deref(), None);
         assert_eq!(options.as_deref(), Some("VERS|2020|"));

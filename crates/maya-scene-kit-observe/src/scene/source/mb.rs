@@ -43,14 +43,14 @@ pub(crate) fn collect_mb_scene_paths(
             &mut seen,
             ScenePathEntry {
                 node_type: "reference".to_string(),
-                node_name: reference.reference_node.clone(),
+                node_name: reference.reference_node.to_string(),
                 attr: ".fn".to_string(),
                 value: reference.path.clone(),
                 meta: Some(ScenePathMeta {
                     origin: "canonical-reference-file".to_string(),
-                    short_name: Some(reference.namespace.clone()),
-                    reference_node: Some(reference.reference_node.clone()),
-                    format_hint: Some(reference.file_type.clone()),
+                    short_name: Some(reference.namespace.to_string()),
+                    reference_node: Some(reference.reference_node.to_string()),
+                    format_hint: Some(reference.file_type.to_string()),
                     reference_options: reference.options.clone(),
                     color_space: None,
                     raw_fields: vec![],
@@ -71,7 +71,7 @@ pub(crate) fn collect_mb_scene_paths(
     }
 
     for node in nodes {
-        if node.node_type != "file" {
+        if node.node_type.as_ref() != "file" {
             continue;
         }
         for attr in &node.attrs {

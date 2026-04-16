@@ -1,7 +1,10 @@
-use crate::scene::ir::{ChunkTrace, Confidence, DecodedChunkRecord, DecodedEvent, LinkOp};
+use crate::scene::ir::{
+    ChunkTrace, Confidence, DecodedChunkRecord, DecodedEvent, LinkOp, StringInterner,
+};
 
 pub(crate) fn recover_links_from_cons(decoded_chunks: &[DecodedChunkRecord]) -> Vec<LinkOp> {
     let mut links = Vec::new();
+    let mut interner = StringInterner::default();
 
     for decoded in decoded_chunks {
         if decoded.chunk_ref.form != "CONS" {
@@ -28,7 +31,7 @@ pub(crate) fn recover_links_from_cons(decoded_chunks: &[DecodedChunkRecord]) -> 
                 }
                 DecodedEvent::Relationship { kind, head, tail } => {
                     links.push(LinkOp::Relationship {
-                        kind: kind.clone(),
+                        kind: interner.intern(kind.as_ref()),
                         head: head.clone(),
                         tail: tail.clone(),
                         trace: trace.clone(),

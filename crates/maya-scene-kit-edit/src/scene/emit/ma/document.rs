@@ -137,7 +137,7 @@ pub(in crate::scene) fn render_best_effort_maya_ascii(
         for note in &node.decode_notes {
             lines.push(format!("\t//decode-note: {}", note.to_decode_note()));
         }
-        if node.node_type == "script" && distinct_script_bodies(node).len() > 1 {
+        if node.node_type.as_ref() == "script" && distinct_script_bodies(node).len() > 1 {
             lines.push(
                 "\t//decode-note: inferred attr=.b reason=multiple divergent script bodies recovered for this script node".to_string(),
             );

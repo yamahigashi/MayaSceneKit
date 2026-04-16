@@ -48,7 +48,7 @@ fn check_addattr_emission_plausibility(nodes: &[RecoveredNode]) -> Vec<NodeRecov
                 continue;
             };
             out.push(NodeRecoveryIssue {
-                node_type: node.node_type.clone(),
+                node_type: node.node_type.to_string(),
                 node_name: node.name.clone(),
                 issue: RecoveryIssue::inferred_analysis(
                     &op.attr_name,
@@ -65,7 +65,7 @@ fn collect_decode_notes(nodes: &[RecoveredNode]) -> Vec<NodeRecoveryIssue> {
     for node in nodes {
         for issue in &node.decode_notes {
             out.push(NodeRecoveryIssue {
-                node_type: node.node_type.clone(),
+                node_type: node.node_type.to_string(),
                 node_name: node.name.clone(),
                 issue: issue.clone(),
             });
@@ -112,7 +112,7 @@ fn check_duplicate_setattr_paths(nodes: &[RecoveredNode]) -> Vec<NodeRecoveryIss
                 continue;
             }
             out.push(NodeRecoveryIssue {
-                node_type: node.node_type.clone(),
+                node_type: node.node_type.to_string(),
                 node_name: node.name.clone(),
                 issue: RecoveryIssue::inferred_analysis(
                     attr_path,
@@ -131,7 +131,7 @@ fn check_duplicate_setattr_paths(nodes: &[RecoveredNode]) -> Vec<NodeRecoveryIss
 fn check_script_nodes_have_body(nodes: &[RecoveredNode]) -> Vec<NodeRecoveryIssue> {
     let mut out = Vec::new();
     for node in nodes {
-        if node.node_type != "script" {
+        if node.node_type.as_ref() != "script" {
             continue;
         }
         let has_script_body = node.attrs.iter().any(|attr| {
@@ -148,7 +148,7 @@ fn check_script_nodes_have_body(nodes: &[RecoveredNode]) -> Vec<NodeRecoveryIssu
             continue;
         }
         out.push(NodeRecoveryIssue {
-            node_type: node.node_type.clone(),
+            node_type: node.node_type.to_string(),
             node_name: node.name.clone(),
             issue: RecoveryIssue::inferred_analysis(
                 ".b",
@@ -168,7 +168,7 @@ fn check_reference_semantic_fallbacks(
         if reference.namespace_defaulted {
             out.push(NodeRecoveryIssue {
                 node_type: "reference".to_string(),
-                node_name: reference.reference_node.clone(),
+                node_name: reference.reference_node.to_string(),
                 issue: RecoveryIssue::inferred_analysis_with_provenance(
                     ".fn",
                     "reference namespace defaulted from reference node",
@@ -179,7 +179,7 @@ fn check_reference_semantic_fallbacks(
         if reference.file_type_defaulted {
             out.push(NodeRecoveryIssue {
                 node_type: "reference".to_string(),
-                node_name: reference.reference_node.clone(),
+                node_name: reference.reference_node.to_string(),
                 issue: RecoveryIssue::inferred_analysis_with_provenance(
                     ".fn",
                     "reference file type defaulted to mayaBinary",
@@ -190,7 +190,7 @@ fn check_reference_semantic_fallbacks(
         if reference.path_inferred_from_parent_include {
             out.push(NodeRecoveryIssue {
                 node_type: "reference".to_string(),
-                node_name: reference.reference_node.clone(),
+                node_name: reference.reference_node.to_string(),
                 issue: RecoveryIssue::inferred_analysis_with_provenance(
                     ".fn",
                     "relative nested reference path inferred from parent include path",
@@ -211,7 +211,7 @@ mod tests {
     fn analyzer_reports_script_nodes_without_body_attr() {
         let issues = check_script_nodes_have_body(&[
             RecoveredNode {
-                node_type: "script".to_string(),
+                node_type: "script".into(),
                 name: "missingScriptBody".to_string(),
                 parent: None,
                 uid: None,
@@ -220,7 +220,7 @@ mod tests {
                 create_flags: Default::default(),
             },
             RecoveredNode {
-                node_type: "script".to_string(),
+                node_type: "script".into(),
                 name: "sharedScript".to_string(),
                 parent: None,
                 uid: None,

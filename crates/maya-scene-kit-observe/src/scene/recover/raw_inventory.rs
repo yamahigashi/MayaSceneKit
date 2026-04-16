@@ -7,7 +7,7 @@ use crate::{
     },
     scene::{
         decode::dispatcher::DecoderDispatcher,
-        ir::{ChunkRef, DecodedChunkRecord, RawChunkRecord},
+        ir::{ChunkRef, DecodedChunkRecord, DecodedEvent, RawChunkRecord, StringInterner},
         schema::SchemaRegistry,
     },
 };
@@ -80,25 +80,56 @@ pub(crate) fn collect_decoded_chunk_records(
     registry: Arc<SchemaRegistry>,
 ) -> Vec<DecodedChunkRecord> {
     let dispatcher = DecoderDispatcher::new(registry);
-    raw_chunks
-        .iter()
-        .map(|raw| {
-            let dispatch = dispatcher.decode_with_quality(
-                &raw.chunk_ref.form,
-                &raw.chunk_ref.tag,
-                raw.payload(raw_source),
-                raw.chunk_ref.node_offset,
-                raw.chunk_ref.chunk_aux,
-                raw.chunk_ref.child_alignment,
-                raw.chunk_ref.child_header_size,
-                Some(raw.chunk_ref.form.as_str()),
-                raw.chunk_ref.parent_tag.as_deref(),
-            );
-            DecodedChunkRecord {
-                chunk_ref: raw.chunk_ref.clone(),
-                events: dispatch.events,
-                quality: dispatch.quality,
+    let mut interner = StringInterner::default();
+    let mut decoded = Vec::with_capacity(raw_chunks.len());
+
+    for raw in raw_chunks {
+        let mut dispatch = dispatcher.decode_with_quality(
+            &raw.chunk_ref.form,
+            &raw.chunk_ref.tag,
+            raw.payload(raw_source),
+            raw.chunk_ref.node_offset,
+            raw.chunk_ref.chunk_aux,
+            raw.chunk_ref.child_alignment,
+            raw.chunk_ref.child_header_size,
+            Some(raw.chunk_ref.form.as_str()),
+            raw.chunk_ref.parent_tag.as_deref(),
+        );
+        intern_decoded_events(&mut dispatch.events, &mut interner);
+        decoded.push(DecodedChunkRecord {
+            chunk_ref: raw.chunk_ref.clone(),
+            events: dispatch.events,
+            quality: dispatch.quality,
+        });
+    }
+
+    decoded
+}
+
+fn intern_decoded_events(events: &mut [DecodedEvent], interner: &mut StringInterner) {
+    for event in events {
+        match event {
+            DecodedEvent::Relationship { kind, .. } => {
+                *kind = interner.intern(kind.as_ref());
             }
-        })
-        .collect()
+            DecodedEvent::RefEdit { attr_name, .. } => {
+                *attr_name = interner.intern(attr_name.as_ref());
+            }
+            DecodedEvent::ReferenceFile {
+                reference_node,
+                namespace,
+                file_type,
+                ..
+            } => {
+                *reference_node = interner.intern(reference_node.as_ref());
+                if let Some(namespace) = namespace {
+                    *namespace = interner.intern(namespace.as_ref());
+                }
+                if let Some(file_type) = file_type {
+                    *file_type = interner.intern(file_type.as_ref());
+                }
+            }
+            _ => {}
+        }
+    }
 }

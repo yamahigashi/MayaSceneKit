@@ -1,10 +1,11 @@
 use super::{
     AddAttrOp, ChunkTrace, Confidence, CreateNodeFlags, RecoveryIssue, RefEditData, SetAttrOp,
+    SharedStr,
 };
 
 #[derive(Debug, Clone)]
 pub struct RecoveredNode {
-    pub node_type: String,
+    pub node_type: SharedStr,
     pub name: String,
     pub parent: Option<String>,
     pub uid: Option<String>,
@@ -18,7 +19,7 @@ pub enum RecoveredAttrOp {
     AddAttr(AddAttrOp),
     SetAttr(SetAttrOp),
     RefEdit {
-        attr_name: String,
+        attr_name: SharedStr,
         data: RefEditData,
     },
 }
@@ -53,7 +54,7 @@ pub enum LinkOp {
         confidence: Confidence,
     },
     Relationship {
-        kind: String,
+        kind: SharedStr,
         head: String,
         tail: Vec<String>,
         trace: Option<ChunkTrace>,
@@ -64,9 +65,9 @@ pub enum LinkOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceFileOp {
     pub path: String,
-    pub namespace: String,
-    pub reference_node: String,
-    pub file_type: String,
+    pub namespace: SharedStr,
+    pub reference_node: SharedStr,
+    pub file_type: SharedStr,
     pub options: Option<String>,
     pub namespace_defaulted: bool,
     pub file_type_defaulted: bool,

@@ -4,7 +4,7 @@ use crate::scene::{
     ir::{
         ChunkTrace, Confidence, CreateNodeFlags, DecodedChunkRecord, DecodedEvent, FlagState,
         RecoveredAttrOp, RecoveredNode, RecoveryIssue, RecoveryIssueKind, SemanticProvenance,
-        SetAttrOp, SetAttrValue,
+        SetAttrOp, SetAttrValue, StringInterner,
     },
     schema::typeid_map::TypeIdTypeNameResolver,
 };
@@ -22,6 +22,7 @@ pub(crate) fn recover_nodes(
     let mut node_create_flags: HashMap<NodeKey, CreateNodeFlags> = HashMap::new();
     let mut node_candidates_by_base: HashMap<NodeBaseKey, Vec<NodeKey>> = HashMap::new();
     let mut duplicate_node_keys_noted: HashSet<NodeKey> = HashSet::new();
+    let mut interner = StringInterner::default();
     let mut cursor = 0usize;
 
     while cursor < decoded_chunks.len() {
@@ -115,7 +116,7 @@ pub(crate) fn recover_nodes(
                     }),
                     DecodedEvent::RefEdit { attr_name, data } => {
                         attrs.push(RecoveredAttrOp::RefEdit {
-                            attr_name: attr_name.clone(),
+                            attr_name: interner.intern(attr_name.as_ref()),
                             data: data.clone(),
                         })
                     }
@@ -243,7 +244,7 @@ pub(crate) fn recover_nodes(
         .map(|key| {
             let (node_type, name, parent, uid, _) = key.clone();
             RecoveredNode {
-                node_type,
+                node_type: interner.intern_owned(node_type),
                 name,
                 parent,
                 uid,
