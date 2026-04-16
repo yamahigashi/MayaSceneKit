@@ -98,7 +98,11 @@ impl ChunkDecoder for ConsFamilyDecoder {
                         "cons_decoder",
                     )]
                 } else {
-                    vec![DecodedEvent::Relationship { kind, head, tail }]
+                    vec![DecodedEvent::Relationship {
+                        kind: kind.into(),
+                        head,
+                        tail,
+                    }]
                 }
             }
             _ => vec![make_unknown_event(

@@ -2,13 +2,16 @@ use crate::{
     reference_semantics::{
         default_reference_file_type, derive_parent_reference_node, parse_reference_include_path,
     },
-    scene::ir::{ChunkTrace, Confidence, DecodedChunkRecord, DecodedEvent, ReferenceFileOp},
+    scene::ir::{
+        ChunkTrace, Confidence, DecodedChunkRecord, DecodedEvent, ReferenceFileOp, StringInterner,
+    },
 };
 
 pub(crate) fn recover_reference_files(
     decoded_chunks: &[DecodedChunkRecord],
 ) -> Vec<ReferenceFileOp> {
     let mut out = Vec::new();
+    let mut interner = StringInterner::default();
     for decoded in decoded_chunks {
         let trace = Some(ChunkTrace {
             form: decoded.chunk_ref.form.clone(),
@@ -31,11 +34,15 @@ pub(crate) fn recover_reference_files(
             };
             out.push(ReferenceFileOp {
                 path: path.clone(),
-                namespace: namespace.clone().unwrap_or_else(|| reference_node.clone()),
-                reference_node: reference_node.clone(),
+                namespace: namespace
+                    .as_ref()
+                    .map(|value| interner.intern(value.as_ref()))
+                    .unwrap_or_else(|| interner.intern(reference_node.as_ref())),
+                reference_node: interner.intern(reference_node.as_ref()),
                 file_type: file_type
-                    .clone()
-                    .unwrap_or_else(|| default_reference_file_type().to_string()),
+                    .as_ref()
+                    .map(|value| interner.intern(value.as_ref()))
+                    .unwrap_or_else(|| interner.intern(default_reference_file_type())),
                 options: options.clone(),
                 namespace_defaulted: namespace.is_none(),
                 file_type_defaulted: file_type.is_none(),
@@ -118,7 +125,7 @@ pub(crate) fn normalize_nested_reference_paths(reference_files: &mut [ReferenceF
         let Some(parent_node) = derive_parent_reference_node(&op.reference_node) else {
             continue;
         };
-        let Some(parent_include) = include_by_node.get(&parent_node) else {
+        let Some(parent_include) = include_by_node.get(parent_node.as_str()) else {
             continue;
         };
         if path_is_absolute(parent_include) {
@@ -168,11 +175,12 @@ pub(crate) fn reference_file_op_from_entry(
         Confidence::Inferred
     };
 
+    let mut interner = StringInterner::default();
     Some(ReferenceFileOp {
         path: entry.value,
-        namespace,
-        reference_node,
-        file_type,
+        namespace: interner.intern_owned(namespace),
+        reference_node: interner.intern_owned(reference_node),
+        file_type: interner.intern_owned(file_type),
         options,
         namespace_defaulted: meta.short_name.is_none(),
         file_type_defaulted: meta.format_hint.is_none(),

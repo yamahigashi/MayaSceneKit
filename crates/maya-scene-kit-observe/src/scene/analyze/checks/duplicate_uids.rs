@@ -21,7 +21,7 @@ pub(crate) fn check_duplicate_uids(nodes: &[RecoveredNode]) -> Vec<NodeRecoveryI
             continue;
         }
         out.push(NodeRecoveryIssue {
-            node_type: node.node_type.clone(),
+            node_type: node.node_type.to_string(),
             node_name: node.name.clone(),
             issue: RecoveryIssue::inferred_analysis(
                 "<uid>",

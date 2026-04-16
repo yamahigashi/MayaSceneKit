@@ -1,4 +1,4 @@
-use super::{CreateNodeFlags, UnknownEvent};
+use super::{CreateNodeFlags, SharedStr, UnknownEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefEditGroupSource {
@@ -73,7 +73,7 @@ pub enum DecodedEvent {
         mode: u8,
     },
     Relationship {
-        kind: String,
+        kind: SharedStr,
         head: String,
         tail: Vec<String>,
     },
@@ -81,14 +81,14 @@ pub enum DecodedEvent {
         target: String,
     },
     RefEdit {
-        attr_name: String,
+        attr_name: SharedStr,
         data: RefEditData,
     },
     ReferenceFile {
         path: String,
-        reference_node: String,
-        namespace: Option<String>,
-        file_type: Option<String>,
+        reference_node: SharedStr,
+        namespace: Option<SharedStr>,
+        file_type: Option<SharedStr>,
         options: Option<String>,
     },
     Unknown(UnknownEvent),

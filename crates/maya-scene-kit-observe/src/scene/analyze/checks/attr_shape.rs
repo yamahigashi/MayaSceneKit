@@ -18,7 +18,7 @@ pub(crate) fn check_attr_value_shape_plausibility(
                     values,
                 } if *declared_count != values.len() => {
                     out.push(NodeRecoveryIssue {
-                        node_type: node.node_type.clone(),
+                        node_type: node.node_type.to_string(),
                         node_name: node.name.clone(),
                         issue: RecoveryIssue::inferred_analysis(
                             &op.attr_name_or_path,
@@ -39,7 +39,7 @@ pub(crate) fn check_attr_value_shape_plausibility(
                         .unwrap_or(false);
                     if invalid {
                         out.push(NodeRecoveryIssue {
-                            node_type: node.node_type.clone(),
+                            node_type: node.node_type.to_string(),
                             node_name: node.name.clone(),
                             issue: RecoveryIssue::inferred_analysis(
                                 &op.attr_name_or_path,

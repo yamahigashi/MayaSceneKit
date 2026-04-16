@@ -13,10 +13,10 @@ pub(crate) fn check_refedit_group_counts(nodes: &[RecoveredNode]) -> Vec<NodeRec
                     continue;
                 }
                 out.push(NodeRecoveryIssue {
-                    node_type: node.node_type.clone(),
+                    node_type: node.node_type.to_string(),
                     node_name: node.name.clone(),
                     issue: RecoveryIssue::inferred_analysis(
-                        attr_name,
+                        attr_name.as_ref(),
                         format!(
                             "reference edit group count mismatch: group='{}' expected={} actual={actual}",
                             group.name, group.expected_count
@@ -26,9 +26,12 @@ pub(crate) fn check_refedit_group_counts(nodes: &[RecoveredNode]) -> Vec<NodeRec
             }
             if let Some(unknown_tail) = &data.unknown_tail {
                 out.push(NodeRecoveryIssue {
-                    node_type: node.node_type.clone(),
+                    node_type: node.node_type.to_string(),
                     node_name: node.name.clone(),
-                    issue: RecoveryIssue::inferred_refedit_unknown_tail(attr_name, unknown_tail),
+                    issue: RecoveryIssue::inferred_refedit_unknown_tail(
+                        attr_name.as_ref(),
+                        unknown_tail,
+                    ),
                 });
             }
         }

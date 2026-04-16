@@ -3,7 +3,10 @@ mod canonical;
 mod diagnostics;
 mod events;
 mod raw;
+mod shared;
 mod trace;
+
+pub(crate) use self::shared::StringInterner;
 
 pub use self::{
     attrs::{
@@ -23,5 +26,6 @@ pub use self::{
         RefEditRecord, RefEditUnknownTail,
     },
     raw::{DecodedChunkRecord, RawChunkRecord, SceneArtifacts},
+    shared::SharedStr,
     trace::{ChunkRef, ChunkTrace, Confidence},
 };
