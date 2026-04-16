@@ -10,7 +10,10 @@ use maya_scene_kit_formats::mb::{
 
 use crate::{
     reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
-    scene::{PathKind, ScenePathEntry, ScenePathMeta, decode::families::decode_crea_payload},
+    scene::{
+        decode::families::decode_crea_payload,
+        paths::{PathKind, ScenePathEntry, ScenePathMeta},
+    },
 };
 
 pub(crate) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKind {
@@ -292,30 +295,37 @@ fn map_mb_owner_trace_meta_ref(trace: &MbRtftOwnerTrace) -> ScenePathMeta {
     }
 }
 
-fn decode_rtft_attr_name(payload: &[u8]) -> Option<String> {
-    let attr_end = payload.iter().position(|b| *b == 0)?;
-    Some(String::from_utf8_lossy(&payload[..attr_end]).to_string())
-}
-
-fn decode_crea_name(payload: &[u8]) -> Option<String> {
-    decode_crea_payload(payload).name
-}
-
 fn push_unique_scene_path_entry(
     out: &mut Vec<ScenePathEntry>,
     seen: &mut HashSet<u64>,
     entry: ScenePathEntry,
 ) {
-    if seen.insert(scene_path_entry_fingerprint(&entry)) {
-        out.push(entry);
-    }
-}
-
-fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
     let mut hasher = DefaultHasher::new();
     entry.node_type.hash(&mut hasher);
     entry.node_name.hash(&mut hasher);
     entry.attr.hash(&mut hasher);
     entry.value.hash(&mut hasher);
-    hasher.finish()
+    if let Some(meta) = &entry.meta {
+        meta.origin.hash(&mut hasher);
+        meta.trace_form.hash(&mut hasher);
+        meta.trace_tag.hash(&mut hasher);
+        meta.trace_node_offset.hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    if seen.insert(key) {
+        out.push(entry);
+    }
+}
+
+fn decode_rtft_attr_name(payload: &[u8]) -> Option<String> {
+    let chunks = payload.split(|byte| *byte == 0).collect::<Vec<_>>();
+    chunks
+        .iter()
+        .rev()
+        .find(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).to_string())
+}
+
+fn decode_crea_name(payload: &[u8]) -> Option<String> {
+    decode_crea_payload(payload).name
 }

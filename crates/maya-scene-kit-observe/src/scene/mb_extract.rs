@@ -4,7 +4,7 @@ use maya_scene_kit_formats::mb::render_requires_entry;
 
 use crate::{
     mb::{MayaBinaryFile, extract_head_metadata},
-    scene::{SceneDumpRequireEntry, SceneDumpRequireKind},
+    scene::dump::{SceneDumpRequireEntry, SceneDumpRequireKind},
 };
 
 pub(super) fn extract_requires_from_mb(mb: &MayaBinaryFile) -> Vec<String> {

@@ -1,4 +1,4 @@
-use maya_scene_kit_observe::scene::NumericValue;
+use maya_scene_kit_observe::scene::model::NumericValue;
 
 pub(crate) fn escape_ma_string(text: &str) -> String {
     maya_scene_kit_formats::ma::text::escape_ma_string(text)
@@ -27,7 +27,7 @@ pub(crate) fn format_numeric_value(value: NumericValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use maya_scene_kit_observe::scene::NumericValue;
+    use maya_scene_kit_observe::scene::model::NumericValue;
 
     use super::{format_number, format_numeric_value};
 

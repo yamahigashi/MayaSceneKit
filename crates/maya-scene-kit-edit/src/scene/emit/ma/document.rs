@@ -3,9 +3,10 @@ use std::{
     path::Path,
 };
 
-use maya_scene_kit_observe::scene::{
-    AngularAttrKind, RecoveredAttrOp, RecoveredNode, SceneModel, SetAttrValue,
+use maya_scene_kit_observe::scene::model::{
+    RecoveredAttrOp, RecoveredHeader, RecoveredNode, SceneModel, SetAttrValue,
 };
+use maya_scene_kit_observe::scene::recovery::AngularAttrKind;
 
 use super::{
     add_attr::render_add_attr_op,
@@ -16,10 +17,10 @@ use super::{
     set_attr::{SetAttrRenderContext, render_set_attr_op_with_render_context},
     units::{build_angular_render_unit, build_time_render_context},
 };
-use crate::mb::{HeadMetadata, MbRequiresEntry};
+use crate::mb::MbRequiresEntry;
 
 pub(in crate::scene) fn render_best_effort_maya_ascii(
-    metadata: &HeadMetadata,
+    metadata: &RecoveredHeader,
     scene_model: &SceneModel,
     source_path: &Path,
     output_name: &str,

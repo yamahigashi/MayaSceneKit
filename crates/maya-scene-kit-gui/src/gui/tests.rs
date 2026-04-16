@@ -22,10 +22,15 @@ use maya_scene_kit_edit::scene::{
     PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem,
     ValidationState,
 };
-use maya_scene_kit_observe::scene::{
+use maya_scene_kit_observe::scene::{LoadOptions, collect_scene_paths};
+use maya_scene_kit_observe::scene::core::SceneFormat;
+use maya_scene_kit_observe::scene::dump::SceneDumpRequireKind;
+use maya_scene_kit_observe::scene::evidence::{
     ExecutionLanguage, ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind,
-    ExecutionTrigger, LoadOptions, PathKind, SceneDumpRequireKind, SceneFormat, ScenePathEntry,
-    ScenePathValueStyle, ScenePathsReport, collect_scene_paths,
+    ExecutionTrigger,
+};
+use maya_scene_kit_observe::scene::paths::{
+    PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport,
 };
 use tempfile::tempdir;
 

@@ -1,46 +1,51 @@
-use std::{collections::HashMap, path::Path};
+#![allow(unused_imports)]
 
-pub use crate::scene::{
-    ir::{
-        AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, ChunkRef, ChunkTrace, Confidence,
-        CreateNodeFlags, DecodeQualityRecord, FlagState, LinkOp, NodeRecoveryIssue, NumericValue,
-        RawChunkRecord, RecoveredAttrOp, RecoveredNode, RecoveryIssue, RecoveryIssueKind,
-        RefEditData, RefEditGroup, RefEditGroupSource, RefEditParseStats, RefEditRecord,
-        RefEditUnknownTail, ReferenceFileOp, SceneArtifacts, SceneBuildOutput, SceneModel,
-        SchemaDecodeAttempt, SchemaDecodeAttemptResult, SelectBlock, SelectBlockNote,
-        SelectBlockOp, SemanticProvenance, SetAttrOp, SetAttrValue, SkinWeightPair, SkinWeightRow,
-        TimeValuePair, TypeIdResolverStatus,
-    },
-    schema::node_semantics::AngularAttrKind,
+use std::{collections::HashMap, path::Path, sync::Arc};
+
+pub use crate::scene::forensics::{
+    ChunkRef, ChunkTrace, Confidence, DecodeQualityRecord, NodeRecoveryIssue, RecoveryForensics,
+    RecoveryIssue, RecoveryIssueKind, RawChunkRecord, SchemaDecodeAttempt, SchemaDecodeAttemptResult,
+    SemanticProvenance, TypeIdResolverStatus,
 };
+pub use crate::scene::model::{
+    AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, CreateNodeFlags, FlagState, LinkOp,
+    NumericValue, RecoveredAttrOp, RecoveredHeader, RecoveredNode, RecoveredScene, RefEditData,
+    RefEditGroup, RefEditGroupSource, RefEditParseStats, RefEditRecord, RefEditUnknownTail,
+    ReferenceFileOp, SelectBlock, SelectBlockNote, SelectBlockOp, SetAttrOp, SetAttrValue,
+    SkinWeightPair, SkinWeightRow, TimeValuePair,
+};
+pub use crate::scene::schema::node_semantics::AngularAttrKind;
+
 use crate::{
     addattr_semantics::{AddAttrAngularSemantics, add_attr_semantics},
-    mb::{HeadMetadata, extract_head_metadata},
+    mb::extract_head_metadata,
     scene::{
         LoadOptions, SceneFormat, SceneToolError,
         analyze::analyze_scene_model,
+        forensics::DecodeQualityRecord as PublicDecodeQualityRecord,
+        ir::SceneBuildOutput,
         mb_read_session::MbReadSession,
-        runtime_assets::RuntimeAssets,
-        schema::node_semantics::{
-            AngularAttrKind as SchemaAngularAttrKind,
-            node_angular_attr_rules_for_node_type_with_registry,
+        schema::{
+            SchemaContext,
+            node_semantics::{
+                AngularAttrKind as SchemaAngularAttrKind,
+                node_angular_attr_rules_for_node_type_with_registry,
+            },
         },
     },
 };
 
 #[derive(Debug, Clone)]
 pub struct MbRecoveryBundle {
-    pub header: HeadMetadata,
-    pub build: crate::scene::ir::SceneBuildOutput,
+    pub header: RecoveredHeader,
+    pub scene: RecoveredScene,
     pub issues: Vec<NodeRecoveryIssue>,
+    pub forensics: RecoveryForensics,
     pub angular_attrs_by_node: HashMap<String, HashMap<String, SchemaAngularAttrKind>>,
 }
 
 pub fn validate_additional_node_info_paths(options: &LoadOptions) -> Result<(), SceneToolError> {
-    let assets = RuntimeAssets::from_schema_inputs(&options.schema_inputs());
-    assets.validate_schema_inputs()?;
-    assets.build_typeid_typename_resolver()?;
-    Ok(())
+    SchemaContext::from_inputs(&options.schema_inputs()).map(|_| ())
 }
 
 pub fn recover_mb_scene(
@@ -56,28 +61,56 @@ pub fn recover_mb_scene(
         });
     }
 
-    let session =
-        MbReadSession::load_raw(path, &options.schema_inputs(), options.mb_parse_budget())?;
+    let schema_context = SchemaContext::from_inputs(&options.schema_inputs())?;
+    let session = MbReadSession::load_raw(
+        path,
+        Arc::new(schema_context.clone()),
+        options.mb_parse_budget(),
+    )?;
     let build = session.build()?;
-    let issues = analyze_scene_model(&build.scene, &build.artifacts);
-    let angular_attrs_by_node = build_node_angular_attrs(
-        &build.scene.nodes,
-        &RuntimeAssets::from_schema_inputs(&options.schema_inputs()),
-    );
 
     Ok(MbRecoveryBundle {
-        header: extract_head_metadata(&session.mb),
-        build: build.clone(),
-        issues,
-        angular_attrs_by_node,
+        header: RecoveredHeader::from(extract_head_metadata(&session.mb)),
+        scene: RecoveredScene::from_scene_model(build.scene.clone()),
+        issues: analyze_scene_model(&build.scene, &build.artifacts)
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        forensics: recovery_forensics_from_build(build),
+        angular_attrs_by_node: build_node_angular_attrs(&build.scene.nodes, &schema_context),
     })
 }
 
+fn recovery_forensics_from_build(build: &SceneBuildOutput) -> RecoveryForensics {
+    let raw_chunks = build
+        .artifacts
+        .raw_chunks
+        .iter()
+        .map(|chunk| RawChunkRecord {
+            chunk_ref: chunk.chunk_ref.clone().into(),
+            payload: chunk.payload(build.artifacts.raw_source.as_ref()).to_vec(),
+        })
+        .collect();
+    let decode_qualities = build
+        .artifacts
+        .decode_qualities
+        .iter()
+        .cloned()
+        .map(PublicDecodeQualityRecord::from)
+        .collect();
+
+    RecoveryForensics {
+        raw_chunks,
+        decode_qualities,
+        typeid_resolver_status: build.typeid_resolver_status.clone().into(),
+    }
+}
+
 fn build_node_angular_attrs(
-    nodes: &[crate::scene::ir::RecoveredNode],
-    assets: &RuntimeAssets,
-) -> HashMap<String, HashMap<String, AngularAttrKind>> {
-    let registry = assets.registry();
+    nodes: &[RecoveredNode],
+    schema_context: &SchemaContext,
+) -> HashMap<String, HashMap<String, SchemaAngularAttrKind>> {
+    let registry = schema_context.registry();
     nodes
         .iter()
         .map(|node| {
@@ -89,7 +122,7 @@ fn build_node_angular_attrs(
 
             let mut angle_children_by_parent: HashMap<String, usize> = HashMap::new();
             for op in &node.attrs {
-                let crate::scene::ir::RecoveredAttrOp::AddAttr(add_attr) = op else {
+                let RecoveredAttrOp::AddAttr(add_attr) = op else {
                     continue;
                 };
                 if !matches!(
@@ -100,10 +133,10 @@ fn build_node_angular_attrs(
                 }
 
                 if let Some(token) = normalize_attr_leaf_token(&add_attr.short_name) {
-                    attrs.insert(token, AngularAttrKind::Scalar);
+                    attrs.insert(token, SchemaAngularAttrKind::Scalar);
                 }
                 if let Some(token) = normalize_attr_leaf_token(&add_attr.long_name) {
-                    attrs.insert(token, AngularAttrKind::Scalar);
+                    attrs.insert(token, SchemaAngularAttrKind::Scalar);
                 }
                 if let Some(parent) = &add_attr.parent {
                     if let Some(parent_token) = normalize_attr_leaf_token(parent) {
@@ -114,7 +147,7 @@ fn build_node_angular_attrs(
 
             for (parent, count) in angle_children_by_parent {
                 if count >= 2 {
-                    attrs.insert(parent, AngularAttrKind::Vector3);
+                    attrs.insert(parent, SchemaAngularAttrKind::Vector3);
                 }
             }
 

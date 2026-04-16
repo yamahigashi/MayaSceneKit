@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::scene::SceneFormat;
+use crate::scene::core::SceneFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MbInspectOptions {

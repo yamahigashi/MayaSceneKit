@@ -4,6 +4,7 @@ use crate::scene::ir::NumericValue;
 
 pub(super) mod addattr_tokens;
 mod builtin;
+pub(crate) mod context;
 mod embedded;
 mod eval;
 mod external;
@@ -24,6 +25,7 @@ pub(in crate::scene) use self::lookup::lookup_chunk_schema;
 #[cfg(all(test, doctest))]
 pub(in crate::scene) use self::lookup::lookup_chunk_schema_with_context;
 pub(in crate::scene) use self::{
+    context::{SchemaContext, SchemaInputs},
     eval::{
         decode_fields_with_schema, field_bytes, field_numbers, field_text, field_text_values,
         field_u8, field_u32,

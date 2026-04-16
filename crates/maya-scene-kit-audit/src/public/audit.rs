@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use maya_scene_kit_observe::scene::{
+use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
+use maya_scene_kit_observe::scene::evidence::{
     DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionOrigin,
-    ExecutionUnitSummary, SceneDigestSet, SceneFormat, UnknownSemanticFact, ValidationState,
+    ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
 };
 use serde::Serialize;
 

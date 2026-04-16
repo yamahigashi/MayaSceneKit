@@ -63,7 +63,7 @@ pub use self::{
 };
 
 pub fn configure_additional_node_info_paths(paths: &[PathBuf]) -> Result<(), SceneToolError> {
-    maya_scene_kit_observe::scene::validate_additional_node_info_paths(
+    maya_scene_kit_observe::scene::recovery::validate_additional_node_info_paths(
         &maya_scene_kit_observe::scene::LoadOptions::default()
             .with_additional_node_info_paths(paths.to_vec()),
     )
@@ -167,7 +167,7 @@ pub fn preview_replace_scene_path_candidates(
 }
 
 pub fn preview_replace_scene_path_candidates_in_report_with_options(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     rules: &[PathReplaceRule],
     options: &MaterializeOptions,
 ) -> Result<PathReplaceCandidatePreview, SceneToolError> {
@@ -176,7 +176,7 @@ pub fn preview_replace_scene_path_candidates_in_report_with_options(
 }
 
 pub fn preview_replace_scene_path_candidates_in_report(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     rules: &[PathReplaceRule],
 ) -> Result<PathReplaceCandidatePreview, SceneToolError> {
     preview_replace_scene_path_candidates_in_report_with_options(
@@ -226,7 +226,7 @@ pub fn preview_replace_scene_paths_with_overrides(
 }
 
 pub fn preview_replace_scene_paths_with_overrides_in_report_with_options(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     overrides: &[PathReplaceOverride],
     options: &MaterializeOptions,
 ) -> Result<PathReplacePreview, SceneToolError> {
@@ -235,7 +235,7 @@ pub fn preview_replace_scene_paths_with_overrides_in_report_with_options(
 }
 
 pub fn preview_replace_scene_paths_with_overrides_in_report(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     overrides: &[PathReplaceOverride],
 ) -> Result<PathReplacePreview, SceneToolError> {
     preview_replace_scene_paths_with_overrides_in_report_with_options(
@@ -266,7 +266,7 @@ pub fn stage_replace_scene_paths_with_overrides(
 }
 
 pub fn stage_replace_scene_paths_with_overrides_in_report_with_options(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     overrides: &[PathReplaceOverride],
     options: &MaterializeOptions,
 ) -> Result<PathReplaceStageResult, SceneToolError> {
@@ -275,7 +275,7 @@ pub fn stage_replace_scene_paths_with_overrides_in_report_with_options(
 }
 
 pub fn stage_replace_scene_paths_with_overrides_in_report(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     overrides: &[PathReplaceOverride],
 ) -> Result<PathReplaceStageResult, SceneToolError> {
     stage_replace_scene_paths_with_overrides_in_report_with_options(
@@ -350,7 +350,7 @@ pub fn stage_scene_edits(
 }
 
 pub fn stage_scene_edits_in_report_with_bytes_with_options(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     bytes: &[u8],
     clean_targets: &[ExecutionCleanTarget],
     path_owner_delete_targets: &[PathOwnerDeleteTarget],
@@ -365,7 +365,7 @@ pub fn stage_scene_edits_in_report_with_bytes_with_options(
 }
 
 pub fn stage_scene_edits_in_report_with_bytes(
-    report: &maya_scene_kit_observe::scene::ScenePathsReport,
+    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
     bytes: &[u8],
     clean_targets: &[ExecutionCleanTarget],
     path_owner_delete_targets: &[PathOwnerDeleteTarget],

@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use maya_scene_kit_formats::ma::selective::{self, RawMaSelectiveSections};
@@ -10,11 +10,14 @@ use maya_scene_kit_formats::mel::{MelParseBudget, first_mel_parse_budget_limit};
 use crate::{
     mb::MbParseBudget,
     scene::{
-        DependencyFact, ExecutionUnitSummary, PathKind, SceneDigestSet, SceneDumpRequireEntry,
-        SceneFormat, ScenePathEntry, SceneToolError, ScriptNodeEntry, ValidationState,
-        context::SchemaInputs, mb_read_session::MbReadSession, ops, query,
-        execution::ExecutionSurface,
-        observe::{ObservedExecutionCatalog, ObservedExecutionSurface, catalog},
+        DependencyFact, ExecutionUnitSummary, SceneDigestSet, SceneToolError,
+        ValidationState, mb_read_session::MbReadSession, ops, query,
+        dump::SceneDumpRequireEntry,
+        execution::{ExecutionSurface, ObservedExecutionCatalog, ObservedExecutionSurface, catalog},
+        paths::{PathKind, ScenePathEntry},
+        core::SceneFormat,
+        schema::{SchemaContext, SchemaInputs},
+        scripts::ScriptNodeEntry,
     },
 };
 
@@ -145,15 +148,29 @@ impl LoadOptions {
 
 pub struct Loader {
     options: LoadOptions,
+    schema_context: OnceLock<Result<Arc<SchemaContext>, String>>,
 }
 
 impl Loader {
     pub fn new(options: LoadOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            schema_context: OnceLock::new(),
+        }
     }
 
     fn observe(&self, input: SourceInput<'_>) -> Result<ObservationBundle, SceneToolError> {
-        ObservationBundle::load(input, &self.options)
+        ObservationBundle::load(input, &self.options, self.schema_context()?)
+    }
+
+    fn schema_context(&self) -> Result<&Arc<SchemaContext>, SceneToolError> {
+        match self
+            .schema_context
+            .get_or_init(|| SchemaContext::from_inputs(&self.options.schema_inputs()).map(Arc::new).map_err(|err| err.to_string()))
+        {
+            Ok(context) => Ok(context),
+            Err(err) => Err(SceneToolError::Config(err.clone())),
+        }
     }
 
     pub fn observe_path(
@@ -214,6 +231,7 @@ impl ObservationBundle {
     pub(crate) fn load(
         input: SourceInput<'_>,
         options: &LoadOptions,
+        schema_context: &Arc<SchemaContext>,
     ) -> Result<Self, SceneToolError> {
         let path = input.path;
         let scene_format = match input.scene_format {
@@ -281,12 +299,12 @@ impl ObservationBundle {
                     Some(bytes) => MbReadSession::load_raw_bytes(
                         path,
                         bytes,
-                        &options.schema_inputs(),
+                        Arc::clone(schema_context),
                         &options.mb_parse_budget,
                     )?,
                     None => MbReadSession::load_raw(
                         path,
-                        &options.schema_inputs(),
+                        Arc::clone(schema_context),
                         &options.mb_parse_budget,
                     )?,
                 };
@@ -332,7 +350,7 @@ impl ObservationBundle {
         query::scripts::script_node_entries(self)
     }
 
-    pub fn scene_dump_report(&self) -> Result<crate::scene::SceneDumpReport, SceneToolError> {
+    pub fn scene_dump_report(&self) -> Result<crate::scene::dump::SceneDumpReport, SceneToolError> {
         query::dump::scene_dump_report(self)
     }
 

@@ -1,4 +1,4 @@
-use maya_scene_kit_observe::scene::{RefEditData, RefEditRecord};
+use maya_scene_kit_observe::scene::model::{RefEditData, RefEditRecord};
 
 use crate::scene::emit::ma::format::escape_ma_string;
 

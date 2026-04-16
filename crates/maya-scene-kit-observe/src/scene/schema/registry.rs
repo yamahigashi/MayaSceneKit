@@ -10,7 +10,7 @@ use super::{
     node_semantics::AngularAttrKind, refedit_loader::RefEditSchema,
     structural_attr::StructuralAttrHandlerRule,
 };
-use crate::scene::context::SchemaInputs;
+use crate::scene::schema::SchemaInputs;
 
 type ChunkSchemaCache = Mutex<HashMap<(String, String), Option<Arc<ChunkSchema>>>>;
 type NodeSemanticsMap = Arc<HashMap<String, HashMap<String, AngularAttrKind>>>;

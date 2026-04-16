@@ -11,10 +11,13 @@ use maya_scene_kit_edit::scene::{
     replace_scene_paths_with_options,
 };
 use maya_scene_kit_observe::scene::{
-    LoadOptions, Loader, MbInspectOptions, PathKind, SceneToolError,
-    collect_scene_paths_with_options, collect_script_node_entries_with_options, inspect_mb,
-    inspect_mb_with_max_parse_bytes,
+    LoadOptions, Loader, SceneToolError, collect_script_node_entries_with_options,
 };
+use maya_scene_kit_observe::scene::inspect::{
+    MbInspectOptions, inspect_mb, inspect_mb_with_max_parse_bytes,
+};
+use maya_scene_kit_observe::scene::paths::PathKind;
+use maya_scene_kit_observe::scene::{collect_scene_paths_with_options};
 use serde_json::Value;
 
 use crate::{json as json_map, schema};

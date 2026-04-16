@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::scene::{ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle};
+use crate::scene::paths::{
+    ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle,
+};
 
 fn has_windows_drive_prefix(value: &str) -> bool {
     let bytes = value.as_bytes();

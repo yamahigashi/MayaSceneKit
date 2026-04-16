@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::scene::context::SchemaInputs;
+use crate::scene::schema::SchemaInputs;
 
 #[derive(Debug, Clone)]
 pub(in crate::scene) struct SchemaPaths {

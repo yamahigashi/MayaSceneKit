@@ -399,7 +399,7 @@ fn decoded_chunk_may_contain_execution_text(decoded: &DecodedChunkRecord) -> boo
         .any(decoded_event_may_contain_execution_text)
         || matches!(
             decoded.quality,
-            crate::scene::SchemaDecodeAttemptResult::Failed
+            crate::scene::ir::SchemaDecodeAttemptResult::Failed
         )
 }
 
@@ -737,8 +737,9 @@ mod tests {
         contains_any_audit_marker, decoded_chunk_may_contain_execution_text,
     };
     use crate::scene::{
-        ExecutionSurfaceKind, SetAttrOp, SetAttrValue,
+        ExecutionSurfaceKind,
         ir::{ChunkRef, CreateNodeFlags, DecodedChunkRecord, DecodedEvent},
+        model::{SetAttrOp, SetAttrValue},
     };
 
     fn repo_root() -> PathBuf {
@@ -794,7 +795,7 @@ mod tests {
         assert!(coverage.coverage_issues.iter().any(|issue| {
             matches!(
                 issue.detail,
-                crate::scene::ExecutionCoverageIssueDetail::UnsupportedTopLevelStatement
+                crate::scene::evidence::ExecutionCoverageIssueDetail::UnsupportedTopLevelStatement
             )
         }));
     }
@@ -828,7 +829,7 @@ mod tests {
                 create_flags: CreateNodeFlags::default(),
                 used_len_prefixed_fields: false,
             }],
-            quality: crate::scene::SchemaDecodeAttemptResult::Exact,
+            quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
         };
         assert!(!decoded_chunk_may_contain_execution_text(&create_node));
 
@@ -842,7 +843,7 @@ mod tests {
                 keyable: None,
                 value: SetAttrValue::String(r#"python("import socket")"#.to_string()),
             })],
-            quality: crate::scene::SchemaDecodeAttemptResult::Exact,
+            quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
         };
         assert!(decoded_chunk_may_contain_execution_text(&script_body));
     }

@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use maya_scene_kit_observe::scene::{
-    AngularAttrKind, LinkOp, SelectBlock, SelectBlockNote, SelectBlockOp,
-};
+use maya_scene_kit_observe::scene::model::{LinkOp, SelectBlock, SelectBlockNote, SelectBlockOp};
+use maya_scene_kit_observe::scene::recovery::AngularAttrKind;
 
 use crate::scene::emit::ma::{
     add_attr::render_add_attr_op,
