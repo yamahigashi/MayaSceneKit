@@ -1,34 +1,25 @@
-mod bundle;
-mod catalog;
+pub(crate) mod catalog;
 mod dependency;
 mod effect_registry;
-mod inspect;
-mod ma;
-mod mb;
+pub(crate) mod inspect;
+pub(crate) mod mb;
 mod mel_surface;
-mod path_resolve;
 mod surfaces;
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
-use self::bundle::ObservationData;
-pub use self::{
-    bundle::{LoadOptions, Loader, ObservationBundle},
-    inspect::{inspect_mb, inspect_mb_with_max_parse_bytes},
-    mel_surface::{
+pub use self::mel_surface::{
         MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceCommandMode, MelSurfaceDiagnostic,
         MelSurfaceDiagnosticStage, MelSurfaceFacts, MelSurfaceNormalizedArg,
         MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag, MelSurfaceNormalizedItem,
         MelSurfaceValidationDiagnostic, collect_mel_surface_facts,
         collect_mel_surface_facts_shared,
-    },
-    path_resolve::{find_scene_workspace_root, resolve_scene_path_value},
-    surfaces::ExecutionSurface,
 };
 use crate::scene::{
-    DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionUnitSummary, PathKind,
-    SceneDigestSet, SceneFormat, SceneToolError, UnknownSemanticFact,
+    DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionUnitSummary,
+    SceneDigestSet, UnknownSemanticFact, source::{ObservationBundle, ObservationData},
 };
+pub use self::surfaces::ExecutionSurface;
 
 #[derive(Debug, Clone)]
 pub struct ObservedExecutionSurface {
@@ -47,84 +38,6 @@ pub struct ObservedExecutionCatalog {
     pub coverage_issues: Vec<ExecutionCoverageIssue>,
 }
 
-pub fn detect_scene_format(path: impl AsRef<Path>) -> Result<SceneFormat, SceneToolError> {
-    crate::scene::ops::detect_scene_format(path)
-}
-
-pub fn check_script_nodes(
-    path: impl AsRef<Path>,
-) -> Result<crate::scene::ScriptNodeReport, SceneToolError> {
-    check_script_nodes_with_options(path, &LoadOptions::default())
-}
-
-pub fn check_script_nodes_with_options(
-    path: impl AsRef<Path>,
-    options: &LoadOptions,
-) -> Result<crate::scene::ScriptNodeReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path(path)?;
-    let entries = observation.script_node_entries()?;
-    Ok(crate::scene::ScriptNodeReport {
-        scene_path: observation.scene_path().to_path_buf(),
-        scene_format: observation.scene_format(),
-        validation_state: observation.validation_state(),
-        nodes: entries.into_iter().map(|entry| entry.name).collect(),
-    })
-}
-
-pub fn collect_script_node_entries(
-    path: impl AsRef<Path>,
-) -> Result<crate::scene::ScriptNodeEntriesReport, SceneToolError> {
-    collect_script_node_entries_with_options(path, &LoadOptions::default())
-}
-
-pub fn collect_script_node_entries_with_options(
-    path: impl AsRef<Path>,
-    options: &LoadOptions,
-) -> Result<crate::scene::ScriptNodeEntriesReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path(path)?;
-    Ok(crate::scene::ScriptNodeEntriesReport {
-        scene_path: observation.scene_path().to_path_buf(),
-        scene_format: observation.scene_format(),
-        validation_state: observation.validation_state(),
-        entries: observation.script_node_entries()?,
-    })
-}
-
-pub fn collect_scene_dump(
-    path: impl AsRef<Path>,
-) -> Result<crate::scene::SceneDumpReport, SceneToolError> {
-    collect_scene_dump_with_options(path, &LoadOptions::default())
-}
-
-pub fn collect_scene_dump_with_options(
-    path: impl AsRef<Path>,
-    options: &LoadOptions,
-) -> Result<crate::scene::SceneDumpReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path_without_retained_ma_bytes(path)?;
-    observation.scene_dump_report()
-}
-
-pub fn collect_scene_paths(
-    path: impl AsRef<Path>,
-    kind: PathKind,
-) -> Result<crate::scene::ScenePathsReport, SceneToolError> {
-    collect_scene_paths_with_options(path, kind, &LoadOptions::default())
-}
-
-pub fn collect_scene_paths_with_options(
-    path: impl AsRef<Path>,
-    kind: PathKind,
-    options: &LoadOptions,
-) -> Result<crate::scene::ScenePathsReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path_without_retained_ma_bytes(path)?;
-    Ok(crate::scene::ScenePathsReport {
-        scene_path: observation.scene_path().to_path_buf(),
-        scene_format: observation.scene_format(),
-        validation_state: observation.validation_state(),
-        entries: observation.scene_paths(kind)?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
@@ -132,16 +45,17 @@ mod tests {
     use maya_scene_kit_formats::ma as format_ma;
 
     use super::{
-        LoadOptions, Loader, catalog, collect_scene_dump, collect_scene_paths, dependency,
-        find_scene_workspace_root, ma as observe_ma, mb, resolve_scene_path_value, surfaces,
+        catalog, dependency, mb, surfaces,
     };
     use crate::{
         mb::{MbParseBudget, MbParseBudgetLimit},
         scene::{
             DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
             ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
-            MelParseBudget, MelParseBudgetLimit, PathKind, SceneDumpRequireKind, SceneFormat,
-            ScenePathResolutionStatus, ScenePathValueStyle, SceneToolError, ValidationState,
+            LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit, PathKind,
+            SceneDumpRequireKind, SceneFormat, ScenePathResolutionStatus, ScenePathValueStyle,
+            SceneToolError, ValidationState, collect_scene_dump, collect_scene_paths,
+            find_scene_workspace_root, resolve_scene_path_value, source::ma as observe_ma,
         },
     };
 

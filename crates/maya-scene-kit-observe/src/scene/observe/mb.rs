@@ -13,7 +13,7 @@ use crate::{
     scene::{PathKind, ScenePathEntry, ScenePathMeta, decode::families::decode_crea_payload},
 };
 
-pub(super) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKind {
+pub(crate) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKind {
     if entry.node_type == "reference" {
         PathKind::Reference
     } else {
@@ -21,7 +21,7 @@ pub(super) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKin
     }
 }
 
-pub(super) fn collect_mb_scene_paths(
+pub(crate) fn collect_mb_scene_paths(
     mb: &MayaBinaryFile,
     nodes: &[crate::scene::ir::RecoveredNode],
     reference_files: &[crate::scene::ir::ReferenceFileOp],

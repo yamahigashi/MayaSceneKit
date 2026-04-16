@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::rules::CompiledRule;
-use crate::scene::{AuditFinding, observe::MelSurfaceFacts};
+use crate::scene::{AuditFinding, execution::MelSurfaceFacts};
 
 mod builders;
 mod callback_flags;

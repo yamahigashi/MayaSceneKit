@@ -18,7 +18,8 @@ use crate::scene::{
     ExecutionEffectClass, ExecutionLanguage, ExecutionSemanticClass, ExecutionUnitSummary,
     LoadOptions, ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError,
     StaticAuditFindingDetail, ValidationState,
-    observe::{Loader, ObservedExecutionCatalog},
+    execution::ObservedExecutionCatalog,
+    Loader,
 };
 use maya_scene_kit_observe::scene::detect_scene_format;
 
@@ -256,11 +257,7 @@ pub fn audit_script_nodes_with_options_and_digests(
 ) -> Result<AuditReport, SceneToolError> {
     let path = path.as_ref();
     let loader = Loader::new(load_options.clone());
-    let observation = match if include_digests {
-        loader.observe_path(path)
-    } else {
-        loader.observe_path_without_retained_ma_bytes(path)
-    } {
+    let observation = match loader.observe_path(path) {
         Ok(observation) => observation,
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
             let scene_format = detect_scene_format(path)?;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::scene::{
     AuditFinding, AuditReviewSignal, AuditSurface, AuditSurfaceDerivation, ExecutionOrigin,
-    observe::{MelSurfaceFacts, ObservedExecutionSurface},
+    execution::{MelSurfaceFacts, ObservedExecutionSurface},
 };
 
 #[derive(Debug, Clone)]

@@ -14,7 +14,7 @@ use super::{
 };
 use crate::scene::{
     AuditEvidence, AuditFinding, AuditSeverity, AuditSinkKind, ExecutionLanguage,
-    observe::{MelSurfaceCall, MelSurfaceFacts},
+    execution::{MelSurfaceCall, MelSurfaceFacts},
 };
 
 pub(super) fn analyze_mel_surface_impl(

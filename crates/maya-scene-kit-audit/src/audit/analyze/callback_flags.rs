@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use maya_scene_kit_observe::scene::observe::{
+use maya_scene_kit_observe::scene::execution::{
     MelSurfaceNormalizedArg, MelSurfaceNormalizedItem, collect_mel_surface_facts_shared,
 };
 
@@ -13,7 +13,7 @@ use super::{
 };
 use crate::scene::{
     AuditEvidence, AuditEvidenceKey, AuditReviewSignal, AuditSurfaceDerivation, ExecutionLanguage,
-    observe::MelSurfaceFacts,
+    execution::MelSurfaceFacts,
 };
 
 #[derive(Debug, Default)]

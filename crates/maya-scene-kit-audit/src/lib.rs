@@ -6,7 +6,7 @@ pub mod scene {
         DependencyFact, DependencyFactKind, DependencyRiskClass, EffectCertainty,
         ExecutionCoverageIssue, ExecutionCoverageIssueKind, ExecutionCoverageState,
         ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin, ExecutionSemanticClass,
-        ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, LoadOptions,
+        ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, LoadOptions, Loader,
         ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError, UnknownSemanticFact,
         ValidationState,
     };
@@ -19,10 +19,9 @@ pub mod scene {
         StaticAuditFindingDetail, StaticAuditReviewDetail,
     };
 
-    pub mod observe {
+    pub mod execution {
         pub use maya_scene_kit_observe::scene::{
-            Loader,
-            observe::{
+            execution::{
                 ExecutionSurface, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts,
                 ObservedExecutionCatalog, ObservedExecutionSurface,
             },
