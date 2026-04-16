@@ -157,6 +157,7 @@ struct GuiShell {
     file_table: Entity<TableState<FileTableDelegate>>,
     file_table_focus_handle: FocusHandle,
     path_table: Entity<TableState<PathTableDelegate>>,
+    path_table_summary: PathTableSummary,
     audit_table: Entity<TableState<AuditTableDelegate>>,
     audit_all_rows: Vec<AuditResultRow>,
     audit_rows: Vec<AuditTableRow>,
@@ -588,6 +589,12 @@ struct PathTableModel {
     rows: Vec<PathTableRow>,
     has_report_rows: bool,
     show_scene_column: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PathTableSummary {
+    row_count: usize,
+    has_report_rows: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1137,7 +1144,7 @@ mod ignore_dialog;
 mod jobs;
 mod max_bytes_dialog;
 mod menu;
-mod path_collect_dialog;
+mod path;
 mod path_edit;
 mod render;
 mod replace_dialog;

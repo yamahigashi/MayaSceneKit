@@ -1627,24 +1627,6 @@ pub(super) fn analyze_row_with_options(
     }
 }
 
-#[cfg(test)]
-pub(super) fn analyze_row_bytes(
-    path: &Path,
-    scene_format: SceneFormat,
-    validation_state: ValidationState,
-    bytes: Vec<u8>,
-    audit_mode: AuditModePreference,
-) -> Result<AnalyzeRowResult, String> {
-    analyze_row_bytes_with_options(
-        path,
-        scene_format,
-        validation_state,
-        bytes,
-        audit_mode,
-        &LoadOptions::default(),
-    )
-}
-
 pub(super) fn analyze_row_bytes_with_options(
     path: &Path,
     scene_format: SceneFormat,

@@ -83,13 +83,15 @@ pub(super) fn render_paths_filter_bar(
     i18n: &I18n,
     view: Entity<GuiShell>,
 ) -> impl IntoElement {
-    let model = shell.current_path_table_model();
     let dedup_label = if shell.path_table_dedup {
         i18n.text("path_table.show_all")
     } else {
         i18n.text("path_table.dedup")
     };
-    let count_label = i18n.format("log.paths", &[("count", model.rows.len().to_string())]);
+    let count_label = i18n.format(
+        "log.paths",
+        &[("count", shell.path_table_summary.row_count.to_string())],
+    );
 
     div()
         .flex()
@@ -239,8 +241,7 @@ pub(super) fn result_paths(shell: &GuiShell, i18n: &I18n) -> AnyElement {
     if selected.is_empty() {
         return body_text(i18n.text("empty.paths.none")).into_any_element();
     }
-    let model = shell.current_path_table_model();
-    if !model.rows.is_empty() || model.has_report_rows {
+    if shell.path_table_summary.row_count > 0 || shell.path_table_summary.has_report_rows {
         return div()
             .size_full()
             .flex()

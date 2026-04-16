@@ -1,13 +1,13 @@
-use super::path_edit::{
+use super::super::*;
+use super::{
     normalize_path_edit_targets, parse_path_collect_folder_input, path_collect_default_folder,
     path_collect_destination_supports_rewrite_mode, path_collect_supported_for_edit_targets,
     path_file_collect_supported_for_edit_targets, scene_path_string,
     shared_workspace_root_for_targets,
 };
-use super::*;
 
 impl GuiShell {
-    pub(super) fn open_path_collect_dialog(
+    pub(in crate::gui) fn open_path_collect_dialog(
         &mut self,
         edit_targets: PathEditTargets,
         rewrite_mode: PathCollectRewriteMode,
@@ -63,12 +63,12 @@ impl GuiShell {
         cx.notify();
     }
 
-    pub(super) fn clear_path_collect_dialog_state(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn clear_path_collect_dialog_state(&mut self, cx: &mut Context<Self>) {
         self.path_collect_dialog = None;
         cx.notify();
     }
 
-    pub(super) fn path_collect_dialog_destination_path(&self, cx: &App) -> Option<PathBuf> {
+    pub(in crate::gui) fn path_collect_dialog_destination_path(&self, cx: &App) -> Option<PathBuf> {
         let dialog = self.path_collect_dialog.as_ref()?;
         let input_value = dialog.folder_input.read(cx).value();
         let destination =
@@ -81,7 +81,10 @@ impl GuiShell {
         .then_some(destination)
     }
 
-    pub(super) fn path_collect_dialog_initial_directory(&self, cx: &App) -> Option<PathBuf> {
+    pub(in crate::gui) fn path_collect_dialog_initial_directory(
+        &self,
+        cx: &App,
+    ) -> Option<PathBuf> {
         let dialog = self.path_collect_dialog.as_ref()?;
         let input_value = dialog.folder_input.read(cx).value();
         parse_path_collect_folder_input(input_value.as_ref(), dialog.workspace_root.as_path())
@@ -94,7 +97,7 @@ impl GuiShell {
             })
     }
 
-    pub(super) fn path_collect_dialog_can_apply(&self, cx: &App) -> bool {
+    pub(in crate::gui) fn path_collect_dialog_can_apply(&self, cx: &App) -> bool {
         self.path_collect_dialog_destination_path(cx).is_some()
     }
 
@@ -180,7 +183,7 @@ impl GuiShell {
             .detach();
     }
 
-    pub(super) fn select_path_collect_folder(
+    pub(in crate::gui) fn select_path_collect_folder(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -197,7 +200,7 @@ impl GuiShell {
         });
     }
 
-    pub(super) fn apply_path_collect_dialog(
+    pub(in crate::gui) fn apply_path_collect_dialog(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,

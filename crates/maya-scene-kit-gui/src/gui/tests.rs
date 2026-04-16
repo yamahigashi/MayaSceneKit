@@ -3306,6 +3306,7 @@ fn settings_menu_updates_auto_analyze_parallelism_preference(cx: &mut TestAppCon
     let (shell, visual_cx) = open_test_shell(cx);
 
     shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.auto_analyze_parallelism = AutoAnalyzeParallelismPreference::Four;
         assert_eq!(
             shell.state.auto_analyze_parallelism,
             AutoAnalyzeParallelismPreference::Four
@@ -5636,6 +5637,25 @@ fn collect_target_files_reuses_matching_destination_and_rejects_conflict() {
     }])
     .expect_err("conflicting destination should fail");
     assert!(err.contains("different contents"));
+}
+
+#[test]
+fn collect_target_files_reuses_self_copy_without_destination_read() {
+    let dir = tempdir().expect("tmpdir");
+    let source = dir.path().join("source.tx");
+    fs::write(&source, "same").expect("write source");
+
+    let reused = collect_target_files(&[PathCollectPlan {
+        row_id: 1,
+        entry_index: 0,
+        row_index: 0,
+        source_path: source.clone(),
+        destination_path: source,
+        next_value: "source.tx".to_string(),
+    }])
+    .expect("reuse self copy");
+    assert_eq!(reused.copied, 0);
+    assert_eq!(reused.reused, 1);
 }
 
 #[test]
