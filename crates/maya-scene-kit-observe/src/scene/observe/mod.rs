@@ -621,6 +621,38 @@ mod tests {
     }
 
     #[test]
+    fn ma_observation_skips_schema_context_initialization() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let missing_chunk_root = dir.path().join("missing_chunks");
+        let options = LoadOptions::default().with_chunk_schema_root(&missing_chunk_root);
+
+        let observation = Loader::new(options)
+            .observe_path(repo_root().join("tests/02/sphere.ma"))
+            .expect("ma observation should not require schema context");
+
+        assert_eq!(observation.scene_format(), SceneFormat::Ma);
+    }
+
+    #[test]
+    fn mb_observation_still_validates_schema_context_inputs() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let missing_chunk_root = dir.path().join("missing_chunks");
+        let options = LoadOptions::default().with_chunk_schema_root(&missing_chunk_root);
+
+        let err = match Loader::new(options).observe_path(repo_root().join("tests/02/sphere.mb")) {
+            Ok(_) => panic!("mb observation should still require schema context"),
+            Err(err) => err,
+        };
+
+        match err {
+            SceneToolError::Config(message) => {
+                assert!(message.contains("missing_chunks"));
+            }
+            other => panic!("expected schema config error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mb_load_options_accept_parse_budget() {
         let source = repo_root().join("tests/02/sphere.mb");
         let options = LoadOptions::default().with_mb_parse_budget(MbParseBudget {

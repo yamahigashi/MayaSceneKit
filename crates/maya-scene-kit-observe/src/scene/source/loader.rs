@@ -164,7 +164,15 @@ impl Loader {
     }
 
     fn observe(&self, input: SourceInput<'_>) -> Result<ObservationBundle, SceneToolError> {
-        ObservationBundle::load(input, &self.options, self.schema_context()?)
+        let scene_format = match input.scene_format {
+            Some(scene_format) => scene_format,
+            None => ops::detect_scene_format(input.path)?,
+        };
+        let schema_context = match scene_format {
+            SceneFormat::Mb => Some(self.schema_context()?),
+            SceneFormat::Ma | SceneFormat::Unknown => None,
+        };
+        ObservationBundle::load(input, scene_format, &self.options, schema_context)
     }
 
     fn schema_context(&self) -> Result<&Arc<SchemaContext>, SceneToolError> {
@@ -235,14 +243,11 @@ pub(crate) enum ObservationData {
 impl ObservationBundle {
     pub(crate) fn load(
         input: SourceInput<'_>,
+        scene_format: SceneFormat,
         options: &LoadOptions,
-        schema_context: &Arc<SchemaContext>,
+        schema_context: Option<&Arc<SchemaContext>>,
     ) -> Result<Self, SceneToolError> {
         let path = input.path;
-        let scene_format = match input.scene_format {
-            Some(scene_format) => scene_format,
-            None => ops::detect_scene_format(path)?,
-        };
         match scene_format {
             SceneFormat::Ma => {
                 let bytes = match input.bytes {
@@ -300,6 +305,8 @@ impl ObservationBundle {
                 })
             }
             SceneFormat::Mb => {
+                let schema_context =
+                    schema_context.expect("mb observation requires schema context");
                 let session = match input.bytes {
                     Some(bytes) => MbReadSession::load_raw_bytes(
                         path,
