@@ -134,6 +134,8 @@ impl Render for GuiShell {
             .on_action(cx.listener(Self::on_menu_auto_analyze_parallelism_8))
             .on_action(cx.listener(Self::on_menu_auto_analyze_parallelism_16))
             .on_action(cx.listener(Self::on_menu_auto_analyze_parallelism_32))
+            .on_action(cx.listener(Self::on_menu_toggle_analysis_cache))
+            .on_action(cx.listener(Self::on_menu_purge_analysis_cache))
             .on_action(cx.listener(Self::on_menu_edit_max_bytes))
             .on_action(cx.listener(Self::on_menu_toggle_ignore_folder_names))
             .on_action(cx.listener(Self::on_menu_edit_ignored_folder_names))
@@ -188,9 +190,12 @@ impl Render for GuiShell {
             }))
             .child(
                 div().px_4().pb_3().text_sm().text_color(rgb(MUTED)).child(
-                    self.status_message
-                        .as_ref()
-                        .map(|message| render_banner_message(&i18n, message))
+                    self.cache_restore_message(&i18n)
+                        .or_else(|| {
+                            self.status_message
+                                .as_ref()
+                                .map(|message| render_banner_message(&i18n, message))
+                        })
                         .unwrap_or_else(|| i18n.text("banner.default_hint")),
                 ),
             )

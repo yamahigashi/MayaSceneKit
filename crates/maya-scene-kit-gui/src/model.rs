@@ -149,6 +149,8 @@ pub struct PersistedState {
     pub workspace_auto_analyze: bool,
     #[serde(default)]
     pub auto_analyze_parallelism: AutoAnalyzeParallelismPreference,
+    #[serde(default = "default_analysis_cache_enabled")]
+    pub analysis_cache_enabled: bool,
     #[serde(default)]
     pub max_bytes: Option<usize>,
     #[serde(default = "default_ignore_folder_names_enabled")]
@@ -184,6 +186,10 @@ pub struct PersistedState {
 }
 
 fn default_ignore_folder_names_enabled() -> bool {
+    true
+}
+
+fn default_analysis_cache_enabled() -> bool {
     true
 }
 
@@ -230,6 +236,7 @@ impl Default for PersistedState {
             workspace_layout: WorkspaceLayoutPreference::default(),
             workspace_auto_analyze: false,
             auto_analyze_parallelism: AutoAnalyzeParallelismPreference::default(),
+            analysis_cache_enabled: default_analysis_cache_enabled(),
             max_bytes: None,
             ignore_folder_names_enabled: default_ignore_folder_names_enabled(),
             ignored_folder_names: default_ignored_folder_names(),
@@ -438,6 +445,7 @@ mod tests {
             workspace_layout: WorkspaceLayoutPreference::TopBottom,
             workspace_auto_analyze: true,
             auto_analyze_parallelism: AutoAnalyzeParallelismPreference::Four,
+            analysis_cache_enabled: true,
             max_bytes: None,
             ignore_folder_names_enabled: true,
             ignored_folder_names: vec!["backup".to_string(), "autosave".to_string()],

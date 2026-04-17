@@ -462,13 +462,16 @@ impl GuiShell {
             if !toggle {
                 self.clear_selection();
             }
-            for row_index in range_indices {
-                self.rows[row_index].selected = true;
+            for row_index in &range_indices {
+                self.rows[*row_index].selected = true;
             }
             self.selection_anchor = Some(anchor);
             self.active_path_edit = None;
             self.selected_path_rows.clear();
             self.path_selection_anchor = None;
+            for row_index in &range_indices {
+                self.prioritize_cache_restore_for_row(self.rows[*row_index].id);
+            }
             self.refresh_file_table(cx);
             self.schedule_selected_auto_analysis(window, cx);
             return;
@@ -480,6 +483,9 @@ impl GuiShell {
             self.active_path_edit = None;
             self.selected_path_rows.clear();
             self.path_selection_anchor = None;
+            if self.rows[index].selected {
+                self.prioritize_cache_restore_for_row(self.rows[index].id);
+            }
             self.refresh_file_table(cx);
             self.schedule_selected_auto_analysis(window, cx);
             return;
@@ -495,6 +501,7 @@ impl GuiShell {
         self.active_path_edit = None;
         self.selected_path_rows.clear();
         self.path_selection_anchor = None;
+        self.prioritize_cache_restore_for_row(self.rows[index].id);
         self.refresh_file_table(cx);
         self.schedule_selected_auto_analysis(window, cx);
     }
@@ -584,6 +591,9 @@ impl GuiShell {
         self.active_path_edit = None;
         self.selected_path_rows.clear();
         self.path_selection_anchor = None;
+        for index in self.visible_row_indices() {
+            self.prioritize_cache_restore_for_row(self.rows[index].id);
+        }
         self.refresh_file_table(cx);
         self.schedule_selected_auto_analysis(window, cx);
     }
@@ -672,6 +682,8 @@ impl GuiShell {
                     audit_report,
                     paths_report,
                     dump_report,
+                    observe_snapshot,
+                    audit_snapshot,
                     audit_mode,
                     elapsed,
                 } = result;
@@ -733,6 +745,7 @@ impl GuiShell {
                     ),
                     false,
                 );
+                self.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
             }
             RowJobResult::SceneEdits {
                 staged,

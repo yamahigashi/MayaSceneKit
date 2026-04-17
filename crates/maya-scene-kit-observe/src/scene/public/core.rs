@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Scene container format detected for an input path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SceneFormat {
     /// Maya ASCII text scene.
@@ -30,7 +30,7 @@ impl std::fmt::Display for SceneFormat {
 }
 
 /// Operation policy applied when degraded input must be accepted or rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationMode {
     /// Reject anything that is not fully validated.
@@ -77,7 +77,7 @@ impl std::fmt::Display for OperationMode {
 /// `Validated` means the canonical model was built without known degradation. `Partial` means the
 /// scene was recovered but some information was missing or inferred. `CopiedUnvalidated` is used
 /// for rewrite operations that preserve bytes without re-validating semantic correctness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationState {
     /// The result was produced from a fully validated scene.
@@ -113,7 +113,7 @@ impl std::fmt::Display for ValidationState {
 }
 
 /// How Maya ASCII text should be decoded before parsing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AsciiDecodePolicy {
     /// Reject invalid UTF-8 input.

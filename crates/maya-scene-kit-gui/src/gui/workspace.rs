@@ -1,4 +1,5 @@
 use super::*;
+use std::{fs, io};
 
 impl GuiShell {
     pub(super) fn set_file_table_column_widths(&mut self, widths: Vec<PersistedTableColumnWidth>) {
@@ -183,6 +184,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_progressive_cache_restore();
         let mut files = Vec::new();
         collect_scene_files_recursively(&folder, &mut files, &self.state);
         let rows = build_rows_from_paths(files, &mut self.next_row_id);
@@ -203,11 +205,13 @@ impl GuiShell {
         self.refresh_app_menus(window, cx);
         self.refresh_file_table(cx);
         self.refresh_path_table(cx);
+        self.start_progressive_cache_restore(window, cx);
         self.schedule_workspace_auto_analysis_if_enabled(window, cx);
         self.persist();
     }
 
     pub(super) fn clear_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_progressive_cache_restore();
         self.clear_rows();
         self.visible_rows.clear();
         self.clear_edit_history();
@@ -229,6 +233,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_progressive_cache_restore();
         let Some(root) = self.state.workspace_root_path() else {
             self.refresh_app_menus(window, cx);
             self.persist();
@@ -247,6 +252,7 @@ impl GuiShell {
         self.refresh_file_table(cx);
         self.refresh_path_table(cx);
         self.refresh_app_menus(window, cx);
+        self.start_progressive_cache_restore(window, cx);
         self.schedule_workspace_auto_analysis_if_enabled(window, cx);
         self.persist();
     }
@@ -316,6 +322,44 @@ impl GuiShell {
         self.persist();
         self.dispatch_auto_analyze_jobs(window, cx);
         cx.notify();
+    }
+
+    pub(super) fn set_analysis_cache_enabled_preference(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.analysis_cache_enabled == enabled {
+            return;
+        }
+        self.state.analysis_cache_enabled = enabled;
+        self.cancel_progressive_cache_restore();
+        self.cancel_cache_writes();
+        self.refresh_app_menus(window, cx);
+        self.persist();
+        if enabled {
+            self.start_progressive_cache_restore(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn purge_analysis_cache(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_progressive_cache_restore();
+        self.cancel_cache_writes();
+        match purge_cache_dir(&self.observe_cache_root)
+            .and_then(|()| purge_cache_dir(&self.audit_cache_root))
+        {
+            Ok(()) => {
+                self.status_message = Some(BannerMessage::CachePurged);
+                self.refresh_app_menus(window, cx);
+                cx.notify();
+            }
+            Err(err) => {
+                self.status_message = Some(BannerMessage::PersistFailed(err.to_string()));
+                cx.notify();
+            }
+        }
     }
 
     pub(super) fn set_ignore_folder_names_enabled_preference(
@@ -499,5 +543,13 @@ impl GuiShell {
         });
         self.refresh_audit_table(cx);
         self.refresh_path_table(cx);
+    }
+}
+
+fn purge_cache_dir(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
     }
 }

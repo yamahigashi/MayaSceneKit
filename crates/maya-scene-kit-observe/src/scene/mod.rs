@@ -17,6 +17,7 @@ mod observe;
 mod ops;
 pub mod paths;
 mod patterns;
+pub mod persistent_cache;
 pub(crate) mod query;
 mod recover;
 pub mod recovery;
@@ -61,6 +62,7 @@ pub(crate) mod public {
 pub use self::{
     error::SceneToolError,
     inspect::{inspect_mb, inspect_mb_with_max_parse_bytes},
+    persistent_cache::{ObserveCacheIdentity, ObserveCacheStore, ObservedSceneSnapshot},
     public::{AsciiDecodePolicy, OperationMode, SceneFormat, ValidationState},
     query::resolve::{find_scene_workspace_root, resolve_scene_path_value},
     source::{

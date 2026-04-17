@@ -14,8 +14,14 @@ use gpui::{
 };
 use gpui_component::{Root, table::ColumnSort};
 use maya_scene_kit_audit::{
-    audit::{build_parse_budget_blocked_audit_report, build_script_audit_plan},
-    scene::{AuditOptions, AuditSeverity},
+    audit::{
+        audit_script_nodes_with_options, build_parse_budget_blocked_audit_report,
+        build_script_audit_plan,
+    },
+    scene::{
+        AuditCacheStore, AuditOptions, AuditSeverity, AuditedSceneSnapshot,
+        fingerprint_audit_plan,
+    },
 };
 use maya_scene_kit_edit::scene::{
     ExecutionCleanTarget, OperationMode, PathOwnerDeletePreview, PathOwnerDeleteTarget,
@@ -31,17 +37,20 @@ use maya_scene_kit_observe::scene::evidence::{
 use maya_scene_kit_observe::scene::paths::{
     PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport,
 };
-use maya_scene_kit_observe::scene::{LoadOptions, collect_scene_paths};
+use maya_scene_kit_observe::scene::{
+    LoadOptions, Loader, ObserveCacheStore, ObservedSceneSnapshot, collect_scene_paths,
+};
 use tempfile::tempdir;
 
 use super::{
     AuditDetailDialogState, AuditResultItemKind, AuditResultRow, AuditResultRowKey,
     AuditRowCleanState, AuditSeverityFilter, AuditSortKey, AuditTableSort,
-    AutoAnalyzeParallelismPreference, AutoAnalyzePriority, AutoAnalyzeQueueState,
+    AutoAnalyzeParallelismPreference, AutoAnalyzePriority, AutoAnalyzeQueueState, BannerMessage,
     BackupLocationPreference, DirtyKind, FileSortKey, FileStatus, FileTableSelectAll,
     FileTableSort, MenuAutoAnalyzeParallelism32, MenuEditRedo, MenuEditUndo,
-    MenuToggleIgnoreFolderNames, PathCollectRewriteMode, PathEditKeyboardOutcome, PathFormFilter,
-    PathOrderSnapshot, PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter,
+    MenuPurgeAnalysisCache, MenuToggleAnalysisCache, MenuToggleIgnoreFolderNames,
+    PathCollectRewriteMode, PathEditKeyboardOutcome, PathFormFilter, PathOrderSnapshot,
+    PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter,
     ReplaceDialogPreviewSignature, ReplaceDialogPreviewState, ReplaceDialogSort,
     ReplaceDialogSortKey, ReplaceDialogState, RowJobResult, RowOperation, SceneRow, analyze_row,
     analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
@@ -90,6 +99,7 @@ fn test_state(root: &Path, search_query: &str) -> PersistedState {
         workspace_layout: WorkspaceLayoutPreference::TopBottom,
         workspace_auto_analyze: false,
         auto_analyze_parallelism: AutoAnalyzeParallelismPreference::Four,
+        analysis_cache_enabled: true,
         max_bytes: None,
         ignore_folder_names_enabled: true,
         ignored_folder_names: vec!["backup".to_string(), "autosave".to_string()],
@@ -119,6 +129,33 @@ fn ignore_state(enabled: bool, names: &[&str]) -> PersistedState {
         ignored_folder_names: names.iter().map(|name| name.to_string()).collect(),
         ..PersistedState::default()
     }
+}
+
+fn write_cached_scene(path: &Path) {
+    fs::write(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"Example\";\n",
+            "    setAttr \".b\" -type \"string\" \"print \\\"Example\\\";\";\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"asset/example/file.fbx\";\n",
+        ),
+    )
+    .expect("write cached scene");
+}
+
+fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
+    let dir = tempdir().expect("tmpdir");
+    let scene_path = dir.path().join(path_name);
+    write_cached_scene(&scene_path);
+    let load_options = LoadOptions::default();
+    let observation = Loader::new(load_options.clone())
+        .observe_path(&scene_path)
+        .expect("observe sample scene");
+    ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+        .expect("sample snapshot")
 }
 
 fn display_audit_rows(rows: Vec<AuditResultRow>) -> Vec<super::AuditTableRow> {
@@ -166,6 +203,83 @@ fn test_audit_row(
         }),
         clean_state: AuditRowCleanState::Available,
     }
+}
+
+#[test]
+fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
+    let dir = tempdir().expect("tmpdir");
+    let scene_path = dir.path().join("Example.ma");
+    write_cached_scene(&scene_path);
+
+    let load_options = LoadOptions::default();
+    let observation = Loader::new(load_options.clone())
+        .observe_path(&scene_path)
+        .expect("observe scene");
+    let observe_snapshot =
+        ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+            .expect("observe snapshot");
+
+    let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
+    let plan_fingerprint = fingerprint_audit_plan(&plan);
+    let audit_options = AuditOptions::strict_default();
+    let audit_report = audit_script_nodes_with_options(
+        &scene_path,
+        &plan,
+        &load_options,
+        audit_options,
+    )
+    .expect("audit scene");
+    let audit_snapshot =
+        AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint)
+            .expect("audit snapshot");
+
+    let observe_root = dir.path().join("cache/observe");
+    let audit_root = dir.path().join("cache/audit");
+    ObserveCacheStore::new(&observe_root)
+        .save(&observe_snapshot)
+        .expect("save observe snapshot");
+    AuditCacheStore::new(&audit_root)
+        .save(&audit_snapshot)
+        .expect("save audit snapshot");
+
+    let mut row = test_row(1, &scene_path);
+    let state = test_state(dir.path(), "");
+    let batch = super::cache_restore::hydrate_cached_analysis_batch(
+        vec![super::cache_restore::CacheHydrationInput {
+            row_id: row.id,
+            path: scene_path.clone(),
+        }],
+        load_options,
+        audit_options,
+        fingerprint_audit_plan(&plan),
+        observe_root,
+        audit_root,
+    );
+    let update = batch.updates.into_iter().next().expect("row update");
+
+    if let Some(snapshot) = update.observe_snapshot {
+        row.paths_report = Some(snapshot.paths_report);
+        row.dump_report = Some(snapshot.dump_report);
+        row.refresh_scene_workspace_root();
+        row.refresh_path_resolution_cache();
+    }
+    if let Some(snapshot) = update.audit_snapshot {
+        row.findings = snapshot.report.findings.len();
+        row.audit_report = Some(snapshot.report);
+        row.analyzed_audit_mode = Some(state.audit_mode);
+        row.status = FileStatus::Audited;
+        row.sync_findings_count();
+    }
+
+    assert!(row.paths_report.is_some());
+    assert!(row.dump_report.is_some());
+    assert!(row.audit_report.is_some());
+    assert_eq!(row.analyzed_audit_mode, Some(state.audit_mode));
+    assert!(matches!(row.status, FileStatus::Audited));
+    assert_eq!(
+        row.path_resolution_cache.len(),
+        row.paths_report.as_ref().expect("paths").entries.len()
+    );
 }
 
 fn open_test_shell(cx: &mut TestAppContext) -> (Entity<GuiShell>, &mut VisualTestContext) {
@@ -3303,6 +3417,63 @@ fn settings_menu_toggle_updates_ignore_folder_name_preference(cx: &mut TestAppCo
         assert!(shell.state.ignore_folder_names_enabled);
         shell.on_menu_toggle_ignore_folder_names(&MenuToggleIgnoreFolderNames, window, cx);
         assert!(!shell.state.ignore_folder_names_enabled);
+    });
+}
+
+#[gpui::test]
+fn settings_menu_toggle_updates_analysis_cache_preference(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        assert!(shell.state.analysis_cache_enabled);
+        shell.on_menu_toggle_analysis_cache(&MenuToggleAnalysisCache, window, cx);
+        assert!(!shell.state.analysis_cache_enabled);
+    });
+}
+
+#[gpui::test]
+fn disabling_analysis_cache_cancels_restore_and_pending_writes(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        shell.cache_restore_state.pending.push_back(11);
+        shell.cache_restore_state.in_flight = true;
+        shell.cache_write_state
+            .pending_observe_order
+            .push_back("Example.ma".to_string());
+        shell
+            .cache_write_state
+            .pending_observe
+            .insert("Example.ma".to_string(), sample_observed_snapshot("Example.ma"));
+
+        shell.on_menu_toggle_analysis_cache(&MenuToggleAnalysisCache, window, cx);
+
+        assert!(!shell.state.analysis_cache_enabled);
+        assert!(shell.cache_restore_state.pending.is_empty());
+        assert!(!shell.cache_restore_state.in_flight);
+        assert!(shell.cache_write_state.pending_observe.is_empty());
+        assert!(shell.cache_write_state.pending_observe_order.is_empty());
+        assert!(!shell.cache_write_state.in_flight);
+    });
+}
+
+#[gpui::test]
+fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        fs::create_dir_all(shell.observe_cache_root.join("aa/bb")).expect("create observe cache");
+        fs::create_dir_all(shell.audit_cache_root.join("cc/dd")).expect("create audit cache");
+        fs::write(shell.observe_cache_root.join("aa/bb/index.json"), "{}").expect("write observe");
+        fs::write(shell.audit_cache_root.join("cc/dd/index.json"), "{}").expect("write audit");
+
+        shell.on_menu_purge_analysis_cache(&MenuPurgeAnalysisCache, window, cx);
+
+        assert!(!shell.observe_cache_root.exists());
+        assert!(!shell.audit_cache_root.exists());
+        assert!(matches!(shell.status_message, Some(BannerMessage::CachePurged)));
     });
 }
 

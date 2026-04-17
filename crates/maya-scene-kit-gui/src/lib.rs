@@ -5,4 +5,6 @@ mod model;
 mod persistence;
 
 pub use gui::run;
-pub use persistence::{default_state_path, load_persisted_state, save_persisted_state};
+pub use persistence::{
+    default_analysis_cache_root, default_state_path, load_persisted_state, save_persisted_state,
+};

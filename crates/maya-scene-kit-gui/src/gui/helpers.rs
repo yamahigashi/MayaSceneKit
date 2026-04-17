@@ -1602,23 +1602,29 @@ pub(super) fn analyze_row_with_options(
 ) -> Result<RowJobResult, String> {
     let started_at = Instant::now();
     match Loader::new(load_options.clone()).observe_path(path) {
-        Ok(observation) => analyze_observation(&observation, audit_mode, started_at.elapsed()),
+        Ok(observation) => {
+            analyze_observation(&observation, audit_mode, load_options, started_at.elapsed())
+        }
         Err(
             maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { .. }
             | maya_scene_kit_observe::scene::SceneToolError::MbParseBudgetExceeded { .. },
         ) => {
-            let plan = build_script_audit_plan(vec![], 64).map_err(|err| err.to_string())?;
-            let audit_report = audit_script_nodes_with_options(
-                path,
-                &plan,
-                load_options,
-                audit_options_from_preference(audit_mode),
+            let plan = gui_audit_plan().map_err(|err| err.to_string())?;
+            let options = audit_options_from_preference(audit_mode);
+            let audit_report = audit_script_nodes_with_options(path, &plan, load_options, options)
+                .map_err(|err| err.to_string())?;
+            let audit_snapshot = AuditedSceneSnapshot::new(
+                audit_report.clone(),
+                options,
+                fingerprint_audit_plan(&plan),
             )
             .map_err(|err| err.to_string())?;
             Ok(RowJobResult::Analyze(AnalyzeRowResult {
                 audit_report,
                 paths_report: None,
                 dump_report: None,
+                observe_snapshot: None,
+                audit_snapshot: Some(audit_snapshot),
                 audit_mode,
                 elapsed: started_at.elapsed(),
             }))
@@ -1643,40 +1649,54 @@ pub(super) fn analyze_row_bytes_with_options(
         bytes,
     ) {
         Ok(observation) => {
-            analyze_observation_result(&observation, audit_mode, started_at.elapsed())
+            analyze_observation_result(&observation, audit_mode, load_options, started_at.elapsed())
         }
         Err(maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { limit }) => {
-            let plan = build_script_audit_plan(vec![], 64).map_err(|err| err.to_string())?;
+            let plan = gui_audit_plan().map_err(|err| err.to_string())?;
+            let options = audit_options_from_preference(audit_mode);
+            let audit_report = build_parse_budget_blocked_audit_report(
+                path.to_path_buf(),
+                scene_format,
+                ValidationState::Invalid,
+                &plan,
+                options,
+                limit,
+                None,
+            );
             Ok(AnalyzeRowResult {
-                audit_report: build_parse_budget_blocked_audit_report(
-                    path.to_path_buf(),
-                    scene_format,
-                    ValidationState::Invalid,
-                    &plan,
-                    audit_options_from_preference(audit_mode),
-                    limit,
-                    None,
-                ),
+                audit_report: audit_report.clone(),
                 paths_report: None,
                 dump_report: None,
+                observe_snapshot: None,
+                audit_snapshot: Some(
+                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(&plan))
+                        .map_err(|err| err.to_string())?,
+                ),
                 audit_mode,
                 elapsed: started_at.elapsed(),
             })
         }
         Err(maya_scene_kit_observe::scene::SceneToolError::MbParseBudgetExceeded { limit }) => {
-            let plan = build_script_audit_plan(vec![], 64).map_err(|err| err.to_string())?;
+            let plan = gui_audit_plan().map_err(|err| err.to_string())?;
+            let options = audit_options_from_preference(audit_mode);
+            let audit_report = build_parse_budget_blocked_audit_report(
+                path.to_path_buf(),
+                scene_format,
+                ValidationState::Invalid,
+                &plan,
+                options,
+                limit,
+                None,
+            );
             Ok(AnalyzeRowResult {
-                audit_report: build_parse_budget_blocked_audit_report(
-                    path.to_path_buf(),
-                    scene_format,
-                    ValidationState::Invalid,
-                    &plan,
-                    audit_options_from_preference(audit_mode),
-                    limit,
-                    None,
-                ),
+                audit_report: audit_report.clone(),
                 paths_report: None,
                 dump_report: None,
+                observe_snapshot: None,
+                audit_snapshot: Some(
+                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(&plan))
+                        .map_err(|err| err.to_string())?,
+                ),
                 audit_mode,
                 elapsed: started_at.elapsed(),
             })
@@ -1688,11 +1708,13 @@ pub(super) fn analyze_row_bytes_with_options(
 fn analyze_observation(
     observation: &maya_scene_kit_observe::scene::ObservationBundle,
     audit_mode: AuditModePreference,
+    load_options: &LoadOptions,
     elapsed: Duration,
 ) -> Result<RowJobResult, String> {
     Ok(RowJobResult::Analyze(analyze_observation_result(
         observation,
         audit_mode,
+        load_options,
         elapsed,
     )?))
 }
@@ -1700,8 +1722,11 @@ fn analyze_observation(
 fn analyze_observation_result(
     observation: &maya_scene_kit_observe::scene::ObservationBundle,
     audit_mode: AuditModePreference,
+    load_options: &LoadOptions,
     elapsed: Duration,
 ) -> Result<AnalyzeRowResult, String> {
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(observation, load_options, 64)
+        .map_err(|err| err.to_string())?;
     let dump_report = observation
         .scene_dump_report()
         .map_err(|err| err.to_string())?;
@@ -1713,21 +1738,30 @@ fn analyze_observation_result(
             .scene_paths(PathKind::All)
             .map_err(|err| err.to_string())?,
     };
-    let plan = build_script_audit_plan(vec![], 64).map_err(|err| err.to_string())?;
-    let audit_report = audit_observation(
-        &observation,
-        &plan,
-        audit_options_from_preference(audit_mode),
-    )
-    .map_err(|err| err.to_string())?;
+    let plan = gui_audit_plan().map_err(|err| err.to_string())?;
+    let options = audit_options_from_preference(audit_mode);
+    let audit_report =
+        audit_observation(&observation, &plan, options).map_err(|err| err.to_string())?;
+    let audit_snapshot =
+        AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(&plan))
+            .map_err(|err| err.to_string())?;
 
     Ok(AnalyzeRowResult {
         audit_report,
         paths_report: Some(paths_report),
         dump_report: Some(dump_report),
+        observe_snapshot: Some(observe_snapshot),
+        audit_snapshot: Some(audit_snapshot),
         audit_mode,
         elapsed,
     })
+}
+
+pub(super) fn gui_audit_plan() -> Result<
+    maya_scene_kit_audit::audit::ScriptAuditPlan,
+    maya_scene_kit_observe::scene::SceneToolError,
+> {
+    build_script_audit_plan(vec![], 64)
 }
 
 pub(super) fn audit_options_from_preference(audit_mode: AuditModePreference) -> AuditOptions {
@@ -1781,6 +1815,7 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
         BannerMessage::PersistFailed(error) => {
             i18n.format("banner.persist_failed", &[("error", error.clone())])
         }
+        BannerMessage::CachePurged => i18n.text("banner.cache_purged"),
         BannerMessage::WorkspaceLoaded { count, path } => i18n.format(
             "banner.workspace_loaded",
             &[
@@ -2026,6 +2061,15 @@ pub(super) fn build_app_menus(
                     ],
                 }),
                 MenuItem::separator(),
+                checked_menu_item(
+                    state.analysis_cache_enabled,
+                    i18n.text("settings.analysis_cache_enabled"),
+                    MenuToggleAnalysisCache,
+                ),
+                MenuItem::action(
+                    i18n.text("settings.purge_analysis_cache"),
+                    MenuPurgeAnalysisCache,
+                ),
                 MenuItem::action(edit_max_bytes_label(i18n), MenuEditMaxBytes),
                 checked_menu_item(
                     state.ignore_folder_names_enabled,

@@ -5,7 +5,7 @@ use maya_scene_kit_observe::scene::evidence::{
     DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionOrigin,
     ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Audit execution options that belong to the judgment layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +30,7 @@ impl AuditOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditProfile {
     StrictDefault,
@@ -46,7 +46,7 @@ impl AuditProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisBudgets {
     pub max_dependencies: usize,
     pub max_units: usize,
@@ -62,7 +62,7 @@ impl Default for AnalysisBudgets {
 }
 
 /// One rule hit produced by script auditing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditFinding {
     /// Stable finding identifier emitted by the audit engine.
     pub code: AuditFindingCode,
@@ -81,7 +81,7 @@ pub struct AuditFinding {
 }
 
 /// Non-malicious review signal emitted by script auditing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReviewSignal {
     /// Stable review identifier emitted by the audit engine.
     pub code: AuditReviewCode,
@@ -94,7 +94,7 @@ pub struct AuditReviewSignal {
 }
 
 /// Scene-level notice emitted by audit before surface analysis could proceed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditNotice {
     /// Stable notice identifier emitted by the audit layer.
     pub code: AuditNoticeCode,
@@ -114,7 +114,7 @@ impl AuditNotice {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditFindingCode {
     CommandPort,
@@ -168,7 +168,7 @@ impl AuditFindingCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditReviewCode {
     MelCallbackBody,
@@ -184,7 +184,7 @@ impl AuditReviewCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditNoticeCode {
     ParseBudgetExceeded,
@@ -198,7 +198,7 @@ impl AuditNoticeCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditFindingDetail {
     Static { value: StaticAuditFindingDetail },
@@ -218,7 +218,7 @@ impl AuditFindingDetail {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditReviewDetail {
     Static { value: StaticAuditReviewDetail },
@@ -234,7 +234,7 @@ impl AuditReviewDetail {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StaticAuditFindingDetail {
     CustomRuleMatch,
@@ -312,7 +312,7 @@ impl StaticAuditFindingDetail {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StaticAuditReviewDetail {
     MelCallbackBodyDetected,
@@ -332,7 +332,7 @@ impl StaticAuditReviewDetail {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditEvidence {
     FreeText {
@@ -353,7 +353,7 @@ impl AuditEvidence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditEvidenceKey {
     Command,
@@ -372,7 +372,7 @@ impl AuditEvidenceKey {
 }
 
 /// Report-local surface catalog used by audit findings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditSurface {
     /// Provenance for the triggering surface.
     pub origin: ExecutionOrigin,
@@ -383,7 +383,7 @@ pub struct AuditSurface {
 }
 
 /// Derivation metadata for report-local audit surfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditSurfaceDerivation {
     Observed,
@@ -402,7 +402,7 @@ impl AuditSurfaceDerivation {
 }
 
 /// Aggregate report returned by script auditing operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReport {
     /// Source scene path.
     pub scene_path: PathBuf,
@@ -483,7 +483,7 @@ pub type AuditHit = AuditFinding;
 pub type ScriptAuditReport = AuditReport;
 
 /// Severity assigned to an audit finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditSeverity {
     /// Informational note.
@@ -511,7 +511,7 @@ impl AuditSeverity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditDisposition {
     Allow,
@@ -534,7 +534,7 @@ impl AuditDisposition {
 }
 
 /// Sink category associated with an audit match.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditSinkKind {
     /// No concrete sink was inferred.

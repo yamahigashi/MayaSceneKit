@@ -28,8 +28,8 @@ use maya_scene_kit_audit::{
         build_parse_budget_blocked_audit_report, build_script_audit_plan,
     },
     scene::{
-        AuditEvidence, AuditFindingDetail, AuditOptions, AuditReport, AuditSeverity,
-        StaticAuditFindingDetail,
+        AuditCacheStore, AuditEvidence, AuditFindingDetail, AuditOptions, AuditReport,
+        AuditSeverity, AuditedSceneSnapshot, StaticAuditFindingDetail, fingerprint_audit_plan,
     },
 };
 use maya_scene_kit_edit::scene::{
@@ -54,8 +54,10 @@ use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, collect_scene_paths_with_options, find_scene_workspace_root,
     resolve_scene_path_value,
 };
+use maya_scene_kit_observe::scene::{ObserveCacheStore, ObservedSceneSnapshot};
 
 use crate::{
+    default_analysis_cache_root,
     i18n::I18n,
     menu_bar::TopMenuBar,
     model::{
@@ -109,6 +111,8 @@ actions!(
         MenuAutoAnalyzeParallelism8,
         MenuAutoAnalyzeParallelism16,
         MenuAutoAnalyzeParallelism32,
+        MenuToggleAnalysisCache,
+        MenuPurgeAnalysisCache,
         MenuEditMaxBytes,
         MenuToggleIgnoreFolderNames,
         MenuEditIgnoredFolderNames
@@ -187,6 +191,10 @@ struct GuiShell {
     pending_edit_transactions: BTreeMap<u64, PendingEditTransaction>,
     completed_edit_history: BTreeMap<u64, Option<GuiEditHistoryEntry>>,
     workspace_auto_analyze_started_at: Option<Instant>,
+    cache_restore_generation: u64,
+    cache_restore_state: CacheRestoreState,
+    cache_write_generation: u64,
+    cache_write_state: CacheWriteState,
     active_path_edit: Option<Vec<(u64, usize)>>,
     selected_path_rows: BTreeSet<PathEditTargets>,
     path_selection_anchor: Option<PathEditTargets>,
@@ -209,6 +217,8 @@ struct GuiShell {
     ignore_folder_names_dialog: Option<IgnoreFolderNamesDialogState>,
     replace_dialog: Option<ReplaceDialogState>,
     path_collect_dialog: Option<PathCollectDialogState>,
+    observe_cache_root: PathBuf,
+    audit_cache_root: PathBuf,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -224,6 +234,25 @@ struct AutoAnalyzeQueueState {
     pending_high: VecDeque<u64>,
     pending_low: VecDeque<u64>,
     in_flight: BTreeSet<u64>,
+}
+
+#[derive(Debug, Default)]
+struct CacheRestoreState {
+    pending: VecDeque<u64>,
+    total_count: usize,
+    completed_count: usize,
+    in_flight: bool,
+}
+
+#[derive(Debug, Default)]
+struct CacheWriteState {
+    pending_observe_order: VecDeque<String>,
+    pending_audit_order: VecDeque<String>,
+    pending_observe: BTreeMap<String, ObservedSceneSnapshot>,
+    pending_audit: BTreeMap<String, AuditedSceneSnapshot>,
+    in_flight: bool,
+    error_count: usize,
+    first_error: Option<String>,
 }
 
 impl AutoAnalyzeQueueState {
@@ -734,6 +763,7 @@ enum RowOperation {
 
 enum BannerMessage {
     PersistFailed(String),
+    CachePurged,
     WorkspaceLoaded { count: usize, path: PathBuf },
     AnalyzeCompleted { name: String, elapsed: Duration },
     WorkspaceAutoAnalyzeCompleted { count: usize, elapsed: Duration },
@@ -759,6 +789,8 @@ struct AnalyzeRowResult {
     audit_report: AuditReport,
     paths_report: Option<ScenePathsReport>,
     dump_report: Option<SceneDumpReport>,
+    observe_snapshot: Option<ObservedSceneSnapshot>,
+    audit_snapshot: Option<AuditedSceneSnapshot>,
     audit_mode: AuditModePreference,
     elapsed: Duration,
 }
@@ -1146,6 +1178,8 @@ enum RowJobResult {
 
 mod audit_detail_dialog;
 mod auto_analyze;
+mod cache_restore;
+mod cache_write;
 mod helpers;
 mod ignore_dialog;
 mod jobs;

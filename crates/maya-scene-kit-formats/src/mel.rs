@@ -7,6 +7,7 @@ use maya_mel::{
     sema::{self, DiagnosticSeverity as SemaDiagnosticSeverity},
     syntax::{LexDiagnostic, SourceMap, SourceView, TextRange, range_end, range_start},
 };
+use serde::{Deserialize, Serialize};
 
 #[path = "mel_calls.rs"]
 mod mel_calls;
@@ -97,7 +98,7 @@ impl FullParseLike for SharedParse {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MelSpan {
     pub start: usize,
     pub end: usize,
@@ -215,7 +216,7 @@ pub enum MelNormalizedCommandMode {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MelValueShape {
     Bool,
     Int,

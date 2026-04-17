@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use super::{SceneFormat, ValidationState};
 
 /// Summary of script node names discovered in a scene.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptNodeReport {
     /// Source scene path.
     pub scene_path: PathBuf,
@@ -28,7 +30,7 @@ impl ScriptNodeReport {
 }
 
 /// One extracted script node body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptNodeEntry {
     /// Script node name.
     pub name: String,
@@ -37,7 +39,7 @@ pub struct ScriptNodeEntry {
 }
 
 /// Extracted script node bodies for a scene.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptNodeEntriesReport {
     /// Source scene path.
     pub scene_path: PathBuf,
