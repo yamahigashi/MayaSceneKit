@@ -1,7 +1,18 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
-use super::{SchemaRegistry, typeid_map::TypeIdTypeNameResolver};
+use once_cell::sync::Lazy;
+
+use super::{SchemaRegistry, locator::SchemaPaths, typeid_map::TypeIdTypeNameResolver};
 use crate::scene::SceneToolError;
+
+type CachedSchemaContext = Result<Arc<SchemaContext>, String>;
+
+static SCHEMA_CONTEXT_CACHE: Lazy<Mutex<HashMap<SchemaPaths, CachedSchemaContext>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SchemaInputs<'a> {
@@ -21,7 +32,29 @@ pub(crate) struct SchemaContext {
 
 impl SchemaContext {
     pub(crate) fn from_inputs(inputs: &SchemaInputs<'_>) -> Result<Self, SceneToolError> {
-        let registry = Arc::new(SchemaRegistry::from_schema_inputs(inputs));
+        Self::from_paths(SchemaPaths::from_schema_inputs(inputs))
+    }
+
+    pub(crate) fn from_inputs_cached(
+        inputs: &SchemaInputs<'_>,
+    ) -> Result<Arc<Self>, SceneToolError> {
+        let paths = SchemaPaths::from_schema_inputs(inputs);
+        if let Some(cached) = cached_schema_context(&paths) {
+            return cached;
+        }
+
+        let built = Self::from_paths(paths.clone())
+            .map(Arc::new)
+            .map_err(|err| err.to_string());
+        let mut cache = SCHEMA_CONTEXT_CACHE
+            .lock()
+            .expect("schema context cache lock poisoned");
+        let cached = cache.entry(paths).or_insert(built);
+        clone_cached_schema_context(cached)
+    }
+
+    fn from_paths(paths: SchemaPaths) -> Result<Self, SceneToolError> {
+        let registry = Arc::new(SchemaRegistry::new(paths));
         validate_registry_inputs(registry.as_ref())?;
         let typeid_resolver =
             crate::scene::schema::typeid_map::build_typeid_typename_resolver_with_registry(
@@ -40,6 +73,24 @@ impl SchemaContext {
 
     pub(crate) fn typeid_resolver(&self) -> &TypeIdTypeNameResolver {
         &self.typeid_resolver
+    }
+}
+
+fn cached_schema_context(
+    paths: &SchemaPaths,
+) -> Option<Result<Arc<SchemaContext>, SceneToolError>> {
+    let cache = SCHEMA_CONTEXT_CACHE
+        .lock()
+        .expect("schema context cache lock poisoned");
+    cache.get(paths).map(clone_cached_schema_context)
+}
+
+fn clone_cached_schema_context(
+    cached: &CachedSchemaContext,
+) -> Result<Arc<SchemaContext>, SceneToolError> {
+    match cached {
+        Ok(context) => Ok(Arc::clone(context)),
+        Err(err) => Err(SceneToolError::Config(err.clone())),
     }
 }
 
@@ -69,4 +120,45 @@ fn validate_registry_inputs(registry: &SchemaRegistry) -> Result<(), SceneToolEr
     crate::scene::schema::refedit::validate_refedit_schema_file(&paths.refedit_schema_file)
         .map_err(SceneToolError::Config)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::SchemaContext;
+    use crate::scene::{LoadOptions, SceneToolError};
+
+    #[test]
+    fn cached_schema_context_reuses_arc_for_identical_inputs() {
+        let options = LoadOptions::default();
+
+        let first = SchemaContext::from_inputs_cached(&options.schema_inputs()).expect("first");
+        let second = SchemaContext::from_inputs_cached(&options.schema_inputs()).expect("second");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn cached_schema_context_reuses_config_errors_for_identical_inputs() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let missing_chunk_root = dir.path().join("missing_chunks");
+        let options = LoadOptions::default().with_chunk_schema_root(&missing_chunk_root);
+
+        let first = SchemaContext::from_inputs_cached(&options.schema_inputs());
+        let second = SchemaContext::from_inputs_cached(&options.schema_inputs());
+
+        match first {
+            Err(SceneToolError::Config(message)) => {
+                assert!(message.contains("missing_chunks"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+        match second {
+            Err(SceneToolError::Config(message)) => {
+                assert!(message.contains("missing_chunks"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
 }

@@ -177,8 +177,7 @@ impl Loader {
 
     fn schema_context(&self) -> Result<&Arc<SchemaContext>, SceneToolError> {
         match self.schema_context.get_or_init(|| {
-            SchemaContext::from_inputs(&self.options.schema_inputs())
-                .map(Arc::new)
+            SchemaContext::from_inputs_cached(&self.options.schema_inputs())
                 .map_err(|err| err.to_string())
         }) {
             Ok(context) => Ok(context),

@@ -10,7 +10,6 @@ use super::{
     node_semantics::AngularAttrKind, refedit_loader::RefEditSchema,
     structural_attr::StructuralAttrHandlerRule,
 };
-use crate::scene::schema::SchemaInputs;
 
 type ChunkSchemaCache = Mutex<HashMap<(String, String), Option<Arc<ChunkSchema>>>>;
 type NodeSemanticsMap = Arc<HashMap<String, HashMap<String, AngularAttrKind>>>;
@@ -38,11 +37,6 @@ impl SchemaRegistry {
             caches: SchemaRegistryCaches::default(),
         }
     }
-
-    pub(crate) fn from_schema_inputs(inputs: &SchemaInputs<'_>) -> Self {
-        Self::new(SchemaPaths::from_schema_inputs(inputs))
-    }
-
     pub(in crate::scene) fn paths(&self) -> &SchemaPaths {
         &self.paths
     }

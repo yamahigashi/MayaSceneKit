@@ -45,7 +45,7 @@ pub struct MbRecoveryBundle {
 }
 
 pub fn validate_additional_node_info_paths(options: &LoadOptions) -> Result<(), SceneToolError> {
-    SchemaContext::from_inputs(&options.schema_inputs()).map(|_| ())
+    SchemaContext::from_inputs_cached(&options.schema_inputs()).map(|_| ())
 }
 
 pub fn recover_mb_scene(
@@ -61,12 +61,9 @@ pub fn recover_mb_scene(
         });
     }
 
-    let schema_context = SchemaContext::from_inputs(&options.schema_inputs())?;
-    let session = MbReadSession::load_raw(
-        path,
-        Arc::new(schema_context.clone()),
-        options.mb_parse_budget(),
-    )?;
+    let schema_context = SchemaContext::from_inputs_cached(&options.schema_inputs())?;
+    let session =
+        MbReadSession::load_raw(path, Arc::clone(&schema_context), options.mb_parse_budget())?;
     let build = session.build()?;
 
     Ok(MbRecoveryBundle {
@@ -77,7 +74,10 @@ pub fn recover_mb_scene(
             .map(Into::into)
             .collect(),
         forensics: recovery_forensics_from_build(build),
-        angular_attrs_by_node: build_node_angular_attrs(&build.scene.nodes, &schema_context),
+        angular_attrs_by_node: build_node_angular_attrs(
+            &build.scene.nodes,
+            schema_context.as_ref(),
+        ),
     })
 }
 
