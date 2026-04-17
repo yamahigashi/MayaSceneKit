@@ -69,7 +69,7 @@ pub fn remove_raw_script_nodes_from_ma_by_name(
     (out, removed_names)
 }
 
-fn find_script_blocks_in_ma(lines: &[Vec<u8>]) -> Vec<(usize, usize, String)> {
+fn find_script_blocks_in_ma(lines: &[&[u8]]) -> Vec<(usize, usize, String)> {
     let mut blocks = Vec::new();
     let mut i = 0usize;
     while i < lines.len() {

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use regex::Regex;
 
 use crate::{PathReplaceMode, PathReplaceRule};
@@ -37,8 +39,8 @@ impl CompiledPathReplaceRules {
         Self { rules: compiled }
     }
 
-    pub(crate) fn apply(&self, input: &str) -> (String, usize) {
-        let mut current = input.to_string();
+    pub(crate) fn apply<'a>(&self, input: &'a str) -> (Cow<'a, str>, usize) {
+        let mut current = Cow::Borrowed(input);
         let mut total = 0usize;
         for rule in &self.rules {
             match rule {
@@ -47,7 +49,7 @@ impl CompiledPathReplaceRules {
                     if count == 0 {
                         continue;
                     }
-                    current = current.replace(from, to);
+                    current = Cow::Owned(current.replace(from, to));
                     total += count;
                 }
                 CompiledPathReplaceRule::Regex { regex, to } => {
@@ -55,12 +57,16 @@ impl CompiledPathReplaceRules {
                     if count == 0 {
                         continue;
                     }
-                    current = regex.replace_all(&current, to.as_str()).into_owned();
+                    current = Cow::Owned(regex.replace_all(&current, to.as_str()).into_owned());
                     total += count;
                 }
             }
         }
         (current, total)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rules.is_empty()
     }
 }
 

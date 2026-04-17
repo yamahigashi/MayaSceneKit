@@ -2,7 +2,10 @@
 
 // Raw MB path/script helpers are chunk-level transport utilities used by rewrite
 // and diagnostics. Canonical inspection APIs should prefer recovered scene state.
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use crate::{
     mb::{
@@ -91,9 +94,8 @@ pub(crate) fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(St
                 .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset));
         let body =
             extract_script_body_from_scrp_with_layout(payload, child_alignment, child_header_size);
-        let key = (name.clone(), body.clone());
-        if seen.insert(key.clone()) {
-            out.push(key);
+        if seen.insert((name.clone(), body.clone())) {
+            out.push((name, body));
         }
     }
 
@@ -212,10 +214,17 @@ pub fn remove_raw_script_nodes_from_mb_by_name(
 }
 
 pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEntry> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    extract_raw_scene_paths_from_mb_parts(&mb.data, &mb.root)
+}
 
-    for child in &mb.root.children {
+pub(crate) fn extract_raw_scene_paths_from_mb_parts(
+    data: &[u8],
+    root: &Chunk,
+) -> Vec<MbScenePathEntry> {
+    let mut out = Vec::new();
+    let mut seen = HashMap::<u64, Vec<usize>>::new();
+
+    for child in &root.children {
         let (child_alignment, child_header_size) = resolve_section_layout_hints(
             &child.tag,
             child.form_type.as_deref(),
@@ -223,7 +232,7 @@ pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEn
             child.child_header_size,
         );
         let form = child.form_type.as_deref().unwrap_or("");
-        let payload = &mb.data[child.payload_offset..child.payload_end];
+        let payload = &data[child.payload_offset..child.payload_end];
 
         if form == "FREF" {
             for e in extract_reference_entries_from_fref_payload(
@@ -232,13 +241,7 @@ pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEn
                 child_alignment,
                 child_header_size,
             ) {
-                let key = (
-                    e.node_type.clone(),
-                    e.node_name.clone(),
-                    e.attr.clone(),
-                    e.value.clone(),
-                );
-                if seen.insert(key) {
+                if push_unique_scene_path_entry(&out, &mut seen, &e) {
                     out.push(e);
                 }
             }
@@ -251,13 +254,7 @@ pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEn
                 child_alignment,
                 child_header_size,
             ) {
-                let key = (
-                    e.node_type.clone(),
-                    e.node_name.clone(),
-                    e.attr.clone(),
-                    e.value.clone(),
-                );
-                if seen.insert(key) {
+                if push_unique_scene_path_entry(&out, &mut seen, &e) {
                     out.push(e);
                 }
             }
@@ -271,13 +268,7 @@ pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEn
                 child_header_size,
                 Some(child.tag.as_str()),
             ) {
-                let key = (
-                    e.node_type.clone(),
-                    e.node_name.clone(),
-                    e.attr.clone(),
-                    e.value.clone(),
-                );
-                if seen.insert(key) {
+                if push_unique_scene_path_entry(&out, &mut seen, &e) {
                     out.push(e);
                 }
             }
@@ -286,6 +277,36 @@ pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEn
     }
 
     out
+}
+
+fn push_unique_scene_path_entry(
+    out: &[MbScenePathEntry],
+    seen: &mut HashMap<u64, Vec<usize>>,
+    entry: &MbScenePathEntry,
+) -> bool {
+    let fingerprint = scene_path_entry_fingerprint(entry);
+    let bucket = seen.entry(fingerprint).or_default();
+    if bucket.iter().copied().any(|idx| {
+        out.get(idx).is_some_and(|existing| {
+            existing.node_type == entry.node_type
+                && existing.node_name == entry.node_name
+                && existing.attr == entry.attr
+                && existing.value == entry.value
+        })
+    }) {
+        return false;
+    }
+    bucket.push(out.len());
+    true
+}
+
+fn scene_path_entry_fingerprint(entry: &MbScenePathEntry) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    entry.node_type.hash(&mut hasher);
+    entry.node_name.hash(&mut hasher);
+    entry.attr.hash(&mut hasher);
+    entry.value.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn collect_rtft_owner_traces_from_mb(mb: &MayaBinaryFile) -> Vec<MbRtftOwnerTrace> {

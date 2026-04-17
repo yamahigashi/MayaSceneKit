@@ -24,7 +24,7 @@ pub use self::{
         remove_raw_script_nodes_from_mb, remove_root_forms_from_mb_by_locator,
     },
     raw_walk::{walk_group_chunks_with_layout, walk_group_chunks_with_layout_with_budget},
-    rewrite::{MbPathReplaceRule, replace_scene_paths_in_mb},
+    rewrite::{MbPathReplaceRule, replace_scene_paths_in_mb, replace_scene_paths_in_mb_cow},
     section::parse_section_chunks_with_hints,
 };
 pub(crate) use self::{
