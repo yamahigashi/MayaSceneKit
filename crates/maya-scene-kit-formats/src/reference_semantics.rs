@@ -85,9 +85,10 @@ pub fn parse_reference_include_path(options: &str) -> Option<String> {
 }
 
 pub fn classify_scene_path_attr(attr_name: &str) -> Option<ScenePathAttrKind> {
-    match attr_name.trim_start_matches('.') {
+    let normalized = attr_name.trim_start_matches('.').to_ascii_lowercase();
+    match normalized.as_str() {
         "fn" | "f" => Some(ScenePathAttrKind::ReferencePath),
-        "ftn" => Some(ScenePathAttrKind::FileTexturePath),
+        "ftn" | "filetexturename" => Some(ScenePathAttrKind::FileTexturePath),
         "cs" => Some(ScenePathAttrKind::FileTextureColorSpace),
         _ => None,
     }

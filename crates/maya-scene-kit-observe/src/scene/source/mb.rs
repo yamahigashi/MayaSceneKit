@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
 };
 
@@ -36,6 +36,11 @@ pub(crate) fn collect_mb_scene_paths(
     let mut seen = HashSet::new();
     let mut raw_file_meta = build_raw_mb_file_meta_index(raw_entries);
     let fallback_file_meta = build_mb_file_owner_trace_index(mb, raw_chunks, raw_source);
+    let nodes_by_name = nodes
+        .iter()
+        .map(|node| (node.name.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut consumed_node_values = HashSet::<(String, String)>::new();
 
     for reference in reference_files {
         push_unique_scene_path_entry(
@@ -70,10 +75,39 @@ pub(crate) fn collect_mb_scene_paths(
         );
     }
 
-    for node in nodes {
-        if node.node_type.as_ref() != "file" {
+    for entry in raw_entries {
+        if !matches!(
+            classify_scene_path_attr(&entry.attr),
+            Some(ScenePathAttrKind::FileTexturePath)
+        ) {
             continue;
         }
+        let node_type = nodes_by_name
+            .get(entry.node_name.as_str())
+            .map(|node| node.node_type.to_string())
+            .unwrap_or_else(|| entry.node_type.clone());
+        consumed_node_values.insert((entry.node_name.clone(), entry.value.clone()));
+        push_unique_scene_path_entry(
+            &mut out,
+            &mut seen,
+            ScenePathEntry {
+                node_type,
+                node_name: entry.node_name.clone(),
+                attr: entry.attr.clone(),
+                value: entry.value.clone(),
+                meta: take_raw_mb_file_meta(&mut raw_file_meta, &entry.node_name, &entry.value)
+                    .map(|meta| {
+                        merge_mb_file_meta_with_owner_trace(
+                            meta,
+                            fallback_file_meta.get(&entry.node_name),
+                        )
+                    })
+                    .or_else(|| fallback_file_meta.get(&entry.node_name).cloned()),
+            },
+        );
+    }
+
+    for node in nodes {
         for attr in &node.attrs {
             let crate::scene::ir::RecoveredAttrOp::SetAttr(op) = attr else {
                 continue;
@@ -87,11 +121,14 @@ pub(crate) fn collect_mb_scene_paths(
             ) {
                 continue;
             }
+            if consumed_node_values.contains(&(node.name.clone(), value.clone())) {
+                continue;
+            }
             push_unique_scene_path_entry(
                 &mut out,
                 &mut seen,
                 ScenePathEntry {
-                    node_type: "file".to_string(),
+                    node_type: node.node_type.to_string(),
                     node_name: node.name.clone(),
                     attr: op.attr_name_or_path.clone(),
                     value: value.clone(),
@@ -167,8 +204,10 @@ fn build_mb_file_owner_trace_index_from_raw_chunks(
             });
         if meta.trace_tag.is_none()
             && matches!(
-                decode_rtft_attr_name(payload).as_deref(),
-                Some("ftn") | Some(".ftn")
+                decode_rtft_attr_name(payload)
+                    .as_deref()
+                    .and_then(classify_scene_path_attr),
+                Some(ScenePathAttrKind::FileTexturePath)
             )
         {
             meta.trace_tag = Some(raw.chunk_ref.tag.clone());
@@ -198,9 +237,6 @@ fn build_raw_mb_file_meta_index(
     let mut index = BTreeMap::<(String, String), VecDeque<ScenePathMeta>>::new();
 
     for entry in raw_entries {
-        if entry.node_type != "file" {
-            continue;
-        }
         if !matches!(
             classify_scene_path_attr(&entry.attr),
             Some(ScenePathAttrKind::FileTexturePath)
@@ -325,16 +361,26 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::collections::HashSet;
 
     use super::{decode_rtft_attr_name, push_unique_scene_path_entry};
-    use crate::scene::paths::{ScenePathEntry, ScenePathMeta};
+    use crate::scene::{
+        ir::{RecoveredAttrOp, RecoveredNode, SetAttrOp, SetAttrValue},
+        paths::{ScenePathEntry, ScenePathMeta},
+    };
+    use crate::scene::model::CreateNodeFlags;
+    use maya_scene_kit_formats::mb::{parse_file, paths::{MbScenePathEntry, MbScenePathMeta}};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
 
     fn scene_path_entry(trace_tag: &str, trace_node_offset: usize) -> ScenePathEntry {
         ScenePathEntry {
-            node_type: "file".to_string(),
+            node_type: "psdFileTex".to_string(),
             node_name: "ExampleFile".to_string(),
-            attr: ".ftn".to_string(),
+            attr: ".fileTextureName".to_string(),
             value: "asset/example/file.png".to_string(),
             meta: Some(ScenePathMeta {
                 origin: "rtft".to_string(),
@@ -343,7 +389,7 @@ mod tests {
                 format_hint: None,
                 reference_options: None,
                 color_space: None,
-                raw_fields: vec!["ftn=asset/example/file.png".to_string()],
+                raw_fields: vec!["fileTextureName=asset/example/file.png".to_string()],
                 trace_form: Some("RTFT".to_string()),
                 trace_tag: Some(trace_tag.to_string()),
                 trace_node_offset: Some(trace_node_offset),
@@ -376,5 +422,61 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node_name, "ExampleFile");
         assert_eq!(out[0].value, "asset/example/file.png");
+    }
+
+    #[test]
+    fn collect_mb_scene_paths_preserves_non_file_owner_type_for_file_texture_name() {
+        let source = repo_root().join("tests/fixtures/mb/owner_delete/file_owner_delete.mb");
+        let parsed = parse_file(&source).expect("parse fixture");
+        let nodes = vec![RecoveredNode {
+            node_type: std::sync::Arc::<str>::from("psdFileTex"),
+            name: "psdTex1".to_string(),
+            parent: None,
+            uid: None,
+            attrs: vec![RecoveredAttrOp::SetAttr(SetAttrOp {
+                attr_name_or_path: ".fileTextureName".to_string(),
+                array_size: None,
+                channel_hint: None,
+                lock: None,
+                keyable: None,
+                value: SetAttrValue::String("sourceimages/layered.psd".to_string()),
+            })],
+            decode_notes: Vec::new(),
+            create_flags: CreateNodeFlags::default(),
+        }];
+        let raw_entries = vec![MbScenePathEntry {
+            node_type: "file".to_string(),
+            node_name: "psdTex1".to_string(),
+            attr: ".fileTextureName".to_string(),
+            value: "sourceimages/layered.psd".to_string(),
+            meta: Some(MbScenePathMeta {
+                origin: "rtft".to_string(),
+                short_name: Some("psdTex1".to_string()),
+                reference_node: None,
+                format_hint: None,
+                reference_options: None,
+                color_space: None,
+                raw_fields: vec!["fileTextureName=sourceimages/layered.psd".to_string()],
+                trace_form: Some("RTFT".to_string()),
+                trace_tag: Some("STR ".to_string()),
+                trace_node_offset: Some(0x40),
+                trace_child_alignment: Some(8),
+                trace_child_header_size: Some(16),
+            }),
+        }];
+
+        let entries = super::collect_mb_scene_paths(
+            &parsed,
+            &nodes,
+            &[],
+            &raw_entries,
+            &[],
+            parsed.data.as_ref(),
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].node_type, "psdFileTex");
+        assert_eq!(entries[0].attr, ".fileTextureName");
+        assert_eq!(entries[0].value, "sourceimages/layered.psd");
     }
 }

@@ -478,7 +478,7 @@ fn extract_file_entries_from_rtft_payload(
         .map(|path| MbScenePathEntry {
             node_type: "file".to_string(),
             node_name: node_name.clone(),
-            attr: ".ftn".to_string(),
+            attr: file_texture_attr_name_from_fields(&attrs).unwrap_or_else(|| ".ftn".to_string()),
             value: path,
             meta: Some(MbScenePathMeta {
                 origin: "rtft".to_string(),
@@ -496,6 +496,21 @@ fn extract_file_entries_from_rtft_payload(
             }),
         })
         .collect()
+}
+
+fn file_texture_attr_name_from_fields(fields: &[String]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        let (attr_name, _) = field.split_once('=')?;
+        matches!(
+            classify_scene_path_attr(attr_name),
+            Some(ScenePathAttrKind::FileTexturePath)
+        )
+        .then(|| normalize_scene_path_attr_name(attr_name))
+    })
+}
+
+fn normalize_scene_path_attr_name(attr_name: &str) -> String {
+    format!(".{}", attr_name.trim_start_matches('.'))
 }
 
 fn extract_reference_entries_from_fref_payload(
@@ -826,13 +841,45 @@ mod tests {
 
     use super::{
         collect_rtft_owner_traces_from_mb, decode_reference_from_frdi_chunk,
-        decode_reference_from_fref_chunk, decode_string_attr_from_rtft_chunk, parse_fref_record,
-        remove_root_forms_from_mb_by_locator,
+        decode_reference_from_fref_chunk, decode_string_attr_from_rtft_chunk,
+        extract_file_entries_from_rtft_payload, parse_fref_record, remove_root_forms_from_mb_by_locator,
     };
-    use crate::mb::{parse_file, paths::extract_raw_scene_paths_from_mb};
+    use crate::mb::{parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk};
+    use crate::mb::section::SectionHeaderFormat;
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn build_mb_with_single_form(
+        form: &str,
+        inner_chunk_tag: &str,
+        inner_chunk_payload: &[u8],
+        inner_tail: &[u8],
+    ) -> Vec<u8> {
+        let mut inner = encode_chunk(
+            inner_chunk_tag,
+            0,
+            inner_chunk_payload,
+            8,
+            SectionHeaderFormat::EightByte,
+        )
+        .expect("inner chunk");
+        inner.extend_from_slice(inner_tail);
+
+        let mut child_payload = form.as_bytes().to_vec();
+        child_payload.extend_from_slice(&inner);
+        let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
+            .expect("child chunk");
+
+        let mut root_payload = b"Maya".to_vec();
+        root_payload.extend_from_slice(&child);
+        let mut root = Vec::new();
+        root.extend_from_slice(b"FOR8");
+        root.extend_from_slice(&0u32.to_be_bytes());
+        root.extend_from_slice(&(root_payload.len() as u64).to_be_bytes());
+        root.extend_from_slice(&root_payload);
+        root
     }
 
     #[test]
@@ -931,6 +978,15 @@ mod tests {
     }
 
     #[test]
+    fn decode_rtft_string_attr_accepts_file_texture_name_alias() {
+        let payload = b"fileTextureName\0\x00sourceimages/layered.psd\0";
+        let decoded =
+            decode_string_attr_from_rtft_chunk("STR ", payload, None, None).expect("decode");
+        assert_eq!(decoded.0, "fileTextureName");
+        assert_eq!(decoded.1, "sourceimages/layered.psd");
+    }
+
+    #[test]
     fn remove_root_forms_from_mb_by_locator_drops_matching_owner_form() {
         let source = repo_root().join("tests/02/sphere.mb");
         let parsed = parse_file(&source).expect("parse fixture");
@@ -1000,6 +1056,35 @@ mod tests {
                 .and_then(|meta| meta.trace_node_offset)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn extract_raw_scene_paths_preserves_file_texture_name_attr_label() {
+        let crea = encode_chunk(
+            "CREA",
+            0,
+            b"psdTex1\0",
+            8,
+            SectionHeaderFormat::EightByte,
+        )
+        .expect("crea chunk");
+        let path = encode_chunk(
+            "STR ",
+            0,
+            b"fileTextureName\0\x00sourceimages/layered.psd\0",
+            8,
+            SectionHeaderFormat::EightByte,
+        )
+        .expect("str chunk");
+        let mut payload = b"RTFT".to_vec();
+        payload.extend_from_slice(&crea);
+        payload.extend_from_slice(&path);
+        let entries = extract_file_entries_from_rtft_payload(&payload, 0x40, Some(8), Some(16), None);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].node_name, "psdTex1");
+        assert_eq!(entries[0].attr, ".fileTextureName");
+        assert_eq!(entries[0].value, "sourceimages/layered.psd");
     }
 
     #[test]

@@ -583,6 +583,62 @@ fn replace_override_stage_changes_only_targeted_ma_entry() {
 }
 
 #[test]
+fn replace_and_delete_support_file_texture_name_on_non_file_nodes() {
+    let dir = tempdir().expect("tmpdir");
+    let source = dir.path().join("non_file_texture_nodes.ma");
+    std::fs::write(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode psdFileTex -n \"psdTex1\";\n",
+            "    setAttr \".fileTextureName\" -type \"string\" \"sourceimages/layered.psd\";\n",
+            "createNode movie -n \"movieTex1\";\n",
+            "    setAttr \".fileTextureName\" -type \"string\" \"movies/clip.mov\";\n",
+        ),
+    )
+    .expect("write source");
+
+    let report = collect_scene_paths(&source, PathKind::File).expect("collect file paths");
+    assert_eq!(report.entries.len(), 2);
+    assert_eq!(report.entries[0].node_type, "psdFileTex");
+    assert_eq!(report.entries[0].attr, ".fileTextureName");
+    assert_eq!(report.entries[1].node_type, "movie");
+
+    let overrides = vec![PathReplaceOverride {
+        entry_index: 1,
+        before_value: "movies/clip.mov".to_string(),
+        after_value: "archive/clip.mov".to_string(),
+    }];
+    let staged =
+        stage_replace_scene_paths_with_overrides_in_report(&report, &overrides).expect("replace");
+    let replaced = String::from_utf8(staged.artifact.bytes.clone()).expect("utf8");
+    assert!(replaced.contains("sourceimages/layered.psd"));
+    assert!(replaced.contains("archive/clip.mov"));
+
+    let delete_preview = preview_delete_path_owner_nodes(
+        &source,
+        &[PathOwnerDeleteTarget {
+            node_type: "psdFileTex".to_string(),
+            node_name: "psdTex1".to_string(),
+        }],
+    )
+    .expect("delete preview");
+    assert_eq!(delete_preview.deleted_count(), 1);
+
+    let deleted = stage_delete_path_owner_nodes(
+        &source,
+        &[PathOwnerDeleteTarget {
+            node_type: "psdFileTex".to_string(),
+            node_name: "psdTex1".to_string(),
+        }],
+    )
+    .expect("delete stage");
+    let deleted_text = String::from_utf8(deleted.artifact.bytes).expect("utf8");
+    assert!(!deleted_text.contains("createNode psdFileTex -n \"psdTex1\";"));
+    assert!(deleted_text.contains("createNode movie -n \"movieTex1\";"));
+}
+
+#[test]
 fn composite_stage_from_replaced_bytes_preserves_replace_overrides() {
     let dir = tempdir().expect("tmpdir");
     let source = dir.path().join("scene.ma");
