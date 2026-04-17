@@ -20,6 +20,10 @@ impl ScriptAuditPlan {
     pub fn effective_rules(&self) -> &[String] {
         &self.effective_rules
     }
+
+    pub fn max_preview(&self) -> usize {
+        self.max_preview
+    }
 }
 
 pub(crate) fn build_script_audit_plan(

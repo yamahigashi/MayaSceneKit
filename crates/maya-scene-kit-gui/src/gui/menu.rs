@@ -378,6 +378,24 @@ impl GuiShell {
         );
     }
 
+    pub(super) fn on_menu_toggle_analysis_cache(
+        &mut self,
+        _: &MenuToggleAnalysisCache,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_analysis_cache_enabled_preference(!self.state.analysis_cache_enabled, window, cx);
+    }
+
+    pub(super) fn on_menu_purge_analysis_cache(
+        &mut self,
+        _: &MenuPurgeAnalysisCache,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.purge_analysis_cache(window, cx);
+    }
+
     pub(super) fn on_menu_edit_max_bytes(
         &mut self,
         _: &MenuEditMaxBytes,

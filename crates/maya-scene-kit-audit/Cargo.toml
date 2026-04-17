@@ -17,6 +17,8 @@ maya-scene-kit-observe = { path = "../maya-scene-kit-observe" }
 regex = "1"
 rustpython-parser = "0.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 encoding_rs = "0.8"

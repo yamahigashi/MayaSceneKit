@@ -7,6 +7,7 @@ use crate::model::PersistedState;
 
 const APP_DIR: &str = "maya-scene-kit";
 const STATE_FILE: &str = "gui-state.json";
+const ANALYSIS_CACHE_DIR: &str = "analysis-cache";
 
 pub fn default_state_path() -> PathBuf {
     if cfg!(windows) {
@@ -27,6 +28,36 @@ pub fn default_state_path() -> PathBuf {
     }
 
     PathBuf::from(STATE_FILE)
+}
+
+pub fn default_analysis_cache_root() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_appdata)
+                .join(APP_DIR)
+                .join(ANALYSIS_CACHE_DIR);
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata)
+                .join(APP_DIR)
+                .join(ANALYSIS_CACHE_DIR);
+        }
+    }
+
+    if let Some(cache_home) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(cache_home)
+            .join(APP_DIR)
+            .join(ANALYSIS_CACHE_DIR);
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join(APP_DIR)
+            .join(ANALYSIS_CACHE_DIR);
+    }
+
+    PathBuf::from(ANALYSIS_CACHE_DIR)
 }
 
 pub fn load_persisted_state() -> io::Result<PersistedState> {
@@ -90,6 +121,7 @@ mod tests {
             workspace_layout: WorkspaceLayoutPreference::LeftRight,
             workspace_auto_analyze: true,
             auto_analyze_parallelism: AutoAnalyzeParallelismPreference::ThirtyTwo,
+            analysis_cache_enabled: false,
             max_bytes: Some(123456789),
             ignore_folder_names_enabled: false,
             ignored_folder_names: vec!["cache".to_string(), "publish".to_string()],
@@ -233,5 +265,6 @@ mod tests {
             restored.auto_analyze_parallelism,
             AutoAnalyzeParallelismPreference::Four
         );
+        assert!(restored.analysis_cache_enabled);
     }
 }

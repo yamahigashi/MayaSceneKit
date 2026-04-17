@@ -1,13 +1,13 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ExecutionSourceRange {
     pub start: usize,
     pub end: usize,
 }
 
 /// Provenance for a single observed execution surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionOrigin {
     /// Language associated with the extracted surface.
     pub lang: ExecutionLanguage,
@@ -64,7 +64,7 @@ impl ExecutionOrigin {
 }
 
 /// Script language inferred for an observed execution surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionLanguage {
     /// MEL surface.
@@ -87,7 +87,7 @@ impl ExecutionLanguage {
 }
 
 /// Trigger associated with an observed execution surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionTrigger {
     /// Trigger could not be inferred.
@@ -130,7 +130,7 @@ impl ExecutionTrigger {
 }
 
 /// Source category used to construct an observed execution surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionSurfaceKind {
     /// Script node body text.
@@ -162,7 +162,7 @@ impl ExecutionSurfaceKind {
 }
 
 /// Coverage state for execution-surface extraction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionCoverageState {
     /// Coverage is complete enough to allow a clean audit.
@@ -188,7 +188,7 @@ impl ExecutionCoverageState {
 }
 
 /// Stable category for a coverage issue emitted by execution-surface extraction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionCoverageIssueKind {
     /// The file-level MEL parser reported diagnostics.
@@ -210,7 +210,7 @@ impl ExecutionCoverageIssueKind {
 }
 
 /// A fact describing why execution-surface coverage is incomplete.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionCoverageIssue {
     pub kind: ExecutionCoverageIssueKind,
     pub detail: ExecutionCoverageIssueDetail,
@@ -218,7 +218,7 @@ pub struct ExecutionCoverageIssue {
     pub preview: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionCoverageIssueDetail {
     TopLevelDiagnostics { diagnostic: String },
@@ -228,7 +228,7 @@ pub enum ExecutionCoverageIssueDetail {
 }
 
 /// Unit-level effect summary derived from an observed execution unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionEffectClass {
     PureComputation,
@@ -259,7 +259,7 @@ impl ExecutionEffectClass {
 }
 
 /// Confidence assigned to an effect summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectCertainty {
     Proven,
@@ -276,7 +276,7 @@ impl EffectCertainty {
 }
 
 /// Additional semantic subtype used when broad effect classes are too coarse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionSemanticClass {
     General,
@@ -301,7 +301,7 @@ impl ExecutionSemanticClass {
 }
 
 /// Summary of a single execution unit observed from a scene.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionUnitSummary {
     pub origin: ExecutionOrigin,
     pub effect: ExecutionEffectClass,
@@ -311,7 +311,7 @@ pub struct ExecutionUnitSummary {
     pub reasons: Vec<ExecutionReason>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StaticExecutionReason {
     SurfaceLanguageUnknown,
@@ -329,7 +329,7 @@ pub enum StaticExecutionReason {
     ReadOnlyMelOptionVarQueryDetected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionReasonTemplate {
     DynamicMelCommandDetected,
@@ -346,7 +346,7 @@ pub enum ExecutionReasonTemplate {
     PythonImportFromDetected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionReason {
     Static {
@@ -363,7 +363,7 @@ pub enum ExecutionReason {
 }
 
 /// Risk bucket assigned to a reported dependency fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyRiskClass {
     Informational,
@@ -382,7 +382,7 @@ impl DependencyRiskClass {
 }
 
 /// High-level dependency category observed from a scene.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyFactKind {
     Require,
@@ -407,7 +407,7 @@ impl DependencyFactKind {
 }
 
 /// Report-only dependency evidence discovered from a scene.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyFact {
     pub kind: DependencyFactKind,
     pub risk: DependencyRiskClass,
@@ -416,7 +416,7 @@ pub struct DependencyFact {
     pub origin: Option<ExecutionOrigin>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DependencyFactDetail {
     Require,
@@ -426,14 +426,14 @@ pub enum DependencyFactDetail {
 }
 
 /// Observe-owned uncertainty detail.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnknownSemanticFact {
     pub origin: ExecutionOrigin,
     pub detail: UnknownSemanticDetail,
     pub preview: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UnknownSemanticDetail {
     PrimaryReason { reason: ExecutionReason },
@@ -441,7 +441,7 @@ pub enum UnknownSemanticDetail {
 }
 
 /// Stable digests describing the observed scene and audit environment.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDigestSet {
     pub scene_sha256: String,
     pub schema_bundle_sha256: Option<String>,

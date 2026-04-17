@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use super::{SceneFormat, ValidationState};
 
 /// Filter applied when collecting scene paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PathKind {
     /// Return all supported path types.
     All,
@@ -14,7 +16,7 @@ pub enum PathKind {
 }
 
 /// Classified storage style for a scene path value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScenePathValueStyle {
     /// A value relative to the Maya workspace root.
     PlainRelative,
@@ -27,7 +29,7 @@ pub enum ScenePathValueStyle {
 }
 
 /// Resolution outcome for a scene path value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScenePathResolutionStatus {
     Exists,
     Missing,
@@ -35,7 +37,7 @@ pub enum ScenePathResolutionStatus {
 }
 
 /// Resolved path facts for a raw scene path value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScenePathResolution {
     /// Original value storage style.
     pub style: ScenePathValueStyle,
@@ -46,7 +48,7 @@ pub struct ScenePathResolution {
 }
 
 /// One discovered path entry from a scene.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenePathEntry {
     /// Node type that owns the path.
     pub node_type: String,
@@ -61,7 +63,7 @@ pub struct ScenePathEntry {
 }
 
 /// Supplemental metadata for a path entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenePathMeta {
     /// Extraction source identifier.
     pub origin: String,
@@ -90,7 +92,7 @@ pub struct ScenePathMeta {
 }
 
 /// Aggregate result returned by path collection APIs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenePathsReport {
     /// Source scene path.
     pub scene_path: PathBuf,

@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod persistent_cache;
 mod public;
 
 pub mod scene {
@@ -17,6 +18,9 @@ pub mod scene {
         LoadOptions, Loader, ObservationBundle, SceneToolError,
     };
 
+    pub use crate::persistent_cache::{
+        AuditCacheIdentity, AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
+    };
     pub use crate::public::audit::{
         AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
         AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode, AuditOptions,

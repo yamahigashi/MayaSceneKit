@@ -28,6 +28,9 @@ impl GuiShell {
             .new(|cx| InputState::new(window, cx).placeholder(i18n.text("placeholder.replace_to")));
         let path_edit_focus_handle = path_edit_input.read(cx).focus_handle(cx);
         let mut next_row_id = 1u64;
+        let analysis_cache_root = default_analysis_cache_root();
+        let observe_cache_root = analysis_cache_root.join("observe");
+        let audit_cache_root = analysis_cache_root.join("audit");
         let rows = load_rows_from_state(&state, &mut next_row_id);
         let row_id_to_index = rows
             .iter()
@@ -197,7 +200,7 @@ impl GuiShell {
             ),
         ];
 
-        Self {
+        let mut shell = Self {
             state,
             rows,
             row_id_to_index,
@@ -236,6 +239,10 @@ impl GuiShell {
             pending_edit_transactions: BTreeMap::new(),
             completed_edit_history: BTreeMap::new(),
             workspace_auto_analyze_started_at: None,
+            cache_restore_generation: 0,
+            cache_restore_state: CacheRestoreState::default(),
+            cache_write_generation: 0,
+            cache_write_state: CacheWriteState::default(),
             active_path_edit: None,
             selected_path_rows: BTreeSet::new(),
             path_selection_anchor: None,
@@ -258,8 +265,12 @@ impl GuiShell {
             ignore_folder_names_dialog: None,
             replace_dialog: None,
             path_collect_dialog: None,
+            observe_cache_root,
+            audit_cache_root,
             _subscriptions: subscriptions,
-        }
+        };
+        shell.start_progressive_cache_restore(window, cx);
+        shell
     }
 
     pub(super) fn bind_file_table(&mut self, view: Entity<Self>, cx: &mut Context<Self>) {
@@ -299,6 +310,25 @@ impl GuiShell {
 
     pub(super) fn scene_materialize_options(&self, mode: OperationMode) -> MaterializeOptions {
         MaterializeOptions::new(self.scene_load_options()).with_operation_mode(mode)
+    }
+
+    pub(super) fn cache_restore_active(&self) -> bool {
+        self.cache_restore_state.in_flight || !self.cache_restore_state.pending.is_empty()
+    }
+
+    pub(super) fn cache_restore_message(&self, i18n: &I18n) -> Option<String> {
+        self.cache_restore_active().then(|| {
+            i18n.format(
+                "banner.cache_restore_in_progress",
+                &[
+                    (
+                        "completed",
+                        self.cache_restore_state.completed_count.to_string(),
+                    ),
+                    ("total", self.cache_restore_state.total_count.to_string()),
+                ],
+            )
+        })
     }
 
     pub(super) fn backup_location_label(&self, i18n: &I18n) -> String {

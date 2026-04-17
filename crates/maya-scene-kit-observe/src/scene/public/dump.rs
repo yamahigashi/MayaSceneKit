@@ -1,21 +1,23 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use super::{SceneFormat, ScriptNodeEntry, ValidationState};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SceneDumpRequireKind {
     MayaVersion,
     Plugin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SceneDumpRequireEntry {
     pub rendered: String,
     pub kind: SceneDumpRequireKind,
 }
 
 /// Read-only scene dump facts shared by CLI and GUI adapters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDumpReport {
     /// Source scene path.
     pub scene_path: PathBuf,
