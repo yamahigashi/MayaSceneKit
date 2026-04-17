@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::scene::schema::SchemaInputs;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::scene) struct SchemaPaths {
     pub(in crate::scene) chunk_schema_root: PathBuf,
     pub(in crate::scene) refedit_schema_file: PathBuf,
