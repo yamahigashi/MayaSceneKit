@@ -564,6 +564,40 @@ mod tests {
     }
 
     #[test]
+    fn mb_scene_paths_do_not_force_full_build() {
+        let source = repo_root().join("tests/02/sphere.mb");
+        let observation = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("observation");
+
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
+        assert!(observation.cached_mb_build_ptr().is_none());
+
+        let paths = observation.scene_paths(PathKind::All).expect("scene paths");
+
+        let _ = paths;
+        assert!(observation.cached_mb_scene_facts_ptr().is_some());
+        assert!(observation.cached_mb_build_ptr().is_none());
+    }
+
+    #[test]
+    fn mb_script_entries_do_not_force_full_build() {
+        let source = repo_root().join("tests/02/sphere.mb");
+        let observation = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("observation");
+
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
+        assert!(observation.cached_mb_build_ptr().is_none());
+
+        let entries = observation.script_node_entries().expect("script entries");
+
+        assert!(!entries.is_empty());
+        assert!(observation.cached_mb_scene_facts_ptr().is_some());
+        assert!(observation.cached_mb_build_ptr().is_none());
+    }
+
+    #[test]
     fn mb_observation_bundle_stays_usable_after_source_file_is_removed() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let source = dir.path().join("copied_sphere.mb");

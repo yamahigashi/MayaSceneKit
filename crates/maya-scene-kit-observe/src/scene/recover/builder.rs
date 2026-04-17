@@ -58,18 +58,18 @@ pub(crate) fn build_scene_model_from_decoded_chunks(
     raw_source: Arc<[u8]>,
     raw_chunks: Vec<crate::scene::ir::RawChunkRecord>,
     decoded_chunks: Vec<crate::scene::ir::DecodedChunkRecord>,
-    typeid_resolver: Option<&TypeIdTypeNameResolver>,
+    nodes: Vec<crate::scene::ir::RecoveredNode>,
+    reference_files: Vec<crate::scene::ir::ReferenceFileOp>,
     _registry: Arc<SchemaRegistry>,
     typeid_resolver_status: TypeIdResolverStatus,
 ) -> SceneBuildOutput {
     let decode_qualities = recover::collect_decode_quality_records(&decoded_chunks);
-    let nodes = recover::recover_nodes(&decoded_chunks, typeid_resolver);
     SceneBuildOutput {
         scene: SceneModel {
             nodes,
             select_blocks: recover::recover_select_blocks(&decoded_chunks),
             links: recover::recover_links_from_cons(&decoded_chunks),
-            reference_files: recover::recover_reference_files(&decoded_chunks),
+            reference_files,
         },
         artifacts: SceneArtifacts {
             raw_source,
@@ -92,11 +92,14 @@ fn build_scene_model_from_raw_chunks(
         raw_source.as_ref(),
         Arc::clone(&registry),
     );
+    let nodes = recover::recover_nodes(&decoded_chunks, typeid_resolver);
+    let reference_files = recover::recover_reference_files(&decoded_chunks);
     build_scene_model_from_decoded_chunks(
         raw_source,
         raw_chunks,
         decoded_chunks,
-        typeid_resolver,
+        nodes,
+        reference_files,
         registry,
         typeid_resolver_status,
     )

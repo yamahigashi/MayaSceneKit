@@ -61,7 +61,10 @@ impl BoundaryGroupIndexes {
             .entry((group.name.clone(), group.expected_count))
             .or_default()
             .push(idx);
-        self.by_name.entry(group.name.clone()).or_default().push(idx);
+        self.by_name
+            .entry(group.name.clone())
+            .or_default()
+            .push(idx);
     }
 }
 
