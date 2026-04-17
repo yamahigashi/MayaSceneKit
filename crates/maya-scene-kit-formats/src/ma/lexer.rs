@@ -4,17 +4,17 @@ use regex::Regex;
 static CREATE_SCRIPT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\bcreateNode\s+script\b").unwrap());
 
-pub(crate) fn split_lines_keepends(data: &[u8]) -> Vec<Vec<u8>> {
+pub(crate) fn split_lines_keepends(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for (i, b) in data.iter().enumerate() {
         if *b == b'\n' {
-            out.push(data[start..=i].to_vec());
+            out.push(&data[start..=i]);
             start = i + 1;
         }
     }
     if start < data.len() {
-        out.push(data[start..].to_vec());
+        out.push(&data[start..]);
     }
     out
 }
@@ -320,7 +320,7 @@ pub(crate) fn is_create_script_command(line: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_script_node_name_from_create;
+    use super::{extract_script_node_name_from_create, split_lines_keepends};
 
     fn parse_ma_borrowed_quoted_literal(text: &str, start: usize) -> (Option<&str>, usize) {
         if start >= text.len() || !text[start..].starts_with('"') {
@@ -378,5 +378,13 @@ mod tests {
         let (literal, next) = parse_ma_borrowed_quoted_literal(text, start);
         assert_eq!(literal, None);
         assert_eq!(next, start);
+    }
+
+    #[test]
+    fn split_lines_keepends_returns_borrowed_slices() {
+        let input = b"first\nsecond\nthird";
+        let lines = split_lines_keepends(input);
+        assert_eq!(lines, vec![&b"first\n"[..], &b"second\n"[..], &b"third"[..]]);
+        assert!(std::ptr::eq(lines[1].as_ptr(), input[6..].as_ptr()));
     }
 }

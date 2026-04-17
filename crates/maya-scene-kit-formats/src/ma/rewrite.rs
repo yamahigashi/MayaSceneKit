@@ -357,7 +357,7 @@ pub fn remove_path_owner_nodes_from_ma(
     (out.into_bytes(), removed)
 }
 
-fn collect_top_level_command_block(lines: &[Vec<u8>], start: usize) -> (String, usize) {
+fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, usize) {
     let mut command = String::from_utf8_lossy(&lines[start]).to_string();
     let mut next = start + 1;
 
@@ -372,7 +372,7 @@ fn collect_top_level_command_block(lines: &[Vec<u8>], start: usize) -> (String, 
     (command, next)
 }
 
-fn collect_command_until_semicolon(lines: &[Vec<u8>], start: usize) -> (String, usize) {
+fn collect_command_until_semicolon(lines: &[&[u8]], start: usize) -> (String, usize) {
     let mut command = String::from_utf8_lossy(&lines[start]).to_string();
     let mut next = start + 1;
     while !command_has_terminating_semicolon(&command) && next < lines.len() {

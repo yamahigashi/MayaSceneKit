@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 // MB rewrite helpers intentionally stay chunk-oriented so replacement can preserve
 // binary layout details without becoming the canonical semantic inspection path.
 use crate::mb::{
     Chunk, parse_section_chunks_full_with_hints,
-    paths::extract_raw_scene_paths_from_mb,
+    paths::extract_raw_scene_paths_from_mb_parts,
     resolve_section_layout_hints,
     rewrite::{
         chunk_header_format_from_chunk, encode_chunk, encode_root_chunk,
@@ -25,18 +25,28 @@ pub(crate) fn replace_raw_scene_paths_in_mb(
     root: &Chunk,
     rules: &[MbPathReplaceRule],
 ) -> (Vec<u8>, usize) {
-    if rules.is_empty() || root.children.is_empty() {
-        return (data.to_vec(), 0);
-    }
+    let compiled_rules = CompiledPathReplaceRules::compile_lossy(&normalize_mb_rules(rules));
+    let (rewritten, count) = replace_raw_scene_paths_in_mb_with_rules(data, root, &compiled_rules);
+    (rewritten.into_owned(), count)
+}
+
+pub fn replace_scene_paths_in_mb_cow<'a>(
+    data: &'a [u8],
+    root: &Chunk,
+    rules: &[MbPathReplaceRule],
+) -> (Cow<'a, [u8]>, usize) {
     let compiled_rules = CompiledPathReplaceRules::compile_lossy(&normalize_mb_rules(rules));
     replace_raw_scene_paths_in_mb_with_rules(data, root, &compiled_rules)
 }
 
-fn replace_raw_scene_paths_in_mb_with_rules(
-    data: &[u8],
+fn replace_raw_scene_paths_in_mb_with_rules<'a>(
+    data: &'a [u8],
     root: &Chunk,
     compiled_rules: &CompiledPathReplaceRules,
-) -> (Vec<u8>, usize) {
+) -> (Cow<'a, [u8]>, usize) {
+    if compiled_rules.is_empty() || root.children.is_empty() {
+        return (Cow::Borrowed(data), 0);
+    }
     let children = &root.children;
     let mut payload_parts: Vec<u8> = Vec::new();
     payload_parts.extend_from_slice(root.form_type.as_deref().unwrap_or("Maya").as_bytes());
@@ -87,13 +97,13 @@ fn replace_raw_scene_paths_in_mb_with_rules(
     }
 
     if total == 0 {
-        return (data.to_vec(), 0);
+        return (Cow::Borrowed(data), 0);
     }
 
     let Some(encoded) = encode_root_chunk(root, &payload_parts) else {
-        return (data.to_vec(), 0);
+        return (Cow::Borrowed(data), 0);
     };
-    (encoded, total)
+    (Cow::Owned(encoded), total)
 }
 
 pub fn replace_scene_paths_in_mb(
@@ -109,13 +119,20 @@ pub fn replace_scene_paths_in_mb_by_index(
     root: &Chunk,
     replacements: &[(usize, String)],
 ) -> (Vec<u8>, usize) {
-    if replacements.is_empty() || root.children.is_empty() {
-        return (data.to_vec(), 0);
-    }
+    replace_scene_paths_in_mb_by_index_cow(data, root, replacements).map_owned()
+}
 
+pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
+    data: &'a [u8],
+    root: &Chunk,
+    replacements: &[(usize, String)],
+) -> (Cow<'a, [u8]>, usize) {
+    if replacements.is_empty() || root.children.is_empty() {
+        return (Cow::Borrowed(data), 0);
+    }
     let targets = replacement_targets_for_mb(data, root, replacements);
     if targets.is_empty() {
-        return (data.to_vec(), 0);
+        return (Cow::Borrowed(data), 0);
     }
 
     let children = &root.children;
@@ -156,13 +173,13 @@ pub fn replace_scene_paths_in_mb_by_index(
     }
 
     if total == 0 {
-        return (data.to_vec(), 0);
+        return (Cow::Borrowed(data), 0);
     }
 
     let Some(encoded) = encode_root_chunk(root, &payload_parts) else {
-        return (data.to_vec(), 0);
+        return (Cow::Borrowed(data), 0);
     };
-    (encoded, total)
+    (Cow::Owned(encoded), total)
 }
 
 fn rewrite_rtft_child(
@@ -378,15 +395,14 @@ fn rewrite_head_child(
         if chunk.tag != "INCL" {
             continue;
         }
-        let payload_text = String::from_utf8_lossy(chunk_payload)
-            .trim_end_matches(char::from(0))
-            .to_string();
+        let payload_text = String::from_utf8_lossy(chunk_payload);
+        let payload_text = payload_text.trim_end_matches(char::from(0));
         let (new_text, count) = compiled_rules.apply(&payload_text);
         if count == 0 {
             continue;
         }
         let rewritten_payload =
-            replace_text_payload_preserving_nul_suffix(chunk_payload, &new_text);
+            replace_text_payload_preserving_nul_suffix(chunk_payload, new_text.as_ref());
         if rewritten_payload != chunk_payload {
             rewritten_payloads.push((idx, rewritten_payload));
             total += count;
@@ -575,7 +591,7 @@ fn replace_first_path_field_in_nul_payload_with_rules(
                 if count > 0 {
                     replaced_count = count;
                     replaced_index = Some(0);
-                    replaced_value = new_text.into_bytes();
+                    replaced_value = new_text.into_owned().into_bytes();
                 }
             }
         }
@@ -657,15 +673,12 @@ fn replace_path_field_in_frdi_payload_with_rules(
     }
 
     let mut path_index = None;
-    let mut stripped_text = String::new();
+    let mut stripped_text = "";
     for (idx, raw) in parts.iter().enumerate() {
         let Some(text) = std::str::from_utf8(raw).ok() else {
             continue;
         };
-        let stripped = text
-            .trim_start_matches(|c: char| c.is_control())
-            .trim()
-            .to_string();
+        let stripped = text.trim_start_matches(|c: char| c.is_control()).trim();
         let lower = stripped.to_ascii_lowercase();
         if (lower.contains(".mb") || lower.contains(".ma"))
             && (stripped.contains('/') || stripped.contains('\\'))
@@ -691,7 +704,7 @@ fn replace_path_field_in_frdi_payload_with_rules(
         .take_while(|byte| (**byte as char).is_control())
         .count();
     let mut replaced = raw[..prefix_len].to_vec();
-    replaced.extend_from_slice(new_text.as_bytes());
+    replaced.extend_from_slice(new_text.as_ref().as_bytes());
 
     let mut out = Vec::new();
     for i in 0..parts.len() {
@@ -750,12 +763,7 @@ fn replacement_targets_for_mb(
     root: &Chunk,
     replacements: &[(usize, String)],
 ) -> HashMap<TargetKey, String> {
-    let mb = crate::mb::MayaBinaryFile {
-        path: None,
-        data: data.to_vec().into(),
-        root: root.clone(),
-    };
-    let entries = extract_raw_scene_paths_from_mb(&mb);
+    let entries = extract_raw_scene_paths_from_mb_parts(data, root);
     let mut out = HashMap::new();
 
     for (index, after_value) in replacements {
@@ -777,14 +785,27 @@ fn replacement_targets_for_mb(
     out
 }
 
+trait IntoOwnedBytes {
+    fn map_owned(self) -> (Vec<u8>, usize);
+}
+
+impl<'a> IntoOwnedBytes for (Cow<'a, [u8]>, usize) {
+    fn map_owned(self) -> (Vec<u8>, usize) {
+        (self.0.into_owned(), self.1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use tempfile::tempdir;
 
     use super::{
         super::chunk_encode::append_chunk_header, MbPathReplaceRule,
         replace_first_path_field_in_nul_payload, replace_path_field_in_frdi_payload,
-        replace_scene_paths_in_mb, replace_text_payload_preserving_nul_suffix,
+        replace_scene_paths_in_mb, replace_scene_paths_in_mb_cow,
+        replace_text_payload_preserving_nul_suffix,
     };
     use crate::mb::{
         parse_file, parse_section_chunks_full_with_hints, rewrite::encode_chunk,
@@ -855,6 +876,23 @@ mod tests {
         let (rewritten, count) = replace_scene_paths_in_mb(&mb, &parsed.root, &rules);
         assert_eq!(count, 0);
         assert_eq!(rewritten, mb);
+    }
+
+    #[test]
+    fn replace_scene_paths_cow_borrows_input_without_match() {
+        let mb = build_mb_with_single_form("RTFT", "STR ", b"ftn\0\x00old/path.mb\0", b"\xFA\xFB");
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        let rules = vec![MbPathReplaceRule {
+            from: "missing/".to_string(),
+            to: "asset/".to_string(),
+            mode: crate::ma::types::PathReplaceMode::Literal,
+        }];
+        let (rewritten, count) = replace_scene_paths_in_mb_cow(&mb, &parsed.root, &rules);
+        assert_eq!(count, 0);
+        assert!(matches!(rewritten, Cow::Borrowed(bytes) if bytes == mb.as_slice()));
     }
 
     #[test]

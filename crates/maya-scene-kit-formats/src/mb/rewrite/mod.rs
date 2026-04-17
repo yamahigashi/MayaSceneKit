@@ -7,4 +7,5 @@ pub(crate) use self::chunk_encode::{
 };
 pub use self::path_rewrite::{
     MbPathReplaceRule, replace_scene_paths_in_mb, replace_scene_paths_in_mb_by_index,
+    replace_scene_paths_in_mb_by_index_cow, replace_scene_paths_in_mb_cow,
 };
