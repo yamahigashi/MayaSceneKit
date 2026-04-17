@@ -2,15 +2,18 @@ pub mod audit;
 mod public;
 
 pub mod scene {
-    pub use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
-    pub use maya_scene_kit_observe::scene::evidence::{
+    #[allow(unused_imports)]
+    pub(crate) use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
+    #[allow(unused_imports)]
+    pub(crate) use maya_scene_kit_observe::scene::evidence::{
         DependencyFact, DependencyFactKind, DependencyRiskClass, EffectCertainty,
         ExecutionCoverageIssue, ExecutionCoverageIssueKind, ExecutionCoverageState,
         ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin, ExecutionSemanticClass,
         ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet,
         UnknownSemanticFact,
     };
-    pub use maya_scene_kit_observe::scene::{
+    #[allow(unused_imports)]
+    pub(crate) use maya_scene_kit_observe::scene::{
         LoadOptions, Loader, ObservationBundle, SceneToolError,
     };
 
@@ -22,7 +25,8 @@ pub mod scene {
         StaticAuditFindingDetail, StaticAuditReviewDetail,
     };
 
-    pub mod execution {
+    pub(crate) mod execution {
+        #[allow(unused_imports)]
         pub use maya_scene_kit_observe::scene::execution::{
             ExecutionSurface, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts,
             ObservedExecutionCatalog, ObservedExecutionSurface,
