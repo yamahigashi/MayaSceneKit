@@ -384,7 +384,10 @@ mod tests {
     fn split_lines_keepends_returns_borrowed_slices() {
         let input = b"first\nsecond\nthird";
         let lines = split_lines_keepends(input);
-        assert_eq!(lines, vec![&b"first\n"[..], &b"second\n"[..], &b"third"[..]]);
+        assert_eq!(
+            lines,
+            vec![&b"first\n"[..], &b"second\n"[..], &b"third"[..]]
+        );
         assert!(std::ptr::eq(lines[1].as_ptr(), input[6..].as_ptr()));
     }
 }

@@ -481,4 +481,22 @@ impl ObservationBundle {
             ObservationData::Mb { .. } => None,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn cached_mb_scene_facts_ptr(
+        &self,
+    ) -> Option<*const crate::scene::mb_read_session::MbSceneFacts> {
+        match &self.data {
+            ObservationData::Ma { .. } => None,
+            ObservationData::Mb { session } => session.cached_scene_facts_ptr(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_mb_build_ptr(&self) -> Option<*const crate::scene::ir::SceneBuildOutput> {
+        match &self.data {
+            ObservationData::Ma { .. } => None,
+            ObservationData::Mb { session } => session.cached_build_ptr(),
+        }
+    }
 }

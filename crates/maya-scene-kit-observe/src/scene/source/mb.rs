@@ -300,32 +300,81 @@ fn push_unique_scene_path_entry(
     seen: &mut HashSet<u64>,
     entry: ScenePathEntry,
 ) {
-    let mut hasher = DefaultHasher::new();
-    entry.node_type.hash(&mut hasher);
-    entry.node_name.hash(&mut hasher);
-    entry.attr.hash(&mut hasher);
-    entry.value.hash(&mut hasher);
-    if let Some(meta) = &entry.meta {
-        meta.origin.hash(&mut hasher);
-        meta.trace_form.hash(&mut hasher);
-        meta.trace_tag.hash(&mut hasher);
-        meta.trace_node_offset.hash(&mut hasher);
-    }
-    let key = hasher.finish();
-    if seen.insert(key) {
+    if seen.insert(scene_path_entry_fingerprint(&entry)) {
         out.push(entry);
     }
 }
 
 fn decode_rtft_attr_name(payload: &[u8]) -> Option<String> {
-    let chunks = payload.split(|byte| *byte == 0).collect::<Vec<_>>();
-    chunks
-        .iter()
-        .rev()
-        .find(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).to_string())
+    let attr_end = payload.iter().position(|b| *b == 0)?;
+    Some(String::from_utf8_lossy(&payload[..attr_end]).to_string())
 }
 
 fn decode_crea_name(payload: &[u8]) -> Option<String> {
     decode_crea_payload(payload).name
+}
+
+fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    entry.node_type.hash(&mut hasher);
+    entry.node_name.hash(&mut hasher);
+    entry.attr.hash(&mut hasher);
+    entry.value.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{decode_rtft_attr_name, push_unique_scene_path_entry};
+    use crate::scene::paths::{ScenePathEntry, ScenePathMeta};
+
+    fn scene_path_entry(trace_tag: &str, trace_node_offset: usize) -> ScenePathEntry {
+        ScenePathEntry {
+            node_type: "file".to_string(),
+            node_name: "ExampleFile".to_string(),
+            attr: ".ftn".to_string(),
+            value: "asset/example/file.png".to_string(),
+            meta: Some(ScenePathMeta {
+                origin: "rtft".to_string(),
+                short_name: Some("ExampleFile".to_string()),
+                reference_node: None,
+                format_hint: None,
+                reference_options: None,
+                color_space: None,
+                raw_fields: vec!["ftn=asset/example/file.png".to_string()],
+                trace_form: Some("RTFT".to_string()),
+                trace_tag: Some(trace_tag.to_string()),
+                trace_node_offset: Some(trace_node_offset),
+                trace_child_alignment: Some(8),
+                trace_child_header_size: Some(16),
+            }),
+        }
+    }
+
+    #[test]
+    fn decode_rtft_attr_name_returns_bytes_before_first_nul() {
+        let payload = b"ftn\0asset/example/file.png\0ignored";
+        assert_eq!(decode_rtft_attr_name(payload).as_deref(), Some("ftn"));
+    }
+
+    #[test]
+    fn decode_rtft_attr_name_does_not_return_last_non_empty_chunk() {
+        let payload = b"ftn\0asset/example/file.png";
+        assert_eq!(decode_rtft_attr_name(payload).as_deref(), Some("ftn"));
+    }
+
+    #[test]
+    fn push_unique_scene_path_entry_dedupes_trace_only_differences() {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+
+        push_unique_scene_path_entry(&mut out, &mut seen, scene_path_entry("STR ", 0x10));
+        push_unique_scene_path_entry(&mut out, &mut seen, scene_path_entry("DATA", 0x20));
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_name, "ExampleFile");
+        assert_eq!(out[0].value, "asset/example/file.png");
+    }
 }

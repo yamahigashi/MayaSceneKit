@@ -8,37 +8,36 @@ pub use maya_scene_kit_audit::{
     },
     scene::{
         AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
-        AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode,
-        AuditOptions, AuditProfile, AuditReport, AuditReviewCode, AuditReviewDetail,
-        AuditReviewSignal, AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation,
-        ScriptAuditReport, StaticAuditFindingDetail, StaticAuditReviewDetail,
+        AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode, AuditOptions,
+        AuditProfile, AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal,
+        AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation, ScriptAuditReport,
+        StaticAuditFindingDetail, StaticAuditReviewDetail,
     },
 };
 #[allow(unused_imports)]
 pub use maya_scene_kit_edit::scene::{
     Confidence, DecodeAttemptResult, DecodeQuality, DecodeQualityDistributionEntry, IssueKind,
     MaterializeOptions, MayaAsciiConversionReport, MayaAsciiDecodeAttempt, MayaAsciiIssue,
-    OperationMode, PathReplaceMode, PathReplaceResult, PathReplaceRule, RawChunkDump,
-    SceneFormat, SceneToolError, ScriptNodeCleanResult, SemanticProvenance,
-    UnknownInventoryEntry, ValidationState, convert_to_maya_ascii_with_options,
-    convert_to_maya_ascii_with_report, convert_to_maya_ascii_with_report_and_options,
-    remove_script_nodes_with_options, replace_scene_paths_with_options, write_output_bytes_atomic,
+    OperationMode, PathReplaceMode, PathReplaceResult, PathReplaceRule, RawChunkDump, SceneFormat,
+    SceneToolError, ScriptNodeCleanResult, SemanticProvenance, UnknownInventoryEntry,
+    ValidationState, convert_to_maya_ascii_with_options, convert_to_maya_ascii_with_report,
+    convert_to_maya_ascii_with_report_and_options, remove_script_nodes_with_options,
+    replace_scene_paths_with_options, write_output_bytes_atomic,
 };
 #[allow(unused_imports)]
 pub use maya_scene_kit_observe::scene::dump::SceneDumpReport;
 #[allow(unused_imports)]
 pub use maya_scene_kit_observe::scene::evidence::{
-    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
-    EffectCertainty, ExecutionCoverageIssue, ExecutionCoverageIssueDetail,
-    ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage,
-    ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass,
-    ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet,
-    StaticExecutionReason, UnknownSemanticDetail, UnknownSemanticFact,
+    DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass, EffectCertainty,
+    ExecutionCoverageIssue, ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind,
+    ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin,
+    ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass, ExecutionSurfaceKind,
+    ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet, StaticExecutionReason,
+    UnknownSemanticDetail, UnknownSemanticFact,
 };
 #[allow(unused_imports)]
 pub use maya_scene_kit_observe::scene::inspect::{
-    MbInspectNode, MbInspectOptions, MbInspectReport, inspect_mb,
-    inspect_mb_with_max_parse_bytes,
+    MbInspectNode, MbInspectOptions, MbInspectReport, inspect_mb, inspect_mb_with_max_parse_bytes,
 };
 #[allow(unused_imports)]
 pub use maya_scene_kit_observe::scene::paths::{
@@ -123,7 +122,10 @@ pub(crate) fn render_scene_dump_with_options(
 pub(crate) fn render_scene_dump_from_report(report: &SceneDumpReport) -> String {
     let requires_text = build_requires_dump_text(report);
     let script_text = build_script_dump_text(report);
-    format!("# maya-scene-kit Scene Dump\n\n{}\n{}", requires_text, script_text)
+    format!(
+        "# maya-scene-kit Scene Dump\n\n{}\n{}",
+        requires_text, script_text
+    )
 }
 
 fn build_script_dump_text(report: &SceneDumpReport) -> String {
@@ -215,7 +217,8 @@ mod tests {
         let dir = tempdir().expect("tmpdir");
         let output = dir.path().join("scene_dump.txt");
 
-        cli::fs::write_scene_dump(&source, &output, &LoadOptions::default()).expect("write scene dump");
+        cli::fs::write_scene_dump(&source, &output, &LoadOptions::default())
+            .expect("write scene dump");
 
         let text = std::fs::read_to_string(output).expect("read dump");
         assert!(text.contains("# maya-scene-kit Scene Dump"));
@@ -226,7 +229,8 @@ mod tests {
     #[test]
     fn scene_dump_report_formats_existing_sections() {
         let source = repo_root().join("tests/02/sphere.ma");
-        let report = maya_scene_kit_observe::scene::collect_scene_dump(&source).expect("scene dump");
+        let report =
+            maya_scene_kit_observe::scene::collect_scene_dump(&source).expect("scene dump");
         let text = render_scene_dump_from_report(&report);
 
         assert!(text.contains("# maya-scene-kit Scene Dump"));

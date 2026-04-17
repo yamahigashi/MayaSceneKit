@@ -184,7 +184,8 @@ pub(crate) fn recover_nodes(
 
         if let (Some(node_type), Some(name)) = (node_type, name) {
             let base_key = (node_type.clone(), name.clone(), parent.clone());
-            let existing_candidate_count = node_candidates_by_base.get(&base_key).map_or(0, Vec::len);
+            let existing_candidate_count =
+                node_candidates_by_base.get(&base_key).map_or(0, Vec::len);
             let occurrence = if uid.is_some() || existing_candidate_count == 0 {
                 0
             } else {
