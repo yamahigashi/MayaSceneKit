@@ -18,6 +18,7 @@ use crate::{
         paths::extract_raw_scene_paths_from_ma,
         text::escape_ma_string,
     },
+    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
     replace_rules::CompiledPathReplaceRules,
 };
 
@@ -58,7 +59,7 @@ fn replace_raw_scene_paths_in_ma_with_rules(
         if trimmed.starts_with("setAttr ") && line_text.contains("-type \"string\"") {
             let (command, next) = collect_command_until_semicolon(&lines, i);
             if let Some((attr, value)) = parse_setattr_string_command(&command) {
-                if attr == ".ftn" || is_reference_attr(&attr) {
+                if is_file_texture_attr(&attr) || is_reference_attr(&attr) {
                     let (new_value, count) = compiled_rules.apply(&value);
                     if count > 0 {
                         total += count;
@@ -76,7 +77,7 @@ fn replace_raw_scene_paths_in_ma_with_rules(
         }
 
         if let Some((attr, value)) = parse_setattr_string_line(&line_text) {
-            if attr == ".ftn" || is_reference_attr(&attr) {
+            if is_file_texture_attr(&attr) || is_reference_attr(&attr) {
                 let (new_value, count) = compiled_rules.apply(&value);
                 if count > 0 {
                     total += count;
@@ -520,29 +521,23 @@ fn replacement_targets(
 }
 
 fn start_raw_create_node_block(trimmed: &[u8], line_number: usize) -> Option<ActiveScenePathBlock> {
-    if raw_create_node_has_type(trimmed, b"file") {
-        return Some(ActiveScenePathBlock {
-            node_type: "file".to_string(),
-            node_name: extract_script_node_name_from_create(trimmed, line_number),
-        });
-    }
-
-    if raw_create_node_has_type(trimmed, b"reference") {
-        return Some(ActiveScenePathBlock {
-            node_type: "reference".to_string(),
-            node_name: extract_script_node_name_from_create(trimmed, line_number),
-        });
-    }
-
-    None
+    let node_type = raw_create_node_type(trimmed)?;
+    Some(ActiveScenePathBlock {
+        node_type,
+        node_name: extract_script_node_name_from_create(trimmed, line_number),
+    })
 }
 
-fn raw_create_node_has_type(trimmed: &[u8], node_type: &[u8]) -> bool {
-    let Some(rest) = trimmed.strip_prefix(b"createNode ") else {
-        return false;
-    };
-    rest.strip_prefix(node_type)
-        .is_some_and(|tail| matches!(tail.first(), Some(b' ' | b'\t' | b'\r' | b'\n' | b';')))
+fn raw_create_node_type(trimmed: &[u8]) -> Option<String> {
+    let rest = trimmed.strip_prefix(b"createNode ")?;
+    let end = rest
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || *byte == b';')
+        .unwrap_or(rest.len());
+    (end > 0)
+        .then(|| std::str::from_utf8(&rest[..end]).ok())
+        .flatten()
+        .map(ToOwned::to_owned)
 }
 
 fn scene_path_entry_from_setattr(
@@ -550,9 +545,9 @@ fn scene_path_entry_from_setattr(
     attr: &str,
     value: &str,
 ) -> Option<ScenePathEntry> {
-    if block.node_type == "file" && attr == ".ftn" {
+    if is_file_texture_attr(attr) {
         return Some(ScenePathEntry {
-            node_type: "file".to_string(),
+            node_type: block.node_type.clone(),
             node_name: block.node_name.clone(),
             attr: attr.to_string(),
             value: value.to_string(),
@@ -571,6 +566,13 @@ fn scene_path_entry_from_setattr(
     }
 
     None
+}
+
+fn is_file_texture_attr(attr: &str) -> bool {
+    matches!(
+        classify_scene_path_attr(attr),
+        Some(ScenePathAttrKind::FileTexturePath)
+    )
 }
 
 fn extract_reference_entry_from_raw_file_command(command: &str) -> Option<ScenePathEntry> {
@@ -741,6 +743,25 @@ createNode file -n "file1";
         assert_eq!(count, 1);
         assert!(text.contains("\"shared/asset.mb\""));
         assert!(text.contains("setAttr \".ftn\" -type \"string\" \"textures/hero_diffuse.png\";"));
+    }
+
+    #[test]
+    fn replace_scene_paths_rewrites_file_texture_name_attrs_on_non_file_nodes() {
+        let input = br#"createNode psdFileTex -n "psdTex1";
+    setAttr ".fileTextureName" -type "string" "sourceimages/layered.psd";
+createNode customPathNode -n "customTex1";
+    setAttr ".fileTextureName" -type "string" "textures/custom.tx";
+"#;
+        let rules = vec![PathReplaceRule {
+            from: "sourceimages/".to_string(),
+            to: "archive/".to_string(),
+            mode: PathReplaceMode::Literal,
+        }];
+        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let text = String::from_utf8_lossy(&rewritten);
+        assert_eq!(count, 1);
+        assert!(text.contains("setAttr \".fileTextureName\" -type \"string\" \"archive/layered.psd\";"));
+        assert!(text.contains("setAttr \".fileTextureName\" -type \"string\" \"textures/custom.tx\";"));
     }
 
     #[test]

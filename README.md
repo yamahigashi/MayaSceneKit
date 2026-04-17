@@ -161,7 +161,7 @@ Current CLI commands:
 
 - `inspect`: inspect Maya Binary chunk structure
 - `dump`: dump `requires` plus script nodes from a file or directory
-- `paths`: extract file and reference paths from a file or directory
+- `paths`: extract file and reference paths from a file or directory, including `fileTextureName` owners such as `file`, `psdFileTex`, and `movie`
 - `audit`: audit execution-capable surfaces
 - `clean`: remove script nodes and save in forensic mode
 - `replace`: replace file and reference paths in forensic mode

@@ -12,6 +12,7 @@ use crate::mb::{
     },
 };
 use crate::{ma::types::PathReplaceRule, replace_rules::CompiledPathReplaceRules};
+use crate::reference_semantics::{ScenePathAttrKind, classify_scene_path_attr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MbPathReplaceRule {
@@ -213,7 +214,10 @@ fn rewrite_rtft_child(
             continue;
         }
         if let Some((attr_name, kind, value_raw)) = decode_attr_triplet(chunk_payload) {
-            if attr_name == "ftn" || attr_name == ".ftn" {
+            if matches!(
+                classify_scene_path_attr(&attr_name),
+                Some(ScenePathAttrKind::FileTexturePath)
+            ) {
                 let value = decode_raw_string_value_preserving_whitespace_lossy(&value_raw);
                 let (new_value, count) = compiled_rules.apply(&value);
                 if count > 0 {
@@ -459,7 +463,10 @@ fn rewrite_rtft_child_by_targets(
             continue;
         }
         if let Some((attr_name, kind, value_raw)) = decode_attr_triplet(chunk_payload) {
-            if attr_name == "ftn" || attr_name == ".ftn" {
+            if matches!(
+                classify_scene_path_attr(&attr_name),
+                Some(ScenePathAttrKind::FileTexturePath)
+            ) {
                 let value = decode_raw_string_value_preserving_whitespace_lossy(&value_raw);
                 let key = ("rtft".to_string(), child.offset, value.clone());
                 let Some(after_value) = targets.get(&key) else {
@@ -801,11 +808,12 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::replace_rules::CompiledPathReplaceRules;
     use super::{
         super::chunk_encode::append_chunk_header, MbPathReplaceRule,
         replace_first_path_field_in_nul_payload, replace_path_field_in_frdi_payload,
         replace_scene_paths_in_mb, replace_scene_paths_in_mb_cow,
-        replace_text_payload_preserving_nul_suffix,
+        replace_text_payload_preserving_nul_suffix, rewrite_rtft_child,
     };
     use crate::mb::{
         parse_file, parse_section_chunks_full_with_hints, rewrite::encode_chunk,
@@ -830,6 +838,29 @@ mod tests {
 
         let mut child_payload = form.as_bytes().to_vec();
         child_payload.extend_from_slice(&inner);
+        let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
+            .expect("child chunk");
+
+        let mut root_payload = b"Maya".to_vec();
+        root_payload.extend_from_slice(&child);
+        let mut root = Vec::new();
+        append_chunk_header(
+            &mut root,
+            "FOR8",
+            0,
+            root_payload.len(),
+            SectionHeaderFormat::EightByte,
+        )
+        .expect("root chunk");
+        root.extend_from_slice(&root_payload);
+        root
+    }
+
+    fn build_mb_with_form_children(form: &str, children: &[Vec<u8>]) -> Vec<u8> {
+        let mut child_payload = form.as_bytes().to_vec();
+        for child in children {
+            child_payload.extend_from_slice(child);
+        }
         let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
             .expect("child chunk");
 
@@ -933,6 +964,54 @@ mod tests {
         let str_payload = str_chunk.payload(&payload[4..]);
         assert!(!str_payload.ends_with(&[0]));
         assert!(String::from_utf8_lossy(str_payload).contains("new/path.mb"));
+    }
+
+    #[test]
+    fn replace_scene_paths_rtft_rewrites_file_texture_name_attr() {
+        let mut payload = b"RTFT".to_vec();
+        payload.extend_from_slice(
+            &encode_chunk("CREA", 0, b"psdTex1\0", 8, SectionHeaderFormat::EightByte)
+                .expect("crea chunk"),
+        );
+        payload.extend_from_slice(
+            &encode_chunk(
+                "STR ",
+                0,
+                b"fileTextureName\0\x00sourceimages/layered.psd\0",
+                8,
+                SectionHeaderFormat::EightByte,
+            )
+            .expect("str chunk"),
+        );
+        let child_bytes = encode_chunk("FOR8", 0, &payload, 8, SectionHeaderFormat::EightByte)
+            .expect("child chunk");
+        let child = crate::mb::Chunk {
+            tag: "FOR8".to_string(),
+            offset: 0,
+            aux: 0,
+            size: payload.len(),
+            payload_offset: 16,
+            payload_end: 16 + payload.len(),
+            form_type: Some("RTFT".to_string()),
+            child_alignment: Some(8),
+            child_header_size: Some(16),
+            children_parsed: false,
+            children: Vec::new(),
+        };
+        let rules = vec![MbPathReplaceRule {
+            from: "sourceimages/".to_string(),
+            to: "archive/".to_string(),
+            mode: crate::ma::types::PathReplaceMode::Literal,
+        }];
+        let compiled = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(&rules));
+        let (rewritten, count) =
+            rewrite_rtft_child(&child, &child_bytes, &compiled).expect("rtft rewrite");
+        assert_eq!(count, 1);
+        assert!(
+            rewritten
+                .windows(b"archive/layered.psd".len())
+                .any(|window| window == b"archive/layered.psd")
+        );
     }
 
     #[test]

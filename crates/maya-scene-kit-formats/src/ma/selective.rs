@@ -23,6 +23,7 @@ use maya_mel::{
 };
 
 use crate::{
+    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
     ScenePathEntry, ScenePathMeta,
     ma::{
         commands::{
@@ -158,11 +159,10 @@ fn start_create_node_block(
             script_type: None,
             source_type: None,
         })),
-        "file" | "reference" => Some(ActiveCreateBlock::ScenePath(ActiveScenePathBlock {
+        _ => Some(ActiveCreateBlock::ScenePath(ActiveScenePathBlock {
             node_type,
             node_name,
         })),
-        _ => None,
     }
 }
 
@@ -202,7 +202,9 @@ fn apply_setattr_to_active_block(
             }
         }
         ActiveCreateBlock::ScenePath(path_block) => {
-            let Some(attr_name) = tracked_scene_path_attr_name(tracked_attr) else {
+            let Some(attr_name) =
+                selective_scene_path_attr_name(source, set_attr, tracked_attr)
+            else {
                 return;
             };
             let value = selective_setattr_string_tail(source, set_attr)
@@ -211,12 +213,15 @@ fn apply_setattr_to_active_block(
                 return;
             };
 
-            if path_block.node_type == "file" && attr_name == ".ftn" {
+            if matches!(
+                classify_scene_path_attr(attr_name),
+                Some(ScenePathAttrKind::FileTexturePath)
+            ) {
                 push_path_entry(
                     scene_paths,
                     seen_paths,
                     ScenePathEntry {
-                        node_type: "file".to_string(),
+                        node_type: path_block.node_type.clone(),
                         node_name: path_block.node_name.clone(),
                         attr: attr_name.to_string(),
                         value,
@@ -267,6 +272,22 @@ fn tracked_scene_path_attr_name(
         Some(MayaTrackedSetAttrAttr::F) => Some(".f"),
         _ => None,
     }
+}
+
+fn selective_scene_path_attr_name<'a>(
+    source: SourceView<'a>,
+    set_attr: &MayaSelectiveSetAttr,
+    tracked_attr: Option<MayaTrackedSetAttrAttr>,
+) -> Option<&'a str> {
+    if let Some(tracked) = tracked_scene_path_attr_name(tracked_attr) {
+        return Some(tracked);
+    }
+    let attr_path = strip_outer_quotes(source.slice(set_attr.attr_path_range?));
+    matches!(
+        classify_scene_path_attr(attr_path),
+        Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
+    )
+    .then_some(attr_path)
 }
 
 fn flush_active_block(
@@ -837,7 +858,16 @@ fn selective_item_from_command(
         "createNode" => {
             let node_type_range = first_non_flag_range(&command.words);
             let node_type = node_type_range.map(|range| strip_outer_quotes(source.slice(range)))?;
-            if !matches!(node_type, "script" | "file" | "reference") {
+            if node_type == "script" {
+                return Some(MayaSelectiveItem::CreateNode(MayaSelectiveCreateNode {
+                    head_range: command.head_range,
+                    node_type_range,
+                    name_range: first_flag_arg_range(source, &command.words, &["name", "n"]),
+                    parent_range: first_flag_arg_range(source, &command.words, &["parent", "p"]),
+                    span: command.span,
+                }));
+            }
+            if node_type.is_empty() {
                 return None;
             }
             Some(MayaSelectiveItem::CreateNode(MayaSelectiveCreateNode {
@@ -856,7 +886,13 @@ fn selective_item_from_command(
                     .classify(strip_outer_quotes(source.slice(range)))
             });
             let attr_path = attr_path_range.map(|range| strip_outer_quotes(source.slice(range)))?;
-            if !matches!(attr_path, ".b" | ".st" | ".stp") && tracked_attr.is_none() {
+            if !matches!(attr_path, ".b" | ".st" | ".stp")
+                && tracked_attr.is_none()
+                && !matches!(
+                    classify_scene_path_attr(attr_path),
+                    Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
+                )
+            {
                 return None;
             }
             Some(MayaSelectiveItem::SetAttr(MayaSelectiveSetAttr {
@@ -1476,6 +1512,37 @@ mod tests {
         );
         assert_eq!(sections.scene_paths.len(), 1);
         assert_eq!(sections.scene_paths[0].value, "textures/albedo.png");
+    }
+
+    #[test]
+    fn selective_sections_collect_file_texture_name_paths_from_non_file_nodes() {
+        let input = concat!(
+            "createNode psdFileTex -n \"psdTex1\";\n",
+            "    setAttr \".fileTextureName\" -type \"string\" \"sourceimages/layered.psd\";\n",
+            "createNode movie -n \"movieTex1\";\n",
+            "    setAttr \".fileTextureName\" -type \"string\" \"movies/clip.mov\";\n",
+            "createNode customPathNode -n \"customTex1\";\n",
+            "    setAttr \".fileTextureName\" -type \"string\" \"textures/custom.tx\";\n",
+        );
+
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+        assert_eq!(sections.scene_paths.len(), 3);
+        assert_eq!(sections.scene_paths[0].node_type, "psdFileTex");
+        assert_eq!(sections.scene_paths[0].attr, ".fileTextureName");
+        assert_eq!(sections.scene_paths[0].value, "sourceimages/layered.psd");
+        assert_eq!(sections.scene_paths[1].node_type, "movie");
+        assert_eq!(sections.scene_paths[2].node_type, "customPathNode");
+    }
+
+    #[test]
+    fn selective_sections_do_not_collect_reference_attr_on_non_reference_nodes() {
+        let input = concat!(
+            "createNode customPathNode -n \"customTex1\";\n",
+            "    setAttr \".fn\" -type \"string\" \"rig/example_scene.ma\";\n",
+        );
+
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+        assert!(sections.scene_paths.is_empty());
     }
 
     #[test]

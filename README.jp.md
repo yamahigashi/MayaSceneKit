@@ -161,7 +161,7 @@ maya-scene-kit <command> [options]
 
 - `inspect`: Maya Binary の chunk 構造を調査する
 - `dump`: ファイルまたはディレクトリから `requires` と script node をダンプする
-- `paths`: ファイルまたはディレクトリから file path と reference path を抽出する
+- `paths`: ファイルまたはディレクトリから file path と reference path を抽出する。`file`、`psdFileTex`、`movie` などの `fileTextureName` も対象
 - `audit`: 実行可能なサーフェスを監査する
 - `clean`: script node を削除し、forensic モードで保存する
 - `replace`: file path と reference path を forensic モードで置換する

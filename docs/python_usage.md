@@ -105,6 +105,8 @@ for entry in report["entries"]:
     print(entry["node_name"], entry["value"])
 ```
 
+`kind="file"` includes `fileTextureName` owners such as `file`, `psdFileTex`, and `movie`.
+
 ### Preview Mutations Before Writing
 
 ```python
