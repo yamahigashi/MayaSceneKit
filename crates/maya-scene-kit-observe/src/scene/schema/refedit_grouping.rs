@@ -2,6 +2,7 @@ use super::{
     super::ir::{RefEditGroup, RefEditGroupSource, RefEditRecord, RefEditUnknownTail},
     refedit_spec::RefEditSchema,
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::scene) struct ParsedBoundary {
@@ -40,19 +41,57 @@ fn find_initial_auto_group_index(groups: &[RefEditGroup]) -> Option<usize> {
     )
 }
 
+#[derive(Debug, Default)]
+struct BoundaryGroupIndexes {
+    exact: HashMap<(String, u32), Vec<usize>>,
+    by_name: HashMap<String, Vec<usize>>,
+}
+
+impl BoundaryGroupIndexes {
+    fn from_groups(groups: &[RefEditGroup]) -> Self {
+        let mut indexes = Self::default();
+        for (idx, group) in groups.iter().enumerate() {
+            indexes.insert(group, idx);
+        }
+        indexes
+    }
+
+    fn insert(&mut self, group: &RefEditGroup, idx: usize) {
+        self.exact
+            .entry((group.name.clone(), group.expected_count))
+            .or_default()
+            .push(idx);
+        self.by_name.entry(group.name.clone()).or_default().push(idx);
+    }
+}
+
+fn first_index_at_or_after(indexes: &[usize], hint_start: usize) -> Option<usize> {
+    indexes.iter().copied().find(|&idx| idx >= hint_start)
+}
+
 fn find_boundary_target_group_index(
-    groups: &[RefEditGroup],
+    indexes: &BoundaryGroupIndexes,
     boundary: &RefEditGroup,
     hint_start: usize,
 ) -> Option<usize> {
-    let exact_from_hint = (hint_start..groups.len()).find(|&i| {
-        groups[i].name == boundary.name && groups[i].expected_count == boundary.expected_count
-    });
-    if exact_from_hint.is_some() {
-        return exact_from_hint;
-    }
-
-    (hint_start..groups.len()).find(|&i| groups[i].name == boundary.name)
+    first_index_at_or_after(
+        indexes
+            .exact
+            .get(&(boundary.name.clone(), boundary.expected_count))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        hint_start,
+    )
+    .or_else(|| {
+        first_index_at_or_after(
+            indexes
+                .by_name
+                .get(boundary.name.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            hint_start,
+        )
+    })
 }
 
 pub(in crate::scene) fn assign_records_to_groups_with_boundaries(
@@ -62,6 +101,7 @@ pub(in crate::scene) fn assign_records_to_groups_with_boundaries(
     boundaries: &[ParsedBoundary],
 ) -> (Vec<RefEditGroup>, Vec<Vec<RefEditRecord>>) {
     let mut grouped_records: Vec<Vec<RefEditRecord>> = vec![Vec::new(); groups.len()];
+    let mut group_indexes = BoundaryGroupIndexes::from_groups(&groups);
 
     let mut current_idx = find_initial_auto_group_index(&groups);
     let mut auto_assigned = 0usize;
@@ -77,11 +117,15 @@ pub(in crate::scene) fn assign_records_to_groups_with_boundaries(
                     groups[i].name == boundary_group.name
                         && groups[i].expected_count == boundary_group.expected_count
                 })
-                .or_else(|| find_boundary_target_group_index(&groups, &boundary_group, hint_start))
+                .or_else(|| {
+                    find_boundary_target_group_index(&group_indexes, &boundary_group, hint_start)
+                })
                 .unwrap_or_else(|| {
                     groups.push(boundary_group);
                     grouped_records.push(Vec::new());
-                    groups.len() - 1
+                    let idx = groups.len() - 1;
+                    group_indexes.insert(&groups[idx], idx);
+                    idx
                 });
             current_idx = Some(target_idx);
             auto_assigned = grouped_records[target_idx].len();
@@ -128,9 +172,11 @@ pub(in crate::scene) fn assign_records_to_groups_with_boundaries(
     while boundary_idx < boundaries.len() {
         let hint_start = current_idx.map(|i| i.saturating_add(1)).unwrap_or(0);
         let boundary_group = boundaries[boundary_idx].group.clone();
-        if find_boundary_target_group_index(&groups, &boundary_group, hint_start).is_none() {
+        if find_boundary_target_group_index(&group_indexes, &boundary_group, hint_start).is_none() {
             groups.push(boundary_group);
             grouped_records.push(Vec::new());
+            let idx = groups.len() - 1;
+            group_indexes.insert(&groups[idx], idx);
         }
         boundary_idx += 1;
     }

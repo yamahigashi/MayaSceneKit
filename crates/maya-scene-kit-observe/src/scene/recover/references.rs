@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     reference_semantics::{
         default_reference_file_type, derive_parent_reference_node, parse_reference_include_path,
@@ -63,14 +65,14 @@ pub(crate) fn recover_reference_files(
 
 fn dedupe_reference_files_by_node(reference_files: &mut Vec<ReferenceFileOp>) {
     let mut deduped = Vec::with_capacity(reference_files.len());
+    let mut deduped_index_by_node = HashMap::with_capacity(reference_files.len());
     for op in reference_files.drain(..) {
-        let Some(existing) = deduped
-            .iter_mut()
-            .find(|existing: &&mut ReferenceFileOp| existing.reference_node == op.reference_node)
-        else {
+        let Some(existing_idx) = deduped_index_by_node.get(&op.reference_node).copied() else {
+            deduped_index_by_node.insert(op.reference_node.clone(), deduped.len());
             deduped.push(op);
             continue;
         };
+        let existing = &mut deduped[existing_idx];
 
         if existing.namespace_defaulted && !op.namespace_defaulted {
             existing.namespace = op.namespace.clone();
