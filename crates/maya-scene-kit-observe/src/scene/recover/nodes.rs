@@ -4,7 +4,7 @@ use crate::scene::{
     ir::{
         ChunkTrace, Confidence, CreateNodeFlags, DecodedChunkRecord, DecodedEvent, FlagState,
         RecoveredAttrOp, RecoveredNode, RecoveryIssue, RecoveryIssueKind, SemanticProvenance,
-        SetAttrOp, SetAttrValue, StringInterner,
+        SetAttrOp, SetAttrValue, SharedStr, StringInterner,
     },
     schema::typeid_map::TypeIdTypeNameResolver,
 };
@@ -21,6 +21,7 @@ pub(crate) fn recover_nodes(
     let mut node_decode_notes: HashMap<NodeKey, Vec<RecoveryIssue>> = HashMap::new();
     let mut node_create_flags: HashMap<NodeKey, CreateNodeFlags> = HashMap::new();
     let mut node_candidates_by_base: HashMap<NodeBaseKey, Vec<NodeKey>> = HashMap::new();
+    let mut node_candidate_membership: HashMap<NodeBaseKey, HashSet<NodeKey>> = HashMap::new();
     let mut duplicate_node_keys_noted: HashSet<NodeKey> = HashSet::new();
     let mut interner = StringInterner::default();
     let mut cursor = 0usize;
@@ -37,7 +38,7 @@ pub(crate) fn recover_nodes(
         let mut uid: Option<String> = None;
         let mut attrs: Vec<RecoveredAttrOp> = Vec::new();
         let mut decode_notes: Vec<RecoveryIssue> = Vec::new();
-        let mut script_bodies: Vec<String> = Vec::new();
+        let mut script_bodies: HashSet<SharedStr> = HashSet::new();
         let mut create_flags = CreateNodeFlags::default();
 
         while cursor < decoded_chunks.len()
@@ -88,9 +89,9 @@ pub(crate) fn recover_nodes(
                     }
                     DecodedEvent::ScriptBody { body } => {
                         if !body.is_empty() {
-                            push_script_body_attr(&mut attrs, body);
-                            if !script_bodies.iter().any(|existing| existing == body) {
-                                script_bodies.push(body.clone());
+                            let body = interner.intern(body);
+                            if script_bodies.insert(body.clone()) {
+                                push_script_body_attr(&mut attrs, &body);
                             }
                         }
                     }
@@ -183,14 +184,11 @@ pub(crate) fn recover_nodes(
 
         if let (Some(node_type), Some(name)) = (node_type, name) {
             let base_key = (node_type.clone(), name.clone(), parent.clone());
-            let existing_candidates = node_candidates_by_base
-                .get(&base_key)
-                .cloned()
-                .unwrap_or_default();
-            let occurrence = if uid.is_some() || existing_candidates.is_empty() {
+            let existing_candidate_count = node_candidates_by_base.get(&base_key).map_or(0, Vec::len);
+            let occurrence = if uid.is_some() || existing_candidate_count == 0 {
                 0
             } else {
-                existing_candidates.len()
+                existing_candidate_count
             };
             let key = recovered_node_merge_key(
                 &node_type,
@@ -214,8 +212,11 @@ pub(crate) fn recover_nodes(
                 .entry(key.clone())
                 .or_insert(create_flags.clone());
 
-            let candidates = node_candidates_by_base.entry(base_key.clone()).or_default();
-            if !candidates.iter().any(|existing| existing == &key) {
+            let already_present = node_candidate_membership
+                .get(&base_key)
+                .is_some_and(|members| members.contains(&key));
+            if !already_present {
+                let candidates = node_candidates_by_base.entry(base_key.clone()).or_default();
                 if !candidates.is_empty() && duplicate_node_keys_noted.insert(key.clone()) {
                     for existing in candidates.iter() {
                         node_decode_notes
@@ -234,7 +235,11 @@ pub(crate) fn recover_nodes(
                             "duplicate recovered node base key encountered; preserved separate recovered candidates",
                         ));
                 }
-                candidates.push(key);
+                candidates.push(key.clone());
+                node_candidate_membership
+                    .entry(base_key)
+                    .or_default()
+                    .insert(key);
             }
         }
     }
@@ -282,27 +287,14 @@ fn chunk_trace_from_record(decoded: &DecodedChunkRecord) -> ChunkTrace {
     }
 }
 
-fn push_script_body_attr(attrs: &mut Vec<RecoveredAttrOp>, body: &str) {
-    let duplicate = attrs.iter().any(|attr| {
-        matches!(
-            attr,
-            RecoveredAttrOp::SetAttr(SetAttrOp {
-                attr_name_or_path,
-                value: SetAttrValue::String(existing),
-                ..
-            }) if attr_name_or_path == ".b" && existing == body
-        )
-    });
-    if duplicate {
-        return;
-    }
+fn push_script_body_attr(attrs: &mut Vec<RecoveredAttrOp>, body: &SharedStr) {
     attrs.push(RecoveredAttrOp::SetAttr(SetAttrOp {
         attr_name_or_path: ".b".to_string(),
         array_size: None,
         channel_hint: None,
         lock: None,
         keyable: None,
-        value: SetAttrValue::String(body.to_string()),
+        value: SetAttrValue::String(body.as_ref().to_string()),
     }));
 }
 
