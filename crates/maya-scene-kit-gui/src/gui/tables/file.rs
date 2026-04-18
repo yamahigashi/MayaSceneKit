@@ -81,6 +81,21 @@ impl FileTableDelegate {
         update_file_sort_columns(&mut self.columns, sort);
     }
 
+    pub(in crate::gui) fn replace_row(
+        &mut self,
+        row_ix: usize,
+        row: FileTableRow,
+        locale: SupportedLocale,
+        sort: FileTableSort,
+    ) {
+        let Some(existing) = self.rows.get_mut(row_ix) else {
+            return;
+        };
+        *existing = row;
+        self.locale = locale;
+        update_file_sort_columns(&mut self.columns, sort);
+    }
+
     pub(super) fn update_sort_columns(&mut self, active_col_ix: usize, sort: ColumnSort) {
         for (col_ix, column) in self.columns.iter_mut().enumerate() {
             if col_ix == active_col_ix {
@@ -355,7 +370,7 @@ impl TableDelegate for FileTableDelegate {
             let view = view.clone();
             move |_, window, cx| {
                 view.update(cx, |shell, cx| {
-                    shell.run_clean(window, cx);
+                    shell.run_file_context_clean(window, cx);
                 });
             }
         }));

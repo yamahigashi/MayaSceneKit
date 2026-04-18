@@ -361,16 +361,19 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::collections::HashSet;
+    use std::path::PathBuf;
 
     use super::{decode_rtft_attr_name, push_unique_scene_path_entry};
+    use crate::scene::model::CreateNodeFlags;
     use crate::scene::{
         ir::{RecoveredAttrOp, RecoveredNode, SetAttrOp, SetAttrValue},
         paths::{ScenePathEntry, ScenePathMeta},
     };
-    use crate::scene::model::CreateNodeFlags;
-    use maya_scene_kit_formats::mb::{parse_file, paths::{MbScenePathEntry, MbScenePathMeta}};
+    use maya_scene_kit_formats::mb::{
+        parse_file,
+        paths::{MbScenePathEntry, MbScenePathMeta},
+    };
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

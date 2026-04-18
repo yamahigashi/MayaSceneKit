@@ -1,13 +1,57 @@
 use super::*;
 
+const BYTE_UNITS: [(&str, usize); 8] = [
+    ("tb", 1024usize.pow(4)),
+    ("t", 1024usize.pow(4)),
+    ("gb", 1024usize.pow(3)),
+    ("g", 1024usize.pow(3)),
+    ("mb", 1024usize.pow(2)),
+    ("m", 1024usize.pow(2)),
+    ("kb", 1024usize),
+    ("k", 1024usize),
+];
+
 pub(super) fn parse_max_bytes_input(input: &str) -> Option<Option<usize>> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Some(None);
     }
-    match trimmed.parse::<usize>() {
-        Ok(value) if value > 0 => Some(Some(value)),
-        _ => None,
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let (digits, unit_suffix) = trimmed.split_at(digit_count);
+    let value = digits.parse::<usize>().ok()?;
+    if value == 0 {
+        return None;
+    }
+
+    let unit = unit_suffix.trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" => 1024usize.pow(2),
+        "b" | "byte" | "bytes" => 1,
+        other => BYTE_UNITS
+            .iter()
+            .find_map(|(label, multiplier)| (*label == other).then_some(*multiplier))?,
+    };
+    value.checked_mul(multiplier).map(Some)
+}
+
+pub(super) fn format_max_bytes_input(value: usize) -> String {
+    for (unit, multiplier) in [
+        ("TB", 1024usize.pow(4)),
+        ("GB", 1024usize.pow(3)),
+        ("MB", 1024usize.pow(2)),
+        ("KB", 1024usize),
+    ] {
+        if value >= multiplier && value % multiplier == 0 {
+            return format!("{} {unit}", value / multiplier);
+        }
+    }
+    if value == 1 {
+        "1 byte".to_string()
+    } else {
+        format!("{value} bytes")
     }
 }
 
@@ -27,7 +71,7 @@ impl GuiShell {
         let default_value = self
             .state
             .max_bytes
-            .map(|value| value.to_string())
+            .map(format_max_bytes_input)
             .unwrap_or_default();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -188,7 +232,7 @@ fn build_max_bytes_dialog(
                                     shell
                                         .state
                                         .max_bytes
-                                        .map(|value| value.to_string())
+                                        .map(format_max_bytes_input)
                                         .unwrap_or_default(),
                                 )],
                             )
@@ -197,4 +241,46 @@ fn build_max_bytes_dialog(
                         }),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_max_bytes_input, parse_max_bytes_input};
+
+    #[test]
+    fn parse_max_bytes_input_accepts_supported_units() {
+        assert_eq!(parse_max_bytes_input(""), Some(None));
+        assert_eq!(parse_max_bytes_input("256"), Some(Some(256 * 1024 * 1024)));
+        assert_eq!(
+            parse_max_bytes_input("256 MB"),
+            Some(Some(256 * 1024 * 1024))
+        );
+        assert_eq!(
+            parse_max_bytes_input("10GB"),
+            Some(Some(10 * 1024 * 1024 * 1024))
+        );
+        assert_eq!(parse_max_bytes_input("1024 bytes"), Some(Some(1024)));
+        assert_eq!(parse_max_bytes_input("2 kb"), Some(Some(2 * 1024)));
+        assert_eq!(parse_max_bytes_input("1 byte"), Some(Some(1)));
+        assert_eq!(parse_max_bytes_input("8B"), Some(Some(8)));
+    }
+
+    #[test]
+    fn parse_max_bytes_input_rejects_invalid_values() {
+        assert_eq!(parse_max_bytes_input("0"), None);
+        assert_eq!(parse_max_bytes_input("-1"), None);
+        assert_eq!(parse_max_bytes_input("1.5GB"), None);
+        assert_eq!(parse_max_bytes_input("12 XB"), None);
+        assert_eq!(parse_max_bytes_input("bytes"), None);
+        assert_eq!(parse_max_bytes_input("1 MB extra"), None);
+    }
+
+    #[test]
+    fn format_max_bytes_input_preserves_exact_values() {
+        assert_eq!(format_max_bytes_input(1), "1 byte");
+        assert_eq!(format_max_bytes_input(1024), "1 KB");
+        assert_eq!(format_max_bytes_input(256 * 1024 * 1024), "256 MB");
+        assert_eq!(format_max_bytes_input(10 * 1024 * 1024 * 1024), "10 GB");
+        assert_eq!(format_max_bytes_input(1537), "1537 bytes");
+    }
 }

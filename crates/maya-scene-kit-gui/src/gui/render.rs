@@ -167,7 +167,7 @@ impl Render for GuiShell {
                     )
                 },
             )
-            .child(div().flex_1().min_h_0().p_4().child({
+            .child(div().flex_1().min_h_0().p_4().relative().child({
                 let split = workspace_split_config(self.state.workspace_layout);
                 let file_panel = resizable_panel()
                     .size(split.file_size)
@@ -177,7 +177,7 @@ impl Render for GuiShell {
                     .size(split.result_size)
                     .size_range(split.result_min..Pixels::MAX)
                     .child(self.render_result_panel(view.clone()));
-                match split.axis {
+                let content = match split.axis {
                     Axis::Vertical => v_resizable(split.group_id)
                         .child(file_panel)
                         .child(result_panel)
@@ -186,11 +186,46 @@ impl Render for GuiShell {
                         .child(file_panel)
                         .child(result_panel)
                         .into_any_element(),
-                }
+                };
+                div().relative().size_full().child(content).when(
+                    self.workspace_scan_active(),
+                    |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .occlude()
+                                .bg(rgba(0xfffcf7b8))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .bg(rgb(PANEL_BG))
+                                        .border_1()
+                                        .border_color(rgb(BORDER))
+                                        .text_sm()
+                                        .text_color(rgb(MUTED))
+                                        .child(Spinner::new().with_size(px(14.0)))
+                                        .child(i18n.text("banner.workspace_scan_in_progress")),
+                                ),
+                        )
+                    },
+                )
             }))
             .child(
                 div().px_4().pb_3().text_sm().text_color(rgb(MUTED)).child(
-                    self.cache_restore_message(&i18n)
+                    self.workspace_scan_message(&i18n)
+                        .or_else(|| self.cache_restore_message(&i18n))
                         .or_else(|| {
                             self.status_message
                                 .as_ref()
@@ -276,6 +311,17 @@ fn render_menu_strip(menu: impl IntoElement, indicator: impl IntoElement) -> imp
 }
 
 fn render_global_processing_indicator(shell: &GuiShell, i18n: &I18n) -> AnyElement {
+    if shell.workspace_scan_active() {
+        return div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .text_color(rgb(MUTED))
+            .child(Spinner::new().with_size(px(14.0)))
+            .child(i18n.text("status.workspace_scan"))
+            .into_any_element();
+    }
     let auto_remaining_count = shell.auto_analyze_queue.remaining_count();
     let row_processing_count = shell.rows.iter().filter(|row| row.is_processing()).count();
     let dialog_previewing = shell

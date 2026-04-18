@@ -192,12 +192,15 @@ struct GuiShell {
     pending_edit_transactions: BTreeMap<u64, PendingEditTransaction>,
     completed_edit_history: BTreeMap<u64, Option<GuiEditHistoryEntry>>,
     workspace_auto_analyze_started_at: Option<Instant>,
+    workspace_scan_state: WorkspaceScanState,
     cache_restore_generation: u64,
     cache_restore_state: CacheRestoreState,
     cache_write_generation: u64,
     cache_write_state: CacheWriteState,
     cache_maintenance_generation: u64,
     cache_maintenance_state: CacheMaintenanceState,
+    auto_analyze_refresh_state: AutoAnalyzeRefreshState,
+    persist_flush_state: PersistFlushState,
     active_path_edit: Option<Vec<(u64, usize)>>,
     selected_path_rows: BTreeSet<PathEditTargets>,
     path_selection_anchor: Option<PathEditTargets>,
@@ -247,12 +250,27 @@ struct CacheRestoreState {
     in_flight: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WorkspaceScanKind {
+    #[default]
+    ReplaceAll,
+    Rescan,
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceScanState {
+    generation: u64,
+    in_flight: bool,
+    kind: WorkspaceScanKind,
+}
+
 #[derive(Debug, Default)]
 struct CacheWriteState {
     pending_observe_order: VecDeque<String>,
     pending_audit_order: VecDeque<String>,
     pending_observe: BTreeMap<String, ObservedSceneSnapshot>,
     pending_audit: BTreeMap<String, AuditedSceneSnapshot>,
+    debounce_pending: bool,
     in_flight: bool,
     error_count: usize,
     first_error: Option<String>,
@@ -265,9 +283,27 @@ struct CacheMaintenanceState {
     pending_observe: BTreeMap<String, ObserveCacheAccess>,
     pending_audit: BTreeMap<String, AuditCacheAccess>,
     pending_sweep: bool,
+    debounce_pending: bool,
     in_flight: bool,
     error_count: usize,
     first_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct AutoAnalyzeRefreshState {
+    visible_generation: u64,
+    full_generation: u64,
+    pending_visible_row_ids: BTreeSet<u64>,
+    pending_full_refresh: bool,
+    pending_completion_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct PersistFlushState {
+    generation: u64,
+    in_flight: bool,
+    dirty: bool,
+    workspace_paths_dirty: bool,
 }
 
 impl AutoAnalyzeQueueState {
@@ -559,8 +595,18 @@ struct SceneRow {
     staged_source_bytes: Option<Vec<u8>>,
     path_overrides: BTreeMap<usize, String>,
     path_resolution_cache: BTreeMap<usize, PathResolutionCacheEntry>,
+    missing_path_count_cache: Option<usize>,
     replace_generation: u64,
     replace_artifact_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiscoveredSceneFile {
+    path: PathBuf,
+    name: String,
+    size: u64,
+    modified: Option<SystemTime>,
+    scene_workspace_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -925,10 +971,34 @@ impl SceneRow {
             modified: metadata.modified().ok(),
             size: metadata.len(),
             path,
+            scene_workspace_root,
+            ..Self::new_unloaded_row(id)
+        })
+    }
+
+    fn from_discovered_file(id: u64, file: DiscoveredSceneFile) -> Self {
+        Self {
+            id,
+            path: file.path,
+            name: file.name,
+            size: file.size,
+            modified: file.modified,
+            scene_workspace_root: file.scene_workspace_root,
+            ..Self::new_unloaded_row(id)
+        }
+    }
+
+    fn new_unloaded_row(id: u64) -> Self {
+        Self {
+            id,
+            path: PathBuf::new(),
+            name: String::new(),
+            size: 0,
+            modified: None,
             selected: false,
             status: FileStatus::Idle,
             findings: 0,
-            scene_workspace_root,
+            scene_workspace_root: None,
             audit_report: None,
             paths_report: None,
             dump_report: None,
@@ -948,9 +1018,10 @@ impl SceneRow {
             staged_source_bytes: None,
             path_overrides: BTreeMap::new(),
             path_resolution_cache: BTreeMap::new(),
+            missing_path_count_cache: None,
             replace_generation: 0,
             replace_artifact_generation: None,
-        })
+        }
     }
 
     fn refresh_scene_workspace_root(&mut self) {
@@ -960,6 +1031,7 @@ impl SceneRow {
     fn refresh_path_resolution_cache(&mut self) {
         let Some(report) = self.display_paths_report() else {
             self.path_resolution_cache.clear();
+            self.missing_path_count_cache = None;
             return;
         };
 
@@ -984,6 +1056,36 @@ impl SceneRow {
                 )
             })
             .collect();
+        self.refresh_missing_path_count_cache();
+    }
+
+    fn refresh_missing_path_count_cache(&mut self) {
+        let Some(report) = self.display_paths_report() else {
+            self.missing_path_count_cache = None;
+            return;
+        };
+
+        self.missing_path_count_cache = Some(
+            report
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(entry_index, entry)| {
+                    let effective_value = self
+                        .path_overrides
+                        .get(entry_index)
+                        .map(String::as_str)
+                        .unwrap_or(entry.value.as_str());
+                    let resolution = self
+                        .path_resolution(*entry_index, effective_value)
+                        .cloned()
+                        .or_else(|| self.path_resolution_fallback(*entry_index, effective_value));
+                    resolution.is_some_and(|resolution| {
+                        matches!(resolution.status, ScenePathResolutionStatus::Missing)
+                    })
+                })
+                .count(),
+        );
     }
 
     fn path_resolution(
@@ -1045,6 +1147,10 @@ impl SceneRow {
 
     fn display_dump_report(&self) -> Option<&SceneDumpReport> {
         self.dump_report.as_ref()
+    }
+
+    fn missing_path_count(&self) -> Option<usize> {
+        self.missing_path_count_cache
     }
 
     fn scene_edits_are_staged(&self) -> bool {
@@ -1121,6 +1227,7 @@ impl SceneRow {
         self.replace_generation = state.replace_generation;
         self.replace_artifact_generation = state.replace_artifact_generation;
         self.sync_findings_count();
+        self.refresh_missing_path_count_cache();
     }
 }
 
@@ -1203,6 +1310,7 @@ mod max_bytes_dialog;
 mod menu;
 mod path;
 mod path_edit;
+mod persist_flush;
 mod render;
 mod replace_dialog;
 mod results;

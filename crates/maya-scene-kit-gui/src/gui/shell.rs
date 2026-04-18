@@ -29,8 +29,8 @@ impl GuiShell {
         let path_edit_focus_handle = path_edit_input.read(cx).focus_handle(cx);
         let mut next_row_id = 1u64;
         let analysis_cache_root = default_analysis_cache_root();
-        let observe_cache_root = analysis_cache_root.join("observe");
-        let audit_cache_root = analysis_cache_root.join("audit");
+        let observe_cache_root = analysis_cache_root.join("observe-v3");
+        let audit_cache_root = analysis_cache_root.join("audit-v3");
         let rows = load_rows_from_state(&state, &mut next_row_id);
         let row_id_to_index = rows
             .iter()
@@ -239,12 +239,15 @@ impl GuiShell {
             pending_edit_transactions: BTreeMap::new(),
             completed_edit_history: BTreeMap::new(),
             workspace_auto_analyze_started_at: None,
+            workspace_scan_state: WorkspaceScanState::default(),
             cache_restore_generation: 0,
             cache_restore_state: CacheRestoreState::default(),
             cache_write_generation: 0,
             cache_write_state: CacheWriteState::default(),
             cache_maintenance_generation: 0,
             cache_maintenance_state: CacheMaintenanceState::default(),
+            auto_analyze_refresh_state: AutoAnalyzeRefreshState::default(),
+            persist_flush_state: PersistFlushState::default(),
             active_path_edit: None,
             selected_path_rows: BTreeSet::new(),
             path_selection_anchor: None,
@@ -271,7 +274,11 @@ impl GuiShell {
             audit_cache_root,
             _subscriptions: subscriptions,
         };
-        shell.start_progressive_cache_restore(window, cx);
+        if shell.state.workspace_root_path().is_some() {
+            shell.rescan_workspace_with_current_settings(window, cx);
+        } else {
+            shell.start_progressive_cache_restore(window, cx);
+        }
         shell
     }
 
@@ -318,6 +325,10 @@ impl GuiShell {
         self.cache_restore_state.in_flight || !self.cache_restore_state.pending.is_empty()
     }
 
+    pub(super) fn workspace_scan_active(&self) -> bool {
+        self.workspace_scan_state.in_flight
+    }
+
     pub(super) fn cache_restore_message(&self, i18n: &I18n) -> Option<String> {
         self.cache_restore_active().then(|| {
             i18n.format(
@@ -331,6 +342,11 @@ impl GuiShell {
                 ],
             )
         })
+    }
+
+    pub(super) fn workspace_scan_message(&self, i18n: &I18n) -> Option<String> {
+        self.workspace_scan_active()
+            .then(|| i18n.text("banner.workspace_scan_in_progress"))
     }
 
     pub(super) fn backup_location_label(&self, i18n: &I18n) -> String {

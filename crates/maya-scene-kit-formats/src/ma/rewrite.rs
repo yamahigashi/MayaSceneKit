@@ -760,8 +760,12 @@ createNode customPathNode -n "customTex1";
         let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
-        assert!(text.contains("setAttr \".fileTextureName\" -type \"string\" \"archive/layered.psd\";"));
-        assert!(text.contains("setAttr \".fileTextureName\" -type \"string\" \"textures/custom.tx\";"));
+        assert!(
+            text.contains("setAttr \".fileTextureName\" -type \"string\" \"archive/layered.psd\";")
+        );
+        assert!(
+            text.contains("setAttr \".fileTextureName\" -type \"string\" \"textures/custom.tx\";")
+        );
     }
 
     #[test]

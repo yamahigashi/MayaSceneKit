@@ -16,6 +16,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.run_save_selected(window, cx);
     }
 
@@ -25,6 +28,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.run_save_all(window, cx);
     }
 
@@ -34,6 +40,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.run_clean(window, cx);
     }
 
@@ -63,6 +72,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.run_replace(window, cx);
     }
 
@@ -72,6 +84,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.run_to_ascii(window, cx);
     }
 
@@ -90,6 +105,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.select_visible(window, cx);
     }
 
@@ -99,6 +117,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         let focused = self.file_table_focus_handle.contains_focused(window, cx);
         if !focused {
             return;
@@ -125,6 +146,9 @@ impl GuiShell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_scan_active() {
+            return;
+        }
         self.clear_selection();
         self.refresh_file_table(cx);
         cx.notify();

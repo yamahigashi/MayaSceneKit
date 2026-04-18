@@ -1,5 +1,9 @@
 use super::*;
 
+const AUTO_ANALYZE_VISIBLE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
+const AUTO_ANALYZE_FULL_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
+const AUTO_ANALYZE_FULL_REFRESH_THRESHOLD: usize = 64;
+
 impl GuiShell {
     pub(super) fn toggle_workspace_auto_analyze(
         &mut self,
@@ -99,6 +103,7 @@ impl GuiShell {
             self.workspace_auto_analyze_generation.wrapping_add(1);
         self.auto_analyze_queue.reset();
         self.workspace_auto_analyze_started_at = None;
+        self.cancel_auto_analyze_refresh();
     }
 
     pub(super) fn schedule_selected_auto_analysis(
@@ -290,11 +295,11 @@ impl GuiShell {
         }
         if self.auto_analyze_queue.generation == generation {
             self.dispatch_auto_analyze_jobs(window, cx);
-            self.maybe_finish_workspace_auto_analyze_batch();
+            self.maybe_finish_workspace_auto_analyze_batch(cx);
         }
     }
 
-    fn maybe_finish_workspace_auto_analyze_batch(&mut self) {
+    fn maybe_finish_workspace_auto_analyze_batch(&mut self, cx: &mut Context<Self>) {
         let Some(started_at) = self.workspace_auto_analyze_started_at else {
             return;
         };
@@ -309,10 +314,171 @@ impl GuiShell {
         if !remaining.is_empty() {
             return;
         }
+        self.flush_pending_auto_analyze_refresh(cx);
+        self.flush_persist_now(false);
         self.workspace_auto_analyze_started_at = None;
         self.status_message = Some(BannerMessage::WorkspaceAutoAnalyzeCompleted {
             count: self.rows.len(),
             elapsed: started_at.elapsed(),
         });
+    }
+
+    pub(super) fn queue_auto_analyze_completion_refresh(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.index_of_row_id(row_id) else {
+            return;
+        };
+
+        if self.rows[index].selected {
+            self.refresh_selected_result_tables(cx);
+        }
+
+        if self.visible_position_for_row_index(index).is_some() {
+            self.auto_analyze_refresh_state
+                .pending_visible_row_ids
+                .insert(row_id);
+            self.schedule_auto_analyze_visible_refresh(window, cx);
+        }
+
+        self.auto_analyze_refresh_state.pending_full_refresh = true;
+        self.auto_analyze_refresh_state.pending_completion_count += 1;
+        if self.auto_analyze_refresh_state.pending_completion_count
+            >= AUTO_ANALYZE_FULL_REFRESH_THRESHOLD
+        {
+            self.flush_auto_analyze_full_refresh(cx);
+            return;
+        }
+        self.schedule_auto_analyze_full_refresh(window, cx);
+    }
+
+    fn cancel_auto_analyze_refresh(&mut self) {
+        self.auto_analyze_refresh_state.visible_generation = self
+            .auto_analyze_refresh_state
+            .visible_generation
+            .wrapping_add(1);
+        self.auto_analyze_refresh_state.full_generation = self
+            .auto_analyze_refresh_state
+            .full_generation
+            .wrapping_add(1);
+        self.auto_analyze_refresh_state
+            .pending_visible_row_ids
+            .clear();
+        self.auto_analyze_refresh_state.pending_full_refresh = false;
+        self.auto_analyze_refresh_state.pending_completion_count = 0;
+    }
+
+    fn schedule_auto_analyze_visible_refresh(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.auto_analyze_refresh_state.visible_generation = self
+            .auto_analyze_refresh_state
+            .visible_generation
+            .wrapping_add(1);
+        let generation = self.auto_analyze_refresh_state.visible_generation;
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    executor.timer(AUTO_ANALYZE_VISIBLE_REFRESH_DEBOUNCE).await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
+                            if shell.auto_analyze_refresh_state.visible_generation != generation {
+                                return;
+                            }
+                            shell.flush_auto_analyze_visible_refresh(cx);
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn schedule_auto_analyze_full_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.auto_analyze_refresh_state.full_generation = self
+            .auto_analyze_refresh_state
+            .full_generation
+            .wrapping_add(1);
+        let generation = self.auto_analyze_refresh_state.full_generation;
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    executor.timer(AUTO_ANALYZE_FULL_REFRESH_DEBOUNCE).await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
+                            if shell.auto_analyze_refresh_state.full_generation != generation {
+                                return;
+                            }
+                            shell.flush_auto_analyze_full_refresh(cx);
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn flush_auto_analyze_visible_refresh(&mut self, cx: &mut Context<Self>) {
+        let row_ids = std::mem::take(&mut self.auto_analyze_refresh_state.pending_visible_row_ids);
+        if row_ids.is_empty() {
+            return;
+        }
+        let mut patched_any = false;
+        for row_id in row_ids {
+            patched_any |= self.patch_visible_file_row(row_id, cx);
+        }
+        if !patched_any && self.auto_analyze_refresh_state.pending_full_refresh {
+            self.flush_auto_analyze_full_refresh(cx);
+        }
+    }
+
+    fn flush_auto_analyze_full_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_analyze_refresh_state.pending_full_refresh {
+            return;
+        }
+        self.auto_analyze_refresh_state.pending_full_refresh = false;
+        self.auto_analyze_refresh_state.pending_completion_count = 0;
+        self.auto_analyze_refresh_state
+            .pending_visible_row_ids
+            .clear();
+        self.refresh_file_table(cx);
+    }
+
+    fn flush_pending_auto_analyze_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_analyze_refresh_state.pending_full_refresh
+            && self
+                .auto_analyze_refresh_state
+                .pending_visible_row_ids
+                .is_empty()
+        {
+            return;
+        }
+        self.auto_analyze_refresh_state.visible_generation = self
+            .auto_analyze_refresh_state
+            .visible_generation
+            .wrapping_add(1);
+        self.auto_analyze_refresh_state.full_generation = self
+            .auto_analyze_refresh_state
+            .full_generation
+            .wrapping_add(1);
+        self.auto_analyze_refresh_state
+            .pending_visible_row_ids
+            .clear();
+        self.auto_analyze_refresh_state.pending_full_refresh = false;
+        self.auto_analyze_refresh_state.pending_completion_count = 0;
+        self.refresh_file_table(cx);
     }
 }

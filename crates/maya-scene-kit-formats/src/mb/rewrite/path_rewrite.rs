@@ -11,8 +11,8 @@ use crate::mb::{
         rebuild_section_with_payload_rewrites, rewrite_attr_payload_string_preserving_shape,
     },
 };
-use crate::{ma::types::PathReplaceRule, replace_rules::CompiledPathReplaceRules};
 use crate::reference_semantics::{ScenePathAttrKind, classify_scene_path_attr};
+use crate::{ma::types::PathReplaceRule, replace_rules::CompiledPathReplaceRules};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MbPathReplaceRule {
@@ -808,7 +808,6 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::replace_rules::CompiledPathReplaceRules;
     use super::{
         super::chunk_encode::append_chunk_header, MbPathReplaceRule,
         replace_first_path_field_in_nul_payload, replace_path_field_in_frdi_payload,
@@ -819,6 +818,7 @@ mod tests {
         parse_file, parse_section_chunks_full_with_hints, rewrite::encode_chunk,
         section::SectionHeaderFormat,
     };
+    use crate::replace_rules::CompiledPathReplaceRules;
 
     fn build_mb_with_single_form(
         form: &str,

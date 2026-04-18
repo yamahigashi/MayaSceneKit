@@ -23,7 +23,6 @@ use maya_mel::{
 };
 
 use crate::{
-    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
     ScenePathEntry, ScenePathMeta,
     ma::{
         commands::{
@@ -42,6 +41,7 @@ use crate::{
         MelAuditTopLevelItemFact, MelAuditTopLevelOtherFact, MelAuditTopLevelProcFact,
         MelDiagnosticStage, MelParseBudget, MelParseDiagnostic, MelSourceEncoding, MelSpan,
     },
+    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
 };
 
 #[derive(Debug, Clone)]
@@ -202,8 +202,7 @@ fn apply_setattr_to_active_block(
             }
         }
         ActiveCreateBlock::ScenePath(path_block) => {
-            let Some(attr_name) =
-                selective_scene_path_attr_name(source, set_attr, tracked_attr)
+            let Some(attr_name) = selective_scene_path_attr_name(source, set_attr, tracked_attr)
             else {
                 return;
             };

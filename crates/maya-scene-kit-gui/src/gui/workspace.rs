@@ -1,6 +1,12 @@
 use super::*;
 use std::{fs, io};
 
+struct WorkspaceScanResult {
+    root: PathBuf,
+    files: Vec<DiscoveredSceneFile>,
+    kind: WorkspaceScanKind,
+}
+
 impl GuiShell {
     pub(super) fn confirm_purge_analysis_cache(
         &mut self,
@@ -87,17 +93,7 @@ impl GuiShell {
     }
 
     pub(super) fn persist(&mut self) {
-        self.state.normalize_ignore_folder_settings();
-        self.state.set_workspace_root(
-            self.state
-                .workspace_root_path()
-                .filter(|path| path.exists()),
-        );
-        self.state
-            .replace_workspace_paths(self.rows.iter().map(|row| row.path.clone()));
-        if let Err(err) = save_persisted_state(&self.state) {
-            self.status_message = Some(BannerMessage::PersistFailed(err.to_string()));
-        }
+        self.flush_persist_now(true);
     }
 
     pub(super) fn add_recent_input(&mut self, path: &Path, was_directory: bool) {
@@ -225,33 +221,11 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_progressive_cache_restore();
-        let mut files = Vec::new();
-        collect_scene_files_recursively(&folder, &mut files, &self.state);
-        let rows = build_rows_from_paths(files, &mut self.next_row_id);
-        self.replace_rows(rows);
-        self.clear_selection();
-        self.clear_edit_history();
-        self.cancel_all_auto_analysis();
-        self.selection_anchor = None;
-        self.active_path_edit = None;
-        self.selected_path_rows.clear();
-        self.path_selection_anchor = None;
-        self.state.set_workspace_root(Some(folder.clone()));
-        self.add_recent_input(&folder, true);
-        self.status_message = Some(BannerMessage::WorkspaceLoaded {
-            count: self.rows.len(),
-            path: folder,
-        });
-        self.refresh_app_menus(window, cx);
-        self.refresh_file_table(cx);
-        self.refresh_path_table(cx);
-        self.start_progressive_cache_restore(window, cx);
-        self.schedule_workspace_auto_analysis_if_enabled(window, cx);
-        self.persist();
+        self.start_workspace_scan(folder, WorkspaceScanKind::ReplaceAll, true, window, cx);
     }
 
     pub(super) fn clear_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_workspace_scan();
         self.cancel_progressive_cache_restore();
         self.clear_rows();
         self.visible_rows.clear();
@@ -274,28 +248,123 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_progressive_cache_restore();
         let Some(root) = self.state.workspace_root_path() else {
             self.refresh_app_menus(window, cx);
             self.persist();
             return;
         };
-        let mut files = Vec::new();
-        collect_scene_files_recursively(&root, &mut files, &self.state);
-        let existing_rows = std::mem::take(&mut self.rows);
-        let rows = reconcile_workspace_rows(existing_rows, files, &mut self.next_row_id);
-        self.replace_rows(rows);
-        self.clear_edit_history();
-        self.selection_anchor = self.rows.iter().position(|row| row.selected);
-        self.active_path_edit = None;
-        self.selected_path_rows.clear();
-        self.path_selection_anchor = None;
+        self.start_workspace_scan(root, WorkspaceScanKind::Rescan, false, window, cx);
+    }
+
+    pub(super) fn cancel_workspace_scan(&mut self) {
+        self.workspace_scan_state.generation = self.workspace_scan_state.generation.wrapping_add(1);
+        self.workspace_scan_state.in_flight = false;
+        self.workspace_scan_state.kind = WorkspaceScanKind::ReplaceAll;
+    }
+
+    fn start_workspace_scan(
+        &mut self,
+        root: PathBuf,
+        kind: WorkspaceScanKind,
+        add_recent_input: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_workspace_scan();
+        self.cancel_progressive_cache_restore();
+        self.cancel_all_auto_analysis();
+        self.workspace_scan_state.in_flight = true;
+        self.workspace_scan_state.kind = kind;
+        let generation = self.workspace_scan_state.generation;
+        self.state.set_workspace_root(Some(root.clone()));
+        if add_recent_input {
+            self.add_recent_input(&root, true);
+        }
+        self.status_message = Some(BannerMessage::Raw(
+            self.i18n().text("banner.workspace_scan_in_progress"),
+        ));
+        self.refresh_app_menus(window, cx);
+        self.persist();
+        cx.notify();
+
+        let state = self.state.clone();
+        let view = cx.entity();
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    let root_for_scan = root.clone();
+                    let result = executor
+                        .spawn(async move {
+                            WorkspaceScanResult {
+                                files: discover_workspace_scene_files(&root_for_scan, &state),
+                                root: root_for_scan,
+                                kind,
+                            }
+                        })
+                        .await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        move |shell: &mut GuiShell,
+                              window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
+                            if shell.workspace_scan_state.generation != generation {
+                                return;
+                            }
+                            shell.apply_workspace_scan_result(result, window, cx);
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn apply_workspace_scan_result(
+        &mut self,
+        result: WorkspaceScanResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_scan_state.in_flight = false;
+        self.workspace_scan_state.kind = result.kind;
+        match result.kind {
+            WorkspaceScanKind::ReplaceAll => {
+                let rows = build_rows_from_discovered_files(result.files, &mut self.next_row_id);
+                self.replace_rows(rows);
+                self.clear_selection();
+                self.clear_edit_history();
+                self.selection_anchor = None;
+                self.active_path_edit = None;
+                self.selected_path_rows.clear();
+                self.path_selection_anchor = None;
+                self.status_message = Some(BannerMessage::WorkspaceLoaded {
+                    count: self.rows.len(),
+                    path: result.root,
+                });
+            }
+            WorkspaceScanKind::Rescan => {
+                let existing_rows = std::mem::take(&mut self.rows);
+                let rows = reconcile_workspace_rows_from_discovered_files(
+                    existing_rows,
+                    result.files,
+                    &mut self.next_row_id,
+                );
+                self.replace_rows(rows);
+                self.clear_edit_history();
+                self.selection_anchor = self.rows.iter().position(|row| row.selected);
+                self.active_path_edit = None;
+                self.selected_path_rows.clear();
+                self.path_selection_anchor = None;
+                self.status_message = None;
+            }
+        }
         self.refresh_file_table(cx);
-        self.refresh_path_table(cx);
         self.refresh_app_menus(window, cx);
         self.start_progressive_cache_restore(window, cx);
         self.schedule_workspace_auto_analysis_if_enabled(window, cx);
         self.persist();
+        cx.notify();
     }
 
     pub(super) fn set_locale_preference(
@@ -390,9 +459,21 @@ impl GuiShell {
         self.cancel_progressive_cache_restore();
         self.cancel_cache_writes();
         self.cancel_cache_maintenance();
-        match purge_cache_dir(&self.observe_cache_root)
-            .and_then(|()| purge_cache_dir(&self.audit_cache_root))
-        {
+        let legacy_root = default_analysis_cache_root();
+        let cache_roots = [
+            self.observe_cache_root.clone(),
+            self.audit_cache_root.clone(),
+            legacy_root.join("observe"),
+            legacy_root.join("audit"),
+            legacy_root.join("observe-v2"),
+            legacy_root.join("audit-v2"),
+            legacy_root.join("observe-v3"),
+            legacy_root.join("audit-v3"),
+        ];
+        let purge_result = cache_roots.into_iter().fold(Ok(()), |result, root| {
+            result.and_then(|()| purge_cache_dir(&root))
+        });
+        match purge_result {
             Ok(()) => {
                 self.status_message = Some(BannerMessage::CachePurged);
                 self.refresh_app_menus(window, cx);
@@ -574,6 +655,12 @@ impl GuiShell {
 
     pub(super) fn refresh_file_table(&mut self, cx: &mut Context<Self>) {
         self.refresh_visible_rows();
+        self.refresh_file_table_from_current_visible_rows(cx);
+        self.refresh_audit_table(cx);
+        self.refresh_path_table(cx);
+    }
+
+    pub(super) fn refresh_file_table_from_current_visible_rows(&mut self, cx: &mut Context<Self>) {
         let i18n = self.i18n();
         let file_sort = self.file_sort;
         let table_rows = build_file_table_rows(&self.rows, &self.visible_rows, &self.state, &i18n);
@@ -584,8 +671,32 @@ impl GuiShell {
             table.clear_selection(cx);
             table.refresh(cx);
         });
+    }
+
+    pub(super) fn refresh_selected_result_tables(&mut self, cx: &mut Context<Self>) {
         self.refresh_audit_table(cx);
         self.refresh_path_table(cx);
+    }
+
+    pub(super) fn patch_visible_file_row(&mut self, row_id: u64, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.index_of_row_id(row_id) else {
+            return false;
+        };
+        let Some(visible_index) = self.visible_position_for_row_index(index) else {
+            return false;
+        };
+        let Some(row) = self.rows.get(index) else {
+            return false;
+        };
+        let i18n = self.i18n();
+        let patched = build_single_file_table_row(row, &self.state, &i18n);
+        self.file_table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .replace_row(visible_index, patched, i18n.locale(), self.file_sort);
+            table.refresh(cx);
+        });
+        true
     }
 }
 
