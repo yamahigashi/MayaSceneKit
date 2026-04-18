@@ -31,17 +31,21 @@ pub(super) fn hydrate_cached_analysis_batch(
 ) -> CacheHydrationBatchResult {
     let observe_store = ObserveCacheStore::new(observe_cache_root);
     let audit_store = AuditCacheStore::new(audit_cache_root);
+    let paths = rows.iter().map(|row| row.path.clone()).collect::<Vec<_>>();
+    let observe_hits = observe_store
+        .load_many_by_path_if_fresh_with_access(&paths, &load_options, 64)
+        .unwrap_or_else(|_| (0..rows.len()).map(|_| Ok(None)).collect());
+    let audit_hits = audit_store
+        .load_many_by_path_if_fresh_with_access(&paths, audit_options, &plan_fingerprint)
+        .unwrap_or_else(|_| (0..rows.len()).map(|_| Ok(None)).collect());
+
     let updates = rows
         .into_iter()
-        .map(|row| {
-            let observe_hit = observe_store
-                .load_by_path_if_fresh_with_access(&row.path, &load_options, 64)
-                .ok()
-                .flatten();
-            let audit_hit = audit_store
-                .load_by_path_if_fresh_with_access(&row.path, audit_options, &plan_fingerprint)
-                .ok()
-                .flatten();
+        .zip(observe_hits)
+        .zip(audit_hits)
+        .map(|((row, observe_hit), audit_hit)| {
+            let observe_hit = observe_hit.ok().flatten();
+            let audit_hit = audit_hit.ok().flatten();
             CacheHydrationUpdate {
                 row_id: row.row_id,
                 observe_snapshot: observe_hit.as_ref().map(|hit| hit.snapshot.clone()),
@@ -277,7 +281,7 @@ impl GuiShell {
 
     fn finish_progressive_cache_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cache_restore_state = CacheRestoreState::default();
-        self.request_cache_sweep(window, cx);
+        let _ = window;
         cx.notify();
     }
 }

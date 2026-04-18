@@ -48,6 +48,23 @@ pub(super) fn build_audit_result_rows(
     out
 }
 
+pub(super) fn clean_targets_for_threat_findings(row: &SceneRow) -> Vec<ExecutionCleanTarget> {
+    let Some(report) = row.display_audit_report() else {
+        return Vec::new();
+    };
+    let mut targets = BTreeSet::<ExecutionCleanTarget>::new();
+    for finding in &report.findings {
+        let surface = report.surface_for(finding);
+        if surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody {
+            continue;
+        }
+        if let Some(target) = audit_clean_target(surface.origin.surface_kind, &surface.origin) {
+            targets.insert(target);
+        }
+    }
+    targets.into_iter().collect()
+}
+
 fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditResultRow> {
     let mut rows = Vec::new();
     for (require_index, require) in report.require_entries.iter().enumerate() {
@@ -1145,48 +1162,35 @@ pub(super) fn build_file_table_rows(
     visible_rows
         .iter()
         .filter_map(|index| rows.get(*index))
-        .map(|row| FileTableRow {
-            id: row.id,
-            selected: row.selected,
-            dirty: row.dirty(),
-            is_processing: row.is_processing(),
-            tone: row.status.tone(),
-            name: workspace_relative_display_path(&row.path, state),
-            has_scene_workspace: row.scene_workspace_root.is_some(),
-            status: row.status.label(i18n),
-            findings: row.effective_findings_count().to_string(),
-            missing: missing_path_count_for_row(row)
-                .map(|count| count.to_string())
-                .unwrap_or_default(),
-            size: i18n.format_bytes(row.size),
-            modified: i18n.format_modified(row.modified),
-        })
+        .map(|row| build_single_file_table_row(row, state, i18n))
         .collect()
 }
 
+pub(super) fn build_single_file_table_row(
+    row: &SceneRow,
+    state: &PersistedState,
+    i18n: &I18n,
+) -> FileTableRow {
+    FileTableRow {
+        id: row.id,
+        selected: row.selected,
+        dirty: row.dirty(),
+        is_processing: row.is_processing(),
+        tone: row.status.tone(),
+        name: workspace_relative_display_path(&row.path, state),
+        has_scene_workspace: row.scene_workspace_root.is_some(),
+        status: row.status.label(i18n),
+        findings: row.effective_findings_count().to_string(),
+        missing: missing_path_count_for_row(row)
+            .map(|count| count.to_string())
+            .unwrap_or_default(),
+        size: i18n.format_bytes(row.size),
+        modified: i18n.format_modified(row.modified),
+    }
+}
+
 pub(super) fn missing_path_count_for_row(row: &SceneRow) -> Option<usize> {
-    let report = row.display_paths_report()?;
-    Some(
-        report
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(entry_index, entry)| {
-                let effective_value = row
-                    .path_overrides
-                    .get(entry_index)
-                    .map(String::as_str)
-                    .unwrap_or(entry.value.as_str());
-                let resolution = row
-                    .path_resolution(*entry_index, effective_value)
-                    .cloned()
-                    .or_else(|| row.path_resolution_fallback(*entry_index, effective_value));
-                resolution.is_some_and(|resolution| {
-                    matches!(resolution.status, ScenePathResolutionStatus::Missing)
-                })
-            })
-            .count(),
-    )
+    row.missing_path_count()
 }
 
 pub(super) fn searchable_text_for_row(row: &SceneRow, state: &PersistedState) -> String {
@@ -1520,6 +1524,19 @@ pub(super) fn build_rows_from_paths(paths: Vec<PathBuf>, next_row_id: &mut u64) 
     rows
 }
 
+pub(super) fn build_rows_from_discovered_files(
+    files: Vec<DiscoveredSceneFile>,
+    next_row_id: &mut u64,
+) -> Vec<SceneRow> {
+    let mut rows = Vec::new();
+    for file in files {
+        rows.push(SceneRow::from_discovered_file(*next_row_id, file));
+        *next_row_id += 1;
+    }
+    rows
+}
+
+#[cfg(test)]
 pub(super) fn reconcile_workspace_rows(
     existing_rows: Vec<SceneRow>,
     paths: Vec<PathBuf>,
@@ -1541,11 +1558,30 @@ pub(super) fn reconcile_workspace_rows(
     rows
 }
 
+pub(super) fn reconcile_workspace_rows_from_discovered_files(
+    existing_rows: Vec<SceneRow>,
+    files: Vec<DiscoveredSceneFile>,
+    next_row_id: &mut u64,
+) -> Vec<SceneRow> {
+    let mut rows_by_path = existing_rows
+        .into_iter()
+        .map(|row| (row.path.clone(), row))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = Vec::new();
+    for file in files {
+        if let Some(row) = rows_by_path.remove(&file.path) {
+            rows.push(row);
+        } else {
+            rows.push(SceneRow::from_discovered_file(*next_row_id, file));
+            *next_row_id += 1;
+        }
+    }
+    rows
+}
+
 pub(super) fn load_rows_from_state(state: &PersistedState, next_row_id: &mut u64) -> Vec<SceneRow> {
-    if let Some(root) = state.workspace_root_path() {
-        let mut files = Vec::new();
-        collect_scene_files_recursively(&root, &mut files, state);
-        return build_rows_from_paths(files, next_row_id);
+    if state.workspace_root_path().is_some() {
+        return Vec::new();
     }
 
     build_rows_from_paths(state.workspace_paths(), next_row_id)
@@ -1566,6 +1602,7 @@ pub(super) fn should_ignore_workspace_directory(path: &Path, state: &PersistedSt
             })
 }
 
+#[cfg(test)]
 pub(super) fn collect_scene_files_recursively(
     path: &Path,
     out: &mut Vec<PathBuf>,
@@ -1584,6 +1621,55 @@ pub(super) fn collect_scene_files_recursively(
         } else if detect_format(&path).is_some() {
             out.push(path);
         }
+    }
+}
+
+pub(super) fn discover_workspace_scene_files(
+    path: &Path,
+    state: &PersistedState,
+) -> Vec<DiscoveredSceneFile> {
+    let mut out = Vec::new();
+    discover_workspace_scene_files_recursively(path, &mut out, state);
+    out
+}
+
+fn discover_workspace_scene_files_recursively(
+    path: &Path,
+    out: &mut Vec<DiscoveredSceneFile>,
+    state: &PersistedState,
+) {
+    let Ok(read_dir) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if should_ignore_workspace_directory(&path, state) {
+                continue;
+            }
+            discover_workspace_scene_files_recursively(&path, out, state);
+            continue;
+        }
+        if detect_format(&path).is_none() {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        out.push(DiscoveredSceneFile {
+            name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("scene")
+                .to_string(),
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            scene_workspace_root: find_scene_workspace_root(&path),
+            path,
+        });
     }
 }
 

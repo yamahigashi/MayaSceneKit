@@ -606,6 +606,18 @@ impl GuiShell {
         summary: String,
         failed: bool,
     ) {
+        self.push_job_history_entry(operation, input, output, summary, failed);
+        self.persist();
+    }
+
+    fn push_job_history_entry(
+        &mut self,
+        operation: &str,
+        input: PathBuf,
+        output: Option<PathBuf>,
+        summary: String,
+        failed: bool,
+    ) {
         self.state.job_history.insert(
             0,
             JobHistoryEntry {
@@ -618,7 +630,10 @@ impl GuiShell {
             },
         );
         self.state.job_history.truncate(24);
-        self.persist();
+    }
+
+    fn record_auto_analyze_job(&mut self, input: PathBuf, summary: String, failed: bool) {
+        self.push_job_history_entry("analyze", input, None, summary, failed);
     }
 
     pub(super) fn mark_error(
@@ -627,7 +642,7 @@ impl GuiShell {
         operation: RowOperation,
         edit_sequence: Option<u64>,
         error: impl ToString,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let message = error.to_string();
@@ -636,14 +651,20 @@ impl GuiShell {
         }
         let row_id = self.rows[index].id;
         self.rows[index].status = FileStatus::Error(message.clone());
-        self.refresh_file_table(cx);
-        self.record_job(
-            operation_key(operation),
-            self.rows[index].path.clone(),
-            None,
-            message,
-            true,
-        );
+        if matches!(operation, RowOperation::Analyze) {
+            self.record_auto_analyze_job(self.rows[index].path.clone(), message, true);
+            self.queue_auto_analyze_completion_refresh(row_id, window, cx);
+            self.schedule_persist_flush(window, cx, false);
+        } else {
+            self.refresh_file_table(cx);
+            self.record_job(
+                operation_key(operation),
+                self.rows[index].path.clone(),
+                None,
+                message,
+                true,
+            );
+        }
         if let Some(edit_sequence) = edit_sequence {
             self.complete_edit_transaction_failure(edit_sequence, row_id);
         }
@@ -736,10 +757,8 @@ impl GuiShell {
                     name: self.rows[index].name.clone(),
                     elapsed,
                 });
-                self.record_job(
-                    operation_key(operation),
+                self.record_auto_analyze_job(
                     self.rows[index].path.clone(),
-                    None,
                     format!(
                         "{findings} finding(s), {path_count} path(s), {require_count} require(s), {script_count} script node(s)"
                     ),
@@ -927,11 +946,14 @@ impl GuiShell {
             }
         }
 
-        self.refresh_file_table(cx);
-        if !matches!(operation, RowOperation::Analyze) {
+        if matches!(operation, RowOperation::Analyze) {
+            self.queue_auto_analyze_completion_refresh(row_id, window, cx);
+            self.schedule_persist_flush(window, cx, false);
+        } else {
+            self.refresh_file_table(cx);
             self.refresh_app_menus(window, cx);
+            self.persist();
         }
-        self.persist();
     }
 
     pub(super) fn spawn_row_job(
@@ -1060,6 +1082,38 @@ impl GuiShell {
                 ResultTab::Audit,
                 edit_sequence,
                 false,
+                window,
+                cx,
+            );
+        }
+    }
+
+    pub(super) fn run_file_context_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets_by_row = self
+            .ready_selected_indices()
+            .into_iter()
+            .filter_map(|row_index| {
+                let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
+                next_targets.extend(clean_targets_for_threat_findings(&self.rows[row_index]));
+                (!next_targets.is_empty()).then_some((row_index, next_targets))
+            })
+            .collect::<Vec<_>>();
+        if !bulk_enabled(targets_by_row.len()) {
+            self.status_message = Some(BannerMessage::SelectFilesFirst);
+            return;
+        }
+
+        let row_indices = targets_by_row
+            .iter()
+            .map(|(row_index, _)| *row_index)
+            .collect::<Vec<_>>();
+        let edit_sequence = self.begin_edit_transaction(&row_indices);
+        for (row_index, targets) in targets_by_row {
+            self.stage_clean_targets_for_row(
+                row_index,
+                targets,
+                ResultTab::Audit,
+                edit_sequence,
                 window,
                 cx,
             );

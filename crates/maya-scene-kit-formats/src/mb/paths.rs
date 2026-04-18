@@ -842,10 +842,11 @@ mod tests {
     use super::{
         collect_rtft_owner_traces_from_mb, decode_reference_from_frdi_chunk,
         decode_reference_from_fref_chunk, decode_string_attr_from_rtft_chunk,
-        extract_file_entries_from_rtft_payload, parse_fref_record, remove_root_forms_from_mb_by_locator,
+        extract_file_entries_from_rtft_payload, parse_fref_record,
+        remove_root_forms_from_mb_by_locator,
     };
-    use crate::mb::{parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk};
     use crate::mb::section::SectionHeaderFormat;
+    use crate::mb::{parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk};
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -1060,14 +1061,8 @@ mod tests {
 
     #[test]
     fn extract_raw_scene_paths_preserves_file_texture_name_attr_label() {
-        let crea = encode_chunk(
-            "CREA",
-            0,
-            b"psdTex1\0",
-            8,
-            SectionHeaderFormat::EightByte,
-        )
-        .expect("crea chunk");
+        let crea = encode_chunk("CREA", 0, b"psdTex1\0", 8, SectionHeaderFormat::EightByte)
+            .expect("crea chunk");
         let path = encode_chunk(
             "STR ",
             0,
@@ -1079,7 +1074,8 @@ mod tests {
         let mut payload = b"RTFT".to_vec();
         payload.extend_from_slice(&crea);
         payload.extend_from_slice(&path);
-        let entries = extract_file_entries_from_rtft_payload(&payload, 0x40, Some(8), Some(16), None);
+        let entries =
+            extract_file_entries_from_rtft_payload(&payload, 0x40, Some(8), Some(16), None);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].node_name, "psdTex1");

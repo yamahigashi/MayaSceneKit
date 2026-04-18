@@ -1346,7 +1346,7 @@ impl GuiShell {
         );
     }
 
-    fn stage_clean_targets_for_row(
+    pub(super) fn stage_clean_targets_for_row(
         &mut self,
         row_index: usize,
         targets: BTreeSet<ExecutionCleanTarget>,

@@ -7,6 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::default_analysis_cache_root;
 use encoding_rs::SHIFT_JIS;
 use gpui::{
     AppContext, Axis, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
@@ -59,11 +60,11 @@ use super::{
     build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
     build_file_table_rows, build_job_history_log_lines, build_path_table_model,
     build_path_table_model_with_order_snapshot, clean_targets_for_removed_script_nodes,
-    collect_scene_files_recursively, compute_visible_row_indices_for,
-    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
-    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
-    filter_audit_result_rows, merge_column_widths, missing_path_count_for_row, next_backup_path,
-    path_context_menu_state,
+    clean_targets_for_threat_findings, collect_scene_files_recursively,
+    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
+    default_path_form_filter, default_path_resolution_filter, default_path_sort,
+    default_path_type_filter, detect_format, filter_audit_result_rows, merge_column_widths,
+    missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
@@ -145,6 +146,19 @@ fn write_cached_scene(path: &Path) {
         ),
     )
     .expect("write cached scene");
+}
+
+fn write_mixed_threat_scene(path: &Path) {
+    fs::write(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "python(\"print('Example')\");\n",
+            "createNode script -n \"ExampleScript\";\n",
+            "    setAttr \".b\" -type \"string\" \"print \\\"ExampleScript\\\";\";\n",
+        ),
+    )
+    .expect("write mixed threat scene");
 }
 
 fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
@@ -275,6 +289,70 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
         row.path_resolution_cache.len(),
         row.paths_report.as_ref().expect("paths").entries.len()
     );
+}
+
+#[test]
+fn hydrate_cached_analysis_batch_keeps_row_alignment_for_hits_and_misses() {
+    let dir = tempdir().expect("tmpdir");
+    let cached_path = dir.path().join("Example.ma");
+    let missing_path = dir.path().join("Missing.ma");
+    write_cached_scene(&cached_path);
+    write_cached_scene(&missing_path);
+
+    let load_options = LoadOptions::default();
+    let observation = Loader::new(load_options.clone())
+        .observe_path(&cached_path)
+        .expect("observe scene");
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+        .expect("observe snapshot");
+
+    let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
+    let plan_fingerprint = fingerprint_audit_plan(&plan);
+    let audit_options = AuditOptions::strict_default();
+    let audit_report =
+        audit_script_nodes_with_options(&cached_path, &plan, &load_options, audit_options)
+            .expect("audit scene");
+    let audit_snapshot =
+        AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint.clone())
+            .expect("audit snapshot");
+
+    let observe_root = dir.path().join("cache/observe");
+    let audit_root = dir.path().join("cache/audit");
+    ObserveCacheStore::new(&observe_root)
+        .save(&observe_snapshot)
+        .expect("save observe snapshot");
+    AuditCacheStore::new(&audit_root)
+        .save(&audit_snapshot)
+        .expect("save audit snapshot");
+
+    std::fs::remove_file(&missing_path).expect("remove missing scene");
+
+    let batch = super::cache_restore::hydrate_cached_analysis_batch(
+        vec![
+            super::cache_restore::CacheHydrationInput {
+                row_id: 41,
+                path: missing_path,
+            },
+            super::cache_restore::CacheHydrationInput {
+                row_id: 42,
+                path: cached_path,
+            },
+        ],
+        load_options,
+        audit_options,
+        plan_fingerprint,
+        observe_root,
+        audit_root,
+    );
+
+    assert_eq!(batch.processed_count, 2);
+    assert_eq!(batch.updates.len(), 2);
+    assert_eq!(batch.updates[0].row_id, 41);
+    assert!(batch.updates[0].observe_snapshot.is_none());
+    assert!(batch.updates[0].audit_snapshot.is_none());
+    assert_eq!(batch.updates[1].row_id, 42);
+    assert!(batch.updates[1].observe_snapshot.is_some());
+    assert!(batch.updates[1].audit_snapshot.is_some());
 }
 
 fn open_test_shell(cx: &mut TestAppContext) -> (Entity<GuiShell>, &mut VisualTestContext) {
@@ -2631,6 +2709,38 @@ fn build_audit_result_rows_marks_top_level_command_findings_cleanable() {
 }
 
 #[test]
+fn clean_targets_for_threat_findings_excludes_script_node_targets() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("mixed_threats.ma");
+    write_mixed_threat_scene(&path);
+    let mut row = test_row(1, &path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+    row.audit_report = Some(result.audit_report);
+
+    let targets = clean_targets_for_threat_findings(&row);
+
+    assert!(
+        targets
+            .iter()
+            .any(|target| matches!(target, ExecutionCleanTarget::TopLevelCommand { .. })),
+        "expected top-level threat target",
+    );
+    assert!(
+        targets.iter().all(|target| {
+            !matches!(
+                target,
+                ExecutionCleanTarget::ScriptNode { .. } | ExecutionCleanTarget::MbOwnerForm { .. }
+            )
+        }),
+        "file-list threat clean should not include script-node targets",
+    );
+}
+
+#[test]
 fn audit_clean_target_maps_top_level_proc_definition_to_range_delete() {
     let origin = ExecutionOrigin {
         lang: ExecutionLanguage::Mel,
@@ -3493,6 +3603,7 @@ fn disabling_analysis_cache_cancels_restore_and_pending_writes(cx: &mut TestAppC
         assert!(!shell.cache_restore_state.in_flight);
         assert!(shell.cache_write_state.pending_observe.is_empty());
         assert!(shell.cache_write_state.pending_observe_order.is_empty());
+        assert!(!shell.cache_write_state.debounce_pending);
         assert!(!shell.cache_write_state.in_flight);
         assert!(shell.cache_maintenance_state.pending_observe.is_empty());
         assert!(
@@ -3509,14 +3620,54 @@ fn disabling_analysis_cache_cancels_restore_and_pending_writes(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn cache_writes_queue_with_idle_debounce(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        let observe_snapshot = sample_observed_snapshot("Example.ma");
+        shell.enqueue_cache_writes(Some(observe_snapshot), None, window, cx);
+
+        assert!(shell.cache_write_state.debounce_pending);
+        assert!(!shell.cache_write_state.in_flight);
+        assert_eq!(shell.cache_write_state.pending_observe.len(), 1);
+    });
+}
+
+#[gpui::test]
+fn cache_maintenance_queue_with_idle_debounce(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        let snapshot = sample_observed_snapshot("Example.ma");
+        let observe_access = ObserveCacheAccess {
+            path: PathBuf::from("Example.ma"),
+            file_state: snapshot.file_state,
+            identity: snapshot.identity,
+        };
+        shell.enqueue_cache_accesses(Some(observe_access), None, window, cx);
+
+        assert!(shell.cache_maintenance_state.debounce_pending);
+        assert!(!shell.cache_maintenance_state.in_flight);
+        assert_eq!(shell.cache_maintenance_state.pending_observe.len(), 1);
+    });
+}
+
+#[gpui::test]
 fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
 
     shell.update_in(visual_cx, |shell, window, cx| {
+        let legacy_root = default_analysis_cache_root();
         fs::create_dir_all(shell.observe_cache_root.join("aa/bb")).expect("create observe cache");
         fs::create_dir_all(shell.audit_cache_root.join("cc/dd")).expect("create audit cache");
         fs::write(shell.observe_cache_root.join("aa/bb/index.json"), "{}").expect("write observe");
         fs::write(shell.audit_cache_root.join("cc/dd/index.json"), "{}").expect("write audit");
+        fs::create_dir_all(legacy_root.join("observe-v2/ee/ff")).expect("create observe v2 cache");
+        fs::create_dir_all(legacy_root.join("audit-v2/gg/hh")).expect("create audit v2 cache");
+        fs::write(legacy_root.join("observe-v2/ee/ff/index.json"), "{}").expect("write observe v2");
+        fs::write(legacy_root.join("audit-v2/gg/hh/index.json"), "{}").expect("write audit v2");
 
         shell.on_menu_purge_analysis_cache(&MenuPurgeAnalysisCache, window, cx);
     });
@@ -3527,6 +3678,8 @@ fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, _window, _cx| {
         assert!(!shell.observe_cache_root.exists());
         assert!(!shell.audit_cache_root.exists());
+        assert!(!default_analysis_cache_root().join("observe-v2").exists());
+        assert!(!default_analysis_cache_root().join("audit-v2").exists());
         assert!(matches!(
             shell.status_message,
             Some(BannerMessage::CachePurged)
@@ -3587,13 +3740,13 @@ fn max_bytes_dialog_apply_updates_preference(cx: &mut TestAppContext) {
         let dialog = shell.max_bytes_dialog.as_ref().expect("max bytes dialog");
         dialog
             .input
-            .update(cx, |input, cx| input.set_value("4096", window, cx));
+            .update(cx, |input, cx| input.set_value("256 MB", window, cx));
 
         assert!(shell.max_bytes_dialog_can_apply(cx));
         shell.apply_max_bytes_dialog(window, cx);
 
         assert!(shell.max_bytes_dialog.is_none());
-        assert_eq!(shell.state.max_bytes, Some(4096));
+        assert_eq!(shell.state.max_bytes, Some(256 * 1024 * 1024));
     });
 }
 
@@ -3608,6 +3761,37 @@ fn max_bytes_dialog_reset_restores_default(cx: &mut TestAppContext) {
 
         assert!(shell.max_bytes_dialog.is_none());
         assert_eq!(shell.state.max_bytes, None);
+    });
+}
+
+#[gpui::test]
+fn max_bytes_dialog_plain_number_defaults_to_mb(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.open_max_bytes_dialog(window, cx);
+        let dialog = shell.max_bytes_dialog.as_ref().expect("max bytes dialog");
+        dialog
+            .input
+            .update(cx, |input, cx| input.set_value("256", window, cx));
+
+        assert!(shell.max_bytes_dialog_can_apply(cx));
+        shell.apply_max_bytes_dialog(window, cx);
+
+        assert_eq!(shell.state.max_bytes, Some(256 * 1024 * 1024));
+    });
+}
+
+#[gpui::test]
+fn max_bytes_dialog_reopens_with_humanized_exact_unit_value(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.max_bytes = Some(256 * 1024 * 1024);
+        shell.open_max_bytes_dialog(window, cx);
+
+        let dialog = shell.max_bytes_dialog.as_ref().expect("max bytes dialog");
+        assert_eq!(dialog.input.read(cx).value(), "256 MB");
     });
 }
 
@@ -3894,6 +4078,33 @@ fn workspace_auto_analysis_dispatch_respects_parallelism_preference(cx: &mut Tes
 }
 
 #[gpui::test]
+fn analyze_result_queues_debounced_refresh_and_persist(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("queued_analyze.ma");
+    write_cached_scene(&scene);
+    let analyze_result =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze result");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            shell.state = test_state(dir.path(), "");
+            shell.rows = vec![test_row(1, &scene)];
+            shell.refresh_file_table(cx);
+
+            shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+
+            assert!(shell.auto_analyze_refresh_state.pending_full_refresh);
+            assert_eq!(shell.auto_analyze_refresh_state.pending_completion_count, 1);
+            assert!(shell.persist_flush_state.dirty);
+            assert!(!shell.persist_flush_state.workspace_paths_dirty);
+            assert_eq!(shell.state.job_history.len(), 1);
+            assert_eq!(shell.state.job_history[0].operation, "analyze");
+        });
+    });
+}
+
+#[gpui::test]
 fn ignore_folder_names_dialog_apply_updates_state_and_rescans_workspace(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");
@@ -3910,6 +4121,12 @@ fn ignore_folder_names_dialog_apply_updates_state_and_rescans_workspace(cx: &mut
             .state
             .set_ignored_folder_names(vec!["backup".to_string(), "autosave".to_string()]);
         shell.set_workspace_folder(dir.path().to_path_buf(), window, cx);
+        assert!(shell.workspace_scan_active());
+        assert!(shell.rows.is_empty());
+    });
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, window, cx| {
         assert_eq!(shell.rows.len(), 2);
 
         shell.open_ignore_folder_names_dialog(window, cx);
@@ -3921,7 +4138,11 @@ fn ignore_folder_names_dialog_apply_updates_state_and_rescans_workspace(cx: &mut
             .push("cache".to_string());
 
         shell.apply_ignore_folder_names_dialog(window, cx);
+        assert!(shell.workspace_scan_active());
+    });
+    visual_cx.run_until_parked();
 
+    shell.update_in(visual_cx, |shell, _, _| {
         assert!(shell.ignore_folder_names_dialog.is_none());
         assert_eq!(
             shell.state.ignored_folder_names,
@@ -3944,17 +4165,23 @@ fn workspace_row_id_lookup_map_tracks_reload_and_clear(cx: &mut TestAppContext) 
     let second = dir.path().join("second.mb");
     fs::write(&first, "").expect("write first");
     fs::write(&second, "").expect("write second");
+    let mut first_row_id = 0;
+    let mut second_row_id = 0;
 
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.set_workspace_folder(dir.path().to_path_buf(), window, cx);
+        assert!(shell.workspace_scan_active());
+    });
+    visual_cx.run_until_parked();
 
-        let first_row_id = shell
+    shell.update_in(visual_cx, |shell, window, cx| {
+        first_row_id = shell
             .rows
             .iter()
             .find(|row| row.path == first)
             .map(|row| row.id)
             .expect("first row id");
-        let second_row_id = shell
+        second_row_id = shell
             .rows
             .iter()
             .find(|row| row.path == second)
@@ -3976,7 +4203,11 @@ fn workspace_row_id_lookup_map_tracks_reload_and_clear(cx: &mut TestAppContext) 
 
         fs::remove_file(&first).expect("remove first");
         shell.rescan_workspace_with_current_settings(window, cx);
+        assert!(shell.workspace_scan_active());
+    });
+    visual_cx.run_until_parked();
 
+    shell.update_in(visual_cx, |shell, window, cx| {
         assert_eq!(shell.rows.len(), 1);
         assert_eq!(shell.index_of_row_id(first_row_id), None);
         assert_eq!(shell.index_of_row_id(second_row_id), Some(0));
@@ -3984,6 +4215,31 @@ fn workspace_row_id_lookup_map_tracks_reload_and_clear(cx: &mut TestAppContext) 
         shell.clear_workspace(window, cx);
 
         assert_eq!(shell.index_of_row_id(second_row_id), None);
+    });
+}
+
+#[gpui::test]
+fn workspace_scan_keeps_menu_state_changes_responsive(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(&scene, "").expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.set_workspace_folder(dir.path().to_path_buf(), window, cx);
+        assert!(shell.workspace_scan_active());
+
+        shell.set_locale_preference(LocalePreference::Japanese, window, cx);
+
+        assert_eq!(shell.state.locale, LocalePreference::Japanese);
+        assert!(shell.workspace_scan_active());
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(!shell.workspace_scan_active());
+        assert_eq!(shell.rows.len(), 1);
     });
 }
 
@@ -4573,6 +4829,53 @@ fn path_context_undo_delete_owner_preserves_other_scene_edits(cx: &mut TestAppCo
             "clicked owner-delete target should be the only one removed",
         );
         assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+    });
+}
+
+#[gpui::test]
+fn file_context_clean_stages_threats_without_script_node_targets(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("mixed_context_clean.ma");
+    write_mixed_threat_scene(&scene);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.audit_report = Some(result.audit_report.clone());
+            shell.rows = vec![row];
+            shell.rebuild_row_id_index();
+
+            shell.run_file_context_clean(window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(
+            shell.rows[0]
+                .pending_clean_targets
+                .iter()
+                .any(|target| matches!(target, ExecutionCleanTarget::TopLevelCommand { .. })),
+            "expected top-level threat target to be staged",
+        );
+        assert!(
+            shell.rows[0].pending_clean_targets.iter().all(|target| {
+                !matches!(
+                    target,
+                    ExecutionCleanTarget::ScriptNode { .. }
+                        | ExecutionCleanTarget::MbOwnerForm { .. }
+                )
+            }),
+            "file-list context clean should not stage script-node targets",
+        );
     });
 }
 

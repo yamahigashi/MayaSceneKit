@@ -1,7 +1,8 @@
 use super::*;
 
-const CACHE_MAINTENANCE_DEBOUNCE: Duration = Duration::from_secs(2);
-const CACHE_MAINTENANCE_TOUCH_THRESHOLD: usize = 1000;
+const CACHE_MAINTENANCE_DEBOUNCE: Duration = Duration::from_secs(1);
+const CACHE_MAINTENANCE_TOUCH_THRESHOLD: usize = 2048;
+const CACHE_MAINTENANCE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 struct CacheMaintenanceBatch {
     observe: Vec<ObserveCacheAccess>,
@@ -38,14 +39,6 @@ impl GuiShell {
         }
         let debounced = self.pending_cache_access_count() < CACHE_MAINTENANCE_TOUCH_THRESHOLD;
         self.schedule_cache_maintenance(window, cx, debounced);
-    }
-
-    pub(super) fn request_cache_sweep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.analysis_cache_enabled {
-            return;
-        }
-        self.cache_maintenance_state.pending_sweep = true;
-        self.schedule_cache_maintenance(window, cx, true);
     }
 
     fn enqueue_observe_cache_access(&mut self, access: ObserveCacheAccess) {
@@ -86,16 +79,28 @@ impl GuiShell {
         cx: &mut Context<Self>,
         debounced: bool,
     ) {
-        if self.cache_maintenance_state.in_flight || !self.cache_maintenance_has_pending() {
+        if !self.cache_maintenance_has_pending() {
             return;
         }
 
-        self.cache_maintenance_state.in_flight = true;
         self.cache_maintenance_generation = self.cache_maintenance_generation.wrapping_add(1);
         let generation = self.cache_maintenance_generation;
         let observe_cache_root = self.observe_cache_root.clone();
         let audit_cache_root = self.audit_cache_root.clone();
         let view = cx.entity();
+
+        if debounced {
+            self.cache_maintenance_state.debounce_pending = true;
+            if self.cache_maintenance_state.in_flight {
+                return;
+            }
+        } else if self.cache_maintenance_state.in_flight
+            || self.cache_maintenance_state.debounce_pending
+        {
+            return;
+        }
+
+        self.cache_maintenance_state.in_flight = !debounced;
 
         window
             .spawn(cx, move |cx: &mut AsyncWindowContext| {
@@ -110,10 +115,21 @@ impl GuiShell {
                         .update_window_entity(
                             &view,
                             |shell: &mut GuiShell,
-                             _window: &mut Window,
-                             _cx: &mut Context<GuiShell>| {
+                             window: &mut Window,
+                             cx: &mut Context<GuiShell>| {
                                 if shell.cache_maintenance_generation != generation {
                                     return None;
+                                }
+                                if debounced {
+                                    shell.cache_maintenance_state.debounce_pending = false;
+                                    if !shell.cache_maintenance_has_pending() {
+                                        return None;
+                                    }
+                                    if shell.cache_maintenance_state.in_flight {
+                                        shell.schedule_cache_maintenance(window, cx, true);
+                                        return None;
+                                    }
+                                    shell.cache_maintenance_state.in_flight = true;
                                 }
                                 Some(shell.take_cache_maintenance_batch())
                             },
@@ -146,7 +162,7 @@ impl GuiShell {
                             shell.cache_maintenance_state.in_flight = false;
                             shell.record_cache_maintenance_flush_result(result);
                             if shell.cache_maintenance_has_pending() {
-                                shell.schedule_cache_maintenance(window, cx, false);
+                                shell.schedule_cache_maintenance(window, cx, true);
                             } else {
                                 shell.finish_cache_maintenance_cycle();
                             }
@@ -239,20 +255,38 @@ fn flush_cache_maintenance_batch(
     let now = SystemTime::now();
 
     if batch.sweep || !batch.observe.is_empty() {
-        if let Err(err) =
-            ObserveCacheStore::new(observe_cache_root).apply_maintenance(&batch.observe, now)
-        {
-            error_count += batch.observe.len().max(1);
-            first_error.get_or_insert_with(|| err.to_string());
+        let store = ObserveCacheStore::new(observe_cache_root);
+        if !batch.observe.is_empty() {
+            if let Err(err) =
+                store.touch_many_if_stale(&batch.observe, now, CACHE_MAINTENANCE_TOUCH_INTERVAL)
+            {
+                error_count += batch.observe.len().max(1);
+                first_error.get_or_insert_with(|| err.to_string());
+            }
+        }
+        if batch.sweep {
+            if let Err(err) = store.sweep_expired(now) {
+                error_count += 1;
+                first_error.get_or_insert_with(|| err.to_string());
+            }
         }
     }
 
     if batch.sweep || !batch.audit.is_empty() {
-        if let Err(err) =
-            AuditCacheStore::new(audit_cache_root).apply_maintenance(&batch.audit, now)
-        {
-            error_count += batch.audit.len().max(1);
-            first_error.get_or_insert_with(|| err.to_string());
+        let store = AuditCacheStore::new(audit_cache_root);
+        if !batch.audit.is_empty() {
+            if let Err(err) =
+                store.touch_many_if_stale(&batch.audit, now, CACHE_MAINTENANCE_TOUCH_INTERVAL)
+            {
+                error_count += batch.audit.len().max(1);
+                first_error.get_or_insert_with(|| err.to_string());
+            }
+        }
+        if batch.sweep {
+            if let Err(err) = store.sweep_expired(now) {
+                error_count += 1;
+                first_error.get_or_insert_with(|| err.to_string());
+            }
         }
     }
 
