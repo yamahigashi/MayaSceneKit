@@ -19,7 +19,8 @@ pub mod scene {
     };
 
     pub use crate::persistent_cache::{
-        AuditCacheIdentity, AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
+        AuditCacheAccess, AuditCacheHit, AuditCacheIdentity, AuditCacheMaintenanceStats,
+        AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
     };
     pub use crate::public::audit::{
         AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,

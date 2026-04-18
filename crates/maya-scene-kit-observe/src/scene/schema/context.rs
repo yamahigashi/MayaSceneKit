@@ -31,10 +31,6 @@ pub(crate) struct SchemaContext {
 }
 
 impl SchemaContext {
-    pub(crate) fn from_inputs(inputs: &SchemaInputs<'_>) -> Result<Self, SceneToolError> {
-        Self::from_paths(SchemaPaths::from_schema_inputs(inputs))
-    }
-
     pub(crate) fn from_inputs_cached(
         inputs: &SchemaInputs<'_>,
     ) -> Result<Arc<Self>, SceneToolError> {

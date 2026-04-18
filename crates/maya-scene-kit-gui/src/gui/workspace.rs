@@ -2,6 +2,47 @@ use super::*;
 use std::{fs, io};
 
 impl GuiShell {
+    pub(super) fn confirm_purge_analysis_cache(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let i18n = self.i18n();
+        let response = window.prompt(
+            PromptLevel::Warning,
+            &i18n.text("dialog.confirm_purge_analysis_cache_title"),
+            Some(&i18n.text("dialog.confirm_purge_analysis_cache_description")),
+            &[
+                PromptButton::cancel(i18n.text("action.cancel")),
+                PromptButton::ok(i18n.text("settings.purge_analysis_cache")),
+            ],
+            cx,
+        );
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let mut async_cx = cx.clone();
+                async move {
+                    let Ok(answer) = response.await else {
+                        return;
+                    };
+                    if answer != 1 {
+                        return;
+                    }
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        move |shell: &mut GuiShell,
+                              window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
+                            shell.purge_analysis_cache(window, cx);
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
     pub(super) fn set_file_table_column_widths(&mut self, widths: Vec<PersistedTableColumnWidth>) {
         if self.state.file_table_column_widths == widths {
             return;
@@ -336,6 +377,7 @@ impl GuiShell {
         self.state.analysis_cache_enabled = enabled;
         self.cancel_progressive_cache_restore();
         self.cancel_cache_writes();
+        self.cancel_cache_maintenance();
         self.refresh_app_menus(window, cx);
         self.persist();
         if enabled {
@@ -347,6 +389,7 @@ impl GuiShell {
     pub(super) fn purge_analysis_cache(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_progressive_cache_restore();
         self.cancel_cache_writes();
+        self.cancel_cache_maintenance();
         match purge_cache_dir(&self.observe_cache_root)
             .and_then(|()| purge_cache_dir(&self.audit_cache_root))
         {

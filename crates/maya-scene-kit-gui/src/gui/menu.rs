@@ -393,7 +393,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.purge_analysis_cache(window, cx);
+        self.confirm_purge_analysis_cache(window, cx);
     }
 
     pub(super) fn on_menu_edit_max_bytes(

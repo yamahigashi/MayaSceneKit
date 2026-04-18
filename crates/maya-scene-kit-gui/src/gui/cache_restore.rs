@@ -11,7 +11,9 @@ pub(super) struct CacheHydrationInput {
 pub(super) struct CacheHydrationUpdate {
     pub(super) row_id: u64,
     pub(super) observe_snapshot: Option<ObservedSceneSnapshot>,
+    pub(super) observe_access: Option<ObserveCacheAccess>,
     pub(super) audit_snapshot: Option<AuditedSceneSnapshot>,
+    pub(super) audit_access: Option<AuditCacheAccess>,
 }
 
 pub(super) struct CacheHydrationBatchResult {
@@ -31,16 +33,22 @@ pub(super) fn hydrate_cached_analysis_batch(
     let audit_store = AuditCacheStore::new(audit_cache_root);
     let updates = rows
         .into_iter()
-        .map(|row| CacheHydrationUpdate {
-            row_id: row.row_id,
-            observe_snapshot: observe_store
-                .load_by_path_if_fresh(&row.path, &load_options, 64)
+        .map(|row| {
+            let observe_hit = observe_store
+                .load_by_path_if_fresh_with_access(&row.path, &load_options, 64)
                 .ok()
-                .flatten(),
-            audit_snapshot: audit_store
-                .load_by_path_if_fresh(&row.path, audit_options, &plan_fingerprint)
+                .flatten();
+            let audit_hit = audit_store
+                .load_by_path_if_fresh_with_access(&row.path, audit_options, &plan_fingerprint)
                 .ok()
-                .flatten(),
+                .flatten();
+            CacheHydrationUpdate {
+                row_id: row.row_id,
+                observe_snapshot: observe_hit.as_ref().map(|hit| hit.snapshot.clone()),
+                observe_access: observe_hit.map(|hit| hit.access),
+                audit_snapshot: audit_hit.as_ref().map(|hit| hit.snapshot.clone()),
+                audit_access: audit_hit.map(|hit| hit.access),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -150,11 +158,7 @@ impl GuiShell {
         batch
     }
 
-    fn dispatch_progressive_cache_restore(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_progressive_cache_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.cache_restore_state.in_flight {
             return;
         }
@@ -195,13 +199,15 @@ impl GuiShell {
                         .await;
                     let _ = async_cx.update_window_entity(
                         &view,
-                        move |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {
+                        move |shell: &mut GuiShell,
+                              window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
                             if shell.cache_restore_generation != generation {
                                 return;
                             }
                             shell.cache_restore_state.in_flight = false;
                             shell.cache_restore_state.completed_count += result.processed_count;
-                            shell.apply_cache_restore_updates(result.updates, cx);
+                            shell.apply_cache_restore_updates(result.updates, window, cx);
                             shell.dispatch_progressive_cache_restore(window, cx);
                             cx.notify();
                         },
@@ -214,10 +220,13 @@ impl GuiShell {
     fn apply_cache_restore_updates(
         &mut self,
         updates: Vec<CacheHydrationUpdate>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let mut changed = false;
         for update in updates {
+            let observe_access = update.observe_access.clone();
+            let audit_access = update.audit_access.clone();
             let Some(index) = self.index_of_row_id(update.row_id) else {
                 continue;
             };
@@ -257,6 +266,8 @@ impl GuiShell {
                     changed = true;
                 }
             }
+
+            self.enqueue_cache_accesses(observe_access, audit_access, window, cx);
         }
 
         if changed {
@@ -264,12 +275,9 @@ impl GuiShell {
         }
     }
 
-    fn finish_progressive_cache_restore(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_progressive_cache_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cache_restore_state = CacheRestoreState::default();
+        self.request_cache_sweep(window, cx);
         cx.notify();
     }
 }

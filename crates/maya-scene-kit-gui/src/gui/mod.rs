@@ -28,8 +28,9 @@ use maya_scene_kit_audit::{
         build_parse_budget_blocked_audit_report, build_script_audit_plan,
     },
     scene::{
-        AuditCacheStore, AuditEvidence, AuditFindingDetail, AuditOptions, AuditReport,
-        AuditSeverity, AuditedSceneSnapshot, StaticAuditFindingDetail, fingerprint_audit_plan,
+        AuditCacheAccess, AuditCacheStore, AuditEvidence, AuditFindingDetail, AuditOptions,
+        AuditReport, AuditSeverity, AuditedSceneSnapshot, StaticAuditFindingDetail,
+        fingerprint_audit_plan,
     },
 };
 use maya_scene_kit_edit::scene::{
@@ -54,7 +55,7 @@ use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, collect_scene_paths_with_options, find_scene_workspace_root,
     resolve_scene_path_value,
 };
-use maya_scene_kit_observe::scene::{ObserveCacheStore, ObservedSceneSnapshot};
+use maya_scene_kit_observe::scene::{ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot};
 
 use crate::{
     default_analysis_cache_root,
@@ -195,6 +196,8 @@ struct GuiShell {
     cache_restore_state: CacheRestoreState,
     cache_write_generation: u64,
     cache_write_state: CacheWriteState,
+    cache_maintenance_generation: u64,
+    cache_maintenance_state: CacheMaintenanceState,
     active_path_edit: Option<Vec<(u64, usize)>>,
     selected_path_rows: BTreeSet<PathEditTargets>,
     path_selection_anchor: Option<PathEditTargets>,
@@ -250,6 +253,18 @@ struct CacheWriteState {
     pending_audit_order: VecDeque<String>,
     pending_observe: BTreeMap<String, ObservedSceneSnapshot>,
     pending_audit: BTreeMap<String, AuditedSceneSnapshot>,
+    in_flight: bool,
+    error_count: usize,
+    first_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct CacheMaintenanceState {
+    pending_observe_order: VecDeque<String>,
+    pending_audit_order: VecDeque<String>,
+    pending_observe: BTreeMap<String, ObserveCacheAccess>,
+    pending_audit: BTreeMap<String, AuditCacheAccess>,
+    pending_sweep: bool,
     in_flight: bool,
     error_count: usize,
     first_error: Option<String>,
@@ -1178,6 +1193,7 @@ enum RowJobResult {
 
 mod audit_detail_dialog;
 mod auto_analyze;
+mod cache_maintenance;
 mod cache_restore;
 mod cache_write;
 mod helpers;

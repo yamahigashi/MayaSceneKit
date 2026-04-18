@@ -111,7 +111,9 @@ impl GuiShell {
 
                     let _ = async_cx.update_window_entity(
                         &view,
-                        move |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {
+                        move |shell: &mut GuiShell,
+                              window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
                             if shell.cache_write_generation != generation {
                                 return;
                             }
@@ -146,7 +148,8 @@ impl GuiShell {
     }
 
     fn cache_write_has_pending(&self) -> bool {
-        !self.cache_write_state.pending_observe.is_empty() || !self.cache_write_state.pending_audit.is_empty()
+        !self.cache_write_state.pending_observe.is_empty()
+            || !self.cache_write_state.pending_audit.is_empty()
     }
 
     fn record_cache_write_flush_result(&mut self, result: CacheWriteFlushResult) {
@@ -237,10 +240,7 @@ mod tests {
     #[test]
     fn take_pending_snapshots_preserves_latest_per_key() {
         let mut order = VecDeque::from(["a".to_string(), "b".to_string()]);
-        let mut map = BTreeMap::from([
-            ("a".to_string(), 3usize),
-            ("b".to_string(), 2usize),
-        ]);
+        let mut map = BTreeMap::from([("a".to_string(), 3usize), ("b".to_string(), 2usize)]);
 
         let batch = take_pending_snapshots(&mut order, &mut map, 64);
 
