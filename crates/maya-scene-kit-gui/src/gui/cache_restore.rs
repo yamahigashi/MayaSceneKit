@@ -86,6 +86,9 @@ impl GuiShell {
             return;
         }
 
+        if self.state.workspace_auto_analyze {
+            self.sync_viewport_auto_analyze(window, cx);
+        }
         self.dispatch_progressive_cache_restore(window, cx);
         cx.notify();
     }
@@ -279,9 +282,15 @@ impl GuiShell {
         }
     }
 
-    fn finish_progressive_cache_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn finish_progressive_cache_restore(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cache_restore_state = CacheRestoreState::default();
-        let _ = window;
+        if self.state.workspace_auto_analyze {
+            self.run_workspace_auto_analysis(window, cx);
+        }
         cx.notify();
     }
 }
