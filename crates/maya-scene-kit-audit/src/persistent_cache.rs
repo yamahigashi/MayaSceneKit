@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use crate::{
 
 const AUDIT_CACHE_SCHEMA_VERSION: u32 = 1;
 const INDEX_FILE: &str = "index.json";
+const AUDIT_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditCacheIdentity {
@@ -42,11 +43,33 @@ pub struct AuditedSceneSnapshot {
 struct AuditCacheIndexRecord {
     file_state: AuditFileState,
     identity: AuditCacheIdentity,
+    #[serde(default)]
+    last_accessed_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct AuditCacheIndex {
     by_path: BTreeMap<String, AuditCacheIndexRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditCacheAccess {
+    pub path: PathBuf,
+    pub file_state: AuditFileState,
+    pub identity: AuditCacheIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditCacheHit {
+    pub snapshot: AuditedSceneSnapshot,
+    pub access: AuditCacheAccess,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AuditCacheMaintenanceStats {
+    pub touched_count: usize,
+    pub expired_record_count: usize,
+    pub deleted_blob_count: usize,
 }
 
 impl AuditCacheIdentity {
@@ -101,19 +124,80 @@ impl AuditCacheStore {
         Self { root: root.into() }
     }
 
-    pub fn load_by_path_if_fresh(
+    pub fn load_by_path_if_fresh_with_access(
         &self,
         path: &Path,
         options: AuditOptions,
         plan_fingerprint: &str,
-    ) -> io::Result<Option<AuditedSceneSnapshot>> {
+    ) -> io::Result<Option<AuditCacheHit>> {
         let file_state = file_state_for_path(path)?;
         let Some(record) =
             self.load_index_record_by_path_if_fresh(path, &file_state, options, plan_fingerprint)?
         else {
             return Ok(None);
         };
-        self.load_by_identity(&record.identity)
+        let Some(snapshot) = self.load_by_identity(&record.identity)? else {
+            return Ok(None);
+        };
+        Ok(Some(AuditCacheHit {
+            snapshot,
+            access: AuditCacheAccess {
+                path: path.to_path_buf(),
+                file_state,
+                identity: record.identity,
+            },
+        }))
+    }
+
+    pub fn load_by_path_if_fresh(
+        &self,
+        path: &Path,
+        options: AuditOptions,
+        plan_fingerprint: &str,
+    ) -> io::Result<Option<AuditedSceneSnapshot>> {
+        Ok(self
+            .load_by_path_if_fresh_with_access(path, options, plan_fingerprint)?
+            .map(|hit| hit.snapshot))
+    }
+
+    pub fn load_by_path_with_hash_fallback_with_access(
+        &self,
+        path: &Path,
+        options: AuditOptions,
+        plan_fingerprint: &str,
+    ) -> io::Result<Option<AuditCacheHit>> {
+        let file_state = file_state_for_path(path)?;
+        let index = self.load_index()?;
+        if let Some(record) =
+            self.find_fresh_record_by_path(&index, path, &file_state, options, plan_fingerprint)
+        {
+            if let Some(snapshot) = self.load_by_identity(&record.identity)? {
+                return Ok(Some(AuditCacheHit {
+                    snapshot,
+                    access: AuditCacheAccess {
+                        path: path.to_path_buf(),
+                        file_state,
+                        identity: record.identity,
+                    },
+                }));
+            }
+        }
+
+        let identity = AuditCacheIdentity::new(file_sha256(path)?, options, plan_fingerprint);
+        if !self.identity_has_live_reference(&index, &identity) {
+            return Ok(None);
+        }
+        let Some(snapshot) = self.load_by_identity(&identity)? else {
+            return Ok(None);
+        };
+        Ok(Some(AuditCacheHit {
+            snapshot,
+            access: AuditCacheAccess {
+                path: path.to_path_buf(),
+                file_state,
+                identity,
+            },
+        }))
     }
 
     pub fn load_by_path_with_hash_fallback(
@@ -122,17 +206,9 @@ impl AuditCacheStore {
         options: AuditOptions,
         plan_fingerprint: &str,
     ) -> io::Result<Option<AuditedSceneSnapshot>> {
-        let file_state = file_state_for_path(path)?;
-        if let Some(record) =
-            self.load_index_record_by_path_if_fresh(path, &file_state, options, plan_fingerprint)?
-        {
-            if let Some(snapshot) = self.load_by_identity(&record.identity)? {
-                return Ok(Some(snapshot));
-            }
-        }
-
-        let identity = AuditCacheIdentity::new(file_sha256(path)?, options, plan_fingerprint);
-        self.load_by_identity(&identity)
+        Ok(self
+            .load_by_path_with_hash_fallback_with_access(path, options, plan_fingerprint)?
+            .map(|hit| hit.snapshot))
     }
 
     pub fn load_by_identity(
@@ -164,6 +240,7 @@ impl AuditCacheStore {
 
         fs::create_dir_all(self.blobs_dir())?;
         let mut index = self.load_index()?;
+        let now_unix_secs = unix_timestamp_secs(SystemTime::now());
         for snapshot in snapshots {
             let blob_path = self.blob_path(&snapshot.identity);
             if !blob_path.exists() {
@@ -174,10 +251,63 @@ impl AuditCacheStore {
                 AuditCacheIndexRecord {
                     file_state: snapshot.file_state.clone(),
                     identity: snapshot.identity.clone(),
+                    last_accessed_unix_secs: Some(now_unix_secs),
                 },
             );
         }
         write_json_atomic(&self.index_path(), &index)
+    }
+
+    pub fn apply_maintenance(
+        &self,
+        touched: &[AuditCacheAccess],
+        now: SystemTime,
+    ) -> io::Result<AuditCacheMaintenanceStats> {
+        let mut index = self.load_index()?;
+        let now_unix_secs = unix_timestamp_secs(now);
+        let mut touched_count = 0usize;
+
+        for access in touched {
+            let key = normalized_path_key(&access.path);
+            index.by_path.insert(
+                key,
+                AuditCacheIndexRecord {
+                    file_state: access.file_state.clone(),
+                    identity: access.identity.clone(),
+                    last_accessed_unix_secs: Some(now_unix_secs),
+                },
+            );
+            touched_count += 1;
+        }
+
+        let mut expired_keys = Vec::new();
+        for (key, record) in &index.by_path {
+            if record_expired(
+                record.last_accessed_unix_secs,
+                now_unix_secs,
+                AUDIT_CACHE_TTL,
+            ) {
+                expired_keys.push(key.clone());
+            }
+        }
+        let expired_record_count = expired_keys.len();
+        for key in expired_keys {
+            index.by_path.remove(&key);
+        }
+
+        let live_identities = index
+            .by_path
+            .values()
+            .map(|record| record.identity.blob_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        let deleted_blob_count = self.delete_unreferenced_blobs(&live_identities)?;
+        write_json_atomic(&self.index_path(), &index)?;
+
+        Ok(AuditCacheMaintenanceStats {
+            touched_count,
+            expired_record_count,
+            deleted_blob_count,
+        })
     }
 }
 
@@ -252,14 +382,81 @@ impl AuditCacheStore {
         plan_fingerprint: &str,
     ) -> io::Result<Option<AuditCacheIndexRecord>> {
         let index = self.load_index()?;
+        Ok(self.find_fresh_record_by_path(&index, path, file_state, options, plan_fingerprint))
+    }
+
+    fn find_fresh_record_by_path(
+        &self,
+        index: &AuditCacheIndex,
+        path: &Path,
+        file_state: &AuditFileState,
+        options: AuditOptions,
+        plan_fingerprint: &str,
+    ) -> Option<AuditCacheIndexRecord> {
         let key = normalized_path_key(path);
         let options_fingerprint = fingerprint_debug(&options);
-        Ok(index.by_path.get(&key).cloned().filter(|record| {
-            record.file_state.size == file_state.size
+        let now_unix_secs = unix_timestamp_secs(SystemTime::now());
+        index.by_path.get(&key).cloned().filter(|record| {
+            !record_expired(
+                record.last_accessed_unix_secs,
+                now_unix_secs,
+                AUDIT_CACHE_TTL,
+            ) && record.file_state.size == file_state.size
                 && record.file_state.modified_unix_nanos == file_state.modified_unix_nanos
                 && record.identity.audit_options_fingerprint == options_fingerprint
                 && record.identity.audit_plan_fingerprint == plan_fingerprint
-        }))
+        })
+    }
+
+    fn identity_has_live_reference(
+        &self,
+        index: &AuditCacheIndex,
+        identity: &AuditCacheIdentity,
+    ) -> bool {
+        let now_unix_secs = unix_timestamp_secs(SystemTime::now());
+        index.by_path.values().any(|record| {
+            !record_expired(
+                record.last_accessed_unix_secs,
+                now_unix_secs,
+                AUDIT_CACHE_TTL,
+            ) && record.identity.blob_name() == identity.blob_name()
+        })
+    }
+
+    fn delete_unreferenced_blobs(
+        &self,
+        live_blob_names: &std::collections::BTreeSet<String>,
+    ) -> io::Result<usize> {
+        let blobs_dir = self.blobs_dir();
+        let mut deleted = 0usize;
+        if !blobs_dir.exists() {
+            return Ok(0);
+        }
+        for shard_a in fs::read_dir(&blobs_dir)? {
+            let shard_a = shard_a?;
+            if !shard_a.file_type()?.is_dir() {
+                continue;
+            }
+            for shard_b in fs::read_dir(shard_a.path())? {
+                let shard_b = shard_b?;
+                if !shard_b.file_type()?.is_dir() {
+                    continue;
+                }
+                for entry in fs::read_dir(shard_b.path())? {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let blob_name = entry.file_name().to_string_lossy().to_string();
+                    if live_blob_names.contains(&blob_name) {
+                        continue;
+                    }
+                    fs::remove_file(entry.path())?;
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -267,6 +464,19 @@ fn sharded_blob_path(blobs_dir: &Path, blob_name: &str) -> PathBuf {
     let shard_a = blob_name.get(0..2).unwrap_or("__");
     let shard_b = blob_name.get(2..4).unwrap_or("__");
     blobs_dir.join(shard_a).join(shard_b).join(blob_name)
+}
+
+fn unix_timestamp_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn record_expired(last_accessed_unix_secs: Option<u64>, now_unix_secs: u64, ttl: Duration) -> bool {
+    let Some(last_accessed_unix_secs) = last_accessed_unix_secs else {
+        return false;
+    };
+    now_unix_secs.saturating_sub(last_accessed_unix_secs) > ttl.as_secs()
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
@@ -282,11 +492,18 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        path::Path,
+        time::{Duration, SystemTime},
+    };
 
     use tempfile::tempdir;
 
-    use super::{AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan, write_json_atomic};
+    use super::{
+        AUDIT_CACHE_TTL, AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
+        record_expired, write_json_atomic,
+    };
     use crate::{
         audit::{audit_script_nodes_with_options, build_script_audit_plan},
         scene::{AuditOptions, LoadOptions},
@@ -407,7 +624,96 @@ mod tests {
             .load_by_path_if_fresh(&second, options, &plan_fingerprint)
             .expect("load second")
             .expect("second snapshot");
-        assert_eq!(loaded_first.identity.scene_sha256, first_snapshot.identity.scene_sha256);
-        assert_eq!(loaded_second.identity.scene_sha256, second_snapshot.identity.scene_sha256);
+        assert_eq!(
+            loaded_first.identity.scene_sha256,
+            first_snapshot.identity.scene_sha256
+        );
+        assert_eq!(
+            loaded_second.identity.scene_sha256,
+            second_snapshot.identity.scene_sha256
+        );
+    }
+
+    #[test]
+    fn audit_store_keeps_legacy_records_without_last_access() {
+        let dir = tempdir().expect("tmpdir");
+        let source = dir.path().join("Example.ma");
+        write_sample_scene(&source);
+
+        let plan = build_script_audit_plan(vec![], 64).expect("plan");
+        let plan_fingerprint = fingerprint_audit_plan(&plan);
+        let options = AuditOptions::strict_default();
+        let report =
+            audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
+                .expect("audit report");
+        let snapshot =
+            AuditedSceneSnapshot::new(report, options, plan_fingerprint.clone()).expect("snapshot");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        store.save(&snapshot).expect("save snapshot");
+
+        let mut index = store.load_index().expect("load index");
+        for record in index.by_path.values_mut() {
+            record.last_accessed_unix_secs = None;
+        }
+        write_json_atomic(&store.index_path(), &index).expect("write legacy index");
+
+        let loaded = store
+            .load_by_path_if_fresh(&source, options, &plan_fingerprint)
+            .expect("load legacy record");
+        assert!(loaded.is_some());
+    }
+
+    #[test]
+    fn audit_maintenance_expires_records_and_deletes_unreferenced_blobs() {
+        let dir = tempdir().expect("tmpdir");
+        let source = dir.path().join("Example.ma");
+        write_sample_scene(&source);
+
+        let plan = build_script_audit_plan(vec![], 64).expect("plan");
+        let plan_fingerprint = fingerprint_audit_plan(&plan);
+        let options = AuditOptions::strict_default();
+        let report =
+            audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
+                .expect("audit report");
+        let snapshot =
+            AuditedSceneSnapshot::new(report, options, plan_fingerprint).expect("snapshot");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        store.save(&snapshot).expect("save snapshot");
+
+        let mut index = store.load_index().expect("load index");
+        let expired_at = SystemTime::now()
+            .checked_sub(AUDIT_CACHE_TTL + Duration::from_secs(5))
+            .expect("expired timestamp");
+        let expired_unix_secs = super::unix_timestamp_secs(expired_at);
+        for record in index.by_path.values_mut() {
+            record.last_accessed_unix_secs = Some(expired_unix_secs);
+        }
+        write_json_atomic(&store.index_path(), &index).expect("write expired index");
+
+        let stats = store
+            .apply_maintenance(&[], SystemTime::now())
+            .expect("apply maintenance");
+
+        assert_eq!(stats.touched_count, 0);
+        assert_eq!(stats.expired_record_count, 1);
+        assert_eq!(stats.deleted_blob_count, 1);
+        assert!(
+            store
+                .load_index()
+                .expect("load trimmed index")
+                .by_path
+                .is_empty()
+        );
+        assert!(
+            store
+                .load_by_identity(&snapshot.identity)
+                .expect("load identity after sweep")
+                .is_none()
+        );
+        assert!(record_expired(
+            Some(expired_unix_secs),
+            super::unix_timestamp_secs(SystemTime::now()),
+            AUDIT_CACHE_TTL
+        ));
     }
 }

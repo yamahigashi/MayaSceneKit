@@ -243,6 +243,8 @@ impl GuiShell {
             cache_restore_state: CacheRestoreState::default(),
             cache_write_generation: 0,
             cache_write_state: CacheWriteState::default(),
+            cache_maintenance_generation: 0,
+            cache_maintenance_state: CacheMaintenanceState::default(),
             active_path_edit: None,
             selected_path_rows: BTreeSet::new(),
             path_selection_anchor: None,

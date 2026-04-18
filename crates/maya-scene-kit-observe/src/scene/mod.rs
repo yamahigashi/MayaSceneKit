@@ -62,7 +62,10 @@ pub(crate) mod public {
 pub use self::{
     error::SceneToolError,
     inspect::{inspect_mb, inspect_mb_with_max_parse_bytes},
-    persistent_cache::{ObserveCacheIdentity, ObserveCacheStore, ObservedSceneSnapshot},
+    persistent_cache::{
+        ObserveCacheAccess, ObserveCacheHit, ObserveCacheIdentity, ObserveCacheMaintenanceStats,
+        ObserveCacheStore, ObservedSceneSnapshot,
+    },
     public::{AsciiDecodePolicy, OperationMode, SceneFormat, ValidationState},
     query::resolve::{find_scene_workspace_root, resolve_scene_path_value},
     source::{

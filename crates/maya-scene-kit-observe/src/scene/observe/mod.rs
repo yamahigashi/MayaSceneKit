@@ -793,11 +793,11 @@ mod tests {
         let source = repo_root().join("tests/fixtures/mb/owner_delete/file_owner_delete.mb");
         let options = LoadOptions::default();
         let schema_context =
-            crate::scene::schema::SchemaContext::from_inputs(&options.schema_inputs())
+            crate::scene::schema::SchemaContext::from_inputs_cached(&options.schema_inputs())
                 .expect("schema context");
         let session = crate::scene::mb_read_session::MbReadSession::load_raw(
             &source,
-            std::sync::Arc::new(schema_context),
+            schema_context,
             options.mb_parse_budget(),
         )
         .expect("load session");

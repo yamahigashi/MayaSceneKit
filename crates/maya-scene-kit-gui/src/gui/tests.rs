@@ -19,7 +19,7 @@ use maya_scene_kit_audit::{
         build_script_audit_plan,
     },
     scene::{
-        AuditCacheStore, AuditOptions, AuditSeverity, AuditedSceneSnapshot,
+        AuditCacheAccess, AuditCacheStore, AuditOptions, AuditSeverity, AuditedSceneSnapshot,
         fingerprint_audit_plan,
     },
 };
@@ -38,31 +38,32 @@ use maya_scene_kit_observe::scene::paths::{
     PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport,
 };
 use maya_scene_kit_observe::scene::{
-    LoadOptions, Loader, ObserveCacheStore, ObservedSceneSnapshot, collect_scene_paths,
+    LoadOptions, Loader, ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot,
+    collect_scene_paths,
 };
 use tempfile::tempdir;
 
 use super::{
     AuditDetailDialogState, AuditResultItemKind, AuditResultRow, AuditResultRowKey,
     AuditRowCleanState, AuditSeverityFilter, AuditSortKey, AuditTableSort,
-    AutoAnalyzeParallelismPreference, AutoAnalyzePriority, AutoAnalyzeQueueState, BannerMessage,
-    BackupLocationPreference, DirtyKind, FileSortKey, FileStatus, FileTableSelectAll,
-    FileTableSort, MenuAutoAnalyzeParallelism32, MenuEditRedo, MenuEditUndo,
+    AutoAnalyzeParallelismPreference, AutoAnalyzePriority, AutoAnalyzeQueueState,
+    BackupLocationPreference, BannerMessage, DirtyKind, FileSortKey, FileStatus,
+    FileTableSelectAll, FileTableSort, MenuAutoAnalyzeParallelism32, MenuEditRedo, MenuEditUndo,
     MenuPurgeAnalysisCache, MenuToggleAnalysisCache, MenuToggleIgnoreFolderNames,
     PathCollectRewriteMode, PathEditKeyboardOutcome, PathFormFilter, PathOrderSnapshot,
-    PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter,
-    ReplaceDialogPreviewSignature, ReplaceDialogPreviewState, ReplaceDialogSort,
-    ReplaceDialogSortKey, ReplaceDialogState, RowJobResult, RowOperation, SceneRow, analyze_row,
-    analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
-    audit_clean_target, audit_context_menu_state, audit_table_columns, backup_file_name,
-    build_audit_clipboard_payload, build_audit_result_rows, build_audit_table_model,
-    build_file_copy_payload, build_file_table_rows, build_job_history_log_lines,
-    build_path_table_model, build_path_table_model_with_order_snapshot,
-    clean_targets_for_removed_script_nodes, collect_scene_files_recursively,
-    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
-    default_path_form_filter, default_path_resolution_filter, default_path_sort,
-    default_path_type_filter, detect_format, filter_audit_result_rows, merge_column_widths,
-    missing_path_count_for_row, next_backup_path, path_context_menu_state,
+    PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter, ReplaceDialogPreviewSignature,
+    ReplaceDialogPreviewState, ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState,
+    RowJobResult, RowOperation, SceneRow, analyze_row, analyze_row_with_options,
+    apply_path_overrides_to_report, apply_persisted_column_widths, audit_clean_target,
+    audit_context_menu_state, audit_table_columns, backup_file_name, build_audit_clipboard_payload,
+    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
+    build_file_table_rows, build_job_history_log_lines, build_path_table_model,
+    build_path_table_model_with_order_snapshot, clean_targets_for_removed_script_nodes,
+    collect_scene_files_recursively, compute_visible_row_indices_for,
+    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
+    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
+    filter_audit_result_rows, merge_column_widths, missing_path_count_for_row, next_backup_path,
+    path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
@@ -215,23 +216,17 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
     let observation = Loader::new(load_options.clone())
         .observe_path(&scene_path)
         .expect("observe scene");
-    let observe_snapshot =
-        ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
-            .expect("observe snapshot");
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+        .expect("observe snapshot");
 
     let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
     let plan_fingerprint = fingerprint_audit_plan(&plan);
     let audit_options = AuditOptions::strict_default();
-    let audit_report = audit_script_nodes_with_options(
-        &scene_path,
-        &plan,
-        &load_options,
-        audit_options,
-    )
-    .expect("audit scene");
-    let audit_snapshot =
-        AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint)
-            .expect("audit snapshot");
+    let audit_report =
+        audit_script_nodes_with_options(&scene_path, &plan, &load_options, audit_options)
+            .expect("audit scene");
+    let audit_snapshot = AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint)
+        .expect("audit snapshot");
 
     let observe_root = dir.path().join("cache/observe");
     let audit_root = dir.path().join("cache/audit");
@@ -3438,15 +3433,58 @@ fn disabling_analysis_cache_cancels_restore_and_pending_writes(cx: &mut TestAppC
 
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.state.analysis_cache_enabled = true;
+        let observe_snapshot = sample_observed_snapshot("Example.ma");
+        let observe_access = ObserveCacheAccess {
+            path: observe_snapshot.file_state.path.clone(),
+            file_state: observe_snapshot.file_state.clone(),
+            identity: observe_snapshot.identity.clone(),
+        };
+        let audit_scene = tempdir().expect("tmpdir");
+        let audit_path = audit_scene.path().join("Example.ma");
+        write_cached_scene(&audit_path);
+        let load_options = LoadOptions::default();
+        let plan = build_script_audit_plan(vec![], 64).expect("plan");
+        let plan_fingerprint = fingerprint_audit_plan(&plan);
+        let audit_options = AuditOptions::strict_default();
+        let audit_report =
+            audit_script_nodes_with_options(&audit_path, &plan, &load_options, audit_options)
+                .expect("audit report");
+        let audit_snapshot =
+            AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint)
+                .expect("audit snapshot");
+        let audit_access = AuditCacheAccess {
+            path: audit_snapshot.file_state.path.clone(),
+            file_state: audit_snapshot.file_state.clone(),
+            identity: audit_snapshot.identity.clone(),
+        };
         shell.cache_restore_state.pending.push_back(11);
         shell.cache_restore_state.in_flight = true;
-        shell.cache_write_state
+        shell
+            .cache_write_state
             .pending_observe_order
             .push_back("Example.ma".to_string());
         shell
             .cache_write_state
             .pending_observe
-            .insert("Example.ma".to_string(), sample_observed_snapshot("Example.ma"));
+            .insert("Example.ma".to_string(), observe_snapshot);
+        shell
+            .cache_maintenance_state
+            .pending_observe_order
+            .push_back("Example.ma".to_string());
+        shell
+            .cache_maintenance_state
+            .pending_observe
+            .insert("Example.ma".to_string(), observe_access);
+        shell
+            .cache_maintenance_state
+            .pending_audit_order
+            .push_back("ExampleAudit.ma".to_string());
+        shell
+            .cache_maintenance_state
+            .pending_audit
+            .insert("ExampleAudit.ma".to_string(), audit_access);
+        shell.cache_maintenance_state.pending_sweep = true;
+        shell.cache_maintenance_state.in_flight = true;
 
         shell.on_menu_toggle_analysis_cache(&MenuToggleAnalysisCache, window, cx);
 
@@ -3456,6 +3494,17 @@ fn disabling_analysis_cache_cancels_restore_and_pending_writes(cx: &mut TestAppC
         assert!(shell.cache_write_state.pending_observe.is_empty());
         assert!(shell.cache_write_state.pending_observe_order.is_empty());
         assert!(!shell.cache_write_state.in_flight);
+        assert!(shell.cache_maintenance_state.pending_observe.is_empty());
+        assert!(
+            shell
+                .cache_maintenance_state
+                .pending_observe_order
+                .is_empty()
+        );
+        assert!(shell.cache_maintenance_state.pending_audit.is_empty());
+        assert!(shell.cache_maintenance_state.pending_audit_order.is_empty());
+        assert!(!shell.cache_maintenance_state.pending_sweep);
+        assert!(!shell.cache_maintenance_state.in_flight);
     });
 }
 
@@ -3470,10 +3519,42 @@ fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
         fs::write(shell.audit_cache_root.join("cc/dd/index.json"), "{}").expect("write audit");
 
         shell.on_menu_purge_analysis_cache(&MenuPurgeAnalysisCache, window, cx);
+    });
+    visual_cx.run_until_parked();
+    visual_cx.simulate_prompt_answer("Purge cache");
+    visual_cx.run_until_parked();
 
+    shell.update_in(visual_cx, |shell, _window, _cx| {
         assert!(!shell.observe_cache_root.exists());
         assert!(!shell.audit_cache_root.exists());
-        assert!(matches!(shell.status_message, Some(BannerMessage::CachePurged)));
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::CachePurged)
+        ));
+    });
+}
+
+#[gpui::test]
+fn cancel_purge_analysis_cache_keeps_cache_directories(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        fs::create_dir_all(shell.observe_cache_root.join("aa/bb")).expect("create observe cache");
+        fs::create_dir_all(shell.audit_cache_root.join("cc/dd")).expect("create audit cache");
+
+        shell.on_menu_purge_analysis_cache(&MenuPurgeAnalysisCache, window, cx);
+    });
+    visual_cx.run_until_parked();
+    visual_cx.simulate_prompt_answer("Cancel");
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, _window, _cx| {
+        assert!(shell.observe_cache_root.exists());
+        assert!(shell.audit_cache_root.exists());
+        assert!(!matches!(
+            shell.status_message,
+            Some(BannerMessage::CachePurged)
+        ));
     });
 }
 

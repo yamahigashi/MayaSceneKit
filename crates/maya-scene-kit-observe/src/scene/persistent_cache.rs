@@ -3,7 +3,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
-    time::UNIX_EPOCH,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ use crate::scene::{
 
 const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 1;
 const INDEX_FILE: &str = "index.json";
+const OBSERVE_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserveCacheIdentity {
@@ -171,11 +172,33 @@ pub enum MelSurfaceCommandModeSnapshot {
 struct ObserveCacheIndexRecord {
     file_state: ObserveFileState,
     identity: ObserveCacheIdentity,
+    #[serde(default)]
+    last_accessed_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct ObserveCacheIndex {
     by_path: BTreeMap<String, ObserveCacheIndexRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObserveCacheAccess {
+    pub path: PathBuf,
+    pub file_state: ObserveFileState,
+    pub identity: ObserveCacheIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObserveCacheHit {
+    pub snapshot: ObservedSceneSnapshot,
+    pub access: ObserveCacheAccess,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ObserveCacheMaintenanceStats {
+    pub touched_count: usize,
+    pub expired_record_count: usize,
+    pub deleted_blob_count: usize,
 }
 
 impl ObserveCacheIdentity {
@@ -595,19 +618,80 @@ impl ObserveCacheStore {
         Self { root: root.into() }
     }
 
-    pub fn load_by_path_if_fresh(
+    pub fn load_by_path_if_fresh_with_access(
         &self,
         path: &Path,
         load_options: &LoadOptions,
         max_preview: usize,
-    ) -> io::Result<Option<ObservedSceneSnapshot>> {
+    ) -> io::Result<Option<ObserveCacheHit>> {
         let file_state = file_state_for_path(path)?;
         let Some(record) =
             self.load_index_record_by_path_if_fresh(path, &file_state, load_options, max_preview)?
         else {
             return Ok(None);
         };
-        self.load_by_identity(&record.identity)
+        let Some(snapshot) = self.load_by_identity(&record.identity)? else {
+            return Ok(None);
+        };
+        Ok(Some(ObserveCacheHit {
+            snapshot,
+            access: ObserveCacheAccess {
+                path: path.to_path_buf(),
+                file_state,
+                identity: record.identity,
+            },
+        }))
+    }
+
+    pub fn load_by_path_if_fresh(
+        &self,
+        path: &Path,
+        load_options: &LoadOptions,
+        max_preview: usize,
+    ) -> io::Result<Option<ObservedSceneSnapshot>> {
+        Ok(self
+            .load_by_path_if_fresh_with_access(path, load_options, max_preview)?
+            .map(|hit| hit.snapshot))
+    }
+
+    pub fn load_by_path_with_hash_fallback_with_access(
+        &self,
+        path: &Path,
+        load_options: &LoadOptions,
+        max_preview: usize,
+    ) -> io::Result<Option<ObserveCacheHit>> {
+        let file_state = file_state_for_path(path)?;
+        let index = self.load_index()?;
+        if let Some(record) =
+            self.find_fresh_record_by_path(&index, path, &file_state, load_options, max_preview)
+        {
+            if let Some(snapshot) = self.load_by_identity(&record.identity)? {
+                return Ok(Some(ObserveCacheHit {
+                    snapshot,
+                    access: ObserveCacheAccess {
+                        path: path.to_path_buf(),
+                        file_state,
+                        identity: record.identity,
+                    },
+                }));
+            }
+        }
+
+        let identity = ObserveCacheIdentity::new(file_sha256(path)?, load_options, max_preview);
+        if !self.identity_has_live_reference(&index, &identity) {
+            return Ok(None);
+        }
+        let Some(snapshot) = self.load_by_identity(&identity)? else {
+            return Ok(None);
+        };
+        Ok(Some(ObserveCacheHit {
+            snapshot,
+            access: ObserveCacheAccess {
+                path: path.to_path_buf(),
+                file_state,
+                identity,
+            },
+        }))
     }
 
     pub fn load_by_path_with_hash_fallback(
@@ -616,17 +700,9 @@ impl ObserveCacheStore {
         load_options: &LoadOptions,
         max_preview: usize,
     ) -> io::Result<Option<ObservedSceneSnapshot>> {
-        let file_state = file_state_for_path(path)?;
-        if let Some(record) =
-            self.load_index_record_by_path_if_fresh(path, &file_state, load_options, max_preview)?
-        {
-            if let Some(snapshot) = self.load_by_identity(&record.identity)? {
-                return Ok(Some(snapshot));
-            }
-        }
-
-        let identity = ObserveCacheIdentity::new(file_sha256(path)?, load_options, max_preview);
-        self.load_by_identity(&identity)
+        Ok(self
+            .load_by_path_with_hash_fallback_with_access(path, load_options, max_preview)?
+            .map(|hit| hit.snapshot))
     }
 
     pub fn load_by_identity(
@@ -658,6 +734,7 @@ impl ObserveCacheStore {
 
         fs::create_dir_all(self.blobs_dir())?;
         let mut index = self.load_index()?;
+        let now_unix_secs = unix_timestamp_secs(SystemTime::now());
         for snapshot in snapshots {
             let blob_path = self.blob_path(&snapshot.identity);
             if !blob_path.exists() {
@@ -668,10 +745,63 @@ impl ObserveCacheStore {
                 ObserveCacheIndexRecord {
                     file_state: snapshot.file_state.clone(),
                     identity: snapshot.identity.clone(),
+                    last_accessed_unix_secs: Some(now_unix_secs),
                 },
             );
         }
         write_json_atomic(&self.index_path(), &index)
+    }
+
+    pub fn apply_maintenance(
+        &self,
+        touched: &[ObserveCacheAccess],
+        now: SystemTime,
+    ) -> io::Result<ObserveCacheMaintenanceStats> {
+        let mut index = self.load_index()?;
+        let now_unix_secs = unix_timestamp_secs(now);
+        let mut touched_count = 0usize;
+
+        for access in touched {
+            let key = normalized_path_key(&access.path);
+            index.by_path.insert(
+                key,
+                ObserveCacheIndexRecord {
+                    file_state: access.file_state.clone(),
+                    identity: access.identity.clone(),
+                    last_accessed_unix_secs: Some(now_unix_secs),
+                },
+            );
+            touched_count += 1;
+        }
+
+        let mut expired_keys = Vec::new();
+        for (key, record) in &index.by_path {
+            if record_expired(
+                record.last_accessed_unix_secs,
+                now_unix_secs,
+                OBSERVE_CACHE_TTL,
+            ) {
+                expired_keys.push(key.clone());
+            }
+        }
+        let expired_record_count = expired_keys.len();
+        for key in expired_keys {
+            index.by_path.remove(&key);
+        }
+
+        let live_identities = index
+            .by_path
+            .values()
+            .map(|record| record.identity.blob_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        let deleted_blob_count = self.delete_unreferenced_blobs(&live_identities)?;
+        write_json_atomic(&self.index_path(), &index)?;
+
+        Ok(ObserveCacheMaintenanceStats {
+            touched_count,
+            expired_record_count,
+            deleted_blob_count,
+        })
     }
 }
 
@@ -739,13 +869,80 @@ impl ObserveCacheStore {
         max_preview: usize,
     ) -> io::Result<Option<ObserveCacheIndexRecord>> {
         let index = self.load_index()?;
+        Ok(self.find_fresh_record_by_path(&index, path, file_state, load_options, max_preview))
+    }
+
+    fn find_fresh_record_by_path(
+        &self,
+        index: &ObserveCacheIndex,
+        path: &Path,
+        file_state: &ObserveFileState,
+        load_options: &LoadOptions,
+        max_preview: usize,
+    ) -> Option<ObserveCacheIndexRecord> {
         let key = normalized_path_key(path);
-        Ok(index.by_path.get(&key).cloned().filter(|record| {
-            record.file_state.size == file_state.size
+        let now_unix_secs = unix_timestamp_secs(SystemTime::now());
+        index.by_path.get(&key).cloned().filter(|record| {
+            !record_expired(
+                record.last_accessed_unix_secs,
+                now_unix_secs,
+                OBSERVE_CACHE_TTL,
+            ) && record.file_state.size == file_state.size
                 && record.file_state.modified_unix_nanos == file_state.modified_unix_nanos
                 && record.identity.load_options_fingerprint == fingerprint_debug(load_options)
                 && record.identity.max_preview == max_preview
-        }))
+        })
+    }
+
+    fn identity_has_live_reference(
+        &self,
+        index: &ObserveCacheIndex,
+        identity: &ObserveCacheIdentity,
+    ) -> bool {
+        let now_unix_secs = unix_timestamp_secs(SystemTime::now());
+        index.by_path.values().any(|record| {
+            !record_expired(
+                record.last_accessed_unix_secs,
+                now_unix_secs,
+                OBSERVE_CACHE_TTL,
+            ) && record.identity.blob_name() == identity.blob_name()
+        })
+    }
+
+    fn delete_unreferenced_blobs(
+        &self,
+        live_blob_names: &std::collections::BTreeSet<String>,
+    ) -> io::Result<usize> {
+        let blobs_dir = self.blobs_dir();
+        let mut deleted = 0usize;
+        if !blobs_dir.exists() {
+            return Ok(0);
+        }
+        for shard_a in fs::read_dir(&blobs_dir)? {
+            let shard_a = shard_a?;
+            if !shard_a.file_type()?.is_dir() {
+                continue;
+            }
+            for shard_b in fs::read_dir(shard_a.path())? {
+                let shard_b = shard_b?;
+                if !shard_b.file_type()?.is_dir() {
+                    continue;
+                }
+                for entry in fs::read_dir(shard_b.path())? {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let blob_name = entry.file_name().to_string_lossy().to_string();
+                    if live_blob_names.contains(&blob_name) {
+                        continue;
+                    }
+                    fs::remove_file(entry.path())?;
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -753,6 +950,19 @@ fn sharded_blob_path(blobs_dir: &Path, blob_name: &str) -> PathBuf {
     let shard_a = blob_name.get(0..2).unwrap_or("__");
     let shard_b = blob_name.get(2..4).unwrap_or("__");
     blobs_dir.join(shard_a).join(shard_b).join(blob_name)
+}
+
+fn unix_timestamp_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn record_expired(last_accessed_unix_secs: Option<u64>, now_unix_secs: u64, ttl: Duration) -> bool {
+    let Some(last_accessed_unix_secs) = last_accessed_unix_secs else {
+        return false;
+    };
+    now_unix_secs.saturating_sub(last_accessed_unix_secs) > ttl.as_secs()
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
@@ -768,11 +978,18 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        path::Path,
+        time::{Duration, SystemTime},
+    };
 
     use tempfile::tempdir;
 
-    use super::{ObserveCacheStore, ObservedSceneSnapshot, write_json_atomic};
+    use super::{
+        OBSERVE_CACHE_TTL, ObserveCacheStore, ObservedSceneSnapshot, record_expired,
+        write_json_atomic,
+    };
     use crate::scene::{LoadOptions, Loader};
 
     fn write_sample_scene(path: &Path) {
@@ -863,12 +1080,18 @@ mod tests {
         let second_observation = Loader::new(LoadOptions::default())
             .observe_path(&second)
             .expect("observe second");
-        let first_snapshot =
-            ObservedSceneSnapshot::from_observation(&first_observation, &LoadOptions::default(), 64)
-                .expect("first snapshot");
-        let second_snapshot =
-            ObservedSceneSnapshot::from_observation(&second_observation, &LoadOptions::default(), 64)
-                .expect("second snapshot");
+        let first_snapshot = ObservedSceneSnapshot::from_observation(
+            &first_observation,
+            &LoadOptions::default(),
+            64,
+        )
+        .expect("first snapshot");
+        let second_snapshot = ObservedSceneSnapshot::from_observation(
+            &second_observation,
+            &LoadOptions::default(),
+            64,
+        )
+        .expect("second snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
 
         store
@@ -883,7 +1106,92 @@ mod tests {
             .load_by_path_if_fresh(&second, &LoadOptions::default(), 64)
             .expect("load second")
             .expect("second snapshot");
-        assert_eq!(loaded_first.identity.scene_sha256, first_snapshot.identity.scene_sha256);
-        assert_eq!(loaded_second.identity.scene_sha256, second_snapshot.identity.scene_sha256);
+        assert_eq!(
+            loaded_first.identity.scene_sha256,
+            first_snapshot.identity.scene_sha256
+        );
+        assert_eq!(
+            loaded_second.identity.scene_sha256,
+            second_snapshot.identity.scene_sha256
+        );
+    }
+
+    #[test]
+    fn observe_store_keeps_legacy_records_without_last_access() {
+        let dir = tempdir().expect("tmpdir");
+        let source = dir.path().join("Example.ma");
+        write_sample_scene(&source);
+
+        let observation = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("observe source");
+        let snapshot =
+            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default(), 64)
+                .expect("snapshot");
+        let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
+        store.save(&snapshot).expect("save snapshot");
+
+        let mut index = store.load_index().expect("load index");
+        for record in index.by_path.values_mut() {
+            record.last_accessed_unix_secs = None;
+        }
+        write_json_atomic(&store.index_path(), &index).expect("write legacy index");
+
+        let loaded = store
+            .load_by_path_if_fresh(&source, &LoadOptions::default(), 64)
+            .expect("load legacy record");
+        assert!(loaded.is_some());
+    }
+
+    #[test]
+    fn observe_maintenance_expires_records_and_deletes_unreferenced_blobs() {
+        let dir = tempdir().expect("tmpdir");
+        let source = dir.path().join("Example.ma");
+        write_sample_scene(&source);
+
+        let observation = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("observe source");
+        let snapshot =
+            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default(), 64)
+                .expect("snapshot");
+        let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
+        store.save(&snapshot).expect("save snapshot");
+
+        let mut index = store.load_index().expect("load index");
+        let expired_at = SystemTime::now()
+            .checked_sub(OBSERVE_CACHE_TTL + Duration::from_secs(5))
+            .expect("expired timestamp");
+        let expired_unix_secs = super::unix_timestamp_secs(expired_at);
+        for record in index.by_path.values_mut() {
+            record.last_accessed_unix_secs = Some(expired_unix_secs);
+        }
+        write_json_atomic(&store.index_path(), &index).expect("write expired index");
+
+        let stats = store
+            .apply_maintenance(&[], SystemTime::now())
+            .expect("apply maintenance");
+
+        assert_eq!(stats.touched_count, 0);
+        assert_eq!(stats.expired_record_count, 1);
+        assert_eq!(stats.deleted_blob_count, 1);
+        assert!(
+            store
+                .load_index()
+                .expect("load trimmed index")
+                .by_path
+                .is_empty()
+        );
+        assert!(
+            store
+                .load_by_identity(&snapshot.identity)
+                .expect("load identity after sweep")
+                .is_none()
+        );
+        assert!(record_expired(
+            Some(expired_unix_secs),
+            super::unix_timestamp_secs(SystemTime::now()),
+            OBSERVE_CACHE_TTL
+        ));
     }
 }
