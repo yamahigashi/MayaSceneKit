@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -640,17 +640,20 @@ fn collect_scene_files_recursively_matches_ignore_names_case_insensitively() {
 }
 
 #[test]
-fn auto_analyze_queue_prioritizes_high_before_low() {
+fn auto_analyze_queue_prioritizes_high_before_viewport_before_low() {
     let mut queue = AutoAnalyzeQueueState::default();
     queue.enqueue_many([1, 2, 3], AutoAnalyzePriority::Low);
+    queue.enqueue_many([6, 7], AutoAnalyzePriority::Viewport);
     queue.enqueue_many([4, 5], AutoAnalyzePriority::High);
 
-    assert_eq!(queue.pop_next(), Some(4));
-    assert_eq!(queue.pop_next(), Some(5));
-    assert_eq!(queue.pop_next(), Some(1));
-    assert_eq!(queue.pop_next(), Some(2));
-    assert_eq!(queue.pop_next(), Some(3));
-    assert_eq!(queue.pop_next(), None);
+    assert_eq!(queue.pop_next(true), Some(4));
+    assert_eq!(queue.pop_next(true), Some(5));
+    assert_eq!(queue.pop_next(true), Some(6));
+    assert_eq!(queue.pop_next(true), Some(7));
+    assert_eq!(queue.pop_next(true), Some(1));
+    assert_eq!(queue.pop_next(true), Some(2));
+    assert_eq!(queue.pop_next(true), Some(3));
+    assert_eq!(queue.pop_next(true), None);
 }
 
 #[test]
@@ -661,8 +664,20 @@ fn auto_analyze_queue_promotes_low_entry_to_high_without_duplication() {
     queue.enqueue(7, AutoAnalyzePriority::Low);
 
     assert_eq!(queue.remaining_count(), 1);
-    assert_eq!(queue.pop_next(), Some(7));
-    assert_eq!(queue.pop_next(), None);
+    assert_eq!(queue.pop_next(true), Some(7));
+    assert_eq!(queue.pop_next(true), None);
+}
+
+#[test]
+fn auto_analyze_queue_promotes_low_entry_to_viewport_without_duplication() {
+    let mut queue = AutoAnalyzeQueueState::default();
+    queue.enqueue(9, AutoAnalyzePriority::Low);
+    queue.enqueue(9, AutoAnalyzePriority::Viewport);
+    queue.enqueue(9, AutoAnalyzePriority::Low);
+
+    assert_eq!(queue.remaining_count(), 1);
+    assert_eq!(queue.pop_next(true), Some(9));
+    assert_eq!(queue.pop_next(true), None);
 }
 
 #[test]
@@ -671,11 +686,22 @@ fn auto_analyze_queue_remaining_count_includes_in_flight() {
     queue.enqueue_many([10, 11, 12], AutoAnalyzePriority::Low);
     assert_eq!(queue.remaining_count(), 3);
 
-    assert_eq!(queue.pop_next(), Some(10));
+    assert_eq!(queue.pop_next(true), Some(10));
     assert_eq!(queue.remaining_count(), 3);
 
     queue.complete(10);
     assert_eq!(queue.remaining_count(), 2);
+}
+
+#[test]
+fn auto_analyze_queue_suppresses_low_when_requested() {
+    let mut queue = AutoAnalyzeQueueState::default();
+    queue.enqueue_many([1, 2], AutoAnalyzePriority::Low);
+    queue.enqueue(3, AutoAnalyzePriority::Viewport);
+
+    assert_eq!(queue.pop_next(false), Some(3));
+    assert_eq!(queue.pop_next(false), None);
+    assert_eq!(queue.pop_next(true), Some(1));
 }
 
 #[test]
@@ -4074,6 +4100,122 @@ fn workspace_auto_analysis_dispatch_respects_parallelism_preference(cx: &mut Tes
             shell.status_message.as_ref(),
             Some(super::BannerMessage::WorkspaceAutoAnalyzeCompleted { count, .. }) if *count == 40
         ));
+    });
+}
+
+#[gpui::test]
+fn workspace_auto_analysis_suppresses_low_priority_during_cache_restore(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|ix| dir.path().join(format!("sample_scene_{ix:02}.ma")))
+        .collect();
+    for path in &paths {
+        fs::write(path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    }
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = true;
+        shell.state.auto_analyze_parallelism = AutoAnalyzeParallelismPreference::Four;
+        shell.rows = paths
+            .iter()
+            .enumerate()
+            .map(|(ix, path)| test_row(ix as u64 + 1, path))
+            .collect();
+        shell.refresh_file_table(cx);
+        shell.cache_restore_state.pending = VecDeque::from([99]);
+
+        shell.update_file_table_viewport_range(0..1, window, cx);
+        shell.run_workspace_auto_analysis(window, cx);
+
+        assert_eq!(shell.auto_analyze_queue.in_flight_len(), 1);
+        assert_eq!(shell.auto_analyze_queue.pending_viewport.len(), 0);
+        assert_eq!(shell.auto_analyze_queue.pending_low.len(), 2);
+        assert_eq!(
+            shell
+                .rows
+                .iter()
+                .filter(|row| row.status == FileStatus::Processing(RowOperation::Analyze))
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    });
+}
+
+#[gpui::test]
+fn selected_auto_analysis_still_dispatches_during_cache_restore(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|ix| dir.path().join(format!("sample_click_scene_{ix:02}.ma")))
+        .collect();
+    for path in &paths {
+        fs::write(path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    }
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = true;
+        shell.state.auto_analyze_parallelism = AutoAnalyzeParallelismPreference::Four;
+        shell.rows = paths
+            .iter()
+            .enumerate()
+            .map(|(ix, path)| test_row(ix as u64 + 1, path))
+            .collect();
+        shell.refresh_file_table(cx);
+        shell.cache_restore_state.pending = VecDeque::from([77]);
+
+        shell.update_file_table_viewport_range(0..0, window, cx);
+        shell.run_workspace_auto_analysis(window, cx);
+        assert_eq!(shell.auto_analyze_queue.in_flight_len(), 0);
+
+        shell.select_row_by_id(2, Modifiers::default(), window, cx);
+        shell.run_selected_auto_analysis(window, cx);
+
+        assert_eq!(shell.auto_analyze_queue.in_flight_len(), 1);
+        assert_eq!(shell.auto_analyze_queue.pending_low.len(), 2);
+        assert!(matches!(
+            shell.rows[1].status,
+            FileStatus::Processing(RowOperation::Analyze)
+        ));
+    });
+}
+
+#[gpui::test]
+fn cache_restore_finish_resumes_deferred_workspace_auto_analysis(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let paths: Vec<PathBuf> = (0..3)
+        .map(|ix| dir.path().join(format!("sample_resume_scene_{ix:02}.ma")))
+        .collect();
+    for path in &paths {
+        fs::write(path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    }
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = true;
+        shell.state.auto_analyze_parallelism = AutoAnalyzeParallelismPreference::Four;
+        shell.rows = paths
+            .iter()
+            .enumerate()
+            .map(|(ix, path)| test_row(ix as u64 + 1, path))
+            .collect();
+        shell.refresh_file_table(cx);
+        shell.cache_restore_state.pending = VecDeque::from([55]);
+
+        shell.update_file_table_viewport_range(0..1, window, cx);
+        shell.run_workspace_auto_analysis(window, cx);
+        assert_eq!(shell.auto_analyze_queue.in_flight_len(), 1);
+        assert_eq!(shell.auto_analyze_queue.pending_low.len(), 2);
+
+        shell.finish_progressive_cache_restore(window, cx);
+
+        assert!(!shell.cache_restore_active());
+        assert_eq!(shell.auto_analyze_queue.in_flight_len(), 3);
+        assert_eq!(shell.auto_analyze_queue.pending_low.len(), 0);
     });
 }
 

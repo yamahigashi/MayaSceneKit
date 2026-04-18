@@ -229,6 +229,7 @@ impl GuiShell {
         self.cancel_progressive_cache_restore();
         self.clear_rows();
         self.visible_rows.clear();
+        self.file_table_viewport_range = 0..0;
         self.clear_edit_history();
         self.cancel_all_auto_analysis();
         self.selection_anchor = None;

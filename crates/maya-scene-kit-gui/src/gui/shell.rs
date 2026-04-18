@@ -239,6 +239,7 @@ impl GuiShell {
             pending_edit_transactions: BTreeMap::new(),
             completed_edit_history: BTreeMap::new(),
             workspace_auto_analyze_started_at: None,
+            file_table_viewport_range: 0..0,
             workspace_scan_state: WorkspaceScanState::default(),
             cache_restore_generation: 0,
             cache_restore_state: CacheRestoreState::default(),

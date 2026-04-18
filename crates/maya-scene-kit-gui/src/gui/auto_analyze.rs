@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use super::*;
 
 const AUTO_ANALYZE_VISIBLE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
@@ -72,15 +74,65 @@ impl GuiShell {
         priority: AutoAnalyzePriority,
         audit_mode: AuditModePreference,
     ) -> Vec<u64> {
-        self.rows
+        match priority {
+            AutoAnalyzePriority::High => self
+                .rows
+                .iter()
+                .filter(|row| row.selected)
+                .filter(|row| self.can_auto_analyze_row(row, audit_mode))
+                .map(|row| row.id)
+                .collect(),
+            AutoAnalyzePriority::Viewport => self.viewport_auto_analyze_row_ids(audit_mode),
+            AutoAnalyzePriority::Low => self
+                .rows
+                .iter()
+                .filter(|row| self.can_auto_analyze_row(row, audit_mode))
+                .map(|row| row.id)
+                .collect(),
+        }
+    }
+
+    fn viewport_auto_analyze_row_ids(&self, audit_mode: AuditModePreference) -> Vec<u64> {
+        let end = self
+            .file_table_viewport_range
+            .end
+            .min(self.visible_rows.len());
+        let start = self.file_table_viewport_range.start.min(end);
+        self.visible_rows[start..end]
             .iter()
-            .filter(|row| match priority {
-                AutoAnalyzePriority::High => row.selected,
-                AutoAnalyzePriority::Low => true,
-            })
+            .filter_map(|row_ix| self.rows.get(*row_ix))
             .filter(|row| self.can_auto_analyze_row(row, audit_mode))
             .map(|row| row.id)
             .collect()
+    }
+
+    pub(super) fn update_file_table_viewport_range(
+        &mut self,
+        visible_range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let end = visible_range.end.min(self.visible_rows.len());
+        let start = visible_range.start.min(end);
+        let visible_range = start..end;
+        if self.file_table_viewport_range == visible_range {
+            return;
+        }
+        self.file_table_viewport_range = visible_range;
+        if self.state.workspace_auto_analyze && self.cache_restore_active() {
+            self.sync_viewport_auto_analyze(window, cx);
+        }
+    }
+
+    pub(super) fn sync_viewport_auto_analyze(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let audit_mode = self.state.audit_mode;
+        let targets = self.viewport_auto_analyze_row_ids(audit_mode);
+        self.auto_analyze_queue.replace_pending_viewport(targets);
+        self.dispatch_auto_analyze_jobs(window, cx);
     }
 
     pub(super) fn cancel_selected_auto_analysis(&mut self) {
@@ -93,6 +145,7 @@ impl GuiShell {
         self.workspace_auto_analyze_generation =
             self.workspace_auto_analyze_generation.wrapping_add(1);
         self.auto_analyze_queue.clear_pending_low();
+        self.auto_analyze_queue.pending_viewport.clear();
         self.workspace_auto_analyze_started_at = None;
     }
 
@@ -209,6 +262,10 @@ impl GuiShell {
         }
         self.auto_analyze_queue
             .enqueue_many(targets, AutoAnalyzePriority::Low);
+        if self.cache_restore_active() {
+            self.sync_viewport_auto_analyze(window, cx);
+            return;
+        }
         self.dispatch_auto_analyze_jobs(window, cx);
     }
 
@@ -218,9 +275,10 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         let audit_mode = self.state.audit_mode;
+        let allow_low_priority = !self.cache_restore_active();
         while self.auto_analyze_queue.in_flight_len() < self.state.auto_analyze_parallelism_limit()
         {
-            let Some(row_id) = self.auto_analyze_queue.pop_next() else {
+            let Some(row_id) = self.auto_analyze_queue.pop_next(allow_low_priority) else {
                 break;
             };
             let Some(index) = self.index_of_row_id(row_id) else {
@@ -304,6 +362,7 @@ impl GuiShell {
             return;
         };
         let queue_idle = self.auto_analyze_queue.pending_high.is_empty()
+            && self.auto_analyze_queue.pending_viewport.is_empty()
             && self.auto_analyze_queue.pending_low.is_empty()
             && self.auto_analyze_queue.in_flight.is_empty();
         if !queue_idle {

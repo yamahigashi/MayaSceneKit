@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs, io,
+    ops::Range,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
@@ -192,6 +193,7 @@ struct GuiShell {
     pending_edit_transactions: BTreeMap<u64, PendingEditTransaction>,
     completed_edit_history: BTreeMap<u64, Option<GuiEditHistoryEntry>>,
     workspace_auto_analyze_started_at: Option<Instant>,
+    file_table_viewport_range: Range<usize>,
     workspace_scan_state: WorkspaceScanState,
     cache_restore_generation: u64,
     cache_restore_state: CacheRestoreState,
@@ -231,6 +233,7 @@ struct GuiShell {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AutoAnalyzePriority {
     High,
+    Viewport,
     Low,
 }
 
@@ -238,6 +241,7 @@ enum AutoAnalyzePriority {
 struct AutoAnalyzeQueueState {
     generation: u64,
     pending_high: VecDeque<u64>,
+    pending_viewport: VecDeque<u64>,
     pending_low: VecDeque<u64>,
     in_flight: BTreeSet<u64>,
 }
@@ -310,6 +314,7 @@ impl AutoAnalyzeQueueState {
     fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.pending_high.clear();
+        self.pending_viewport.clear();
         self.pending_low.clear();
         self.in_flight.clear();
     }
@@ -322,24 +327,44 @@ impl AutoAnalyzeQueueState {
         self.pending_low.clear();
     }
 
+    fn replace_pending_viewport(&mut self, row_ids: impl IntoIterator<Item = u64>) {
+        self.pending_viewport.clear();
+        for row_id in row_ids {
+            self.enqueue(row_id, AutoAnalyzePriority::Viewport);
+        }
+    }
+
     fn enqueue(&mut self, row_id: u64, priority: AutoAnalyzePriority) {
         if self.in_flight.contains(&row_id) {
             return;
         }
         let pending_high = self.pending_high.iter().any(|queued| *queued == row_id);
+        let pending_viewport = self.pending_viewport.iter().any(|queued| *queued == row_id);
         let pending_low = self.pending_low.iter().any(|queued| *queued == row_id);
         match priority {
             AutoAnalyzePriority::High => {
                 if pending_high {
                     return;
                 }
+                if pending_viewport {
+                    self.pending_viewport.retain(|queued| *queued != row_id);
+                }
                 if pending_low {
                     self.pending_low.retain(|queued| *queued != row_id);
                 }
                 self.pending_high.push_back(row_id);
             }
+            AutoAnalyzePriority::Viewport => {
+                if pending_high || pending_viewport {
+                    return;
+                }
+                if pending_low {
+                    self.pending_low.retain(|queued| *queued != row_id);
+                }
+                self.pending_viewport.push_back(row_id);
+            }
             AutoAnalyzePriority::Low => {
-                if pending_high || pending_low {
+                if pending_high || pending_viewport || pending_low {
                     return;
                 }
                 self.pending_low.push_back(row_id);
@@ -357,10 +382,17 @@ impl AutoAnalyzeQueueState {
         }
     }
 
-    fn pop_next(&mut self) -> Option<u64> {
+    fn pop_next(&mut self, allow_low_priority: bool) -> Option<u64> {
         if let Some(row_id) = self.pending_high.pop_front() {
             self.in_flight.insert(row_id);
             return Some(row_id);
+        }
+        if let Some(row_id) = self.pending_viewport.pop_front() {
+            self.in_flight.insert(row_id);
+            return Some(row_id);
+        }
+        if !allow_low_priority {
+            return None;
         }
         let row_id = self.pending_low.pop_front()?;
         self.in_flight.insert(row_id);
@@ -376,7 +408,10 @@ impl AutoAnalyzeQueueState {
     }
 
     fn remaining_count(&self) -> usize {
-        self.pending_high.len() + self.pending_low.len() + self.in_flight.len()
+        self.pending_high.len()
+            + self.pending_viewport.len()
+            + self.pending_low.len()
+            + self.in_flight.len()
     }
 }
 

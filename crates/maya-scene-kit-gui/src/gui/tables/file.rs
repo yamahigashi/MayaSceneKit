@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use gpui_component::menu::PopupMenu;
 
 use super::*;
@@ -164,6 +166,27 @@ impl TableDelegate for FileTableDelegate {
                 view.update(cx, |shell, cx| shell.set_file_sort(key, sort, cx));
             });
         }
+    }
+
+    fn visible_rows_changed(
+        &mut self,
+        visible_range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let Some(view) = self.view.clone() else {
+            return;
+        };
+        let visible_range_for_update = visible_range.clone();
+        window.defer(cx, move |window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.update_file_table_viewport_range(
+                    visible_range_for_update.clone(),
+                    window,
+                    cx,
+                );
+            });
+        });
     }
 
     fn render_tr(
