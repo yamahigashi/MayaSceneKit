@@ -12,7 +12,7 @@ impl GuiShell {
                 &i18n,
                 &self.workspace_caption(&i18n),
                 &self.search_input,
-                self.visible_rows.len(),
+                i18n.format("log.files", &[("count", self.visible_rows.len().to_string())]),
                 self.state.file_list_findings_only,
                 self.state.file_list_missing_only,
                 self.state.file_list_no_workspace_only,
@@ -429,7 +429,7 @@ fn file_panel_header(
     i18n: &I18n,
     caption: &str,
     search_input: &Entity<InputState>,
-    visible_count: usize,
+    visible_count_label: String,
     findings_only: bool,
     missing_only: bool,
     no_workspace_only: bool,
@@ -469,15 +469,9 @@ fn file_panel_header(
                 .gap_2()
                 .child(
                     div()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(PANEL_BG))
                         .text_sm()
                         .text_color(rgb(MUTED))
-                        .child(format!("{} {}", i18n.text("label.files"), visible_count)),
+                        .child(visible_count_label),
                 )
                 .child(auto_analyze_toggle_button(
                     i18n.text("label.auto_analyze"),

@@ -155,6 +155,7 @@
   "log.clean": "removal staged: {count} target(s)",
   "log.dump": "dump loaded",
   "log.error": "{operation}: {message}",
+  "log.files": "files: {count}",
   "log.paths": "paths: {count} entry(s)",
   "log.path_collect": "path collect",
   "log.replace": "replace staged: {count} match(es)",
