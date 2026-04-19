@@ -155,6 +155,7 @@
   "log.clean": "已暂存移除：{count} 项",
   "log.dump": "导出已加载",
   "log.error": "{operation}：{message}",
+  "log.files": "文件：{count} 条",
   "log.paths": "路径：{count} 条",
   "log.path_collect": "文件收集",
   "log.replace": "已暂存替换：{count} 个匹配项",

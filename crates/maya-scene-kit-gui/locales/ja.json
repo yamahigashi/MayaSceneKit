@@ -155,6 +155,7 @@
   "log.clean": "除去をステージ: {count} 件",
   "log.dump": "dump を読み込みました",
   "log.error": "{operation}: {message}",
+  "log.files": "files: {count} 件",
   "log.paths": "paths: {count} 件のエントリ",
   "log.path_collect": "ファイル収集",
   "log.replace": "replace staged: {count} 件の一致",
