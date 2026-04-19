@@ -680,32 +680,6 @@ impl GuiShell {
         });
     }
 
-    pub(super) fn refresh_selected_result_tables(&mut self, cx: &mut Context<Self>) {
-        self.refresh_audit_table(cx);
-        self.refresh_path_table(cx);
-    }
-
-    pub(super) fn patch_visible_file_row(&mut self, row_id: u64, cx: &mut Context<Self>) -> bool {
-        let Some(index) = self.index_of_row_id(row_id) else {
-            return false;
-        };
-        let Some(visible_index) = self.visible_position_for_row_index(index) else {
-            return false;
-        };
-        let Some(row) = self.rows.get(index) else {
-            return false;
-        };
-        let i18n = self.i18n();
-        let patched = build_single_file_table_row(row, &self.state, &i18n);
-        self.file_table.update(cx, |table, cx| {
-            table
-                .delegate_mut()
-                .replace_row(visible_index, patched, i18n.locale(), self.file_sort);
-            table.refresh(cx);
-        });
-        true
-    }
-
     pub(super) fn patch_visible_file_rows(
         &mut self,
         row_ids: &BTreeSet<u64>,

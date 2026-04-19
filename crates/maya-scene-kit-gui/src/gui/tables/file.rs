@@ -83,21 +83,6 @@ impl FileTableDelegate {
         update_file_sort_columns(&mut self.columns, sort);
     }
 
-    pub(in crate::gui) fn replace_row(
-        &mut self,
-        row_ix: usize,
-        row: FileTableRow,
-        locale: SupportedLocale,
-        sort: FileTableSort,
-    ) {
-        let Some(existing) = self.rows.get_mut(row_ix) else {
-            return;
-        };
-        *existing = row;
-        self.locale = locale;
-        update_file_sort_columns(&mut self.columns, sort);
-    }
-
     pub(in crate::gui) fn replace_rows(
         &mut self,
         rows: Vec<(usize, FileTableRow)>,

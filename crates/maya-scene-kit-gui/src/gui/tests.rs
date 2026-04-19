@@ -4,7 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::default_analysis_cache_root;
@@ -3676,6 +3676,23 @@ fn cache_writes_queue_with_idle_debounce(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cache_writes_stay_debounced_during_active_auto_analyze(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        shell.workspace_auto_analyze_started_at = Some(Instant::now());
+
+        let observe_snapshot = sample_observed_snapshot("ExampleActiveAnalyze.ma");
+        shell.enqueue_cache_writes(Some(observe_snapshot), None, window, cx);
+
+        assert!(shell.cache_write_state.debounce_pending);
+        assert!(!shell.cache_write_state.in_flight);
+        assert_eq!(shell.cache_write_state.pending_observe.len(), 1);
+    });
+}
+
+#[gpui::test]
 fn cache_writes_resume_after_enqueue_during_in_flight_flush(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
 
@@ -3761,6 +3778,49 @@ fn cache_maintenance_resumes_after_enqueue_during_in_flight_flush(cx: &mut TestA
         assert!(!shell.cache_maintenance_state.in_flight);
         assert!(shell.cache_maintenance_state.debounce_pending);
         assert_eq!(shell.cache_maintenance_state.pending_observe.len(), 1);
+    });
+}
+
+#[gpui::test]
+fn workspace_auto_analysis_completion_flushes_pending_cache_persistence(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        shell.workspace_auto_analyze_started_at = Some(Instant::now());
+
+        let observe_snapshot = sample_observed_snapshot("ExampleFlush.ma");
+        let observe_access = ObserveCacheAccess {
+            path: observe_snapshot.file_state.path.clone(),
+            file_state: observe_snapshot.file_state.clone(),
+            identity: observe_snapshot.identity.clone(),
+        };
+        shell
+            .cache_write_state
+            .pending_observe_order
+            .push_back("ExampleFlush.ma".to_string());
+        shell
+            .cache_write_state
+            .pending_observe
+            .insert("ExampleFlush.ma".to_string(), observe_snapshot);
+        shell.cache_write_state.debounce_pending = true;
+        shell
+            .cache_maintenance_state
+            .pending_observe_order
+            .push_back("ExampleFlush.ma".to_string());
+        shell
+            .cache_maintenance_state
+            .pending_observe
+            .insert("ExampleFlush.ma".to_string(), observe_access);
+        shell.cache_maintenance_state.debounce_pending = true;
+
+        shell.maybe_finish_workspace_auto_analyze_batch(window, cx);
+
+        assert!(shell.workspace_auto_analyze_started_at.is_none());
+        assert!(shell.cache_write_state.in_flight);
+        assert!(!shell.cache_write_state.debounce_pending);
+        assert!(shell.cache_maintenance_state.in_flight);
+        assert!(!shell.cache_maintenance_state.debounce_pending);
     });
 }
 
@@ -4392,6 +4452,108 @@ fn analyze_result_queues_debounced_refresh_and_persist(cx: &mut TestAppContext) 
             assert_eq!(shell.state.job_history.len(), 1);
             assert_eq!(shell.state.job_history[0].operation, "analyze");
         });
+    });
+}
+
+#[gpui::test]
+fn analyze_result_invalidates_path_resolution_state_for_async_refresh(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("async_path_refresh.ma");
+    write_cached_scene(&scene);
+    let analyze_result =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze result");
+    let load_options = LoadOptions::default();
+    let observation = Loader::new(load_options.clone())
+        .observe_path(&scene)
+        .expect("observe scene");
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+        .expect("observe snapshot");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            shell.state = test_state(dir.path(), "");
+            let mut row = test_row(1, &scene);
+            row.paths_report = Some(observe_snapshot.paths_report.clone());
+            row.dump_report = Some(observe_snapshot.dump_report.clone());
+            row.refresh_scene_workspace_root();
+            row.refresh_path_resolution_cache();
+            let prior_revision = row.path_resolution_revision;
+            assert!(!row.path_resolution_cache.is_empty());
+            shell.rows = vec![row];
+            shell.refresh_file_table(cx);
+
+            shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+
+            assert!(shell.rows[0].path_resolution_cache.is_empty());
+            assert_eq!(shell.rows[0].missing_path_count(), None);
+            assert!(shell.rows[0].path_resolution_revision > prior_revision);
+        });
+    });
+}
+
+#[test]
+fn path_table_model_uses_cached_only_resolution_for_passive_render() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("cached_only_paths.ma");
+    write_cached_scene(&scene);
+    let load_options = LoadOptions::default();
+    let observation = Loader::new(load_options.clone())
+        .observe_path(&scene)
+        .expect("observe scene");
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+        .expect("observe snapshot");
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.paths_report = Some(observe_snapshot.paths_report);
+    row.dump_report = Some(observe_snapshot.dump_report);
+    row.invalidate_path_resolution_state();
+
+    let model = build_path_table_model(
+        &[row],
+        &[0],
+        &test_state(dir.path(), ""),
+        None,
+        &BTreeSet::new(),
+        false,
+        "",
+        &BTreeSet::from([PathTypeFilter::File, PathTypeFilter::Reference]),
+        &BTreeSet::from([PathFormFilter::Abs, PathFormFilter::Rel]),
+        &BTreeSet::from([
+            PathResolutionBadge::Exists,
+            PathResolutionBadge::Missing,
+            PathResolutionBadge::Unresolved,
+        ]),
+        default_path_sort(),
+    );
+
+    assert!(!model.rows.is_empty());
+    assert!(model.rows.iter().all(|row| row.resolution_badge.is_none()));
+}
+
+#[gpui::test]
+fn auto_analyze_completion_does_not_force_threshold_full_refresh(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("steady_refresh.ma");
+    write_cached_scene(&scene);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.rows = vec![test_row(1, &scene)];
+        shell.refresh_file_table(cx);
+        shell.update_file_table_viewport_range(0..1, window, cx);
+        shell.auto_analyze_refresh_state.pending_completion_count = 63;
+        shell.auto_analyze_refresh_state.pending_full_refresh = true;
+
+        shell.queue_auto_analyze_completion_refresh(1, window, cx);
+
+        assert!(shell.auto_analyze_refresh_state.pending_full_refresh);
+        assert_eq!(
+            shell.auto_analyze_refresh_state.pending_completion_count,
+            64
+        );
     });
 }
 

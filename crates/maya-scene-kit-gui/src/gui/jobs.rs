@@ -474,6 +474,7 @@ impl GuiShell {
             }
             self.refresh_file_table(cx);
             self.schedule_selected_auto_analysis(window, cx);
+            self.schedule_selected_path_resolution_refresh(window, cx);
             return;
         }
 
@@ -488,6 +489,7 @@ impl GuiShell {
             }
             self.refresh_file_table(cx);
             self.schedule_selected_auto_analysis(window, cx);
+            self.schedule_selected_path_resolution_refresh(window, cx);
             return;
         }
 
@@ -504,6 +506,7 @@ impl GuiShell {
         self.prioritize_cache_restore_for_row(self.rows[index].id);
         self.refresh_file_table(cx);
         self.schedule_selected_auto_analysis(window, cx);
+        self.schedule_selected_path_resolution_refresh(window, cx);
     }
 
     pub(super) fn clear_selection(&mut self) {
@@ -596,6 +599,7 @@ impl GuiShell {
         }
         self.refresh_file_table(cx);
         self.schedule_selected_auto_analysis(window, cx);
+        self.schedule_selected_path_resolution_refresh(window, cx);
     }
 
     pub(super) fn record_job(
@@ -752,7 +756,7 @@ impl GuiShell {
                 self.rows[index].replace_artifact_generation = None;
                 self.rows[index].status = row_status;
                 self.rows[index].sync_findings_count();
-                self.refresh_row_path_resolution_state(index);
+                self.rows[index].invalidate_path_resolution_state();
                 self.status_message = Some(BannerMessage::AnalyzeCompleted {
                     name: self.rows[index].name.clone(),
                     elapsed,
@@ -1002,7 +1006,7 @@ impl GuiShell {
                                 ),
                             }
                             if let Some(target_tab) = target_tab {
-                                shell.set_tab(target_tab, cx);
+                                shell.set_tab(target_tab, window, cx);
                             }
                             cx.notify();
                         },

@@ -49,9 +49,9 @@ impl GuiShell {
                         TabBar::new("result-tabs")
                             .underline()
                             .selected_index(active_ix)
-                            .on_click(move |ix, _window, cx| {
+                            .on_click(move |ix, window, cx| {
                                 tab_view.update(cx, |shell, cx| {
-                                    shell.set_tab(result_tab_for_index(*ix), cx);
+                                    shell.set_tab(result_tab_for_index(*ix), window, cx);
                                     cx.notify();
                                 });
                             })

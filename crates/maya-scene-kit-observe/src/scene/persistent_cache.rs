@@ -753,12 +753,15 @@ impl ObserveCacheStore {
             return Ok(());
         }
 
+        let blobs = snapshots
+            .iter()
+            .map(|snapshot| self.ensure_blob(snapshot))
+            .collect::<io::Result<Vec<_>>>()?;
         let mut conn = self.open_connection()?;
         let now_unix_secs = unix_timestamp_secs(SystemTime::now());
         let tx = conn.transaction().map_err(sqlite_io_error)?;
-        for snapshot in snapshots {
-            let blob = self.ensure_blob(snapshot)?;
-            tx.execute(
+        let mut stmt = tx
+            .prepare_cached(
                 "INSERT INTO path_index (
                     normalized_path,
                     size,
@@ -783,22 +786,25 @@ impl ObserveCacheStore {
                     blob_relative_path=excluded.blob_relative_path,
                     blob_codec=excluded.blob_codec,
                     blob_compressed_size=excluded.blob_compressed_size",
-                params![
-                    normalized_path_key(&snapshot.file_state.path),
-                    u64_to_sql(snapshot.file_state.size)?,
-                    opt_u128_to_sql(snapshot.file_state.modified_unix_nanos)?,
-                    i64::from(snapshot.identity.cache_schema_version),
-                    &snapshot.identity.scene_sha256,
-                    &snapshot.identity.load_options_fingerprint,
-                    usize_to_sql(snapshot.identity.max_preview)?,
-                    u64_to_sql(now_unix_secs)?,
-                    blob.relative_path.to_string_lossy().to_string(),
-                    BLOB_CODEC_ZSTD,
-                    u64_to_sql(blob.compressed_size)?,
-                ],
             )
             .map_err(sqlite_io_error)?;
+        for (snapshot, blob) in snapshots.iter().zip(blobs.iter()) {
+            stmt.execute(params![
+                normalized_path_key(&snapshot.file_state.path),
+                u64_to_sql(snapshot.file_state.size)?,
+                opt_u128_to_sql(snapshot.file_state.modified_unix_nanos)?,
+                i64::from(snapshot.identity.cache_schema_version),
+                &snapshot.identity.scene_sha256,
+                &snapshot.identity.load_options_fingerprint,
+                usize_to_sql(snapshot.identity.max_preview)?,
+                u64_to_sql(now_unix_secs)?,
+                blob.relative_path.to_string_lossy().to_string(),
+                BLOB_CODEC_ZSTD,
+                u64_to_sql(blob.compressed_size)?,
+            ])
+            .map_err(sqlite_io_error)?;
         }
+        drop(stmt);
         tx.commit().map_err(sqlite_io_error)
     }
 
@@ -808,74 +814,35 @@ impl ObserveCacheStore {
         now: SystemTime,
         min_interval: Duration,
     ) -> io::Result<ObserveCacheMaintenanceStats> {
-        if touched.is_empty() {
-            return Ok(ObserveCacheMaintenanceStats::default());
-        }
         let mut conn = self.open_connection()?;
-        let now_unix_secs = unix_timestamp_secs(now);
-        let min_unix_secs = now_unix_secs.saturating_sub(min_interval.as_secs());
-        let mut touched_count = 0usize;
-        let tx = conn.transaction().map_err(sqlite_io_error)?;
-        for access in touched {
-            touched_count += tx
-                .execute(
-                    "UPDATE path_index
-                     SET last_accessed_unix_secs = ?2
-                     WHERE normalized_path = ?1
-                       AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs < ?3)",
-                    params![
-                        normalized_path_key(&access.path),
-                        u64_to_sql(now_unix_secs)?,
-                        u64_to_sql(min_unix_secs)?,
-                    ],
-                )
-                .map_err(sqlite_io_error)?;
-        }
-        tx.commit().map_err(sqlite_io_error)?;
+        self.touch_many_if_stale_with_connection(&mut conn, touched, now, min_interval)
+    }
+
+    pub fn maintain_batch(
+        &self,
+        touched: &[ObserveCacheAccess],
+        now: SystemTime,
+        min_interval: Duration,
+        sweep: bool,
+    ) -> io::Result<ObserveCacheMaintenanceStats> {
+        let mut conn = self.open_connection()?;
+        let touched_stats =
+            self.touch_many_if_stale_with_connection(&mut conn, touched, now, min_interval)?;
+        let sweep_stats = if sweep {
+            self.sweep_expired_with_connection(&mut conn, now)?
+        } else {
+            ObserveCacheMaintenanceStats::default()
+        };
         Ok(ObserveCacheMaintenanceStats {
-            touched_count,
-            ..ObserveCacheMaintenanceStats::default()
+            touched_count: touched_stats.touched_count,
+            expired_record_count: sweep_stats.expired_record_count,
+            deleted_blob_count: sweep_stats.deleted_blob_count,
         })
     }
 
     pub fn sweep_expired(&self, now: SystemTime) -> io::Result<ObserveCacheMaintenanceStats> {
         let mut conn = self.open_connection()?;
-        let expired_before = now
-            .checked_sub(OBSERVE_CACHE_TTL)
-            .map(unix_timestamp_secs)
-            .unwrap_or(0);
-        let tx = conn.transaction().map_err(sqlite_io_error)?;
-        let expired_blob_paths = self.collect_expired_blob_paths(&tx, expired_before)?;
-        let expired_record_count: usize = tx
-            .query_row(
-                "SELECT COUNT(*) FROM path_index
-                 WHERE last_accessed_unix_secs IS NOT NULL
-                   AND last_accessed_unix_secs < ?1",
-                params![u64_to_sql(expired_before)?],
-                |row| row.get(0),
-            )
-            .map_err(sqlite_io_error)?;
-        tx.execute(
-            "DELETE FROM path_index
-             WHERE last_accessed_unix_secs IS NOT NULL
-               AND last_accessed_unix_secs < ?1",
-            params![u64_to_sql(expired_before)?],
-        )
-        .map_err(sqlite_io_error)?;
-        let live_blob_paths = self.collect_live_blob_paths(&tx)?;
-        tx.commit().map_err(sqlite_io_error)?;
-        let orphaned_paths = expired_blob_paths
-            .into_iter()
-            .filter(|path| !live_blob_paths.contains_key(path))
-            .collect::<Vec<_>>();
-        let deleted_blob_count = delete_blob_files(self.blobs_dir(), &orphaned_paths)?;
-        let deleted_temp_count = delete_stale_temp_files(self.blobs_dir())?;
-        self.compact_database(&conn, expired_record_count > 0)?;
-        Ok(ObserveCacheMaintenanceStats {
-            touched_count: 0,
-            expired_record_count,
-            deleted_blob_count: deleted_blob_count + deleted_temp_count,
-        })
+        self.sweep_expired_with_connection(&mut conn, now)
     }
 
     pub fn apply_maintenance(
@@ -883,13 +850,7 @@ impl ObserveCacheStore {
         touched: &[ObserveCacheAccess],
         now: SystemTime,
     ) -> io::Result<ObserveCacheMaintenanceStats> {
-        let touched_stats = self.touch_many_if_stale(touched, now, OBSERVE_CACHE_TOUCH_INTERVAL)?;
-        let sweep_stats = self.sweep_expired(now)?;
-        Ok(ObserveCacheMaintenanceStats {
-            touched_count: touched_stats.touched_count,
-            expired_record_count: sweep_stats.expired_record_count,
-            deleted_blob_count: sweep_stats.deleted_blob_count,
-        })
+        self.maintain_batch(touched, now, OBSERVE_CACHE_TOUCH_INTERVAL, true)
     }
 }
 
@@ -1255,6 +1216,88 @@ impl ObserveCacheStore {
         )
         .map_err(sqlite_io_error)?;
         Ok(conn)
+    }
+
+    fn touch_many_if_stale_with_connection(
+        &self,
+        conn: &mut Connection,
+        touched: &[ObserveCacheAccess],
+        now: SystemTime,
+        min_interval: Duration,
+    ) -> io::Result<ObserveCacheMaintenanceStats> {
+        if touched.is_empty() {
+            return Ok(ObserveCacheMaintenanceStats::default());
+        }
+        let now_unix_secs = unix_timestamp_secs(now);
+        let min_unix_secs = now_unix_secs.saturating_sub(min_interval.as_secs());
+        let tx = conn.transaction().map_err(sqlite_io_error)?;
+        let mut stmt = tx
+            .prepare_cached(
+                "UPDATE path_index
+                 SET last_accessed_unix_secs = ?2
+                 WHERE normalized_path = ?1
+                   AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs < ?3)",
+            )
+            .map_err(sqlite_io_error)?;
+        let mut touched_count = 0usize;
+        for access in touched {
+            touched_count += stmt
+                .execute(params![
+                    normalized_path_key(&access.path),
+                    u64_to_sql(now_unix_secs)?,
+                    u64_to_sql(min_unix_secs)?,
+                ])
+                .map_err(sqlite_io_error)?;
+        }
+        drop(stmt);
+        tx.commit().map_err(sqlite_io_error)?;
+        Ok(ObserveCacheMaintenanceStats {
+            touched_count,
+            ..ObserveCacheMaintenanceStats::default()
+        })
+    }
+
+    fn sweep_expired_with_connection(
+        &self,
+        conn: &mut Connection,
+        now: SystemTime,
+    ) -> io::Result<ObserveCacheMaintenanceStats> {
+        let expired_before = now
+            .checked_sub(OBSERVE_CACHE_TTL)
+            .map(unix_timestamp_secs)
+            .unwrap_or(0);
+        let tx = conn.transaction().map_err(sqlite_io_error)?;
+        let expired_blob_paths = self.collect_expired_blob_paths(&tx, expired_before)?;
+        let expired_record_count: usize = tx
+            .query_row(
+                "SELECT COUNT(*) FROM path_index
+                 WHERE last_accessed_unix_secs IS NOT NULL
+                   AND last_accessed_unix_secs < ?1",
+                params![u64_to_sql(expired_before)?],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_io_error)?;
+        tx.execute(
+            "DELETE FROM path_index
+             WHERE last_accessed_unix_secs IS NOT NULL
+               AND last_accessed_unix_secs < ?1",
+            params![u64_to_sql(expired_before)?],
+        )
+        .map_err(sqlite_io_error)?;
+        let live_blob_paths = self.collect_live_blob_paths(&tx)?;
+        tx.commit().map_err(sqlite_io_error)?;
+        let orphaned_paths = expired_blob_paths
+            .into_iter()
+            .filter(|path| !live_blob_paths.contains_key(path))
+            .collect::<Vec<_>>();
+        let deleted_blob_count = delete_blob_files(self.blobs_dir(), &orphaned_paths)?;
+        let deleted_temp_count = delete_stale_temp_files(self.blobs_dir())?;
+        self.compact_database(conn, expired_record_count > 0)?;
+        Ok(ObserveCacheMaintenanceStats {
+            touched_count: 0,
+            expired_record_count,
+            deleted_blob_count: deleted_blob_count + deleted_temp_count,
+        })
     }
 
     fn compact_database(&self, conn: &Connection, reclaim_pages: bool) -> io::Result<()> {
