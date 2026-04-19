@@ -6,6 +6,7 @@ const AUTO_ANALYZE_VISIBLE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33
 const AUTO_ANALYZE_FULL_REFRESH_DEBOUNCE: Duration = Duration::from_millis(1500);
 const AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL: usize = 32;
 const PATH_RESOLUTION_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
+const PATH_RESOLUTION_BACKLOG_BATCH_SIZE: usize = 64;
 
 struct PathResolutionRefreshInput {
     row_id: u64,
@@ -30,11 +31,18 @@ fn resolve_path_resolution_refresh_input(
         .scene_workspace_root
         .or_else(|| find_scene_workspace_root(&input.scene_path));
     let workspace_root = scene_workspace_root.as_deref();
+    let resolutions = resolve_scene_path_values_batch(
+        input
+            .effective_values
+            .iter()
+            .map(|(_, effective_value)| effective_value.as_str()),
+        workspace_root,
+    );
     let path_resolution_cache = input
         .effective_values
         .into_iter()
-        .map(|(entry_index, effective_value)| {
-            let resolution = resolve_scene_path_value(&effective_value, workspace_root);
+        .zip(resolutions)
+        .map(|((entry_index, effective_value), resolution)| {
             (
                 entry_index,
                 PathResolutionCacheEntry {
@@ -445,6 +453,41 @@ impl GuiShell {
             .collect()
     }
 
+    pub(super) fn queue_path_resolution_backlog_for_row_id(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.index_of_row_id(row_id) else {
+            return;
+        };
+        let row = &self.rows[index];
+        if !row.needs_path_resolution_refresh()
+            || self
+                .path_resolution_refresh_state
+                .pending_priority_row_ids
+                .contains(&row_id)
+        {
+            return;
+        }
+        self.path_resolution_refresh_state
+            .pending_backlog_row_ids
+            .insert(row_id);
+        self.schedule_path_resolution_refresh(window, cx);
+    }
+
+    pub(super) fn queue_path_resolution_backlog_for_row_ids(
+        &mut self,
+        row_ids: impl IntoIterator<Item = u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for row_id in row_ids {
+            self.queue_path_resolution_backlog_for_row_id(row_id, window, cx);
+        }
+    }
+
     fn queue_path_resolution_refresh_for_row_id(
         &mut self,
         row_id: u64,
@@ -462,7 +505,10 @@ impl GuiShell {
             return;
         }
         self.path_resolution_refresh_state
-            .pending_row_ids
+            .pending_backlog_row_ids
+            .remove(&row_id);
+        self.path_resolution_refresh_state
+            .pending_priority_row_ids
             .insert(row_id);
         self.schedule_path_resolution_refresh(window, cx);
     }
@@ -476,9 +522,14 @@ impl GuiShell {
         if targets.is_empty() {
             return;
         }
-        self.path_resolution_refresh_state
-            .pending_row_ids
-            .extend(targets);
+        for row_id in targets {
+            self.path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .remove(&row_id);
+            self.path_resolution_refresh_state
+                .pending_priority_row_ids
+                .insert(row_id);
+        }
         self.schedule_path_resolution_refresh(window, cx);
     }
 
@@ -491,10 +542,43 @@ impl GuiShell {
         if targets.is_empty() {
             return;
         }
-        self.path_resolution_refresh_state
-            .pending_row_ids
-            .extend(targets);
+        for row_id in targets {
+            self.path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .remove(&row_id);
+            self.path_resolution_refresh_state
+                .pending_priority_row_ids
+                .insert(row_id);
+        }
         self.schedule_path_resolution_refresh(window, cx);
+    }
+
+    fn take_path_resolution_refresh_row_ids(&mut self) -> Vec<u64> {
+        if !self
+            .path_resolution_refresh_state
+            .pending_priority_row_ids
+            .is_empty()
+        {
+            return std::mem::take(
+                &mut self.path_resolution_refresh_state.pending_priority_row_ids,
+            )
+            .into_iter()
+            .collect();
+        }
+
+        let row_ids = self
+            .path_resolution_refresh_state
+            .pending_backlog_row_ids
+            .iter()
+            .take(PATH_RESOLUTION_BACKLOG_BATCH_SIZE)
+            .copied()
+            .collect::<Vec<_>>();
+        for row_id in &row_ids {
+            self.path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .remove(row_id);
+        }
+        row_ids
     }
 
     fn schedule_path_resolution_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -522,20 +606,30 @@ impl GuiShell {
                         .update_window_entity(
                             &view,
                             |shell: &mut GuiShell,
-                             _window: &mut Window,
-                             _cx: &mut Context<GuiShell>| {
+                             window: &mut Window,
+                             cx: &mut Context<GuiShell>| {
                                 if shell.path_resolution_refresh_state.debounce_generation
                                     != generation
                                 {
+                                    shell.path_resolution_refresh_state.debounce_pending = false;
+                                    if !shell
+                                        .path_resolution_refresh_state
+                                        .pending_priority_row_ids
+                                        .is_empty()
+                                        || !shell
+                                            .path_resolution_refresh_state
+                                            .pending_backlog_row_ids
+                                            .is_empty()
+                                    {
+                                        shell.schedule_path_resolution_refresh(window, cx);
+                                    }
                                     return None;
                                 }
                                 shell.path_resolution_refresh_state.debounce_pending = false;
                                 if shell.path_resolution_refresh_state.in_flight {
                                     return None;
                                 }
-                                let row_ids = std::mem::take(
-                                    &mut shell.path_resolution_refresh_state.pending_row_ids,
-                                );
+                                let row_ids = shell.take_path_resolution_refresh_row_ids();
                                 let mut inputs = Vec::new();
                                 for row_id in row_ids {
                                     let Some(index) = shell.index_of_row_id(row_id) else {
@@ -632,8 +726,12 @@ impl GuiShell {
                             }
                             if !shell
                                 .path_resolution_refresh_state
-                                .pending_row_ids
+                                .pending_priority_row_ids
                                 .is_empty()
+                                || !shell
+                                    .path_resolution_refresh_state
+                                    .pending_backlog_row_ids
+                                    .is_empty()
                             {
                                 shell.schedule_path_resolution_refresh(window, cx);
                             }

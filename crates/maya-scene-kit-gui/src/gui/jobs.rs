@@ -757,6 +757,7 @@ impl GuiShell {
                 self.rows[index].status = row_status;
                 self.rows[index].sync_findings_count();
                 self.rows[index].invalidate_path_resolution_state();
+                self.queue_path_resolution_backlog_for_row_id(row_id, window, cx);
                 self.status_message = Some(BannerMessage::AnalyzeCompleted {
                     name: self.rows[index].name.clone(),
                     elapsed,
