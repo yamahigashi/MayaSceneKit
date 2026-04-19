@@ -81,6 +81,8 @@ use super::{
     visible_path_selection_targets, visible_selection_range_indices,
     workspace_relative_display_path, workspace_split_config,
 };
+use crate::gui::cache_maintenance::CacheMaintenanceFlushResult;
+use crate::gui::cache_write::CacheWriteFlushResult;
 use crate::{
     gui::{GuiShell, init_gui_app},
     i18n::I18n,
@@ -171,6 +173,19 @@ fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
         .expect("observe sample scene");
     ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
         .expect("sample snapshot")
+}
+
+fn sample_audited_snapshot(path_name: &str) -> AuditedSceneSnapshot {
+    let dir = tempdir().expect("tmpdir");
+    let scene_path = dir.path().join(path_name);
+    write_cached_scene(&scene_path);
+    let load_options = LoadOptions::default();
+    let options = AuditOptions::strict_default();
+    let plan = build_script_audit_plan(Vec::new(), 64).expect("build plan");
+    let plan_fingerprint = fingerprint_audit_plan(&plan);
+    let report = audit_script_nodes_with_options(&scene_path, &plan, &load_options, options)
+        .expect("audit sample scene");
+    AuditedSceneSnapshot::new(report, options, plan_fingerprint).expect("sample audit snapshot")
 }
 
 fn display_audit_rows(rows: Vec<AuditResultRow>) -> Vec<super::AuditTableRow> {
@@ -3661,6 +3676,38 @@ fn cache_writes_queue_with_idle_debounce(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cache_writes_resume_after_enqueue_during_in_flight_flush(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        shell.cache_write_state.in_flight = true;
+        let stale_generation = shell.cache_write_generation;
+
+        let observe_snapshot = sample_observed_snapshot("ExampleResume.ma");
+        shell.enqueue_cache_writes(Some(observe_snapshot), None, window, cx);
+
+        assert!(shell.cache_write_state.in_flight);
+        assert!(shell.cache_write_state.debounce_pending);
+        assert_eq!(shell.cache_write_state.pending_observe.len(), 1);
+
+        shell.finish_cache_write_flush(
+            stale_generation,
+            CacheWriteFlushResult {
+                error_count: 0,
+                first_error: None,
+            },
+            window,
+            cx,
+        );
+
+        assert!(!shell.cache_write_state.in_flight);
+        assert!(shell.cache_write_state.debounce_pending);
+        assert_eq!(shell.cache_write_state.pending_observe.len(), 1);
+    });
+}
+
+#[gpui::test]
 fn cache_maintenance_queue_with_idle_debounce(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
 
@@ -3681,6 +3728,102 @@ fn cache_maintenance_queue_with_idle_debounce(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cache_maintenance_resumes_after_enqueue_during_in_flight_flush(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = true;
+        shell.cache_maintenance_state.in_flight = true;
+        let stale_generation = shell.cache_maintenance_generation;
+
+        let snapshot = sample_observed_snapshot("ExampleResumeTouch.ma");
+        let observe_access = ObserveCacheAccess {
+            path: PathBuf::from("ExampleResumeTouch.ma"),
+            file_state: snapshot.file_state,
+            identity: snapshot.identity,
+        };
+        shell.enqueue_cache_accesses(Some(observe_access), None, window, cx);
+
+        assert!(shell.cache_maintenance_state.in_flight);
+        assert!(shell.cache_maintenance_state.debounce_pending);
+        assert_eq!(shell.cache_maintenance_state.pending_observe.len(), 1);
+
+        shell.finish_cache_maintenance_flush(
+            stale_generation,
+            CacheMaintenanceFlushResult {
+                error_count: 0,
+                first_error: None,
+            },
+            window,
+            cx,
+        );
+
+        assert!(!shell.cache_maintenance_state.in_flight);
+        assert!(shell.cache_maintenance_state.debounce_pending);
+        assert_eq!(shell.cache_maintenance_state.pending_observe.len(), 1);
+    });
+}
+
+#[gpui::test]
+fn cache_restore_updates_queue_coalesced_refresh_for_visible_rows(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("restore_visible_scene.ma");
+    write_cached_scene(&scene);
+    let observe_snapshot = sample_observed_snapshot("RestoreVisible.ma");
+    let audit_snapshot = sample_audited_snapshot("RestoreVisible.ma");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.rows = vec![test_row(1, &scene)];
+        shell.rows[0].selected = true;
+        shell.refresh_file_table(cx);
+        shell.update_file_table_viewport_range(0..1, window, cx);
+
+        shell.apply_cache_restore_updates(
+            vec![super::cache_restore::CacheHydrationUpdate {
+                row_id: 1,
+                observe_snapshot: Some(observe_snapshot),
+                observe_access: None,
+                audit_snapshot: Some(audit_snapshot),
+                audit_access: None,
+            }],
+            window,
+            cx,
+        );
+
+        assert!(shell.cache_restore_refresh_state.pending_full_refresh);
+        assert_eq!(
+            shell.cache_restore_refresh_state.pending_completion_count,
+            1
+        );
+        assert!(
+            shell
+                .cache_restore_refresh_state
+                .pending_visible_row_ids
+                .contains(&1)
+        );
+        assert!(shell.rows[0].paths_report.is_some());
+        assert!(shell.rows[0].audit_report.is_some());
+    });
+}
+
+#[gpui::test]
+fn enabling_analysis_cache_schedules_sweep(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.analysis_cache_enabled = false;
+
+        shell.set_analysis_cache_enabled_preference(true, window, cx);
+
+        assert!(shell.state.analysis_cache_enabled);
+        assert!(shell.cache_maintenance_state.pending_sweep);
+        assert!(shell.cache_maintenance_state.debounce_pending);
+    });
+}
+
+#[gpui::test]
 fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
 
@@ -3694,6 +3837,10 @@ fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
         fs::create_dir_all(legacy_root.join("audit-v2/gg/hh")).expect("create audit v2 cache");
         fs::write(legacy_root.join("observe-v2/ee/ff/index.json"), "{}").expect("write observe v2");
         fs::write(legacy_root.join("audit-v2/gg/hh/index.json"), "{}").expect("write audit v2");
+        fs::create_dir_all(legacy_root.join("observe-v3/ii/jj")).expect("create observe v3 cache");
+        fs::create_dir_all(legacy_root.join("audit-v3/kk/ll")).expect("create audit v3 cache");
+        fs::write(legacy_root.join("observe-v3/ii/jj/index.json"), "{}").expect("write observe v3");
+        fs::write(legacy_root.join("audit-v3/kk/ll/index.json"), "{}").expect("write audit v3");
 
         shell.on_menu_purge_analysis_cache(&MenuPurgeAnalysisCache, window, cx);
     });
@@ -3706,6 +3853,8 @@ fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
         assert!(!shell.audit_cache_root.exists());
         assert!(!default_analysis_cache_root().join("observe-v2").exists());
         assert!(!default_analysis_cache_root().join("audit-v2").exists());
+        assert!(!default_analysis_cache_root().join("observe-v3").exists());
+        assert!(!default_analysis_cache_root().join("audit-v3").exists());
         assert!(matches!(
             shell.status_message,
             Some(BannerMessage::CachePurged)

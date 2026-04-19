@@ -201,6 +201,7 @@ struct GuiShell {
     cache_write_state: CacheWriteState,
     cache_maintenance_generation: u64,
     cache_maintenance_state: CacheMaintenanceState,
+    cache_restore_refresh_state: CacheRestoreRefreshState,
     auto_analyze_refresh_state: AutoAnalyzeRefreshState,
     persist_flush_state: PersistFlushState,
     active_path_edit: Option<Vec<(u64, usize)>>,
@@ -274,6 +275,7 @@ struct CacheWriteState {
     pending_audit_order: VecDeque<String>,
     pending_observe: BTreeMap<String, ObservedSceneSnapshot>,
     pending_audit: BTreeMap<String, AuditedSceneSnapshot>,
+    debounce_generation: u64,
     debounce_pending: bool,
     in_flight: bool,
     error_count: usize,
@@ -287,10 +289,21 @@ struct CacheMaintenanceState {
     pending_observe: BTreeMap<String, ObserveCacheAccess>,
     pending_audit: BTreeMap<String, AuditCacheAccess>,
     pending_sweep: bool,
+    debounce_generation: u64,
     debounce_pending: bool,
+    periodic_sweep_generation: u64,
     in_flight: bool,
     error_count: usize,
     first_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct CacheRestoreRefreshState {
+    visible_generation: u64,
+    full_generation: u64,
+    pending_visible_row_ids: BTreeSet<u64>,
+    pending_full_refresh: bool,
+    pending_completion_count: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1063,10 +1076,14 @@ impl SceneRow {
         self.scene_workspace_root = find_scene_workspace_root(&self.path);
     }
 
+    fn invalidate_path_resolution_state(&mut self) {
+        self.path_resolution_cache.clear();
+        self.missing_path_count_cache = None;
+    }
+
     fn refresh_path_resolution_cache(&mut self) {
         let Some(report) = self.display_paths_report() else {
-            self.path_resolution_cache.clear();
-            self.missing_path_count_cache = None;
+            self.invalidate_path_resolution_state();
             return;
         };
 
