@@ -128,6 +128,7 @@
   "label.dirty": "変更あり",
   "label.files": "ファイル数",
   "label.file_list_findings": "脅威",
+  "label.file_list_no_workspace": "ワークスペースなし",
   "label.findings": "検出",
   "label.audit_notices": "監査 Notice",
   "label.after": "置換後",

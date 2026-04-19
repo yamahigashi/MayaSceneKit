@@ -128,6 +128,7 @@
   "label.dirty": "未保存",
   "label.files": "文件",
   "label.file_list_findings": "威胁",
+  "label.file_list_no_workspace": "无工作区",
   "label.findings": "发现",
   "label.audit_notices": "审计通知",
   "label.after": "替换后",

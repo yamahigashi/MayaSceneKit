@@ -102,6 +102,12 @@ impl GuiShell {
         self.persist();
     }
 
+    pub(super) fn toggle_file_list_no_workspace_filter(&mut self, cx: &mut Context<Self>) {
+        self.state.file_list_no_workspace_only = !self.state.file_list_no_workspace_only;
+        self.refresh_file_table(cx);
+        self.persist();
+    }
+
     pub(super) fn toggle_file_list_dirty_filter(&mut self, cx: &mut Context<Self>) {
         self.state.file_list_dirty_only = !self.state.file_list_dirty_only;
         self.refresh_file_table(cx);

@@ -166,6 +166,8 @@ pub struct PersistedState {
     #[serde(default)]
     pub file_list_missing_only: bool,
     #[serde(default)]
+    pub file_list_no_workspace_only: bool,
+    #[serde(default)]
     pub file_list_dirty_only: bool,
     #[serde(default)]
     pub search_query: String,
@@ -244,6 +246,7 @@ impl Default for PersistedState {
             status_filter: StatusFilter::default(),
             file_list_findings_only: false,
             file_list_missing_only: false,
+            file_list_no_workspace_only: false,
             file_list_dirty_only: false,
             search_query: String::new(),
             workspace_files: Vec::new(),
@@ -453,6 +456,7 @@ mod tests {
             status_filter: StatusFilter::Dirty,
             file_list_findings_only: false,
             file_list_missing_only: false,
+            file_list_no_workspace_only: false,
             file_list_dirty_only: false,
             search_query: String::new(),
             workspace_files: vec![],
