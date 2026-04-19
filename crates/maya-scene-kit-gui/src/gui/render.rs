@@ -12,8 +12,10 @@ impl GuiShell {
                 &i18n,
                 &self.workspace_caption(&i18n),
                 &self.search_input,
+                self.visible_rows.len(),
                 self.state.file_list_findings_only,
                 self.state.file_list_missing_only,
+                self.state.file_list_no_workspace_only,
                 self.state.file_list_dirty_only,
                 self.state.workspace_auto_analyze,
                 view.clone(),
@@ -427,8 +429,10 @@ fn file_panel_header(
     i18n: &I18n,
     caption: &str,
     search_input: &Entity<InputState>,
+    visible_count: usize,
     findings_only: bool,
     missing_only: bool,
+    no_workspace_only: bool,
     dirty_only: bool,
     auto_analyze_enabled: bool,
     view: Entity<GuiShell>,
@@ -463,6 +467,18 @@ fn file_panel_header(
                 .flex_wrap()
                 .items_center()
                 .gap_2()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(PANEL_BG))
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child(format!("{} {}", i18n.text("label.files"), visible_count)),
+                )
                 .child(auto_analyze_toggle_button(
                     i18n.text("label.auto_analyze"),
                     auto_analyze_enabled,
@@ -486,6 +502,16 @@ fn file_panel_header(
                     0x8a3a32,
                     move |shell, cx| {
                         shell.toggle_file_list_missing_filter(cx);
+                    },
+                    view.clone(),
+                ))
+                .child(file_list_filter_button(
+                    i18n.text("label.file_list_no_workspace"),
+                    no_workspace_only,
+                    ACCENT_SOFT,
+                    ACCENT,
+                    move |shell, cx| {
+                        shell.toggle_file_list_no_workspace_filter(cx);
                     },
                     view.clone(),
                 ))

@@ -128,6 +128,7 @@
   "label.dirty": "Dirty",
   "label.files": "Files",
   "label.file_list_findings": "Threats",
+  "label.file_list_no_workspace": "No Workspace",
   "label.findings": "Findings",
   "label.audit_notices": "Audit Notices",
   "label.after": "After",

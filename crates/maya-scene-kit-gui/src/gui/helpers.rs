@@ -1131,10 +1131,12 @@ pub(super) fn compute_visible_row_indices_for(
 fn file_list_filters_match(row: &SceneRow, state: &PersistedState) -> bool {
     let findings_match = row.effective_findings_count() > 0;
     let missing_match = missing_path_count_for_row(row).is_some_and(|count| count > 0);
+    let no_workspace_match = row.scene_workspace_root.is_none();
     let dirty_match = row.dirty();
 
     if !state.file_list_findings_only
         && !state.file_list_missing_only
+        && !state.file_list_no_workspace_only
         && !state.file_list_dirty_only
     {
         return true;
@@ -1142,6 +1144,7 @@ fn file_list_filters_match(row: &SceneRow, state: &PersistedState) -> bool {
 
     (state.file_list_findings_only && findings_match)
         || (state.file_list_missing_only && missing_match)
+        || (state.file_list_no_workspace_only && no_workspace_match)
         || (state.file_list_dirty_only && dirty_match)
 }
 

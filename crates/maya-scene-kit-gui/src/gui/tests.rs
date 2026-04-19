@@ -111,6 +111,7 @@ fn test_state(root: &Path, search_query: &str) -> PersistedState {
         status_filter: StatusFilter::All,
         file_list_findings_only: false,
         file_list_missing_only: false,
+        file_list_no_workspace_only: false,
         file_list_dirty_only: false,
         search_query: search_query.to_string(),
         workspace_files: Vec::new(),
@@ -2145,6 +2146,33 @@ fn compute_visible_rows_filters_to_missing_only() {
 }
 
 #[test]
+fn compute_visible_rows_filters_to_no_workspace_only() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let outside_dir = dir.path().join("outside");
+    fs::create_dir_all(&workspace).expect("mkdir workspace");
+    fs::create_dir_all(&outside_dir).expect("mkdir outside");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let inside = workspace.join("inside.ma");
+    let outside = outside_dir.join("outside.ma");
+    fs::write(&inside, "//Maya ASCII 2026 scene\n").expect("write inside");
+    fs::write(&outside, "//Maya ASCII 2026 scene\n").expect("write outside");
+
+    let mut state = test_state(workspace.as_path(), "");
+    state.file_list_no_workspace_only = true;
+    let visible = compute_visible_row_indices_for(
+        &[test_row(1, &inside), test_row(2, &outside)],
+        &state,
+        FileTableSort {
+            key: FileSortKey::Name,
+            direction: ColumnSort::Ascending,
+        },
+    );
+
+    assert_eq!(visible, vec![1]);
+}
+
+#[test]
 fn compute_visible_rows_combines_findings_missing_filters_with_or_logic() {
     let dir = tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
@@ -2214,6 +2242,50 @@ fn compute_visible_rows_combines_findings_missing_filters_with_or_logic() {
 }
 
 #[test]
+fn compute_visible_rows_combines_no_workspace_with_other_filters_using_or_logic() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let outside_dir = dir.path().join("outside");
+    fs::create_dir_all(workspace.join("textures")).expect("mkdir textures");
+    fs::create_dir_all(&outside_dir).expect("mkdir outside");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(workspace.join("textures/existing.tx"), "tx").expect("write existing");
+    let findings = workspace.join("findings.ma");
+    let no_workspace = outside_dir.join("outside.ma");
+    let hidden = workspace.join("hidden.ma");
+    for path in [&findings, &no_workspace, &hidden] {
+        fs::write(
+            path,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "createNode file -n \"file1\";\n",
+                "    setAttr \".ftn\" -type \"string\" \"textures/existing.tx\";\n",
+            ),
+        )
+        .expect("write scene");
+    }
+
+    let mut findings_row = test_row(1, &findings);
+    findings_row.findings = 1;
+    let no_workspace_row = test_row(2, &no_workspace);
+    let hidden_row = test_row(3, &hidden);
+
+    let mut state = test_state(workspace.as_path(), "");
+    state.file_list_findings_only = true;
+    state.file_list_no_workspace_only = true;
+    let visible = compute_visible_row_indices_for(
+        &[findings_row, no_workspace_row, hidden_row],
+        &state,
+        FileTableSort {
+            key: FileSortKey::Name,
+            direction: ColumnSort::Ascending,
+        },
+    );
+
+    assert_eq!(visible, vec![1, 0]);
+}
+
+#[test]
 fn compute_visible_rows_combines_dirty_with_findings_missing_filters_using_or_logic() {
     let dir = tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
@@ -2259,6 +2331,7 @@ fn compute_visible_rows_combines_dirty_with_findings_missing_filters_using_or_lo
     let mut state = test_state(workspace.as_path(), "");
     state.file_list_findings_only = true;
     state.file_list_missing_only = true;
+    state.file_list_no_workspace_only = true;
     state.file_list_dirty_only = true;
     let visible = compute_visible_row_indices_for(
         &[dirty_row, findings_row, missing_row, hidden_row],
