@@ -98,6 +98,22 @@ impl FileTableDelegate {
         update_file_sort_columns(&mut self.columns, sort);
     }
 
+    pub(in crate::gui) fn replace_rows(
+        &mut self,
+        rows: Vec<(usize, FileTableRow)>,
+        locale: SupportedLocale,
+        sort: FileTableSort,
+    ) {
+        for (row_ix, row) in rows {
+            let Some(existing) = self.rows.get_mut(row_ix) else {
+                continue;
+            };
+            *existing = row;
+        }
+        self.locale = locale;
+        update_file_sort_columns(&mut self.columns, sort);
+    }
+
     pub(super) fn update_sort_columns(&mut self, active_col_ix: usize, sort: ColumnSort) {
         for (col_ix, column) in self.columns.iter_mut().enumerate() {
             if col_ix == active_col_ix {

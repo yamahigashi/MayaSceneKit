@@ -29,8 +29,8 @@ impl GuiShell {
         let path_edit_focus_handle = path_edit_input.read(cx).focus_handle(cx);
         let mut next_row_id = 1u64;
         let analysis_cache_root = default_analysis_cache_root();
-        let observe_cache_root = analysis_cache_root.join("observe-v3");
-        let audit_cache_root = analysis_cache_root.join("audit-v3");
+        let observe_cache_root = analysis_cache_root.join("observe-v4");
+        let audit_cache_root = analysis_cache_root.join("audit-v4");
         let rows = load_rows_from_state(&state, &mut next_row_id);
         let row_id_to_index = rows
             .iter()
@@ -247,6 +247,7 @@ impl GuiShell {
             cache_write_state: CacheWriteState::default(),
             cache_maintenance_generation: 0,
             cache_maintenance_state: CacheMaintenanceState::default(),
+            cache_restore_refresh_state: CacheRestoreRefreshState::default(),
             auto_analyze_refresh_state: AutoAnalyzeRefreshState::default(),
             persist_flush_state: PersistFlushState::default(),
             active_path_edit: None,

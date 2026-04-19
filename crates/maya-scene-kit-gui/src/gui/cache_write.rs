@@ -9,9 +9,9 @@ struct CacheWriteBatch {
     audit: Vec<AuditedSceneSnapshot>,
 }
 
-struct CacheWriteFlushResult {
-    error_count: usize,
-    first_error: Option<String>,
+pub(super) struct CacheWriteFlushResult {
+    pub(super) error_count: usize,
+    pub(super) first_error: Option<String>,
 }
 
 impl GuiShell {
@@ -73,11 +73,17 @@ impl GuiShell {
             return;
         }
 
-        self.cache_write_generation = self.cache_write_generation.wrapping_add(1);
-        let generation = self.cache_write_generation;
+        let cancel_generation = self.cache_write_generation;
         let observe_cache_root = self.observe_cache_root.clone();
         let audit_cache_root = self.audit_cache_root.clone();
         let view = cx.entity();
+        let debounce_generation = if debounced {
+            self.cache_write_state.debounce_generation =
+                self.cache_write_state.debounce_generation.wrapping_add(1);
+            Some(self.cache_write_state.debounce_generation)
+        } else {
+            None
+        };
 
         if debounced {
             self.cache_write_state.debounce_pending = true;
@@ -103,23 +109,10 @@ impl GuiShell {
                         .update_window_entity(
                             &view,
                             |shell: &mut GuiShell,
-                             window: &mut Window,
-                             cx: &mut Context<GuiShell>| {
-                                if shell.cache_write_generation != generation {
-                                    return None;
-                                }
-                                if debounced {
-                                    shell.cache_write_state.debounce_pending = false;
-                                    if !shell.cache_write_has_pending() {
-                                        return None;
-                                    }
-                                    if shell.cache_write_state.in_flight {
-                                        shell.schedule_cache_write_flush(window, cx, true);
-                                        return None;
-                                    }
-                                    shell.cache_write_state.in_flight = true;
-                                }
-                                Some(shell.take_cache_write_batch())
+                             _window: &mut Window,
+                             _cx: &mut Context<GuiShell>| {
+                                shell
+                                    .begin_cache_write_flush(cancel_generation, debounce_generation)
                             },
                         )
                         .ok()
@@ -140,22 +133,57 @@ impl GuiShell {
                         move |shell: &mut GuiShell,
                               window: &mut Window,
                               cx: &mut Context<GuiShell>| {
-                            if shell.cache_write_generation != generation {
-                                return;
-                            }
-                            shell.cache_write_state.in_flight = false;
-                            shell.record_cache_write_flush_result(result);
-                            if shell.cache_write_has_pending() {
-                                shell.schedule_cache_write_flush(window, cx, true);
-                            } else {
-                                shell.finish_cache_write_cycle();
-                            }
+                            shell.finish_cache_write_flush(cancel_generation, result, window, cx);
                             cx.notify();
                         },
                     );
                 }
             })
             .detach();
+    }
+
+    fn begin_cache_write_flush(
+        &mut self,
+        cancel_generation: u64,
+        debounce_generation: Option<u64>,
+    ) -> Option<CacheWriteBatch> {
+        if self.cache_write_generation != cancel_generation {
+            return None;
+        }
+        if let Some(debounce_generation) = debounce_generation {
+            if self.cache_write_state.debounce_generation != debounce_generation {
+                return None;
+            }
+            self.cache_write_state.debounce_pending = false;
+            if !self.cache_write_has_pending() || self.cache_write_state.in_flight {
+                return None;
+            }
+            self.cache_write_state.in_flight = true;
+        }
+        Some(self.take_cache_write_batch())
+    }
+
+    pub(super) fn finish_cache_write_flush(
+        &mut self,
+        cancel_generation: u64,
+        result: CacheWriteFlushResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cache_write_generation != cancel_generation {
+            return;
+        }
+        self.cache_write_state.in_flight = false;
+        self.record_cache_write_flush_result(result);
+        if self.cache_write_has_pending() {
+            self.schedule_cache_write_flush(
+                window,
+                cx,
+                self.pending_cache_write_count() < CACHE_WRITE_IMMEDIATE_THRESHOLD,
+            );
+        } else {
+            self.finish_cache_write_cycle();
+        }
     }
 
     fn take_cache_write_batch(&mut self) -> CacheWriteBatch {

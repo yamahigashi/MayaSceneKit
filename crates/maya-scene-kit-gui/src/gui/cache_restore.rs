@@ -1,6 +1,9 @@
 use super::*;
 
 const CACHE_RESTORE_BATCH_SIZE: usize = 32;
+const CACHE_RESTORE_VISIBLE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
+const CACHE_RESTORE_FULL_REFRESH_DEBOUNCE: Duration = Duration::from_millis(1500);
+const CACHE_RESTORE_PROGRESS_NOTIFY_INTERVAL: usize = CACHE_RESTORE_BATCH_SIZE * 8;
 
 #[derive(Clone)]
 pub(super) struct CacheHydrationInput {
@@ -73,6 +76,7 @@ impl GuiShell {
             return;
         }
         self.cache_restore_generation = self.cache_restore_generation.wrapping_add(1);
+        self.cancel_cache_restore_refresh();
         self.cache_restore_state = CacheRestoreState {
             pending: self.build_cache_restore_queue(),
             total_count: 0,
@@ -96,6 +100,7 @@ impl GuiShell {
     pub(super) fn cancel_progressive_cache_restore(&mut self) {
         self.cache_restore_generation = self.cache_restore_generation.wrapping_add(1);
         self.cache_restore_state = CacheRestoreState::default();
+        self.cancel_cache_restore_refresh();
     }
 
     pub(super) fn prioritize_cache_restore_for_row(&mut self, row_id: u64) {
@@ -216,7 +221,9 @@ impl GuiShell {
                             shell.cache_restore_state.completed_count += result.processed_count;
                             shell.apply_cache_restore_updates(result.updates, window, cx);
                             shell.dispatch_progressive_cache_restore(window, cx);
-                            cx.notify();
+                            if shell.should_notify_cache_restore_progress() {
+                                cx.notify();
+                            }
                         },
                     );
                 }
@@ -224,13 +231,13 @@ impl GuiShell {
             .detach();
     }
 
-    fn apply_cache_restore_updates(
+    pub(super) fn apply_cache_restore_updates(
         &mut self,
         updates: Vec<CacheHydrationUpdate>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut changed = false;
+        let mut changed_row_ids = BTreeSet::new();
         for update in updates {
             let observe_access = update.observe_access.clone();
             let audit_access = update.audit_access.clone();
@@ -246,39 +253,39 @@ impl GuiShell {
                 if row.paths_report.is_none() || row.dump_report.is_none() {
                     row.paths_report = Some(snapshot.paths_report);
                     row.dump_report = Some(snapshot.dump_report);
-                    row.refresh_scene_workspace_root();
-                    row.refresh_path_resolution_cache();
-                    changed = true;
+                    row.invalidate_path_resolution_state();
+                    changed_row_ids.insert(update.row_id);
                 }
             }
 
             if let Some(snapshot) = update.audit_snapshot {
                 if !row.analysis_current_for(self.state.audit_mode) {
-                    row.findings = snapshot.report.findings.len();
-                    row.audit_report = Some(snapshot.report.clone());
+                    let findings = snapshot.report.findings.len();
+                    let parse_budget_blocked = snapshot.report.is_parse_budget_blocked();
+                    let blocked_message = snapshot
+                        .report
+                        .notices
+                        .first()
+                        .map(|notice| notice.message.clone())
+                        .unwrap_or_else(|| "parse budget exceeded".to_string());
+                    row.findings = findings;
+                    row.audit_report = Some(snapshot.report);
                     row.analyzed_audit_mode = Some(self.state.audit_mode);
-                    row.status = if snapshot.report.is_parse_budget_blocked() {
-                        FileStatus::Error(
-                            snapshot
-                                .report
-                                .notices
-                                .first()
-                                .map(|notice| notice.message.clone())
-                                .unwrap_or_else(|| "parse budget exceeded".to_string()),
-                        )
+                    row.status = if parse_budget_blocked {
+                        FileStatus::Error(blocked_message)
                     } else {
                         FileStatus::Audited
                     };
                     row.sync_findings_count();
-                    changed = true;
+                    changed_row_ids.insert(update.row_id);
                 }
             }
 
             self.enqueue_cache_accesses(observe_access, audit_access, window, cx);
         }
 
-        if changed {
-            self.refresh_file_table(cx);
+        if !changed_row_ids.is_empty() {
+            self.queue_cache_restore_refresh(changed_row_ids, window, cx);
         }
     }
 
@@ -288,10 +295,176 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         self.cache_restore_state = CacheRestoreState::default();
+        self.flush_pending_cache_restore_refresh(cx);
         if self.state.workspace_auto_analyze {
             self.run_workspace_auto_analysis(window, cx);
         }
         cx.notify();
+    }
+
+    fn queue_cache_restore_refresh(
+        &mut self,
+        row_ids: BTreeSet<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for row_id in row_ids {
+            if let Some(index) = self.index_of_row_id(row_id) {
+                if self.visible_position_for_row_index(index).is_some() {
+                    self.cache_restore_refresh_state
+                        .pending_visible_row_ids
+                        .insert(row_id);
+                }
+                self.cache_restore_refresh_state.pending_full_refresh = true;
+                self.cache_restore_refresh_state.pending_completion_count += 1;
+            }
+        }
+        if !self
+            .cache_restore_refresh_state
+            .pending_visible_row_ids
+            .is_empty()
+        {
+            self.schedule_cache_restore_visible_refresh(window, cx);
+        }
+        self.schedule_cache_restore_full_refresh(window, cx);
+    }
+
+    fn cancel_cache_restore_refresh(&mut self) {
+        self.cache_restore_refresh_state.visible_generation = self
+            .cache_restore_refresh_state
+            .visible_generation
+            .wrapping_add(1);
+        self.cache_restore_refresh_state.full_generation = self
+            .cache_restore_refresh_state
+            .full_generation
+            .wrapping_add(1);
+        self.cache_restore_refresh_state
+            .pending_visible_row_ids
+            .clear();
+        self.cache_restore_refresh_state.pending_full_refresh = false;
+        self.cache_restore_refresh_state.pending_completion_count = 0;
+    }
+
+    fn schedule_cache_restore_visible_refresh(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cache_restore_refresh_state.visible_generation = self
+            .cache_restore_refresh_state
+            .visible_generation
+            .wrapping_add(1);
+        let generation = self.cache_restore_refresh_state.visible_generation;
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    executor.timer(CACHE_RESTORE_VISIBLE_REFRESH_DEBOUNCE).await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
+                            if shell.cache_restore_refresh_state.visible_generation != generation {
+                                return;
+                            }
+                            shell.flush_cache_restore_visible_refresh(cx);
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn schedule_cache_restore_full_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.cache_restore_refresh_state.pending_full_refresh {
+            return;
+        }
+        self.cache_restore_refresh_state.full_generation = self
+            .cache_restore_refresh_state
+            .full_generation
+            .wrapping_add(1);
+        let generation = self.cache_restore_refresh_state.full_generation;
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    executor.timer(CACHE_RESTORE_FULL_REFRESH_DEBOUNCE).await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
+                            if shell.cache_restore_refresh_state.full_generation != generation {
+                                return;
+                            }
+                            shell.flush_cache_restore_full_refresh(cx);
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn flush_cache_restore_visible_refresh(&mut self, cx: &mut Context<Self>) {
+        let row_ids = std::mem::take(&mut self.cache_restore_refresh_state.pending_visible_row_ids);
+        if row_ids.is_empty() {
+            return;
+        }
+        let patched_any = self.patch_visible_file_rows(&row_ids, cx);
+        if !patched_any
+            && self.cache_restore_refresh_state.pending_full_refresh
+            && !self.cache_restore_active()
+        {
+            self.flush_cache_restore_full_refresh(cx);
+        }
+    }
+
+    fn flush_cache_restore_full_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.cache_restore_refresh_state.pending_full_refresh {
+            return;
+        }
+        self.cache_restore_refresh_state.pending_full_refresh = false;
+        self.cache_restore_refresh_state.pending_completion_count = 0;
+        self.cache_restore_refresh_state
+            .pending_visible_row_ids
+            .clear();
+        self.refresh_file_table(cx);
+    }
+
+    fn flush_pending_cache_restore_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.cache_restore_refresh_state.pending_full_refresh
+            && self
+                .cache_restore_refresh_state
+                .pending_visible_row_ids
+                .is_empty()
+        {
+            return;
+        }
+        self.cache_restore_refresh_state.visible_generation = self
+            .cache_restore_refresh_state
+            .visible_generation
+            .wrapping_add(1);
+        self.cache_restore_refresh_state.full_generation = self
+            .cache_restore_refresh_state
+            .full_generation
+            .wrapping_add(1);
+        self.cache_restore_refresh_state
+            .pending_visible_row_ids
+            .clear();
+        self.cache_restore_refresh_state.pending_full_refresh = false;
+        self.cache_restore_refresh_state.pending_completion_count = 0;
+        self.refresh_file_table(cx);
+    }
+
+    fn should_notify_cache_restore_progress(&self) -> bool {
+        self.cache_restore_state.completed_count >= self.cache_restore_state.total_count
+            || self
+                .cache_restore_state
+                .completed_count
+                .is_multiple_of(CACHE_RESTORE_PROGRESS_NOTIFY_INTERVAL)
     }
 }
 

@@ -362,6 +362,8 @@ impl GuiShell {
         }
         self.refresh_file_table(cx);
         self.refresh_app_menus(window, cx);
+        self.schedule_cache_sweep(window, cx);
+        self.schedule_periodic_cache_sweep(window, cx);
         self.start_progressive_cache_restore(window, cx);
         self.schedule_workspace_auto_analysis_if_enabled(window, cx);
         self.persist();
@@ -451,6 +453,8 @@ impl GuiShell {
         self.refresh_app_menus(window, cx);
         self.persist();
         if enabled {
+            self.schedule_cache_sweep(window, cx);
+            self.schedule_periodic_cache_sweep(window, cx);
             self.start_progressive_cache_restore(window, cx);
         }
         cx.notify();
@@ -470,6 +474,8 @@ impl GuiShell {
             legacy_root.join("audit-v2"),
             legacy_root.join("observe-v3"),
             legacy_root.join("audit-v3"),
+            legacy_root.join("observe-v4"),
+            legacy_root.join("audit-v4"),
         ];
         let purge_result = cache_roots.into_iter().fold(Ok(()), |result, root| {
             result.and_then(|()| purge_cache_dir(&root))
@@ -695,6 +701,43 @@ impl GuiShell {
             table
                 .delegate_mut()
                 .replace_row(visible_index, patched, i18n.locale(), self.file_sort);
+            table.refresh(cx);
+        });
+        true
+    }
+
+    pub(super) fn patch_visible_file_rows(
+        &mut self,
+        row_ids: &BTreeSet<u64>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if row_ids.is_empty() {
+            return false;
+        }
+        let i18n = self.i18n();
+        let mut patched_rows = Vec::new();
+        for row_id in row_ids {
+            let Some(index) = self.index_of_row_id(*row_id) else {
+                continue;
+            };
+            let Some(visible_index) = self.visible_position_for_row_index(index) else {
+                continue;
+            };
+            let Some(row) = self.rows.get(index) else {
+                continue;
+            };
+            patched_rows.push((
+                visible_index,
+                build_single_file_table_row(row, &self.state, &i18n),
+            ));
+        }
+        if patched_rows.is_empty() {
+            return false;
+        }
+        self.file_table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .replace_rows(patched_rows, i18n.locale(), self.file_sort);
             table.refresh(cx);
         });
         true

@@ -379,6 +379,7 @@ impl AuditCacheStore {
             .collect::<Vec<_>>();
         let deleted_blob_count = delete_blob_files(self.blobs_dir(), &orphaned_paths)?;
         let deleted_temp_count = delete_stale_temp_files(self.blobs_dir())?;
+        self.compact_database(&conn, expired_record_count > 0)?;
         Ok(AuditCacheMaintenanceStats {
             touched_count: 0,
             expired_record_count,
@@ -751,7 +752,8 @@ impl AuditCacheStore {
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(sqlite_io_error)?;
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS path_index (
                  normalized_path TEXT PRIMARY KEY,
                  size INTEGER NOT NULL,
@@ -771,6 +773,15 @@ impl AuditCacheStore {
         )
         .map_err(sqlite_io_error)?;
         Ok(conn)
+    }
+
+    fn compact_database(&self, conn: &Connection, reclaim_pages: bool) -> io::Result<()> {
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(sqlite_io_error)?;
+        if reclaim_pages {
+            conn.execute_batch("VACUUM;").map_err(sqlite_io_error)?;
+        }
+        Ok(())
     }
 
     fn blobs_dir(&self) -> PathBuf {
