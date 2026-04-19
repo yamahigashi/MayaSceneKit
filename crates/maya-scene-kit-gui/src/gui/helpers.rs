@@ -587,13 +587,12 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                     .unwrap_or_else(|| entry.value.clone());
                 let is_dirty = row.path_overrides.contains_key(&entry_index)
                     || path_owner_delete_dirty_for_entry(row, entry_index);
-                let resolution = row
-                    .path_resolution(entry_index, &value)
-                    .cloned()
-                    .or_else(|| row.path_resolution_fallback(entry_index, &value));
-                let value_style = resolution.as_ref().map(|resolution| resolution.style);
-                let path_form =
-                    path_form_for_style(value_style.unwrap_or(ScenePathValueStyle::Absolute));
+                let resolution = row.path_resolution(entry_index, &value).cloned();
+                let value_style = resolution
+                    .as_ref()
+                    .map(|resolution| resolution.style)
+                    .unwrap_or_else(|| infer_scene_path_value_style(&value));
+                let path_form = path_form_for_style(value_style);
                 let resolution_badge =
                     resolution
                         .as_ref()
@@ -632,7 +631,7 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                             scene_names: BTreeSet::new(),
                             node_names: BTreeSet::new(),
                             value: value.clone(),
-                            value_style,
+                            value_style: Some(value_style),
                             dirty: false,
                             resolution_badge,
                             owner_deletable: true,
@@ -674,7 +673,7 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                         scene: scene.clone(),
                         node,
                         value,
-                        value_style,
+                        value_style: Some(value_style),
                         dirty: is_dirty,
                         resolution_badge,
                         editable: super::path_edit::path_value_edit_supported_for_entry(
@@ -695,13 +694,8 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                 if !path_type_filter.contains(&path_kind) {
                     continue;
                 }
-                let path_form = path_form_for_style(
-                    resolve_scene_path_value(
-                        &item.after_value,
-                        row.scene_workspace_root.as_deref(),
-                    )
-                    .style,
-                );
+                let path_form =
+                    path_form_for_style(infer_scene_path_value_style(&item.after_value));
                 if !path_form_filter.contains(&path_form) {
                     continue;
                 }
@@ -914,6 +908,19 @@ pub(super) fn path_type_for_node_type(node_type: &str) -> PathTypeFilter {
     } else {
         PathTypeFilter::File
     }
+}
+
+pub(super) fn infer_scene_path_value_style(value: &str) -> ScenePathValueStyle {
+    if value.starts_with("\\") {
+        return ScenePathValueStyle::UncAbsolute;
+    }
+    if value.starts_with("//") {
+        return ScenePathValueStyle::DoubleSlashWorkspaceRelative;
+    }
+    if value.contains(':') || value.starts_with('/') {
+        return ScenePathValueStyle::Absolute;
+    }
+    ScenePathValueStyle::PlainRelative
 }
 
 pub(super) fn path_form_for_style(style: ScenePathValueStyle) -> PathFormFilter {

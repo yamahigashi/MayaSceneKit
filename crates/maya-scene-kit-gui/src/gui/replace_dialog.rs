@@ -417,7 +417,7 @@ impl GuiShell {
 
         self.clear_replace_dialog_state(window, cx);
         window.close_dialog(cx);
-        self.set_tab(ResultTab::Paths, cx);
+        self.set_tab(ResultTab::Paths, window, cx);
         cx.notify();
     }
 

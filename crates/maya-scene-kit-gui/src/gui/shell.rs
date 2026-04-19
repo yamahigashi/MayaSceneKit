@@ -249,6 +249,7 @@ impl GuiShell {
             cache_maintenance_state: CacheMaintenanceState::default(),
             cache_restore_refresh_state: CacheRestoreRefreshState::default(),
             auto_analyze_refresh_state: AutoAnalyzeRefreshState::default(),
+            path_resolution_refresh_state: PathResolutionRefreshState::default(),
             persist_flush_state: PersistFlushState::default(),
             active_path_edit: None,
             selected_path_rows: BTreeSet::new(),

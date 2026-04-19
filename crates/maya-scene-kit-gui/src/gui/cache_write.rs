@@ -1,6 +1,7 @@
 use super::*;
 
 const CACHE_WRITE_DEBOUNCE: Duration = Duration::from_secs(1);
+const CACHE_WRITE_AUTO_ANALYZE_DEBOUNCE: Duration = Duration::from_secs(3);
 const CACHE_WRITE_BATCH_SIZE: usize = 256;
 const CACHE_WRITE_IMMEDIATE_THRESHOLD: usize = 2048;
 
@@ -39,7 +40,8 @@ impl GuiShell {
         self.schedule_cache_write_flush(
             window,
             cx,
-            self.pending_cache_write_count() < CACHE_WRITE_IMMEDIATE_THRESHOLD,
+            self.cache_write_should_debounce(),
+            self.cache_write_flush_delay(),
         );
     }
 
@@ -63,11 +65,40 @@ impl GuiShell {
         self.cache_write_state.pending_audit.insert(key, snapshot);
     }
 
+    pub(super) fn flush_cache_writes_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.cache_write_has_pending() || self.cache_write_state.in_flight {
+            return;
+        }
+        self.cache_write_state.debounce_generation =
+            self.cache_write_state.debounce_generation.wrapping_add(1);
+        self.cache_write_state.debounce_pending = false;
+        self.schedule_cache_write_flush(window, cx, false, CACHE_WRITE_DEBOUNCE);
+    }
+
+    fn cache_write_should_debounce(&self) -> bool {
+        self.cache_persistence_backpressure_active()
+            || self.pending_cache_write_count() < CACHE_WRITE_IMMEDIATE_THRESHOLD
+    }
+
+    fn cache_write_flush_delay(&self) -> Duration {
+        if self.cache_persistence_backpressure_active() {
+            CACHE_WRITE_AUTO_ANALYZE_DEBOUNCE
+        } else {
+            CACHE_WRITE_DEBOUNCE
+        }
+    }
+
+    pub(super) fn cache_persistence_backpressure_active(&self) -> bool {
+        self.workspace_auto_analyze_started_at.is_some()
+            || self.auto_analyze_queue.remaining_count() > 0
+    }
+
     fn schedule_cache_write_flush(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         debounced: bool,
+        delay: Duration,
     ) {
         if !self.cache_write_has_pending() {
             return;
@@ -102,7 +133,7 @@ impl GuiShell {
                 let mut async_cx = cx.clone();
                 async move {
                     if debounced {
-                        executor.timer(CACHE_WRITE_DEBOUNCE).await;
+                        executor.timer(delay).await;
                     }
 
                     let batch = async_cx
@@ -179,7 +210,8 @@ impl GuiShell {
             self.schedule_cache_write_flush(
                 window,
                 cx,
-                self.pending_cache_write_count() < CACHE_WRITE_IMMEDIATE_THRESHOLD,
+                self.cache_write_should_debounce(),
+                self.cache_write_flush_delay(),
             );
         } else {
             self.finish_cache_write_cycle();

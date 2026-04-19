@@ -3,8 +3,62 @@ use std::ops::Range;
 use super::*;
 
 const AUTO_ANALYZE_VISIBLE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
-const AUTO_ANALYZE_FULL_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
-const AUTO_ANALYZE_FULL_REFRESH_THRESHOLD: usize = 64;
+const AUTO_ANALYZE_FULL_REFRESH_DEBOUNCE: Duration = Duration::from_millis(1500);
+const AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL: usize = 32;
+const PATH_RESOLUTION_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
+
+struct PathResolutionRefreshInput {
+    row_id: u64,
+    revision: u64,
+    scene_path: PathBuf,
+    scene_workspace_root: Option<PathBuf>,
+    effective_values: Vec<(usize, String)>,
+}
+
+struct PathResolutionRefreshOutput {
+    row_id: u64,
+    revision: u64,
+    scene_workspace_root: Option<PathBuf>,
+    path_resolution_cache: BTreeMap<usize, PathResolutionCacheEntry>,
+    missing_path_count_cache: Option<usize>,
+}
+
+fn resolve_path_resolution_refresh_input(
+    input: PathResolutionRefreshInput,
+) -> PathResolutionRefreshOutput {
+    let scene_workspace_root = input
+        .scene_workspace_root
+        .or_else(|| find_scene_workspace_root(&input.scene_path));
+    let workspace_root = scene_workspace_root.as_deref();
+    let path_resolution_cache = input
+        .effective_values
+        .into_iter()
+        .map(|(entry_index, effective_value)| {
+            let resolution = resolve_scene_path_value(&effective_value, workspace_root);
+            (
+                entry_index,
+                PathResolutionCacheEntry {
+                    effective_value,
+                    resolution,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let missing_path_count_cache = Some(
+        path_resolution_cache
+            .values()
+            .filter(|entry| matches!(entry.resolution.status, ScenePathResolutionStatus::Missing))
+            .count(),
+    );
+
+    PathResolutionRefreshOutput {
+        row_id: input.row_id,
+        revision: input.revision,
+        scene_workspace_root,
+        path_resolution_cache,
+        missing_path_count_cache,
+    }
+}
 
 impl GuiShell {
     pub(super) fn toggle_workspace_auto_analyze(
@@ -56,9 +110,12 @@ impl GuiShell {
         self.refresh_audit_table(cx);
     }
 
-    pub(super) fn set_tab(&mut self, tab: ResultTab, cx: &mut Context<Self>) {
+    pub(super) fn set_tab(&mut self, tab: ResultTab, window: &mut Window, cx: &mut Context<Self>) {
         self.state.active_tab = tab;
         self.refresh_file_table(cx);
+        if matches!(tab, ResultTab::Paths) {
+            self.schedule_selected_path_resolution_refresh(window, cx);
+        }
         self.persist();
     }
 
@@ -119,6 +176,7 @@ impl GuiShell {
             return;
         }
         self.file_table_viewport_range = visible_range;
+        self.sync_visible_path_resolution_refresh(window, cx);
         if self.state.workspace_auto_analyze && self.cache_restore_active() {
             self.sync_viewport_auto_analyze(window, cx);
         }
@@ -326,7 +384,6 @@ impl GuiShell {
                         &view,
                         |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {
                             shell.finish_auto_analyze_job(row_id, generation, result, window, cx);
-                            cx.notify();
                         },
                     );
                 }
@@ -353,11 +410,273 @@ impl GuiShell {
         }
         if self.auto_analyze_queue.generation == generation {
             self.dispatch_auto_analyze_jobs(window, cx);
-            self.maybe_finish_workspace_auto_analyze_batch(cx);
+            if self.auto_analyze_queue.remaining_count() == 0 {
+                self.flush_pending_auto_analyze_refresh(cx);
+            }
+            self.maybe_finish_workspace_auto_analyze_batch(window, cx);
+        }
+        if self.should_notify_auto_analyze_progress(row_id) {
+            cx.notify();
         }
     }
 
-    fn maybe_finish_workspace_auto_analyze_batch(&mut self, cx: &mut Context<Self>) {
+    fn selected_path_resolution_row_ids(&self) -> Vec<u64> {
+        if !matches!(self.state.active_tab, ResultTab::Paths) {
+            return Vec::new();
+        }
+        self.rows
+            .iter()
+            .filter(|row| row.selected && row.needs_path_resolution_refresh())
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn visible_path_resolution_row_ids(&self) -> Vec<u64> {
+        let end = self
+            .file_table_viewport_range
+            .end
+            .min(self.visible_rows.len());
+        let start = self.file_table_viewport_range.start.min(end);
+        self.visible_rows[start..end]
+            .iter()
+            .filter_map(|row_ix| self.rows.get(*row_ix))
+            .filter(|row| row.needs_path_resolution_refresh())
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn queue_path_resolution_refresh_for_row_id(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.index_of_row_id(row_id) else {
+            return;
+        };
+        let row = &self.rows[index];
+        let needs_refresh = row.needs_path_resolution_refresh()
+            && (self.visible_position_for_row_index(index).is_some()
+                || (row.selected && matches!(self.state.active_tab, ResultTab::Paths)));
+        if !needs_refresh {
+            return;
+        }
+        self.path_resolution_refresh_state
+            .pending_row_ids
+            .insert(row_id);
+        self.schedule_path_resolution_refresh(window, cx);
+    }
+
+    pub(super) fn schedule_selected_path_resolution_refresh(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.selected_path_resolution_row_ids();
+        if targets.is_empty() {
+            return;
+        }
+        self.path_resolution_refresh_state
+            .pending_row_ids
+            .extend(targets);
+        self.schedule_path_resolution_refresh(window, cx);
+    }
+
+    fn sync_visible_path_resolution_refresh(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets = self.visible_path_resolution_row_ids();
+        if targets.is_empty() {
+            return;
+        }
+        self.path_resolution_refresh_state
+            .pending_row_ids
+            .extend(targets);
+        self.schedule_path_resolution_refresh(window, cx);
+    }
+
+    fn schedule_path_resolution_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.path_resolution_refresh_state.in_flight {
+            return;
+        }
+        self.path_resolution_refresh_state.debounce_generation = self
+            .path_resolution_refresh_state
+            .debounce_generation
+            .wrapping_add(1);
+        let generation = self.path_resolution_refresh_state.debounce_generation;
+        if self.path_resolution_refresh_state.debounce_pending {
+            return;
+        }
+        self.path_resolution_refresh_state.debounce_pending = true;
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    executor.timer(PATH_RESOLUTION_REFRESH_DEBOUNCE).await;
+                    let inputs = async_cx
+                        .update_window_entity(
+                            &view,
+                            |shell: &mut GuiShell,
+                             _window: &mut Window,
+                             _cx: &mut Context<GuiShell>| {
+                                if shell.path_resolution_refresh_state.debounce_generation
+                                    != generation
+                                {
+                                    return None;
+                                }
+                                shell.path_resolution_refresh_state.debounce_pending = false;
+                                if shell.path_resolution_refresh_state.in_flight {
+                                    return None;
+                                }
+                                let row_ids = std::mem::take(
+                                    &mut shell.path_resolution_refresh_state.pending_row_ids,
+                                );
+                                let mut inputs = Vec::new();
+                                for row_id in row_ids {
+                                    let Some(index) = shell.index_of_row_id(row_id) else {
+                                        continue;
+                                    };
+                                    let row = &shell.rows[index];
+                                    let Some(report) = row.display_paths_report() else {
+                                        continue;
+                                    };
+                                    if !row.needs_path_resolution_refresh() {
+                                        continue;
+                                    }
+                                    let effective_values = report
+                                        .entries
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(entry_index, entry)| {
+                                            (
+                                                entry_index,
+                                                row.path_overrides
+                                                    .get(&entry_index)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| entry.value.clone()),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    inputs.push(PathResolutionRefreshInput {
+                                        row_id,
+                                        revision: row.path_resolution_revision,
+                                        scene_path: row.path.clone(),
+                                        scene_workspace_root: row.scene_workspace_root.clone(),
+                                        effective_values,
+                                    });
+                                }
+                                if inputs.is_empty() {
+                                    return None;
+                                }
+                                shell.path_resolution_refresh_state.in_flight = true;
+                                Some(inputs)
+                            },
+                        )
+                        .ok()
+                        .flatten();
+
+                    let Some(inputs) = inputs else {
+                        return;
+                    };
+
+                    let results = executor
+                        .spawn(async move {
+                            inputs
+                                .into_iter()
+                                .map(resolve_path_resolution_refresh_input)
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        move |shell: &mut GuiShell,
+                              window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
+                            let mut patched_visible = BTreeSet::new();
+                            let mut refresh_paths = false;
+                            shell.path_resolution_refresh_state.in_flight = false;
+                            for result in results {
+                                let Some(index) = shell.index_of_row_id(result.row_id) else {
+                                    continue;
+                                };
+                                let visible = shell.visible_position_for_row_index(index).is_some();
+                                let selected_paths_active = shell.rows[index].selected
+                                    && matches!(shell.state.active_tab, ResultTab::Paths);
+                                let row = &mut shell.rows[index];
+                                if row.path_resolution_revision != result.revision {
+                                    continue;
+                                }
+                                row.set_path_resolution_state(
+                                    result.scene_workspace_root,
+                                    result.path_resolution_cache,
+                                    result.missing_path_count_cache,
+                                );
+                                if visible {
+                                    patched_visible.insert(result.row_id);
+                                }
+                                if selected_paths_active {
+                                    refresh_paths = true;
+                                }
+                            }
+                            if !patched_visible.is_empty() {
+                                shell.patch_visible_file_rows(&patched_visible, cx);
+                            }
+                            if refresh_paths {
+                                shell.refresh_path_table(cx);
+                            }
+                            if !shell
+                                .path_resolution_refresh_state
+                                .pending_row_ids
+                                .is_empty()
+                            {
+                                shell.schedule_path_resolution_refresh(window, cx);
+                            }
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn refresh_selected_auto_analyze_details(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.state.active_tab {
+            ResultTab::Audit => self.refresh_audit_table(cx),
+            ResultTab::Paths => {
+                self.refresh_path_table(cx);
+                self.schedule_selected_path_resolution_refresh(window, cx);
+            }
+            ResultTab::Overview | ResultTab::Log => {}
+        }
+    }
+
+    fn should_notify_auto_analyze_progress(&self, row_id: u64) -> bool {
+        self.auto_analyze_refresh_state.pending_completion_count == 0
+            || self.auto_analyze_refresh_state.pending_completion_count == 1
+            || self
+                .auto_analyze_refresh_state
+                .pending_completion_count
+                .is_multiple_of(AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL)
+            || self.workspace_auto_analyze_started_at.is_none()
+            || self.index_of_row_id(row_id).is_some_and(|index| {
+                self.rows[index].selected || self.visible_position_for_row_index(index).is_some()
+            })
+    }
+
+    pub(super) fn maybe_finish_workspace_auto_analyze_batch(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(started_at) = self.workspace_auto_analyze_started_at else {
             return;
         };
@@ -376,6 +695,8 @@ impl GuiShell {
         self.flush_pending_auto_analyze_refresh(cx);
         self.flush_persist_now(false);
         self.workspace_auto_analyze_started_at = None;
+        self.flush_cache_writes_now(window, cx);
+        self.flush_cache_maintenance_now(window, cx);
         self.status_message = Some(BannerMessage::WorkspaceAutoAnalyzeCompleted {
             count: self.rows.len(),
             elapsed: started_at.elapsed(),
@@ -393,7 +714,7 @@ impl GuiShell {
         };
 
         if self.rows[index].selected {
-            self.refresh_selected_result_tables(cx);
+            self.refresh_selected_auto_analyze_details(window, cx);
         }
 
         if self.visible_position_for_row_index(index).is_some() {
@@ -403,14 +724,9 @@ impl GuiShell {
             self.schedule_auto_analyze_visible_refresh(window, cx);
         }
 
+        self.queue_path_resolution_refresh_for_row_id(row_id, window, cx);
         self.auto_analyze_refresh_state.pending_full_refresh = true;
         self.auto_analyze_refresh_state.pending_completion_count += 1;
-        if self.auto_analyze_refresh_state.pending_completion_count
-            >= AUTO_ANALYZE_FULL_REFRESH_THRESHOLD
-        {
-            self.flush_auto_analyze_full_refresh(cx);
-            return;
-        }
         self.schedule_auto_analyze_full_refresh(window, cx);
     }
 
@@ -463,6 +779,9 @@ impl GuiShell {
     }
 
     fn schedule_auto_analyze_full_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.auto_analyze_refresh_state.pending_full_refresh {
+            return;
+        }
         self.auto_analyze_refresh_state.full_generation = self
             .auto_analyze_refresh_state
             .full_generation
@@ -495,10 +814,7 @@ impl GuiShell {
         if row_ids.is_empty() {
             return;
         }
-        let mut patched_any = false;
-        for row_id in row_ids {
-            patched_any |= self.patch_visible_file_row(row_id, cx);
-        }
+        let patched_any = self.patch_visible_file_rows(&row_ids, cx);
         if !patched_any && self.auto_analyze_refresh_state.pending_full_refresh {
             self.flush_auto_analyze_full_refresh(cx);
         }
@@ -506,6 +822,9 @@ impl GuiShell {
 
     fn flush_auto_analyze_full_refresh(&mut self, cx: &mut Context<Self>) {
         if !self.auto_analyze_refresh_state.pending_full_refresh {
+            return;
+        }
+        if self.auto_analyze_queue.remaining_count() > 0 {
             return;
         }
         self.auto_analyze_refresh_state.pending_full_refresh = false;

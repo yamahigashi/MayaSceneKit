@@ -203,6 +203,7 @@ struct GuiShell {
     cache_maintenance_state: CacheMaintenanceState,
     cache_restore_refresh_state: CacheRestoreRefreshState,
     auto_analyze_refresh_state: AutoAnalyzeRefreshState,
+    path_resolution_refresh_state: PathResolutionRefreshState,
     persist_flush_state: PersistFlushState,
     active_path_edit: Option<Vec<(u64, usize)>>,
     selected_path_rows: BTreeSet<PathEditTargets>,
@@ -313,6 +314,14 @@ struct AutoAnalyzeRefreshState {
     pending_visible_row_ids: BTreeSet<u64>,
     pending_full_refresh: bool,
     pending_completion_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct PathResolutionRefreshState {
+    debounce_generation: u64,
+    debounce_pending: bool,
+    in_flight: bool,
+    pending_row_ids: BTreeSet<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -644,6 +653,7 @@ struct SceneRow {
     path_overrides: BTreeMap<usize, String>,
     path_resolution_cache: BTreeMap<usize, PathResolutionCacheEntry>,
     missing_path_count_cache: Option<usize>,
+    path_resolution_revision: u64,
     replace_generation: u64,
     replace_artifact_generation: Option<u64>,
 }
@@ -1067,6 +1077,7 @@ impl SceneRow {
             path_overrides: BTreeMap::new(),
             path_resolution_cache: BTreeMap::new(),
             missing_path_count_cache: None,
+            path_resolution_revision: 0,
             replace_generation: 0,
             replace_artifact_generation: None,
         }
@@ -1077,6 +1088,7 @@ impl SceneRow {
     }
 
     fn invalidate_path_resolution_state(&mut self) {
+        self.path_resolution_revision = self.path_resolution_revision.wrapping_add(1);
         self.path_resolution_cache.clear();
         self.missing_path_count_cache = None;
     }
@@ -1117,6 +1129,11 @@ impl SceneRow {
             return;
         };
 
+        if self.path_resolution_cache.len() != report.entries.len() {
+            self.missing_path_count_cache = None;
+            return;
+        }
+
         self.missing_path_count_cache = Some(
             report
                 .entries
@@ -1128,16 +1145,24 @@ impl SceneRow {
                         .get(entry_index)
                         .map(String::as_str)
                         .unwrap_or(entry.value.as_str());
-                    let resolution = self
-                        .path_resolution(*entry_index, effective_value)
-                        .cloned()
-                        .or_else(|| self.path_resolution_fallback(*entry_index, effective_value));
+                    let resolution = self.path_resolution(*entry_index, effective_value);
                     resolution.is_some_and(|resolution| {
                         matches!(resolution.status, ScenePathResolutionStatus::Missing)
                     })
                 })
                 .count(),
         );
+    }
+
+    fn set_path_resolution_state(
+        &mut self,
+        scene_workspace_root: Option<PathBuf>,
+        path_resolution_cache: BTreeMap<usize, PathResolutionCacheEntry>,
+        missing_path_count_cache: Option<usize>,
+    ) {
+        self.scene_workspace_root = scene_workspace_root;
+        self.path_resolution_cache = path_resolution_cache;
+        self.missing_path_count_cache = missing_path_count_cache;
     }
 
     fn path_resolution(
@@ -1203,6 +1228,14 @@ impl SceneRow {
 
     fn missing_path_count(&self) -> Option<usize> {
         self.missing_path_count_cache
+    }
+
+    fn needs_path_resolution_refresh(&self) -> bool {
+        self.display_paths_report().is_some()
+            && (self.missing_path_count_cache.is_none()
+                || self
+                    .display_paths_report()
+                    .is_some_and(|report| self.path_resolution_cache.len() != report.entries.len()))
     }
 
     fn scene_edits_are_staged(&self) -> bool {
