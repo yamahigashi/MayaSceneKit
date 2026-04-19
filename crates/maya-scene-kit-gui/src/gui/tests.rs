@@ -3907,6 +3907,10 @@ fn purge_analysis_cache_removes_cache_directories(cx: &mut TestAppContext) {
     visual_cx.run_until_parked();
     visual_cx.simulate_prompt_answer("Purge cache");
     visual_cx.run_until_parked();
+    visual_cx
+        .executor()
+        .advance_clock(Duration::from_millis(50));
+    visual_cx.run_until_parked();
 
     shell.update_in(visual_cx, |shell, _window, _cx| {
         assert!(!shell.observe_cache_root.exists());
@@ -4530,6 +4534,63 @@ fn path_table_model_uses_cached_only_resolution_for_passive_render() {
 
     assert!(!model.rows.is_empty());
     assert!(model.rows.iter().all(|row| row.resolution_badge.is_none()));
+}
+
+#[gpui::test]
+fn analyze_result_backlog_resolves_noninteractive_missing_counts(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("textures")).expect("mkdir textures");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let scene = workspace.join("backlog_missing.ma");
+    fs::write(
+        &scene,
+        r#"//Maya ASCII 2026 scene
+createNode file -n "file1";
+    setAttr ".ftn" -type "string" "textures/missing.tx";
+"#,
+    )
+    .expect("write scene");
+
+    let analyze_result =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze result");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(workspace.as_path(), "excluded");
+        shell.rows = vec![test_row(1, &scene)];
+        shell.refresh_file_table(cx);
+        shell.update_file_table_viewport_range(0..0, window, cx);
+        assert!(shell.visible_rows.is_empty());
+
+        shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+
+        assert!(shell.rows[0].display_paths_report().is_some());
+        assert!(
+            shell
+                .path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .contains(&1)
+        );
+        assert_eq!(shell.rows[0].missing_path_count(), None);
+    });
+
+    visual_cx.run_until_parked();
+    visual_cx
+        .executor()
+        .advance_clock(Duration::from_millis(50));
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, _window, _cx| {
+        assert_eq!(shell.rows[0].missing_path_count(), Some(1));
+        assert_eq!(shell.rows[0].path_resolution_cache.len(), 1);
+        assert!(
+            shell
+                .path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .is_empty()
+        );
+    });
 }
 
 #[gpui::test]

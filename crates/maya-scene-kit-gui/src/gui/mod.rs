@@ -54,7 +54,7 @@ use maya_scene_kit_observe::scene::paths::{
 };
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, collect_scene_paths_with_options, find_scene_workspace_root,
-    resolve_scene_path_value,
+    resolve_scene_path_value, resolve_scene_path_values_batch,
 };
 use maya_scene_kit_observe::scene::{ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot};
 
@@ -321,7 +321,8 @@ struct PathResolutionRefreshState {
     debounce_generation: u64,
     debounce_pending: bool,
     in_flight: bool,
-    pending_row_ids: BTreeSet<u64>,
+    pending_priority_row_ids: BTreeSet<u64>,
+    pending_backlog_row_ids: BTreeSet<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -1100,17 +1101,30 @@ impl SceneRow {
         };
 
         let workspace_root = self.scene_workspace_root.as_deref();
-        self.path_resolution_cache = report
+        let effective_values = report
             .entries
             .iter()
             .enumerate()
             .map(|(entry_index, entry)| {
-                let effective_value = self
-                    .path_overrides
-                    .get(&entry_index)
-                    .cloned()
-                    .unwrap_or_else(|| entry.value.clone());
-                let resolution = resolve_scene_path_value(&effective_value, workspace_root);
+                (
+                    entry_index,
+                    self.path_overrides
+                        .get(&entry_index)
+                        .cloned()
+                        .unwrap_or_else(|| entry.value.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let resolutions = resolve_scene_path_values_batch(
+            effective_values
+                .iter()
+                .map(|(_, effective_value)| effective_value.as_str()),
+            workspace_root,
+        );
+        self.path_resolution_cache = effective_values
+            .into_iter()
+            .zip(resolutions)
+            .map(|((entry_index, effective_value), resolution)| {
                 (
                     entry_index,
                     PathResolutionCacheEntry {

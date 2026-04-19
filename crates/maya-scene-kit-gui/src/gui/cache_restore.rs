@@ -308,17 +308,19 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for row_id in row_ids {
-            if let Some(index) = self.index_of_row_id(row_id) {
+        let row_ids = row_ids.into_iter().collect::<Vec<_>>();
+        for row_id in &row_ids {
+            if let Some(index) = self.index_of_row_id(*row_id) {
                 if self.visible_position_for_row_index(index).is_some() {
                     self.cache_restore_refresh_state
                         .pending_visible_row_ids
-                        .insert(row_id);
+                        .insert(*row_id);
                 }
                 self.cache_restore_refresh_state.pending_full_refresh = true;
                 self.cache_restore_refresh_state.pending_completion_count += 1;
             }
         }
+        self.queue_path_resolution_backlog_for_row_ids(row_ids.iter().copied(), window, cx);
         if !self
             .cache_restore_refresh_state
             .pending_visible_row_ids

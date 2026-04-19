@@ -67,7 +67,9 @@ pub use self::{
         ObserveCacheStore, ObservedSceneSnapshot,
     },
     public::{AsciiDecodePolicy, OperationMode, SceneFormat, ValidationState},
-    query::resolve::{find_scene_workspace_root, resolve_scene_path_value},
+    query::resolve::{
+        find_scene_workspace_root, resolve_scene_path_value, resolve_scene_path_values_batch,
+    },
     source::{
         LoadOptions, Loader, ObservationBundle, check_script_nodes,
         check_script_nodes_with_options, collect_scene_dump, collect_scene_dump_with_options,
