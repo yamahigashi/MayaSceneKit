@@ -417,9 +417,7 @@ fn unique_test_analysis_cache_root() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "maya-scene-kit-gui-test-cache-{nanos}-{unique_id}"
-    ))
+    std::env::temp_dir().join(format!("maya-scene-kit-gui-test-cache-{nanos}-{unique_id}"))
 }
 
 fn seed_file_table_selection_test_state(
