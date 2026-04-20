@@ -12,7 +12,10 @@ impl GuiShell {
                 &i18n,
                 &self.workspace_caption(&i18n),
                 &self.search_input,
-                i18n.format("log.files", &[("count", self.visible_rows.len().to_string())]),
+                i18n.format(
+                    "log.files",
+                    &[("count", self.visible_rows.len().to_string())],
+                ),
                 self.state.file_list_findings_only,
                 self.state.file_list_missing_only,
                 self.state.file_list_no_workspace_only,
