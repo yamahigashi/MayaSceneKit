@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build_linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -27,7 +27,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install build dependencies
+      - name: Install Linux GUI dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -36,61 +36,23 @@ jobs:
             libfreetype6-dev \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            binutils-mingw-w64-x86-64 \
-            gcc-mingw-w64-x86-64 \
-            g++-mingw-w64-x86-64
-
-      - name: Add Rust targets
-        run: |
-          rustup target add x86_64-unknown-linux-gnu
-          rustup target add x86_64-pc-windows-gnu
-          rustup target list --installed
+            libxkbcommon-x11-dev
 
       - name: Run tests
         run: cargo test --workspace --locked
 
-      - name: Release build for Linux binaries
+      - name: Build Linux binaries
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu -p maya-scene-kit-cli -p maya-scene-kit-gui
 
-      - name: Release build for Windows binaries
-        run: cargo build --release --locked --target x86_64-pc-windows-gnu -p maya-scene-kit-cli -p maya-scene-kit-gui
-
-      - name: Build Python wheel
-        run: uv run --with maturin maturin build --release --features extension-module --manifest-path crates/maya-scene-kit-python/Cargo.toml
-
-      - name: Package binaries
+      - name: Package Linux binaries
         run: |
           mkdir -p release
           linux_dir="release/maya-scene-kit-${{ github.ref_name }}-linux"
-          windows_dir="release/maya-scene-kit-${{ github.ref_name }}-windows"
-          mkdir -p "$linux_dir" "$windows_dir"
-
-          # Linux binary archive contents
+          mkdir -p "$linux_dir"
           cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit "$linux_dir/maya-scene-kit"
           cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit-gui "$linux_dir/maya-scene-kit-gui"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "$linux_dir/"
           tar czf release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz -C release "maya-scene-kit-${{ github.ref_name }}-linux"
-
-          # Windows binary archive contents
-          cp target/x86_64-pc-windows-gnu/release/maya-scene-kit.exe "$windows_dir/maya-scene-kit.exe"
-          cp target/x86_64-pc-windows-gnu/release/maya-scene-kit-gui.exe "$windows_dir/maya-scene-kit-gui.exe"
-          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$windows_dir/"
-          (
-            cd release
-            zip -r "maya-scene-kit-${{ github.ref_name }}-windows.zip" "maya-scene-kit-${{ github.ref_name }}-windows"
-          )
-
-          cp target/wheels/maya_scene_kit-*.whl release/
-
-      - name: Generate SHA256 checksums
-        run: |
-          cd release
-          sha256sum \
-            maya-scene-kit-${{ github.ref_name }}-linux.tar.gz \
-            maya-scene-kit-${{ github.ref_name }}-windows.zip \
-            maya_scene_kit-*.whl \
-            > SHA256SUMS.txt
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -98,11 +60,61 @@ jobs:
           name: maya-scene-kit-linux-${{ github.ref_name }}
           path: release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz
 
+  build_windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Windows binaries
+        run: cargo build --release --locked -p maya-scene-kit-cli -p maya-scene-kit-gui
+
+      - name: Package Windows binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $windowsDir = "release/maya-scene-kit-${{ github.ref_name }}-windows"
+          New-Item -ItemType Directory -Force -Path $windowsDir | Out-Null
+          Copy-Item target/release/maya-scene-kit.exe "$windowsDir/maya-scene-kit.exe"
+          Copy-Item target/release/maya-scene-kit-gui.exe "$windowsDir/maya-scene-kit-gui.exe"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $windowsDir
+          Compress-Archive -Path $windowsDir -DestinationPath "release/maya-scene-kit-${{ github.ref_name }}-windows.zip" -Force
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: maya-scene-kit-windows-${{ github.ref_name }}
           path: release/maya-scene-kit-${{ github.ref_name }}-windows.zip
+
+  build_python:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Python wheel
+        run: uv run --with maturin maturin build --release --features extension-module --manifest-path crates/maya-scene-kit-python/Cargo.toml
+
+      - name: Collect wheel artifact
+        run: |
+          mkdir -p release
+          cp target/wheels/maya_scene_kit-*.whl release/
 
       - name: Upload Python wheel artifact
         uses: actions/upload-artifact@v4
@@ -110,14 +122,11 @@ jobs:
           name: maya-scene-kit-python-${{ github.ref_name }}
           path: release/maya_scene_kit-*.whl
 
-      - name: Upload checksum artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: maya-scene-kit-sha256-${{ github.ref_name }}
-          path: release/SHA256SUMS.txt
-
   release:
-    needs: build
+    needs:
+      - build_linux
+      - build_windows
+      - build_python
     runs-on: ubuntu-latest
 
     steps:
@@ -136,10 +145,19 @@ jobs:
         with:
           name: maya-scene-kit-python-${{ github.ref_name }}
 
-      - name: Download checksum artifact
-        uses: actions/download-artifact@v4
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum \
+            maya-scene-kit-${{ github.ref_name }}-linux.tar.gz \
+            maya-scene-kit-${{ github.ref_name }}-windows.zip \
+            maya_scene_kit-*.whl \
+            > SHA256SUMS.txt
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
         with:
           name: maya-scene-kit-sha256-${{ github.ref_name }}
+          path: SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
