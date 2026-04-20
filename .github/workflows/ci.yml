@@ -27,7 +27,7 @@ jobs:
     - name: Build GUI
       run: cargo build -p maya-scene-kit-gui --release --locked
     - name: Build Python wheel
-      run: uv run --with maturin maturin build --release --manifest-path crates/maya-scene-kit-python/Cargo.toml
+      run: uv run --with maturin maturin build --release --features extension-module --manifest-path crates/maya-scene-kit-python/Cargo.toml
     - name: Check formatting
       run: cargo fmt --all --check
     - name: Run clippy
