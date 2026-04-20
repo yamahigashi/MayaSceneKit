@@ -4,6 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -376,9 +377,18 @@ fn open_test_shell(cx: &mut TestAppContext) -> (Entity<GuiShell>, &mut VisualTes
 
     let shell_slot = Rc::new(RefCell::new(None));
     let shell_slot_for_build = shell_slot.clone();
+    let analysis_cache_root = unique_test_analysis_cache_root();
     let (_, visual_cx) = cx.add_window_view(|window, cx| {
         let menu_bar = TopMenuBar::new(window, cx);
-        let shell = cx.new(|cx| GuiShell::new(menu_bar, window, cx));
+        let shell = cx.new(|cx| {
+            GuiShell::new_for_test(
+                menu_bar,
+                window,
+                cx,
+                PersistedState::default(),
+                analysis_cache_root.clone(),
+            )
+        });
         shell_slot_for_build.replace(Some(shell.clone()));
 
         let shell_view = shell.clone();
@@ -397,6 +407,19 @@ fn open_test_shell(cx: &mut TestAppContext) -> (Entity<GuiShell>, &mut VisualTes
             .expect("test shell should be created"),
         visual_cx,
     )
+}
+
+fn unique_test_analysis_cache_root() -> PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    let unique_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "maya-scene-kit-gui-test-cache-{nanos}-{unique_id}"
+    ))
 }
 
 fn seed_file_table_selection_test_state(
