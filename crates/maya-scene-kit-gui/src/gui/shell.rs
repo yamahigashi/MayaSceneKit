@@ -4,7 +4,13 @@ use maya_scene_kit_edit::scene::{MaterializeOptions, OperationMode};
 impl GuiShell {
     pub(super) fn new(menu_bar: TopMenuBar, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = load_persisted_state().unwrap_or_default();
-        Self::new_with_state_and_cache_root(menu_bar, window, cx, state, default_analysis_cache_root())
+        Self::new_with_state_and_cache_root(
+            menu_bar,
+            window,
+            cx,
+            state,
+            default_analysis_cache_root(),
+        )
     }
 
     #[cfg(test)]
