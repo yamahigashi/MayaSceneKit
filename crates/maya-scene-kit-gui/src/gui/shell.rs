@@ -3,7 +3,28 @@ use maya_scene_kit_edit::scene::{MaterializeOptions, OperationMode};
 
 impl GuiShell {
     pub(super) fn new(menu_bar: TopMenuBar, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut state = load_persisted_state().unwrap_or_default();
+        let state = load_persisted_state().unwrap_or_default();
+        Self::new_with_state_and_cache_root(menu_bar, window, cx, state, default_analysis_cache_root())
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_for_test(
+        menu_bar: TopMenuBar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        state: PersistedState,
+        analysis_cache_root: PathBuf,
+    ) -> Self {
+        Self::new_with_state_and_cache_root(menu_bar, window, cx, state, analysis_cache_root)
+    }
+
+    fn new_with_state_and_cache_root(
+        menu_bar: TopMenuBar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mut state: PersistedState,
+        analysis_cache_root: PathBuf,
+    ) -> Self {
         state.normalize_ignore_folder_settings();
         state.active_tab = ResultTab::Overview;
         let i18n = I18n::new(state.locale.resolve());
@@ -28,7 +49,6 @@ impl GuiShell {
             .new(|cx| InputState::new(window, cx).placeholder(i18n.text("placeholder.replace_to")));
         let path_edit_focus_handle = path_edit_input.read(cx).focus_handle(cx);
         let mut next_row_id = 1u64;
-        let analysis_cache_root = default_analysis_cache_root();
         let observe_cache_root = analysis_cache_root.join("observe-v4");
         let audit_cache_root = analysis_cache_root.join("audit-v4");
         let rows = load_rows_from_state(&state, &mut next_row_id);

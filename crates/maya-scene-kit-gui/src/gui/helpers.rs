@@ -911,11 +911,14 @@ pub(super) fn path_type_for_node_type(node_type: &str) -> PathTypeFilter {
 }
 
 pub(super) fn infer_scene_path_value_style(value: &str) -> ScenePathValueStyle {
-    if value.starts_with("\\") {
+    if value.starts_with("//") || value.starts_with("\\\\") {
         return ScenePathValueStyle::UncAbsolute;
     }
-    if value.starts_with("//") {
+    if value.contains("//") {
         return ScenePathValueStyle::DoubleSlashWorkspaceRelative;
+    }
+    if value.starts_with("\\") {
+        return ScenePathValueStyle::UncAbsolute;
     }
     if value.contains(':') || value.starts_with('/') {
         return ScenePathValueStyle::Absolute;
