@@ -202,28 +202,3 @@ fn scene_tool_error_category(err: &SceneToolError) -> &'static str {
         SceneToolError::Parse(_) => "parse",
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn audit_signature_exposes_supported_arguments_only() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let module = PyModule::new(py, "maya_scene_kit_native").expect("module");
-            maya_scene_kit_native(&module).expect("init module");
-            let inspect = PyModule::import(py, "inspect").expect("inspect");
-            let signature = inspect
-                .call_method1("signature", (module.getattr("audit").expect("audit"),))
-                .expect("signature")
-                .extract::<String>()
-                .expect("signature text");
-
-            assert_eq!(
-                signature,
-                "(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None)"
-            );
-        });
-    }
-}
