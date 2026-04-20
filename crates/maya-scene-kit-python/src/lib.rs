@@ -209,6 +209,7 @@ mod tests {
 
     #[test]
     fn audit_signature_exposes_supported_arguments_only() {
+        pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let module = PyModule::new(py, "maya_scene_kit_native").expect("module");
             maya_scene_kit_native(&module).expect("init module");
