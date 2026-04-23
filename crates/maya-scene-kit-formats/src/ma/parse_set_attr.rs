@@ -1,12 +1,4 @@
 use super::parse_support::{flag_matches, parse_numeric_token, raw_item_text};
-#[cfg(test)]
-use crate::ma::commands::{
-    FlagCommandKind, Token, bare_token, command_flag_descriptor, token_text,
-};
-#[cfg(test)]
-use crate::ma::values::parse_bool_token;
-#[cfg(test)]
-use crate::ma::values::parse_usize_token;
 use crate::{
     error::SceneToolError,
     ma::ast::{
@@ -134,161 +126,6 @@ pub(super) fn parse_specialized_set_attr_command(
         keyable,
         value,
     }))
-}
-
-#[cfg(test)]
-pub(super) fn parse_set_attr_command(tokens: &[Token]) -> Result<ParsedSetAttr, SceneToolError> {
-    let mut array_size = None;
-    let mut channel_hint = None;
-    let mut lock = None;
-    let mut keyable = None;
-    let mut value_type = None;
-
-    let attr_index = tokens
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(idx, token)| matches!(token, Token::Quoted(_)).then_some(idx))
-        .ok_or_else(|| SceneToolError::Message("setAttr missing attribute path".to_string()))?;
-
-    let mut idx = 1usize;
-    while idx < attr_index {
-        let Some(flag) = bare_token(&tokens[idx]) else {
-            break;
-        };
-        if command_flag_descriptor(FlagCommandKind::SetAttr, flag).is_none() {
-            break;
-        }
-        match flag {
-            "-s" => {
-                array_size = Some(parse_usize_token(tokens.get(idx + 1), "-s")?);
-                idx += 2;
-            }
-            "-ch" => {
-                channel_hint = Some(parse_usize_token(tokens.get(idx + 1), "-ch")?);
-                idx += 2;
-            }
-            "-l" => {
-                lock = Some(parse_bool_token(tokens.get(idx + 1), "-l")?);
-                idx += 2;
-            }
-            "-k" => {
-                keyable = Some(parse_bool_token(tokens.get(idx + 1), "-k")?);
-                idx += 2;
-            }
-            "-type" => {
-                value_type = tokens.get(idx + 1).and_then(token_text).map(str::to_string);
-                idx += 2;
-            }
-            _ => break,
-        }
-    }
-
-    let attr_name_or_path = tokens
-        .get(attr_index)
-        .and_then(token_text)
-        .map(str::to_string)
-        .ok_or_else(|| SceneToolError::Message("setAttr missing attribute path".to_string()))?;
-    idx = attr_index + 1;
-    while idx < tokens.len() {
-        let Some(flag) = bare_token(&tokens[idx]) else {
-            break;
-        };
-        if !flag.starts_with('-') {
-            break;
-        }
-        if command_flag_descriptor(FlagCommandKind::SetAttr, flag).is_none() {
-            break;
-        }
-        match flag {
-            "-s" => {
-                array_size = Some(parse_usize_token(tokens.get(idx + 1), "-s")?);
-                idx += 2;
-            }
-            "-ch" => {
-                channel_hint = Some(parse_usize_token(tokens.get(idx + 1), "-ch")?);
-                idx += 2;
-            }
-            "-l" => {
-                lock = Some(parse_bool_token(tokens.get(idx + 1), "-l")?);
-                idx += 2;
-            }
-            "-k" => {
-                keyable = Some(parse_bool_token(tokens.get(idx + 1), "-k")?);
-                idx += 2;
-            }
-            "-type" => {
-                value_type = tokens.get(idx + 1).and_then(token_text).map(str::to_string);
-                idx += 2;
-            }
-            _ => break,
-        }
-    }
-
-    let value_tokens = &tokens[idx..];
-    if matches!(value_type.as_deref(), Some("dataReferenceEdits")) {
-        return Ok(ParsedSetAttr {
-            attr_name_or_path,
-            array_size,
-            channel_hint,
-            lock,
-            keyable,
-            value: parse_data_reference_edits_value(value_tokens)?,
-        });
-    }
-    if value_type.is_none() {
-        if let Some(inferred_type) = infer_opaque_set_attr_type(&attr_name_or_path, value_tokens) {
-            return Ok(ParsedSetAttr {
-                attr_name_or_path,
-                array_size,
-                channel_hint,
-                lock,
-                keyable,
-                value: parse_opaque_typed_value(inferred_type, value_tokens),
-            });
-        }
-    }
-
-    let value = match value_type.as_deref().and_then(TypedValueKind::from_name) {
-        Some(TypedValueKind::String) => parse_string_value(value_tokens)?,
-        Some(TypedValueKind::StringArray) => parse_string_array_value(value_tokens)?,
-        Some(TypedValueKind::Int32Array) => parse_int32_array_value(value_tokens)?,
-        Some(kind) if kind.supports_typed_numeric_payload() => {
-            parse_typed_number_or_opaque_value(kind.name(), value_tokens)?
-        }
-        Some(TypedValueKind::ComponentList) => parse_component_list_value(value_tokens)?,
-        Some(TypedValueKind::PolyFaces)
-        | Some(TypedValueKind::NurbsCurve)
-        | Some(TypedValueKind::DataPolyComponent) => parse_opaque_typed_value(
-            value_type
-                .as_deref()
-                .expect("typed opaque setAttr must have a value type"),
-            value_tokens,
-        ),
-        Some(kind) => {
-            return Err(SceneToolError::UnsupportedAsciiFeature(format!(
-                "unsupported setAttr value type: {}",
-                kind.name()
-            )));
-        }
-        None => {
-            if let Some(other) = value_type.as_deref() {
-                return Err(SceneToolError::UnsupportedAsciiFeature(format!(
-                    "unsupported setAttr value type: {other}"
-                )));
-            }
-            parse_untyped_value(value_tokens)?
-        }
-    };
-
-    Ok(ParsedSetAttr {
-        attr_name_or_path,
-        array_size,
-        channel_hint,
-        lock,
-        keyable,
-        value,
-    })
 }
 
 fn parse_specialized_string_value(
@@ -501,76 +338,6 @@ fn parse_normalized_bool_arg(
     }
 }
 
-#[cfg(test)]
-fn parse_opaque_typed_value(value_type: &str, tokens: &[Token]) -> ParsedSetAttrValue {
-    ParsedSetAttrValue::OpaqueTyped {
-        value_type: value_type.to_string(),
-        items: tokens
-            .iter()
-            .map(|token| match token {
-                Token::Bare(value) => ParsedOpaqueValueItem::Bare(value.clone()),
-                Token::Quoted(value) => ParsedOpaqueValueItem::Quoted(value.clone()),
-                Token::Symbol(ch) => ParsedOpaqueValueItem::Symbol(*ch),
-            })
-            .collect(),
-    }
-}
-
-#[cfg(test)]
-fn infer_opaque_set_attr_type<'a>(attr_name_or_path: &str, tokens: &'a [Token]) -> Option<&'a str> {
-    let first_bare = tokens.first().and_then(bare_token)?;
-    (attr_name_or_path.starts_with(".fc[") && matches!(first_bare, "f" | "mu" | "mc"))
-        .then_some("polyFaces")
-}
-
-#[cfg(test)]
-fn parse_data_reference_edits_value(
-    tokens: &[Token],
-) -> Result<ParsedSetAttrValue, SceneToolError> {
-    let root_node = tokens
-        .first()
-        .and_then(token_text)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            SceneToolError::Message(
-                "dataReferenceEdits setAttr missing root node token".to_string(),
-            )
-        })?;
-
-    let mut groups = Vec::new();
-    let mut idx = 1usize;
-    while idx < tokens.len() {
-        let Some(group_name) = tokens.get(idx).and_then(token_text).map(str::to_string) else {
-            return Err(SceneToolError::Message(
-                "dataReferenceEdits group header missing group name".to_string(),
-            ));
-        };
-        let expected_count = parse_refedit_u32_token(
-            tokens.get(idx + 1),
-            "dataReferenceEdits group header missing expected count",
-        )?;
-        idx += 2;
-
-        let mut records = Vec::new();
-        while idx < tokens.len() && !is_data_reference_edits_group_header(tokens, idx) {
-            let (record, next_idx) = parse_data_reference_edits_record(tokens, idx)?;
-            records.push(record);
-            idx = next_idx;
-        }
-
-        groups.push(ParsedAsciiRefEditGroup {
-            name: group_name,
-            expected_count,
-            records,
-        });
-    }
-
-    Ok(ParsedSetAttrValue::DataReferenceEdits(ParsedAsciiRefEdit {
-        root_node,
-        groups,
-    }))
-}
-
 fn parse_data_reference_edits_raw_items(
     source_text: &str,
     items: &[mel::MelRawShellItem],
@@ -632,16 +399,6 @@ fn parse_data_reference_edits_raw_items(
     }))
 }
 
-#[cfg(test)]
-fn is_data_reference_edits_group_header(tokens: &[Token], idx: usize) -> bool {
-    matches!(tokens.get(idx), Some(Token::Quoted(value)) if is_data_reference_edits_group_name(value))
-        && tokens
-            .get(idx + 1)
-            .and_then(token_text)
-            .and_then(|value| value.parse::<u32>().ok())
-            .is_some()
-}
-
 fn is_data_reference_edits_raw_group_header(
     source_text: &str,
     items: &[mel::MelRawShellItem],
@@ -671,107 +428,6 @@ fn is_data_reference_edits_group_name(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':'))
-}
-
-#[cfg(test)]
-fn parse_data_reference_edits_record(
-    tokens: &[Token],
-    idx: usize,
-) -> Result<(ParsedAsciiRefEditRecord, usize), SceneToolError> {
-    let opcode =
-        parse_refedit_u32_token(tokens.get(idx), "dataReferenceEdits record missing opcode")?;
-    let mut next_idx = idx + 1;
-
-    let record = match opcode {
-        0 => ParsedAsciiRefEditRecord::Op0(
-            parse_refedit_string_token(
-                tokens.get(next_idx),
-                "dataReferenceEdits op0 missing first argument",
-            )?,
-            parse_refedit_string_token(
-                tokens.get(next_idx + 1),
-                "dataReferenceEdits op0 missing second argument",
-            )?,
-            parse_refedit_string_token(
-                tokens.get(next_idx + 2),
-                "dataReferenceEdits op0 missing third argument",
-            )?,
-        ),
-        1 => {
-            let mut args = Vec::new();
-            while next_idx < tokens.len()
-                && !is_data_reference_edits_group_header(tokens, next_idx)
-                && !matches!(
-                    tokens.get(next_idx),
-                    Some(Token::Bare(value)) if value.parse::<u32>().is_ok()
-                )
-            {
-                args.push(parse_refedit_string_token(
-                    tokens.get(next_idx),
-                    "dataReferenceEdits op1 missing argument",
-                )?);
-                next_idx += 1;
-            }
-            return Ok((ParsedAsciiRefEditRecord::Op1(args), next_idx));
-        }
-        2 => ParsedAsciiRefEditRecord::Op2(
-            parse_refedit_string_token(
-                tokens.get(next_idx),
-                "dataReferenceEdits op2 missing first argument",
-            )?,
-            parse_refedit_string_token(
-                tokens.get(next_idx + 1),
-                "dataReferenceEdits op2 missing second argument",
-            )?,
-            parse_refedit_string_token(
-                tokens.get(next_idx + 2),
-                "dataReferenceEdits op2 missing third argument",
-            )?,
-        ),
-        3 => ParsedAsciiRefEditRecord::Op3(
-            parse_refedit_string_token(
-                tokens.get(next_idx),
-                "dataReferenceEdits op3 missing first argument",
-            )?,
-            parse_refedit_string_token(
-                tokens.get(next_idx + 1),
-                "dataReferenceEdits op3 missing second argument",
-            )?,
-            parse_refedit_string_token(
-                tokens.get(next_idx + 2),
-                "dataReferenceEdits op3 missing third argument",
-            )?,
-        ),
-        5 => {
-            let sub = parse_refedit_u32_token(
-                tokens.get(next_idx),
-                "dataReferenceEdits op5 missing sub-count",
-            )?;
-            next_idx += 1;
-            let mut args = Vec::new();
-            while next_idx < tokens.len()
-                && !is_data_reference_edits_group_header(tokens, next_idx)
-                && !matches!(
-                    tokens.get(next_idx),
-                    Some(Token::Bare(value)) if value.parse::<u32>().is_ok()
-                )
-            {
-                args.push(parse_refedit_string_token(
-                    tokens.get(next_idx),
-                    "dataReferenceEdits op5 missing argument",
-                )?);
-                next_idx += 1;
-            }
-            return Ok((ParsedAsciiRefEditRecord::Op5 { sub, args }, next_idx));
-        }
-        other => {
-            return Err(SceneToolError::Message(format!(
-                "unsupported dataReferenceEdits opcode: {other}"
-            )));
-        }
-    };
-
-    Ok((record, next_idx + 3))
 }
 
 fn parse_data_reference_edits_raw_record(
@@ -928,15 +584,6 @@ fn parse_data_reference_edits_raw_record(
     Ok((record, next_idx + 3))
 }
 
-#[cfg(test)]
-fn parse_refedit_u32_token(token: Option<&Token>, message: &str) -> Result<u32, SceneToolError> {
-    token
-        .and_then(token_text)
-        .ok_or_else(|| SceneToolError::Message(message.to_string()))?
-        .parse::<u32>()
-        .map_err(|_| SceneToolError::Message(message.to_string()))
-}
-
 fn parse_refedit_u32_item(
     source_text: &str,
     item: Option<&mel::MelRawShellItem>,
@@ -966,17 +613,6 @@ fn is_refedit_numeric_record_boundary(
         .is_some()
 }
 
-#[cfg(test)]
-fn parse_refedit_string_token(
-    token: Option<&Token>,
-    message: &str,
-) -> Result<String, SceneToolError> {
-    token
-        .and_then(token_text)
-        .map(str::to_string)
-        .ok_or_else(|| SceneToolError::Message(message.to_string()))
-}
-
 fn refedit_item_value(
     source_text: &str,
     item: &mel::MelRawShellItem,
@@ -985,33 +621,6 @@ fn refedit_item_value(
     item.value_text(source_text)
         .map(|value| value.into_owned())
         .ok_or_else(|| SceneToolError::Message(message.to_string()))
-}
-
-#[cfg(test)]
-fn parse_string_value(tokens: &[Token]) -> Result<ParsedSetAttrValue, SceneToolError> {
-    if tokens.is_empty() {
-        return Ok(ParsedSetAttrValue::String(String::new()));
-    }
-    if matches!(tokens.first(), Some(Token::Symbol('('))) {
-        let mut value = String::new();
-        for token in &tokens[1..] {
-            match token {
-                Token::Quoted(part) => value.push_str(part),
-                Token::Symbol(')') | Token::Symbol('+') => {}
-                other => {
-                    return Err(SceneToolError::Message(format!(
-                        "unexpected token in string concatenation: {other:?}"
-                    )));
-                }
-            }
-        }
-        return Ok(ParsedSetAttrValue::String(value));
-    }
-    let value = tokens
-        .first()
-        .and_then(token_text)
-        .ok_or_else(|| SceneToolError::Message("string setAttr missing value".to_string()))?;
-    Ok(ParsedSetAttrValue::String(value.to_string()))
 }
 
 fn parse_string_array_value_raw_items(
@@ -1032,21 +641,6 @@ fn parse_string_array_value_raw_items(
         .iter()
         .skip(1)
         .map(|item| item.preferred_text(source_text).into_owned())
-        .collect::<Vec<_>>();
-    Ok(ParsedSetAttrValue::StringArray {
-        declared_count,
-        values,
-    })
-}
-
-#[cfg(test)]
-fn parse_string_array_value(tokens: &[Token]) -> Result<ParsedSetAttrValue, SceneToolError> {
-    let declared_count = parse_usize_token(tokens.first(), "stringArray count")?;
-    let values = tokens
-        .iter()
-        .skip(1)
-        .filter_map(token_text)
-        .map(str::to_string)
         .collect::<Vec<_>>();
     Ok(ParsedSetAttrValue::StringArray {
         declared_count,
@@ -1078,21 +672,6 @@ fn parse_int32_array_value_raw_items(
     Ok(ParsedSetAttrValue::Int32Array(values))
 }
 
-#[cfg(test)]
-fn parse_int32_array_value(tokens: &[Token]) -> Result<ParsedSetAttrValue, SceneToolError> {
-    let declared_count = parse_usize_token(tokens.first(), "Int32Array count")?;
-    let mut values = Vec::new();
-    for token in tokens.iter().skip(1).take(declared_count) {
-        let raw = token_text(token).ok_or_else(|| {
-            SceneToolError::Message("Int32Array contains a non-scalar token".to_string())
-        })?;
-        values.push(raw.parse::<i32>().map_err(|_| {
-            SceneToolError::Message(format!("Int32Array value is not an i32: {raw}"))
-        })?);
-    }
-    Ok(ParsedSetAttrValue::Int32Array(values))
-}
-
 fn parse_typed_number_value_raw_items(
     source_text: &str,
     value_type: &str,
@@ -1104,22 +683,6 @@ fn parse_typed_number_value_raw_items(
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|value| parse_numeric_token(value.as_ref()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ParsedSetAttrValue::TypedNumbers {
-        value_type: value_type.to_string(),
-        values,
-    })
-}
-
-#[cfg(test)]
-fn parse_typed_number_value(
-    value_type: &str,
-    tokens: &[Token],
-) -> Result<ParsedSetAttrValue, SceneToolError> {
-    let values = tokens
-        .iter()
-        .filter_map(token_text)
-        .map(parse_numeric_token)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ParsedSetAttrValue::TypedNumbers {
         value_type: value_type.to_string(),
@@ -1147,17 +710,6 @@ fn parse_typed_number_or_opaque_value_raw_items(
     parse_typed_number_value_raw_items(source_text, value_type, items)
 }
 
-#[cfg(test)]
-fn parse_typed_number_or_opaque_value(
-    value_type: &str,
-    tokens: &[Token],
-) -> Result<ParsedSetAttrValue, SceneToolError> {
-    if value_type == "matrix" && matches!(tokens.first().and_then(token_text), Some("xform")) {
-        return Ok(parse_opaque_typed_value(value_type, tokens));
-    }
-    parse_typed_number_value(value_type, tokens)
-}
-
 fn parse_component_list_value_raw_items(
     source_text: &str,
     items: &[mel::MelRawShellItem],
@@ -1181,19 +733,6 @@ fn parse_component_list_value_raw_items(
     Ok(ParsedSetAttrValue::ComponentList(values))
 }
 
-#[cfg(test)]
-fn parse_component_list_value(tokens: &[Token]) -> Result<ParsedSetAttrValue, SceneToolError> {
-    let declared_count = parse_usize_token(tokens.first(), "componentList count")?;
-    let values = tokens
-        .iter()
-        .skip(1)
-        .take(declared_count)
-        .filter_map(token_text)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    Ok(ParsedSetAttrValue::ComponentList(values))
-}
-
 fn parse_untyped_value_raw_items(
     source_text: &str,
     items: &[mel::MelRawShellItem],
@@ -1207,23 +746,6 @@ fn parse_untyped_value_raw_items(
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|value| parse_numeric_token(value.as_ref()))
-        .collect::<Result<Vec<_>, _>>()?;
-    if values.len() == 1 {
-        Ok(ParsedSetAttrValue::Scalar(values[0]))
-    } else {
-        Ok(ParsedSetAttrValue::Numbers(values))
-    }
-}
-
-#[cfg(test)]
-fn parse_untyped_value(tokens: &[Token]) -> Result<ParsedSetAttrValue, SceneToolError> {
-    if tokens.is_empty() {
-        return Ok(ParsedSetAttrValue::None);
-    }
-    let values = tokens
-        .iter()
-        .filter_map(token_text)
-        .map(parse_numeric_token)
         .collect::<Result<Vec<_>, _>>()?;
     if values.len() == 1 {
         Ok(ParsedSetAttrValue::Scalar(values[0]))
