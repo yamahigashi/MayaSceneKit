@@ -466,7 +466,8 @@ impl GuiShell {
             || self
                 .cache_restore_state
                 .completed_count
-                .is_multiple_of(CACHE_RESTORE_PROGRESS_NOTIFY_INTERVAL)
+                % CACHE_RESTORE_PROGRESS_NOTIFY_INTERVAL
+                == 0
     }
 }
 

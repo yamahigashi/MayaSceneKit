@@ -1008,7 +1008,7 @@ fn record_expired(last_accessed_unix_secs: Option<u64>, now_unix_secs: u64, ttl:
 }
 
 fn sqlite_io_error(err: rusqlite::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err)
+    io::Error::other(err)
 }
 
 fn u64_to_sql(value: u64) -> io::Result<i64> {

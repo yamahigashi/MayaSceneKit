@@ -74,7 +74,7 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
             }
         };
 
-        let path = sanitize_reference_slot(&field_text(&fields, "path").unwrap_or_default());
+        let path = sanitize_reference_slot(field_text(&fields, "path").unwrap_or_default());
         if path.is_empty() {
             return DecodeAttempt::Handled(vec![make_unknown_event(
                 format!("{} missing required path", schema.schema_id),
@@ -89,7 +89,7 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
         let namespace_slot_raw = field_text(&fields, "namespace")
             .or_else(|| field_text(&fields, "reference_node"))
             .unwrap_or_default();
-        let namespace_slot = sanitize_reference_slot(&namespace_slot_raw);
+        let namespace_slot = sanitize_reference_slot(namespace_slot_raw);
         if namespace_slot.is_empty() {
             return DecodeAttempt::Handled(vec![make_unknown_event(
                 format!("{} missing required namespace slot", schema.schema_id),
@@ -102,7 +102,7 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
         let reference_node_slot_raw = field_text(&fields, "reference_node")
             .or_else(|| field_text(&fields, "short_name"))
             .unwrap_or_default();
-        let reference_node_slot = sanitize_reference_slot(&reference_node_slot_raw);
+        let reference_node_slot = sanitize_reference_slot(reference_node_slot_raw);
         let reference_node = if reference_node_slot.is_empty() {
             namespace_slot.clone()
         } else {
