@@ -17,7 +17,7 @@ impl ByteSpan {
         self.start >= self.end
     }
 
-    pub fn slice<'a>(self, data: &'a [u8]) -> &'a [u8] {
+    pub fn slice(self, data: &[u8]) -> &[u8] {
         &data[self.start..self.end]
     }
 

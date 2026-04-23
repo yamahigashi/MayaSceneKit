@@ -40,10 +40,10 @@ fn replace_raw_scene_paths_in_ma_with_rules(
     let mut i = 0usize;
 
     while i < lines.len() {
-        let line_text = String::from_utf8_lossy(&lines[i]).to_string();
+        let line_text = String::from_utf8_lossy(lines[i]).to_string();
         let trimmed = line_text.trim_start();
 
-        if is_top_level_command(&lines[i]) && trimmed.starts_with("file ") {
+        if is_top_level_command(lines[i]) && trimmed.starts_with("file ") {
             let (command, next) = collect_top_level_command_block(&lines, i);
             let (rewritten, count) = rewrite_ma_file_command_paths(&command, compiled_rules);
             if count > 0 {
@@ -119,10 +119,10 @@ pub fn replace_raw_scene_paths_in_ma_by_index(
     let mut active_block: Option<ActiveScenePathBlock> = None;
 
     while i < lines.len() {
-        let line_text = String::from_utf8_lossy(&lines[i]).to_string();
+        let line_text = String::from_utf8_lossy(lines[i]).to_string();
         let trimmed = line_text.trim_start();
 
-        if is_top_level_command(&lines[i]) {
+        if is_top_level_command(lines[i]) {
             active_block = None;
 
             if trimmed.starts_with("file ") {
@@ -305,10 +305,10 @@ pub fn remove_path_owner_nodes_from_ma(
     let mut line_number = 0usize;
 
     while i < lines.len() {
-        let line_text = String::from_utf8_lossy(&lines[i]).to_string();
+        let line_text = String::from_utf8_lossy(lines[i]).to_string();
         let trimmed = line_text.trim_start();
 
-        if is_top_level_command(&lines[i]) && trimmed.starts_with("file ") {
+        if is_top_level_command(lines[i]) && trimmed.starts_with("file ") {
             let (command, next) = collect_top_level_command_block(&lines, i);
             if let Some(entry) = extract_reference_entry_from_raw_file_command(&command) {
                 let target = (entry.node_type, entry.node_name);
@@ -325,7 +325,7 @@ pub fn remove_path_owner_nodes_from_ma(
             continue;
         }
 
-        if is_top_level_command(&lines[i]) && trimmed.starts_with("createNode ") {
+        if is_top_level_command(lines[i]) && trimmed.starts_with("createNode ") {
             let (command, next) = collect_top_level_command_block(&lines, i);
             if let Some(block) = start_raw_create_node_block(trimmed.as_bytes(), line_number) {
                 let target = (block.node_type, block.node_name);
@@ -359,14 +359,14 @@ pub fn remove_path_owner_nodes_from_ma(
 }
 
 fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, usize) {
-    let mut command = String::from_utf8_lossy(&lines[start]).to_string();
+    let mut command = String::from_utf8_lossy(lines[start]).to_string();
     let mut next = start + 1;
 
     while !command_has_terminating_semicolon(&command) && next < lines.len() {
-        if is_top_level_command(&lines[next]) {
+        if is_top_level_command(lines[next]) {
             break;
         }
-        command.push_str(&String::from_utf8_lossy(&lines[next]));
+        command.push_str(&String::from_utf8_lossy(lines[next]));
         next += 1;
     }
 
@@ -374,10 +374,10 @@ fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, us
 }
 
 fn collect_command_until_semicolon(lines: &[&[u8]], start: usize) -> (String, usize) {
-    let mut command = String::from_utf8_lossy(&lines[start]).to_string();
+    let mut command = String::from_utf8_lossy(lines[start]).to_string();
     let mut next = start + 1;
     while !command_has_terminating_semicolon(&command) && next < lines.len() {
-        command.push_str(&String::from_utf8_lossy(&lines[next]));
+        command.push_str(&String::from_utf8_lossy(lines[next]));
         next += 1;
     }
     (command, next)
