@@ -1746,7 +1746,8 @@ fn analyze_observation_result(
     };
     let plan = gui_audit_plan().map_err(|err| err.to_string())?;
     let options = audit_options_from_preference(audit_mode);
-    let audit_report = audit_observation(observation, &plan, options).map_err(|err| err.to_string())?;
+    let audit_report =
+        audit_observation(observation, &plan, options).map_err(|err| err.to_string())?;
     let audit_snapshot =
         AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(&plan))
             .map_err(|err| err.to_string())?;
