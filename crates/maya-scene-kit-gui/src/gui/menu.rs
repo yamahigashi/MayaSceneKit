@@ -90,6 +90,15 @@ impl GuiShell {
         self.run_to_ascii(window, cx);
     }
 
+    pub(super) fn on_menu_exit_application(
+        &mut self,
+        _: &MenuExitApplication,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_exit(window, cx);
+    }
+
     pub(super) fn on_menu_clear_workspace(
         &mut self,
         _: &MenuClearWorkspace,
@@ -97,18 +106,6 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         self.clear_workspace(window, cx);
-    }
-
-    pub(super) fn on_menu_select_visible(
-        &mut self,
-        _: &MenuSelectVisible,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.workspace_scan_active() {
-            return;
-        }
-        self.select_visible(window, cx);
     }
 
     pub(super) fn on_file_table_select_all(
@@ -137,20 +134,6 @@ impl GuiShell {
             return;
         }
         self.select_visible(window, cx);
-        cx.notify();
-    }
-
-    pub(super) fn on_menu_clear_selection(
-        &mut self,
-        _: &MenuClearSelection,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.workspace_scan_active() {
-            return;
-        }
-        self.clear_selection();
-        self.refresh_file_table(cx);
         cx.notify();
     }
 

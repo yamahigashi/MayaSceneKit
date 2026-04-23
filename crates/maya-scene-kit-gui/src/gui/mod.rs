@@ -97,9 +97,8 @@ actions!(
         MenuEditClean,
         MenuEditReplace,
         MenuEditToAscii,
-        MenuSelectVisible,
+        MenuExitApplication,
         FileTableSelectAll,
-        MenuClearSelection,
         MenuLocaleEnglish,
         MenuLocaleChinese,
         MenuLocaleJapanese,
@@ -229,6 +228,8 @@ struct GuiShell {
     path_collect_dialog: Option<PathCollectDialogState>,
     observe_cache_root: PathBuf,
     audit_cache_root: PathBuf,
+    exit_confirmation_pending: bool,
+    bypass_next_exit_warning: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1410,6 +1411,8 @@ mod workspace;
 
 #[cfg(test)]
 use self::tables::*;
+#[cfg(test)]
+use self::workspace::exit_warning_required_for_rows;
 use self::{helpers::*, results::*};
 
 #[cfg(test)]
@@ -1592,6 +1595,12 @@ fn init_gui_app(cx: &mut App) {
     gpui_component::init(cx);
     apply_app_theme_overrides(cx);
     crate::menu_bar::init(cx);
+    cx.on_window_closed(|cx| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
     cx.bind_keys([
         KeyBinding::new("ctrl-a", FileTableSelectAll, Some(FILE_TABLE_CONTEXT)),
         KeyBinding::new("cmd-a", FileTableSelectAll, Some(FILE_TABLE_CONTEXT)),

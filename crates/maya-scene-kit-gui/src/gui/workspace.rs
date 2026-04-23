@@ -7,7 +7,98 @@ struct WorkspaceScanResult {
     kind: WorkspaceScanKind,
 }
 
+#[derive(Clone, Copy)]
+enum ExitRequestKind {
+    Application,
+}
+
+pub(super) fn exit_warning_required_for_rows(rows: &[SceneRow]) -> bool {
+    rows.iter().any(SceneRow::dirty)
+}
+
 impl GuiShell {
+    pub(super) fn request_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.exit_confirmation_pending {
+            return;
+        }
+        if self.exit_warning_required() {
+            self.confirm_exit_request(ExitRequestKind::Application, window, cx);
+            return;
+        }
+
+        self.complete_exit_request(window);
+        cx.notify();
+    }
+
+    pub(super) fn on_window_should_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.bypass_next_exit_warning {
+            self.bypass_next_exit_warning = false;
+            return true;
+        }
+
+        self.request_exit(window, cx);
+        false
+    }
+
+    pub(super) fn exit_warning_required(&self) -> bool {
+        exit_warning_required_for_rows(&self.rows)
+    }
+
+    fn confirm_exit_request(
+        &mut self,
+        kind: ExitRequestKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.exit_confirmation_pending = true;
+        let i18n = self.i18n();
+        let response = window.prompt(
+            PromptLevel::Warning,
+            &i18n.text("dialog.confirm_exit_application_title"),
+            Some(&i18n.text("dialog.confirm_exit_application_description")),
+            &[
+                PromptButton::cancel(i18n.text("action.return_to_application")),
+                PromptButton::ok(i18n.text("action.discard_edits_and_exit")),
+            ],
+            cx,
+        );
+        let view = cx.entity();
+
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let mut async_cx = cx.clone();
+                async move {
+                    let answer = response.await.ok();
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        move |shell: &mut GuiShell,
+                              window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
+                            shell.exit_confirmation_pending = false;
+                            if answer != Some(1) {
+                                cx.notify();
+                                return;
+                            }
+                            match kind {
+                                ExitRequestKind::Application => shell.complete_exit_request(window),
+                            }
+                            cx.notify();
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    fn complete_exit_request(&mut self, window: &mut Window) {
+        self.bypass_next_exit_warning = true;
+        window.remove_window();
+    }
+
     pub(super) fn confirm_purge_analysis_cache(
         &mut self,
         window: &mut Window,
