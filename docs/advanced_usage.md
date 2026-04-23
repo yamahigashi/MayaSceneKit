@@ -3,6 +3,52 @@
 This document collects reference-heavy material that does not need to live in the
 top-level README.
 
+## CLI Command Summary
+
+```bash
+maya-scene-kit <command> [options]
+```
+
+Current CLI commands:
+
+- `inspect`: inspect Maya Binary chunk structure
+- `dump`: dump `requires` plus script nodes from a file or directory
+- `paths`: extract file and reference paths from a file or directory, including `fileTextureName` owners such as `file`, `psdFileTex`, and `movie`
+- `audit`: audit execution-capable surfaces
+- `clean`: remove script nodes and save in forensic mode
+- `replace`: replace file and reference paths in forensic mode
+
+## Execution Modes
+
+Commands that mutate or gate scenes run in one of three modes:
+
+- `strict`: succeeds only when the relevant surface is validated authoritatively
+- `best-effort`: allows partial structured recovery, but does not claim full validation
+- `forensic`: allows heuristic or transport-level handling and reports that the result is not validated
+
+Public reports expose `validation_state` as one of:
+
+- `validated`
+- `partial`
+- `unsupported`
+- `invalid`
+- `copied_unvalidated`
+
+`audit` is conservative by design:
+
+- `.ma` execution surfaces are audited directly
+- `.mb` strict audit remains fail-closed until binary surface extraction is authoritative
+- parse failures on autorun Python surfaces are treated conservatively in strict-capable paths
+
+## Current Scope
+
+- IFF chunk parsing for `.mb` (`tag / offset / aux / size`)
+- Script node detection, removal, and extraction for `.ma/.mb`
+- Execution-surface audit and report generation for `.ma/.mb`
+- Requires extraction for `.ma/.mb`
+- File and reference path extraction for `.ma/.mb`
+- File and reference path rewrite for `.ma/.mb`
+
 ## Embedded Schema And `node_info` Overlays
 
 CLI commands use the embedded schema bundle shipped with the binary.
