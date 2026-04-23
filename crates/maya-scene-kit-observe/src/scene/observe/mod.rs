@@ -20,7 +20,10 @@ mod tests {
             find_scene_workspace_root,
             paths::{PathKind, ScenePathResolutionStatus, ScenePathValueStyle},
             resolve_scene_path_value,
-            source::{ma as observe_ma, mb},
+            source::{
+                loader::{MbParseBudgetMode, materialize_adaptive_mb_parse_budget},
+                ma as observe_ma, mb,
+            },
         },
     };
 
@@ -75,6 +78,54 @@ mod tests {
         out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
         out.extend_from_slice(&payload);
         out
+    }
+
+    fn build_mb_chunk_with_alignment(
+        tag: &str,
+        payload: &[u8],
+        sibling_alignment: usize,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(tag.as_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        out.extend_from_slice(payload);
+        while (out.len() - 16) % sibling_alignment != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn build_mb_form_with_alignment(
+        form: &str,
+        children: &[Vec<u8>],
+        sibling_alignment: usize,
+    ) -> Vec<u8> {
+        let mut payload = form.as_bytes().to_vec();
+        for child in children {
+            payload.extend_from_slice(child);
+        }
+        build_mb_chunk_with_alignment("FOR8", &payload, sibling_alignment)
+    }
+
+    fn build_repeated_mb_form(
+        form: &str,
+        chunk_tag: &str,
+        chunk_payload: &[u8],
+        count: usize,
+        sibling_alignment: usize,
+    ) -> Vec<u8> {
+        let mut payload =
+            Vec::with_capacity(form.len() + count.saturating_mul(16 + chunk_payload.len()));
+        payload.extend_from_slice(form.as_bytes());
+        for _ in 0..count {
+            payload.extend_from_slice(&build_mb_chunk_with_alignment(
+                chunk_tag,
+                chunk_payload,
+                sibling_alignment,
+            ));
+        }
+        build_mb_chunk_with_alignment("FOR8", &payload, sibling_alignment)
     }
 
     #[test]
@@ -670,6 +721,61 @@ mod tests {
     }
 
     #[test]
+    fn mb_load_options_default_to_adaptive_mode_and_exact_override() {
+        let adaptive = LoadOptions::default();
+        let exact = LoadOptions::default().with_mb_parse_budget(MbParseBudget {
+            max_depth: 32,
+            max_children_per_group: 64,
+            max_total_chunks: 128,
+            max_parse_bytes: 256,
+        });
+
+        assert_eq!(adaptive.mb_parse_budget_mode(), MbParseBudgetMode::Adaptive);
+        assert_eq!(exact.mb_parse_budget_mode(), MbParseBudgetMode::Exact);
+    }
+
+    #[test]
+    fn with_max_parse_bytes_materializes_adaptive_mb_budget_from_effective_bytes() {
+        let options = LoadOptions::default().with_max_parse_bytes(80 * 1024 * 1024);
+        let adaptive = options.materialize_mb_parse_budget_for_bytes(96 * 1024 * 1024);
+
+        assert_eq!(adaptive.max_depth, 128);
+        assert_eq!(adaptive.max_children_per_group, 262_144);
+        assert_eq!(adaptive.max_total_chunks, (80 * 1024 * 1024) / 64);
+        assert_eq!(adaptive.max_parse_bytes, 80 * 1024 * 1024);
+        assert_eq!(options.mel_parse_budget().max_bytes, 80 * 1024 * 1024);
+    }
+
+    #[test]
+    fn with_max_parse_bytes_preserves_exact_mb_budget_override_shape() {
+        let options = LoadOptions::default()
+            .with_mb_parse_budget(MbParseBudget {
+                max_depth: 7,
+                max_children_per_group: 11,
+                max_total_chunks: 13,
+                max_parse_bytes: 17,
+            })
+            .with_max_parse_bytes(19);
+        let exact = options.materialize_mb_parse_budget_for_bytes(200 * 1024 * 1024);
+
+        assert_eq!(exact.max_depth, 7);
+        assert_eq!(exact.max_children_per_group, 11);
+        assert_eq!(exact.max_total_chunks, 13);
+        assert_eq!(exact.max_parse_bytes, 19);
+        assert_eq!(options.mb_parse_budget_mode(), MbParseBudgetMode::Exact);
+    }
+
+    #[test]
+    fn materialize_adaptive_mb_budget_uses_source_size_capped_by_max_parse_bytes() {
+        let adaptive = materialize_adaptive_mb_parse_budget(96 * 1024 * 1024, 80 * 1024 * 1024);
+
+        assert_eq!(adaptive.max_depth, 128);
+        assert_eq!(adaptive.max_children_per_group, 262_144);
+        assert_eq!(adaptive.max_total_chunks, (80 * 1024 * 1024) / 64);
+        assert_eq!(adaptive.max_parse_bytes, 80 * 1024 * 1024);
+    }
+
+    #[test]
     fn scene_path_dependency_fact_captures_origin_fields() {
         assert_eq!(
             DependencyFactDetail::ScenePath {
@@ -747,6 +853,71 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_default_mb_budget_accepts_wide_group_that_exact_default_rejects() {
+        let bytes = build_mb_root(&[build_repeated_mb_form("TEST", "DATA", b"", 100_001, 4)]);
+        let exact_mb = crate::mb::parse_bytes_with_budget(bytes.clone(), &MbParseBudget::default())
+            .expect("exact default should parse scene");
+        let exact_err = crate::scene::recover::collect_raw_chunk_records_with_budget(
+            &exact_mb,
+            &MbParseBudget::default(),
+        )
+        .expect_err("exact default should reject wide group during raw walk");
+        let adaptive_budget =
+            LoadOptions::default().materialize_mb_parse_budget_for_bytes(bytes.len());
+        let adaptive_mb = crate::mb::parse_bytes_with_budget(bytes, &adaptive_budget)
+            .expect("adaptive default should parse scene");
+        let adaptive_raw = crate::scene::recover::collect_raw_chunk_records_with_budget(
+            &adaptive_mb,
+            &adaptive_budget,
+        )
+        .expect("adaptive default should walk wide group");
+
+        assert_eq!(
+            exact_err.budget_limit(),
+            Some(MbParseBudgetLimit::MaxChildrenPerGroup)
+        );
+        assert!(!adaptive_raw.is_empty());
+    }
+
+    #[test]
+    fn adaptive_default_mb_budget_accepts_large_total_chunk_scene_that_exact_default_rejects() {
+        let chunk_payload = [b'X'; 64];
+        let mut subforms = Vec::with_capacity(11);
+        for _ in 0..11 {
+            subforms.push(build_repeated_mb_form(
+                "TEST",
+                "DATA",
+                &chunk_payload,
+                96_000,
+                8,
+            ));
+        }
+        let bytes = build_mb_root(&[build_mb_form_with_alignment("TEST", &subforms, 4)]);
+        let exact_mb = crate::mb::parse_bytes_with_budget(bytes.clone(), &MbParseBudget::default())
+            .expect("exact default should parse scene");
+        let exact_err = crate::scene::recover::collect_raw_chunk_records_with_budget(
+            &exact_mb,
+            &MbParseBudget::default(),
+        )
+        .expect_err("exact default should reject large total chunk scene during raw walk");
+        let adaptive_budget =
+            LoadOptions::default().materialize_mb_parse_budget_for_bytes(bytes.len());
+        let adaptive_mb = crate::mb::parse_bytes_with_budget(bytes, &adaptive_budget)
+            .expect("adaptive default should parse scene");
+        let adaptive_raw = crate::scene::recover::collect_raw_chunk_records_with_budget(
+            &adaptive_mb,
+            &adaptive_budget,
+        )
+        .expect("adaptive default should walk large total chunk scene");
+
+        assert_eq!(
+            exact_err.budget_limit(),
+            Some(MbParseBudgetLimit::MaxTotalChunks)
+        );
+        assert!(!adaptive_raw.is_empty());
+    }
+
+    #[test]
     fn collect_scene_dump_reads_mb_requires_and_scripts() {
         let source = repo_root().join("tests/02/sphere.mb");
         let report = collect_scene_dump(&source).expect("scene dump");
@@ -798,7 +969,9 @@ mod tests {
         let session = crate::scene::mb_read_session::MbReadSession::load_raw(
             &source,
             schema_context,
-            options.mb_parse_budget(),
+            &options
+                .materialize_mb_parse_budget_for_path(&source)
+                .expect("materialized budget"),
         )
         .expect("load session");
         let build = session.build().expect("build scene");
