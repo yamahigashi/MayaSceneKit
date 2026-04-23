@@ -1,5 +1,6 @@
-use super::*;
 use maya_scene_kit_edit::scene::{MaterializeOptions, OperationMode};
+
+use super::*;
 
 impl GuiShell {
     pub(super) fn new(menu_bar: TopMenuBar, window: &mut Window, cx: &mut Context<Self>) -> Self {

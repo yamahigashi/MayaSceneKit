@@ -845,8 +845,10 @@ mod tests {
         extract_file_entries_from_rtft_payload, parse_fref_record,
         remove_root_forms_from_mb_by_locator,
     };
-    use crate::mb::section::SectionHeaderFormat;
-    use crate::mb::{parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk};
+    use crate::mb::{
+        parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk,
+        section::SectionHeaderFormat,
+    };
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

@@ -1,5 +1,4 @@
-use std::fmt;
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, fmt, sync::Arc};
 
 use maya_mel::{
     ast::SourceFile,
@@ -39,6 +38,7 @@ const DEFAULT_MAX_LITERAL_BYTES: usize = 100 * 1024 * 1024;
 
 pub(super) trait FullParseLike {
     fn syntax(&self) -> &SourceFile;
+    fn source_text(&self) -> &str;
     fn source_view(&self) -> SourceView<'_>;
     fn source_map(&self) -> &SourceMap;
     fn decode_errors(&self) -> &[DecodeDiagnostic];
@@ -49,6 +49,10 @@ pub(super) trait FullParseLike {
 impl FullParseLike for Parse {
     fn syntax(&self) -> &SourceFile {
         &self.syntax
+    }
+
+    fn source_text(&self) -> &str {
+        &self.source_text
     }
 
     fn source_view(&self) -> SourceView<'_> {
@@ -77,6 +81,10 @@ impl FullParseLike for SharedParse {
         &self.syntax
     }
 
+    fn source_text(&self) -> &str {
+        self.source_text.as_ref()
+    }
+
     fn source_view(&self) -> SourceView<'_> {
         SharedParse::source_view(self)
     }
@@ -98,7 +106,7 @@ impl FullParseLike for SharedParse {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MelSpan {
     pub start: usize,
     pub end: usize,
@@ -254,6 +262,62 @@ pub struct MelCallFact {
     pub span: MelSpan,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MelStringAssemblyMarker {
+    Concat,
+    VariableReference,
+}
+
+impl MelStringAssemblyMarker {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Concat => "concat",
+            Self::VariableReference => "variable_reference",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MelResolvedStringKind {
+    Literal,
+    ProcReference,
+    AssembledLiteral,
+    Dynamic,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MelSinkArgKind {
+    Python,
+    Eval,
+    EvalDeferred,
+    CallbackFlag,
+    ScriptJobPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MelSinkArgFact {
+    pub sink_kind: MelSinkArgKind,
+    pub resolved_kind: MelResolvedStringKind,
+    pub span: MelSpan,
+    pub command_name: Option<Arc<str>>,
+    pub flag_name: Option<Arc<str>>,
+    pub rendered_text: Option<Arc<str>>,
+    pub markers: Vec<MelStringAssemblyMarker>,
+    pub code_like: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MelCodeLikeValueFact {
+    pub resolved_kind: MelResolvedStringKind,
+    pub span: MelSpan,
+    pub rendered_text: Arc<str>,
+    pub markers: Vec<MelStringAssemblyMarker>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MelParseFacts {
     pub source_text: Arc<str>,
@@ -262,6 +326,8 @@ pub struct MelParseFacts {
     pub validation_diagnostics: Vec<MelValidationDiagnostic>,
     pub calls: Vec<MelCallFact>,
     pub normalized_invokes: Vec<MelNormalizedInvokeFact>,
+    pub sink_arg_facts: Vec<MelSinkArgFact>,
+    pub code_like_value_facts: Vec<MelCodeLikeValueFact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -909,12 +975,13 @@ fn decode_quoted_inner_text(text: &str, policy: QuotedDecodePolicy) -> Option<St
 
 #[cfg(test)]
 mod tests {
+    use std::{borrow::Cow, sync::Arc};
+
     use super::{
         MelAuditSourceStore, MelDiagnosticStage, MelParseBudget, MelParseBudgetLimit,
         MelParseDiagnostic, MelSpan, first_mel_parse_budget_limit,
         mel_parse_budget_limit_from_message,
     };
-    use std::{borrow::Cow, sync::Arc};
 
     #[test]
     fn default_mel_parse_budget_uses_workspace_byte_cap() {

@@ -1,5 +1,6 @@
-use super::*;
 use maya_scene_kit_edit::scene::OperationMode;
+
+use super::*;
 
 impl GuiShell {
     pub(super) fn rebuild_row_id_index(&mut self) {

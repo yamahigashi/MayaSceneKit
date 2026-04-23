@@ -10,13 +10,11 @@ use maya_scene_kit_edit::scene::{
     preview_replace_scene_paths_with_options, remove_script_nodes_with_options,
     replace_scene_paths_with_options,
 };
-use maya_scene_kit_observe::scene::collect_scene_paths_with_options;
-use maya_scene_kit_observe::scene::inspect::{
-    MbInspectOptions, inspect_mb, inspect_mb_with_max_parse_bytes,
-};
-use maya_scene_kit_observe::scene::paths::PathKind;
 use maya_scene_kit_observe::scene::{
-    LoadOptions, Loader, SceneToolError, collect_script_node_entries_with_options,
+    LoadOptions, Loader, SceneToolError, collect_scene_paths_with_options,
+    collect_script_node_entries_with_options,
+    inspect::{MbInspectOptions, inspect_mb, inspect_mb_with_max_parse_bytes},
+    paths::PathKind,
 };
 use serde_json::Value;
 

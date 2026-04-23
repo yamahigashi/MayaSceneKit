@@ -324,8 +324,9 @@ fn cache_write_key(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::take_pending_snapshots;
     use std::collections::{BTreeMap, VecDeque};
+
+    use super::take_pending_snapshots;
 
     #[test]
     fn take_pending_snapshots_preserves_latest_per_key() {

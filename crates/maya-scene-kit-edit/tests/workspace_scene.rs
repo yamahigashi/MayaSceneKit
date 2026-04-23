@@ -17,13 +17,14 @@ use maya_scene_kit_edit::scene::{
     stage_scene_edits, stage_scene_edits_in_report_with_bytes,
 };
 use maya_scene_kit_formats::mb::parse_file;
-use maya_scene_kit_observe::scene::core::{OperationMode, SceneFormat, ValidationState};
-use maya_scene_kit_observe::scene::evidence::ExecutionSourceRange;
-use maya_scene_kit_observe::scene::paths::{PathKind, ScenePathsReport};
-use maya_scene_kit_observe::scene::scripts::ScriptNodeEntry;
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, SceneToolError, check_script_nodes, collect_scene_paths,
-    collect_script_node_entries, detect_scene_format,
+    collect_script_node_entries,
+    core::{OperationMode, SceneFormat, ValidationState},
+    detect_scene_format,
+    evidence::ExecutionSourceRange,
+    paths::{PathKind, ScenePathsReport},
+    scripts::ScriptNodeEntry,
 };
 use serde::Deserialize;
 use tempfile::tempdir;

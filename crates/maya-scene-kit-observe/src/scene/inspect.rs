@@ -1,7 +1,6 @@
 use std::path::Path;
 
 pub use crate::scene::public::{MbInspectNode, MbInspectOptions, MbInspectReport};
-
 use crate::{
     mb::{Chunk, MbParseBudget, parse_file_with_budget},
     scene::{

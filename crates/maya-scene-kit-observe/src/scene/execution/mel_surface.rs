@@ -9,6 +9,8 @@ pub struct MelSurfaceFacts {
     pub validation_diagnostics: Vec<MelSurfaceValidationDiagnostic>,
     pub calls: Vec<MelSurfaceCall>,
     pub normalized_commands: Vec<MelSurfaceNormalizedCommand>,
+    pub sink_arg_facts: Vec<MelSinkArgFact>,
+    pub code_like_value_facts: Vec<MelCodeLikeValueFact>,
 }
 
 pub fn collect_mel_surface_facts(source: &str) -> MelSurfaceFacts {
@@ -88,6 +90,59 @@ pub struct MelSurfaceCall {
     pub dynamic: bool,
     pub span_start: usize,
     pub span_end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MelStringAssemblyMarker {
+    Concat,
+    VariableReference,
+}
+
+impl MelStringAssemblyMarker {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Concat => "concat",
+            Self::VariableReference => "variable_reference",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MelResolvedStringKind {
+    Literal,
+    ProcReference,
+    AssembledLiteral,
+    Dynamic,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MelSinkArgKind {
+    Python,
+    Eval,
+    EvalDeferred,
+    CallbackFlag,
+    ScriptJobPayload,
+}
+
+#[derive(Debug, Clone)]
+pub struct MelSinkArgFact {
+    pub sink_kind: MelSinkArgKind,
+    pub resolved_kind: MelResolvedStringKind,
+    pub span: mel::MelSpan,
+    pub command_name: Option<Arc<str>>,
+    pub flag_name: Option<Arc<str>>,
+    pub rendered_text: Option<Arc<str>>,
+    pub markers: Vec<MelStringAssemblyMarker>,
+    pub code_like: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MelCodeLikeValueFact {
+    pub resolved_kind: MelResolvedStringKind,
+    pub span: mel::MelSpan,
+    pub rendered_text: Arc<str>,
+    pub markers: Vec<MelStringAssemblyMarker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +332,74 @@ fn map_mel_surface_facts(facts: mel::MelParseFacts) -> MelSurfaceFacts {
                     .collect(),
                 span_start: invoke.span.start,
                 span_end: invoke.span.end,
+            })
+            .collect(),
+        sink_arg_facts: facts
+            .sink_arg_facts
+            .into_iter()
+            .map(|fact| MelSinkArgFact {
+                sink_kind: match fact.sink_kind {
+                    mel::MelSinkArgKind::Python => MelSinkArgKind::Python,
+                    mel::MelSinkArgKind::Eval => MelSinkArgKind::Eval,
+                    mel::MelSinkArgKind::EvalDeferred => MelSinkArgKind::EvalDeferred,
+                    mel::MelSinkArgKind::CallbackFlag => MelSinkArgKind::CallbackFlag,
+                    mel::MelSinkArgKind::ScriptJobPayload => MelSinkArgKind::ScriptJobPayload,
+                },
+                resolved_kind: match fact.resolved_kind {
+                    mel::MelResolvedStringKind::Literal => MelResolvedStringKind::Literal,
+                    mel::MelResolvedStringKind::ProcReference => {
+                        MelResolvedStringKind::ProcReference
+                    }
+                    mel::MelResolvedStringKind::AssembledLiteral => {
+                        MelResolvedStringKind::AssembledLiteral
+                    }
+                    mel::MelResolvedStringKind::Dynamic => MelResolvedStringKind::Dynamic,
+                    mel::MelResolvedStringKind::Unknown => MelResolvedStringKind::Unknown,
+                },
+                span: fact.span,
+                command_name: fact.command_name,
+                flag_name: fact.flag_name,
+                rendered_text: fact.rendered_text,
+                markers: fact
+                    .markers
+                    .into_iter()
+                    .map(|marker| match marker {
+                        mel::MelStringAssemblyMarker::Concat => MelStringAssemblyMarker::Concat,
+                        mel::MelStringAssemblyMarker::VariableReference => {
+                            MelStringAssemblyMarker::VariableReference
+                        }
+                    })
+                    .collect(),
+                code_like: fact.code_like,
+            })
+            .collect(),
+        code_like_value_facts: facts
+            .code_like_value_facts
+            .into_iter()
+            .map(|fact| MelCodeLikeValueFact {
+                resolved_kind: match fact.resolved_kind {
+                    mel::MelResolvedStringKind::Literal => MelResolvedStringKind::Literal,
+                    mel::MelResolvedStringKind::ProcReference => {
+                        MelResolvedStringKind::ProcReference
+                    }
+                    mel::MelResolvedStringKind::AssembledLiteral => {
+                        MelResolvedStringKind::AssembledLiteral
+                    }
+                    mel::MelResolvedStringKind::Dynamic => MelResolvedStringKind::Dynamic,
+                    mel::MelResolvedStringKind::Unknown => MelResolvedStringKind::Unknown,
+                },
+                span: fact.span,
+                rendered_text: fact.rendered_text,
+                markers: fact
+                    .markers
+                    .into_iter()
+                    .map(|marker| match marker {
+                        mel::MelStringAssemblyMarker::Concat => MelStringAssemblyMarker::Concat,
+                        mel::MelStringAssemblyMarker::VariableReference => {
+                            MelStringAssemblyMarker::VariableReference
+                        }
+                    })
+                    .collect(),
             })
             .collect(),
     }

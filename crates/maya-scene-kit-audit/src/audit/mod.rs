@@ -10,6 +10,8 @@ use std::{
     sync::Arc,
 };
 
+use maya_scene_kit_observe::scene::detect_scene_format;
+
 pub use self::rules::ScriptAuditPlan;
 use crate::scene::{
     AuditDisposition, AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail,
@@ -19,7 +21,6 @@ use crate::scene::{
     LoadOptions, Loader, ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError,
     StaticAuditFindingDetail, ValidationState, execution::ObservedExecutionCatalog,
 };
-use maya_scene_kit_observe::scene::detect_scene_format;
 
 pub fn build_script_audit_plan(
     inline_rules: Vec<String>,
@@ -53,6 +54,7 @@ pub fn build_parse_budget_blocked_audit_report(
             &[],
             &[],
             blocked_on_uncertainty,
+            false,
             false,
         ),
         unit_summaries: Vec::new(),
@@ -201,6 +203,7 @@ pub fn audit_observation_with_digests(
         &unit_summaries,
         &dependency_facts,
         blocked_on_uncertainty,
+        !review_signals.is_empty(),
         !findings.is_empty(),
     );
     let digests = if include_digests {
@@ -303,6 +306,7 @@ fn determine_disposition(
     unit_summaries: &[ExecutionUnitSummary],
     dependency_facts: &[DependencyFact],
     blocked_on_uncertainty: bool,
+    has_review_signals: bool,
     has_findings: bool,
 ) -> AuditDisposition {
     let mut disposition = if unit_summaries.is_empty() {
@@ -318,6 +322,15 @@ fn determine_disposition(
         disposition = max_disposition(disposition, disposition_for_dependency(profile, fact));
     }
     if blocked_on_uncertainty {
+        disposition = max_disposition(
+            disposition,
+            match profile {
+                AuditProfile::StrictDefault => AuditDisposition::Review,
+                AuditProfile::HardenedUntrusted => AuditDisposition::DenyUncertain,
+            },
+        );
+    }
+    if has_review_signals {
         disposition = max_disposition(
             disposition,
             match profile {

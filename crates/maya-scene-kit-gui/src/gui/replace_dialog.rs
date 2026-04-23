@@ -1,5 +1,6 @@
-use super::*;
 use maya_scene_kit_edit::scene::OperationMode;
+
+use super::*;
 
 const REPLACE_DIALOG_HORIZONTAL_MARGIN: Pixels = px(48.0);
 const REPLACE_DIALOG_VERTICAL_MARGIN: Pixels = px(96.0);

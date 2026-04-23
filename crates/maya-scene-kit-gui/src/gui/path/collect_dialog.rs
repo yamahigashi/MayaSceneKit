@@ -1,9 +1,8 @@
-use super::super::*;
 use super::{
-    normalize_path_edit_targets, parse_path_collect_folder_input, path_collect_default_folder,
-    path_collect_destination_supports_rewrite_mode, path_collect_supported_for_edit_targets,
-    path_file_collect_supported_for_edit_targets, scene_path_string,
-    shared_workspace_root_for_targets,
+    super::*, normalize_path_edit_targets, parse_path_collect_folder_input,
+    path_collect_default_folder, path_collect_destination_supports_rewrite_mode,
+    path_collect_supported_for_edit_targets, path_file_collect_supported_for_edit_targets,
+    scene_path_string, shared_workspace_root_for_targets,
 };
 
 impl GuiShell {

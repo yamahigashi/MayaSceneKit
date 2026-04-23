@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::default_analysis_cache_root;
 use encoding_rs::SHIFT_JIS;
 use gpui::{
     AppContext, Axis, Entity, Focusable, Modifiers, OwnedMenuItem, TestAppContext,
@@ -31,18 +30,16 @@ use maya_scene_kit_edit::scene::{
     PathReplacePreviewItem, StagedSceneArtifact, ValidationState,
     clean_target_for_execution_origin,
 };
-use maya_scene_kit_observe::scene::core::SceneFormat;
-use maya_scene_kit_observe::scene::dump::SceneDumpRequireKind;
-use maya_scene_kit_observe::scene::evidence::{
-    ExecutionLanguage, ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind,
-    ExecutionTrigger,
-};
-use maya_scene_kit_observe::scene::paths::{
-    PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport,
-};
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot,
     collect_scene_paths,
+    core::SceneFormat,
+    dump::SceneDumpRequireKind,
+    evidence::{
+        ExecutionLanguage, ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind,
+        ExecutionTrigger,
+    },
+    paths::{PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport},
 };
 use tempfile::tempdir;
 
@@ -84,10 +81,12 @@ use super::{
     visible_path_selection_targets, visible_selection_range_indices,
     workspace_relative_display_path, workspace_split_config,
 };
-use crate::gui::cache_maintenance::CacheMaintenanceFlushResult;
-use crate::gui::cache_write::CacheWriteFlushResult;
 use crate::{
-    gui::{GuiShell, init_gui_app},
+    default_analysis_cache_root,
+    gui::{
+        GuiShell, cache_maintenance::CacheMaintenanceFlushResult,
+        cache_write::CacheWriteFlushResult, init_gui_app,
+    },
     i18n::I18n,
     menu_bar::TopMenuBar,
     model::{

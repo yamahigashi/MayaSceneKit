@@ -44,19 +44,20 @@ use maya_scene_kit_edit::scene::{
     stage_maya_ascii_with_options, stage_replace_scene_paths_with_overrides_in_report_with_options,
     stage_scene_edits_in_report_with_bytes_with_options, stage_scene_edits_with_options,
 };
-use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
-use maya_scene_kit_observe::scene::dump::{
-    SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind,
-};
-use maya_scene_kit_observe::scene::evidence::{ExecutionOrigin, ExecutionSurfaceKind};
-use maya_scene_kit_observe::scene::paths::{
-    PathKind, ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport,
-};
 use maya_scene_kit_observe::scene::{
-    LoadOptions, Loader, collect_scene_paths_with_options, find_scene_workspace_root,
+    LoadOptions, Loader, ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot,
+    collect_scene_paths_with_options,
+    core::{SceneFormat, ValidationState},
+    dump::{SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind},
+    evidence::{ExecutionOrigin, ExecutionSurfaceKind},
+    find_scene_workspace_root,
+    paths::{
+        PathKind, ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle,
+        ScenePathsReport,
+    },
     resolve_scene_path_value, resolve_scene_path_values_batch,
 };
-use maya_scene_kit_observe::scene::{ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot};
+use serde::Deserialize;
 
 use crate::{
     default_analysis_cache_root,
@@ -70,7 +71,6 @@ use crate::{
     },
     persistence::{load_persisted_state, save_persisted_state},
 };
-use serde::Deserialize;
 
 actions!(
     gui_menu,

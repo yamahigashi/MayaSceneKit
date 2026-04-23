@@ -1,5 +1,6 @@
-use super::{path_edit::normalize_path_edit_targets, *};
 use maya_scene_kit_observe::scene::scripts::ScriptNodeEntry;
+
+use super::{path_edit::normalize_path_edit_targets, *};
 
 pub(super) fn build_audit_result_rows(
     rows: &[SceneRow],

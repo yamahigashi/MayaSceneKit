@@ -481,6 +481,9 @@ pub(in crate::cli) fn render_audit_review_detail(detail: &AuditReviewDetail) -> 
             StaticAuditReviewDetail::MelCallbackProcReferenceDetected => {
                 value.message().to_string()
             }
+            StaticAuditReviewDetail::MelBodyAssemblyWithoutSinkDetected => {
+                value.message().to_string()
+            }
         },
         AuditReviewDetail::FreeText { message } => message.clone(),
     }

@@ -18,16 +18,18 @@ pub mod scene {
         LoadOptions, Loader, ObservationBundle, SceneToolError,
     };
 
-    pub use crate::persistent_cache::{
-        AuditCacheAccess, AuditCacheHit, AuditCacheIdentity, AuditCacheMaintenanceStats,
-        AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
-    };
-    pub use crate::public::audit::{
-        AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
-        AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode, AuditOptions,
-        AuditProfile, AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal,
-        AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation, ScriptAuditReport,
-        StaticAuditFindingDetail, StaticAuditReviewDetail,
+    pub use crate::{
+        persistent_cache::{
+            AuditCacheAccess, AuditCacheHit, AuditCacheIdentity, AuditCacheMaintenanceStats,
+            AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
+        },
+        public::audit::{
+            AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
+            AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode,
+            AuditOptions, AuditProfile, AuditReport, AuditReviewCode, AuditReviewDetail,
+            AuditReviewSignal, AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation,
+            ScriptAuditReport, StaticAuditFindingDetail, StaticAuditReviewDetail,
+        },
     };
 
     pub(crate) mod execution {

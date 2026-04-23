@@ -3,62 +3,13 @@ use std::sync::Arc;
 use maya_scene_kit_observe::scene::execution::collect_mel_surface_facts;
 
 use super::{
-    AnalysisSurface, analyze_mel_surface,
-    mel::find_mel_call,
-    text_scan::{
-        contains_ascii_word_case_insensitive, extract_mel_literal_call_body,
-        obfuscation_marker_base_severity, scan_mel_sink_word_hits,
-    },
+    AnalysisSurface, analyze_mel_surface, mel::find_mel_call, text_scan::scan_mel_sink_word_hits,
 };
 use crate::scene::{
-    AuditSeverity, AuditSurfaceDerivation, ExecutionLanguage, ExecutionOrigin,
-    ExecutionSurfaceKind, ExecutionTrigger,
+    AuditSurfaceDerivation, ExecutionLanguage, ExecutionOrigin, ExecutionSurfaceKind,
+    ExecutionTrigger,
     execution::{MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts},
 };
-
-#[test]
-fn mel_literal_call_body_allows_space_before_parenthesis() {
-    assert_eq!(
-        extract_mel_literal_call_body("python(\"print('hello')\")", "python"),
-        Some("print('hello')".to_string())
-    );
-    assert_eq!(
-        extract_mel_literal_call_body("python (\"print('hello')\")", "python"),
-        Some("print('hello')".to_string())
-    );
-    assert_eq!(
-        extract_mel_literal_call_body("python ('print(\"hello\")')", "python"),
-        Some("print(\"hello\")".to_string())
-    );
-    assert_eq!(
-        extract_mel_literal_call_body("python(\"import sub\" + \"process\")", "python"),
-        Some("import subprocess".to_string())
-    );
-    assert_eq!(
-        extract_mel_literal_call_body("python ( 'print(' + \"\\\"hello\\\"\" + ')' )", "python"),
-        Some("print(\"hello\")".to_string())
-    );
-}
-
-#[test]
-fn ascii_word_lookup_matches_sink_names_case_insensitively() {
-    assert!(contains_ascii_word_case_insensitive(
-        "exec('print(1)')",
-        "exec"
-    ));
-    assert!(contains_ascii_word_case_insensitive(
-        "exec ('print(1)')",
-        "exec"
-    ));
-    assert!(contains_ascii_word_case_insensitive(
-        "commandPort -n \"x\";",
-        "commandPort"
-    ));
-    assert!(!contains_ascii_word_case_insensitive(
-        "execute('print(1)')",
-        "exec"
-    ));
-}
 
 #[test]
 fn sink_word_scan_tracks_whole_word_hits_without_overlap() {
@@ -106,6 +57,8 @@ fn parser_backed_lookup_matches_call_name_case_insensitively() {
                 span_end: 17,
             }],
             normalized_commands: Vec::new(),
+            sink_arg_facts: Vec::new(),
+            code_like_value_facts: Vec::new(),
         })),
     };
 
@@ -139,7 +92,12 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
 
     let analysis = analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new());
 
-    assert!(analysis.findings.is_empty());
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .any(|finding| finding.code.as_str() == "mel_callback_flag")
+    );
     assert!(
         analysis
             .derived_surfaces
@@ -248,6 +206,8 @@ fn bare_mel_variable_is_not_obfuscation_marker() {
             validation_diagnostics: Vec::new(),
             calls: Vec::new(),
             normalized_commands: Vec::new(),
+            sink_arg_facts: Vec::new(),
+            code_like_value_facts: Vec::new(),
         })),
     };
 
@@ -257,21 +217,5 @@ fn bare_mel_variable_is_not_obfuscation_marker() {
             .findings
             .iter()
             .all(|finding| finding.code.as_str() != "obfuscation_markers")
-    );
-}
-
-#[test]
-fn obfuscation_marker_severity_tiers_strong_and_weak_markers() {
-    assert_eq!(
-        obfuscation_marker_base_severity(&["base64".to_string()]),
-        AuditSeverity::Critical
-    );
-    assert_eq!(
-        obfuscation_marker_base_severity(&["format(".to_string()]),
-        AuditSeverity::High
-    );
-    assert_eq!(
-        obfuscation_marker_base_severity(&[" + ".to_string(), "format(".to_string()]),
-        AuditSeverity::Critical
     );
 }

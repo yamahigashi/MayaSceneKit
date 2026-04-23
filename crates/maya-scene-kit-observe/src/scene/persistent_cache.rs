@@ -15,10 +15,12 @@ use crate::scene::{
     LoadOptions, ObservationBundle, SceneDigestSet, SceneToolError,
     dump::SceneDumpReport,
     execution::{
-        ExecutionSurface, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceCommandMode,
-        MelSurfaceDiagnostic, MelSurfaceDiagnosticStage, MelSurfaceFacts, MelSurfaceNormalizedArg,
-        MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag, MelSurfaceNormalizedItem,
-        MelSurfaceValidationDiagnostic, ObservedExecutionCatalog, ObservedExecutionSurface,
+        ExecutionSurface, MelCodeLikeValueFact, MelResolvedStringKind, MelSinkArgFact,
+        MelSinkArgKind, MelStringAssemblyMarker, MelSurfaceCall, MelSurfaceCallSurfaceKind,
+        MelSurfaceCommandMode, MelSurfaceDiagnostic, MelSurfaceDiagnosticStage, MelSurfaceFacts,
+        MelSurfaceNormalizedArg, MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag,
+        MelSurfaceNormalizedItem, MelSurfaceValidationDiagnostic, ObservedExecutionCatalog,
+        ObservedExecutionSurface,
     },
     paths::{PathKind, ScenePathsReport},
 };
@@ -87,6 +89,10 @@ pub struct MelSurfaceFactsSnapshot {
     pub validation_diagnostics: Vec<MelSurfaceValidationDiagnosticSnapshot>,
     pub calls: Vec<MelSurfaceCallSnapshot>,
     pub normalized_commands: Vec<MelSurfaceNormalizedCommandSnapshot>,
+    #[serde(default)]
+    pub sink_arg_facts: Vec<MelSinkArgFactSnapshot>,
+    #[serde(default)]
+    pub code_like_value_facts: Vec<MelCodeLikeValueFactSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +156,26 @@ pub struct MelSurfaceNormalizedCommandSnapshot {
     pub span_end: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MelSinkArgFactSnapshot {
+    pub sink_kind: MelSinkArgKindSnapshot,
+    pub resolved_kind: MelResolvedStringKindSnapshot,
+    pub span: maya_scene_kit_formats::mel::MelSpan,
+    pub command_name: Option<String>,
+    pub flag_name: Option<String>,
+    pub rendered_text: Option<String>,
+    pub markers: Vec<MelStringAssemblyMarkerSnapshot>,
+    pub code_like: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MelCodeLikeValueFactSnapshot {
+    pub resolved_kind: MelResolvedStringKindSnapshot,
+    pub span: maya_scene_kit_formats::mel::MelSpan,
+    pub rendered_text: String,
+    pub markers: Vec<MelStringAssemblyMarkerSnapshot>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MelSurfaceDiagnosticStageSnapshot {
@@ -172,6 +198,33 @@ pub enum MelSurfaceCommandModeSnapshot {
     Edit,
     Query,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MelSinkArgKindSnapshot {
+    Python,
+    Eval,
+    EvalDeferred,
+    CallbackFlag,
+    ScriptJobPayload,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MelResolvedStringKindSnapshot {
+    Literal,
+    ProcReference,
+    AssembledLiteral,
+    Dynamic,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MelStringAssemblyMarkerSnapshot {
+    Concat,
+    VariableReference,
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +420,18 @@ impl MelSurfaceFactsSnapshot {
                 .cloned()
                 .map(MelSurfaceNormalizedCommandSnapshot::from_command)
                 .collect(),
+            sink_arg_facts: facts
+                .sink_arg_facts
+                .iter()
+                .cloned()
+                .map(MelSinkArgFactSnapshot::from_fact)
+                .collect(),
+            code_like_value_facts: facts
+                .code_like_value_facts
+                .iter()
+                .cloned()
+                .map(MelCodeLikeValueFactSnapshot::from_fact)
+                .collect(),
         }
     }
 
@@ -392,6 +457,16 @@ impl MelSurfaceFactsSnapshot {
                 .normalized_commands
                 .into_iter()
                 .map(MelSurfaceNormalizedCommandSnapshot::into_command)
+                .collect(),
+            sink_arg_facts: self
+                .sink_arg_facts
+                .into_iter()
+                .map(MelSinkArgFactSnapshot::into_fact)
+                .collect(),
+            code_like_value_facts: self
+                .code_like_value_facts
+                .into_iter()
+                .map(MelCodeLikeValueFactSnapshot::into_fact)
                 .collect(),
         }
     }
@@ -567,6 +642,70 @@ impl MelSurfaceNormalizedItemSnapshot {
     }
 }
 
+impl MelSinkArgFactSnapshot {
+    fn from_fact(fact: MelSinkArgFact) -> Self {
+        Self {
+            sink_kind: MelSinkArgKindSnapshot::from_kind(fact.sink_kind),
+            resolved_kind: MelResolvedStringKindSnapshot::from_kind(fact.resolved_kind),
+            span: fact.span,
+            command_name: fact.command_name.map(|value| value.to_string()),
+            flag_name: fact.flag_name.map(|value| value.to_string()),
+            rendered_text: fact.rendered_text.map(|value| value.to_string()),
+            markers: fact
+                .markers
+                .into_iter()
+                .map(MelStringAssemblyMarkerSnapshot::from_marker)
+                .collect(),
+            code_like: fact.code_like,
+        }
+    }
+
+    fn into_fact(self) -> MelSinkArgFact {
+        MelSinkArgFact {
+            sink_kind: self.sink_kind.into_kind(),
+            resolved_kind: self.resolved_kind.into_kind(),
+            span: self.span,
+            command_name: self.command_name.map(Arc::<str>::from),
+            flag_name: self.flag_name.map(Arc::<str>::from),
+            rendered_text: self.rendered_text.map(Arc::<str>::from),
+            markers: self
+                .markers
+                .into_iter()
+                .map(MelStringAssemblyMarkerSnapshot::into_marker)
+                .collect(),
+            code_like: self.code_like,
+        }
+    }
+}
+
+impl MelCodeLikeValueFactSnapshot {
+    fn from_fact(fact: MelCodeLikeValueFact) -> Self {
+        Self {
+            resolved_kind: MelResolvedStringKindSnapshot::from_kind(fact.resolved_kind),
+            span: fact.span,
+            rendered_text: fact.rendered_text.to_string(),
+            markers: fact
+                .markers
+                .into_iter()
+                .map(MelStringAssemblyMarkerSnapshot::from_marker)
+                .collect(),
+        }
+    }
+
+    fn into_fact(self) -> MelCodeLikeValueFact {
+        MelCodeLikeValueFact {
+            resolved_kind: self.resolved_kind.into_kind(),
+            span: self.span,
+            rendered_text: Arc::<str>::from(self.rendered_text),
+            markers: self
+                .markers
+                .into_iter()
+                .map(MelStringAssemblyMarkerSnapshot::into_marker)
+                .collect(),
+        }
+    }
+}
+
 impl MelSurfaceDiagnosticStageSnapshot {
     fn from_stage(stage: MelSurfaceDiagnosticStage) -> Self {
         match stage {
@@ -617,6 +756,66 @@ impl MelSurfaceCommandModeSnapshot {
             Self::Edit => MelSurfaceCommandMode::Edit,
             Self::Query => MelSurfaceCommandMode::Query,
             Self::Unknown => MelSurfaceCommandMode::Unknown,
+        }
+    }
+}
+
+impl MelSinkArgKindSnapshot {
+    fn from_kind(kind: MelSinkArgKind) -> Self {
+        match kind {
+            MelSinkArgKind::Python => Self::Python,
+            MelSinkArgKind::Eval => Self::Eval,
+            MelSinkArgKind::EvalDeferred => Self::EvalDeferred,
+            MelSinkArgKind::CallbackFlag => Self::CallbackFlag,
+            MelSinkArgKind::ScriptJobPayload => Self::ScriptJobPayload,
+        }
+    }
+
+    fn into_kind(self) -> MelSinkArgKind {
+        match self {
+            Self::Python => MelSinkArgKind::Python,
+            Self::Eval => MelSinkArgKind::Eval,
+            Self::EvalDeferred => MelSinkArgKind::EvalDeferred,
+            Self::CallbackFlag => MelSinkArgKind::CallbackFlag,
+            Self::ScriptJobPayload => MelSinkArgKind::ScriptJobPayload,
+        }
+    }
+}
+
+impl MelResolvedStringKindSnapshot {
+    fn from_kind(kind: MelResolvedStringKind) -> Self {
+        match kind {
+            MelResolvedStringKind::Literal => Self::Literal,
+            MelResolvedStringKind::ProcReference => Self::ProcReference,
+            MelResolvedStringKind::AssembledLiteral => Self::AssembledLiteral,
+            MelResolvedStringKind::Dynamic => Self::Dynamic,
+            MelResolvedStringKind::Unknown => Self::Unknown,
+        }
+    }
+
+    fn into_kind(self) -> MelResolvedStringKind {
+        match self {
+            Self::Literal => MelResolvedStringKind::Literal,
+            Self::ProcReference => MelResolvedStringKind::ProcReference,
+            Self::AssembledLiteral => MelResolvedStringKind::AssembledLiteral,
+            Self::Dynamic => MelResolvedStringKind::Dynamic,
+            Self::Unknown => MelResolvedStringKind::Unknown,
+        }
+    }
+}
+
+impl MelStringAssemblyMarkerSnapshot {
+    fn from_marker(marker: MelStringAssemblyMarker) -> Self {
+        match marker {
+            MelStringAssemblyMarker::Concat => Self::Concat,
+            MelStringAssemblyMarker::VariableReference => Self::VariableReference,
+        }
+    }
+
+    fn into_marker(self) -> MelStringAssemblyMarker {
+        match self {
+            Self::Concat => MelStringAssemblyMarker::Concat,
+            Self::VariableReference => MelStringAssemblyMarker::VariableReference,
         }
     }
 }

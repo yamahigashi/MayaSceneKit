@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
-use maya_scene_kit_formats::ma::error::MaParseError;
-use maya_scene_kit_formats::mb::{MayaBinaryParseError, MbParseBudgetLimit};
-use maya_scene_kit_formats::mel::MelParseBudgetLimit;
+use maya_scene_kit_formats::{
+    ma::error::MaParseError,
+    mb::{MayaBinaryParseError, MbParseBudgetLimit},
+    mel::MelParseBudgetLimit,
+};
 use thiserror::Error;
 
 use super::{AsciiDecodePolicy, SceneFormat, ValidationState};

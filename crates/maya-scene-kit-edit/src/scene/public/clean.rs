@@ -95,8 +95,9 @@ impl ExecutionCleanResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use maya_scene_kit_observe::scene::evidence::{ExecutionLanguage, ExecutionTrigger};
+
+    use super::*;
 
     #[test]
     fn clean_target_for_execution_origin_maps_script_node_ma() {

@@ -2,10 +2,10 @@ pub(crate) mod loader;
 pub(crate) mod ma;
 pub(crate) mod mb;
 
-pub use self::loader::{LoadOptions, Loader, ObservationBundle};
-pub(crate) use self::loader::{MaObservationData, ObservationData};
 use std::path::Path;
 
+pub use self::loader::{LoadOptions, Loader, ObservationBundle};
+pub(crate) use self::loader::{MaObservationData, ObservationData};
 use crate::scene::{
     SceneToolError,
     core::SceneFormat,

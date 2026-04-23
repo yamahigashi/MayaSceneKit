@@ -4,10 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::super::*;
-use super::helpers::{
-    path_value_edit_supported_for_edit_targets, resolved_target_file_path_for_entry,
-    scene_path_string, shared_workspace_root_for_targets, write_back_selected_scene_path,
+use super::{
+    super::*,
+    helpers::{
+        path_value_edit_supported_for_edit_targets, resolved_target_file_path_for_entry,
+        scene_path_string, shared_workspace_root_for_targets, write_back_selected_scene_path,
+    },
 };
 
 pub(in crate::gui) fn path_collect_supported_for_edit_targets(

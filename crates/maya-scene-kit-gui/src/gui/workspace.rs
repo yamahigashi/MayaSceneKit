@@ -1,5 +1,6 @@
-use super::*;
 use std::{fs, io};
+
+use super::*;
 
 struct WorkspaceScanResult {
     root: PathBuf,

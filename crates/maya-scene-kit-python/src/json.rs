@@ -6,9 +6,11 @@ use maya_scene_kit_edit::scene::{
     MayaAsciiIssue, PathReplacePreview, PathReplacePreviewItem, PathReplaceResult, RawChunkDump,
     ScriptNodeCleanPreview, ScriptNodeCleanResult, UnknownInventoryEntry,
 };
-use maya_scene_kit_observe::scene::inspect::{MbInspectNode, MbInspectReport};
-use maya_scene_kit_observe::scene::paths::{ScenePathEntry, ScenePathMeta, ScenePathsReport};
-use maya_scene_kit_observe::scene::scripts::ScriptNodeEntriesReport;
+use maya_scene_kit_observe::scene::{
+    inspect::{MbInspectNode, MbInspectReport},
+    paths::{ScenePathEntry, ScenePathMeta, ScenePathsReport},
+    scripts::ScriptNodeEntriesReport,
+};
 use serde_json::{Value, json};
 
 pub(crate) fn inspect_report(report: &MbInspectReport) -> Value {
