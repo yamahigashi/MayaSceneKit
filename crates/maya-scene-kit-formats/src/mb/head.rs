@@ -388,8 +388,8 @@ mod tests {
             "HEAD",
             &[
                 build_chunk("VERS", b"2026\0"),
-                build_chunk("PLUG", b"pluginA\01.0\0"),
-                build_chunk("PLUG", b"pluginB\02.0\0-op \"v=0\"\0"),
+                build_chunk("PLUG", b"pluginA\x001.0\0"),
+                build_chunk("PLUG", b"pluginB\x002.0\0-op \"v=0\"\0"),
             ],
             4,
         );
