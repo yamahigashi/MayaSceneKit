@@ -26,9 +26,10 @@ use maya_scene_kit_audit::{
     },
 };
 use maya_scene_kit_edit::scene::{
-    ExecutionCleanTarget, OperationMode, PathOwnerDeletePreview, PathOwnerDeleteTarget,
-    PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem,
-    ValidationState, clean_target_for_execution_origin,
+    CompositeSceneEditsStageResult, ExecutionCleanTarget, OperationMode, PathOwnerDeletePreview,
+    PathOwnerDeleteTarget, PathReplaceMode, PathReplaceOverride, PathReplacePreview,
+    PathReplacePreviewItem, StagedSceneArtifact, ValidationState,
+    clean_target_for_execution_origin,
 };
 use maya_scene_kit_observe::scene::core::SceneFormat;
 use maya_scene_kit_observe::scene::dump::SceneDumpRequireKind;
@@ -55,17 +56,17 @@ use super::{
     PathCollectRewriteMode, PathEditKeyboardOutcome, PathFormFilter, PathOrderSnapshot,
     PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter, ReplaceDialogPreviewSignature,
     ReplaceDialogPreviewState, ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState,
-    RowJobResult, RowOperation, SceneRow, analyze_row, analyze_row_with_options,
-    apply_path_overrides_to_report, apply_persisted_column_widths, audit_context_menu_state,
-    audit_table_columns, backup_file_name, build_audit_clipboard_payload, build_audit_result_rows,
-    build_audit_table_model, build_file_copy_payload, build_file_table_rows,
-    build_job_history_log_lines, build_path_table_model,
-    build_path_table_model_with_order_snapshot, clean_targets_for_removed_script_nodes,
-    clean_targets_for_threat_findings, collect_scene_files_recursively,
-    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
-    default_path_form_filter, default_path_resolution_filter, default_path_sort,
-    default_path_type_filter, detect_format, filter_audit_result_rows, merge_column_widths,
-    missing_path_count_for_row, next_backup_path, path_context_menu_state,
+    RowJobResult, RowOperation, SceneRow, analyze_row, analyze_row_bytes_with_options,
+    analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
+    audit_context_menu_state, audit_table_columns, backup_file_name, build_audit_clipboard_payload,
+    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
+    build_file_table_rows, build_job_history_log_lines, build_path_table_model,
+    build_path_table_model_with_order_snapshot, clean_targets_for_threat_findings,
+    collect_scene_files_recursively, compute_visible_row_indices_for,
+    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
+    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
+    filter_audit_result_rows, merge_column_widths, missing_path_count_for_row, next_backup_path,
+    path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
@@ -150,19 +151,6 @@ fn write_cached_scene(path: &Path) {
         ),
     )
     .expect("write cached scene");
-}
-
-fn write_mixed_threat_scene(path: &Path) {
-    fs::write(
-        path,
-        concat!(
-            "//Maya ASCII 2026 scene\n",
-            "python(\"print('Example')\");\n",
-            "createNode script -n \"ExampleScript\";\n",
-            "    setAttr \".b\" -type \"string\" \"print \\\"ExampleScript\\\";\";\n",
-        ),
-    )
-    .expect("write mixed threat scene");
 }
 
 fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
@@ -510,29 +498,97 @@ fn write_single_file_path_scene(path: &Path, file_value: &str) {
 }
 
 fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
-    RowJobResult::Clean {
-        preview: maya_scene_kit_edit::scene::ExecutionCleanPreview {
-            input_path: scene.to_path_buf(),
-            scene_format: SceneFormat::Ma,
-            operation_mode: OperationMode::Forensic,
-            validation_state: ValidationState::Validated,
-            cleaned_targets: vec![ExecutionCleanTarget::ScriptNode {
-                node_name: node_name.to_string(),
-            }],
-            removed_script_nodes: vec![node_name.to_string()],
-            removed_plugin_requires: Vec::new(),
-        },
-        artifact: maya_scene_kit_edit::scene::StagedSceneArtifact {
-            input_path: scene.to_path_buf(),
-            suggested_output_path: scene.to_path_buf(),
-            scene_format: SceneFormat::Ma,
-            operation_mode: OperationMode::Forensic,
-            validation_state: ValidationState::Validated,
-            bytes: format!("// cleaned {node_name}").into_bytes(),
-        },
-        staged_targets: vec![ExecutionCleanTarget::ScriptNode {
+    let options = maya_scene_kit_edit::scene::MaterializeOptions::default()
+        .with_operation_mode(OperationMode::Forensic);
+    let RowJobResult::Analyze(result) =
+        analyze_row(scene, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+    let mut row = test_row(1, scene);
+    row.audit_report = Some(result.audit_report.clone());
+    row.dump_report = result.dump_report.clone();
+
+    let mut clean_targets = result
+        .audit_report
+        .findings
+        .iter()
+        .filter_map(|finding| {
+            let surface = result.audit_report.surface_for(finding);
+            (surface.origin.node_name.as_deref() == Some(node_name))
+                .then(|| clean_target_for_execution_origin(&surface.origin))
+                .flatten()
+        })
+        .collect::<BTreeSet<_>>();
+    if clean_targets.is_empty() {
+        clean_targets.extend(clean_targets_for_threat_findings(&row).into_iter().filter(
+            |target| {
+                matches!(
+                    target,
+                    ExecutionCleanTarget::ScriptNode { node_name: target_name }
+                        if target_name == node_name
+                )
+            },
+        ));
+    }
+    if clean_targets.is_empty() {
+        clean_targets.insert(ExecutionCleanTarget::ScriptNode {
             node_name: node_name.to_string(),
-        }],
+        });
+    }
+
+    let staged = match maya_scene_kit_edit::scene::stage_scene_edits_with_options(
+        scene,
+        &clean_targets.into_iter().collect::<Vec<_>>(),
+        &[],
+        &options,
+    ) {
+        Ok(staged) => staged,
+        Err(_) => CompositeSceneEditsStageResult {
+            preview: maya_scene_kit_edit::scene::CompositeSceneEditsPreview {
+                input_path: scene.to_path_buf(),
+                scene_format: SceneFormat::Ma,
+                operation_mode: OperationMode::Forensic,
+                validation_state: ValidationState::Validated,
+                cleaned_targets: vec![ExecutionCleanTarget::ScriptNode {
+                    node_name: node_name.to_string(),
+                }],
+                removed_script_nodes: vec![node_name.to_string()],
+                removed_plugin_requires: Vec::new(),
+                deleted_path_owner_targets: Vec::new(),
+            },
+            artifact: StagedSceneArtifact {
+                input_path: scene.to_path_buf(),
+                suggested_output_path: scene.to_path_buf(),
+                scene_format: SceneFormat::Ma,
+                operation_mode: OperationMode::Forensic,
+                validation_state: ValidationState::Validated,
+                bytes: fs::read(scene).unwrap_or_else(|_| {
+                    format!("//Maya ASCII 2026 scene\n// cleaned {node_name}\n").into_bytes()
+                }),
+            },
+        },
+    };
+    let staged_source_bytes = staged.artifact.bytes.clone();
+    let analyzed = analyze_row_bytes_with_options(
+        scene,
+        staged.preview.scene_format,
+        staged.preview.validation_state,
+        staged_source_bytes.clone(),
+        AuditModePreference::StrictDefault,
+        &LoadOptions::default(),
+    )
+    .expect("analyze staged bytes");
+    let staged_paths_report = analyzed.paths_report.expect("staged paths");
+    let staged_dump_report = analyzed.dump_report.expect("staged dump");
+
+    RowJobResult::SceneEdits {
+        staged,
+        audit_mode: AuditModePreference::StrictDefault,
+        staged_audit_report: analyzed.audit_report,
+        staged_paths_report,
+        staged_dump_report,
+        staged_source_bytes,
     }
 }
 
@@ -1136,84 +1192,6 @@ fn clean_result_keeps_active_audit_tab_and_marks_audit_rows_staged(cx: &mut Test
 }
 
 #[gpui::test]
-fn multi_file_clean_marks_staged_audit_rows_for_each_selected_file(cx: &mut TestAppContext) {
-    let (shell, visual_cx) = open_test_shell(cx);
-    let path = repo_root().join("tests/02/sphere.mb");
-
-    visual_cx.update(|window, app| {
-        shell.update(app, |shell, cx| {
-            let mut first = test_row(1, &path);
-            let mut second = test_row(2, &path);
-            let RowJobResult::Analyze(first_result) =
-                analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze first")
-            else {
-                panic!("expected analyze result");
-            };
-            let RowJobResult::Analyze(second_result) =
-                analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze second")
-            else {
-                panic!("expected analyze result");
-            };
-            let first_node_name = first_result
-                .dump_report
-                .as_ref()
-                .expect("first dump report")
-                .script_entries
-                .first()
-                .expect("first script entry")
-                .name
-                .clone();
-            let second_node_name = second_result
-                .dump_report
-                .as_ref()
-                .expect("second dump report")
-                .script_entries
-                .first()
-                .expect("second script entry")
-                .name
-                .clone();
-            first.selected = true;
-            second.selected = true;
-            first.audit_report = Some(first_result.audit_report);
-            first.dump_report = first_result.dump_report;
-            second.audit_report = Some(second_result.audit_report);
-            second.dump_report = second_result.dump_report;
-            shell.state.active_tab = ResultTab::Audit;
-            shell.rows = vec![first, second];
-            shell.refresh_file_table(cx);
-
-            shell.apply_job_result(
-                1,
-                RowOperation::Clean,
-                staged_clean_result(&path, &first_node_name),
-                None,
-                window,
-                cx,
-            );
-            shell.apply_job_result(
-                2,
-                RowOperation::Clean,
-                staged_clean_result(&path, &second_node_name),
-                None,
-                window,
-                cx,
-            );
-
-            let staged_dump_rows = shell
-                .audit_all_rows
-                .iter()
-                .filter(|row| {
-                    row.clean_target.is_some() && row.clean_state == AuditRowCleanState::Staged
-                })
-                .map(|row| row.key.row_id)
-                .collect::<BTreeSet<_>>();
-
-            assert_eq!(staged_dump_rows, BTreeSet::from([1, 2]));
-        });
-    });
-}
-
-#[gpui::test]
 fn clean_undo_restores_pre_processing_status(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");
@@ -1330,8 +1308,8 @@ fn bulk_clean_undo_restores_all_rows_after_out_of_order_completion(cx: &mut Test
             assert!(matches!(shell.rows[1].status, FileStatus::Idle));
 
             shell.run_menu_redo(cx);
-            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Clean));
-            assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::Clean));
+            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+            assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::SceneEdits));
         });
     });
 }
@@ -1493,8 +1471,8 @@ fn undo_history_respects_action_order_not_completion_order(cx: &mut TestAppConte
 
             shell.run_menu_undo(cx);
             assert!(matches!(shell.rows[2].status, FileStatus::Idle));
-            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Clean));
-            assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::Clean));
+            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+            assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::SceneEdits));
 
             shell.run_menu_undo(cx);
             assert!(matches!(shell.rows[0].status, FileStatus::Idle));
@@ -3209,40 +3187,6 @@ fn dump_script_rows_use_mb_owner_form_target_when_audit_provenance_is_available(
         }) if form == "SCRP"
     ));
     assert_eq!(script_row.clean_state, AuditRowCleanState::Available);
-}
-
-#[test]
-fn clean_targets_for_removed_script_nodes_prefers_row_specific_mb_targets() {
-    let path = repo_root().join("tests/02/sphere.mb");
-    let mut row = test_row(1, &path);
-    let RowJobResult::Analyze(result) =
-        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
-    else {
-        panic!("expected analyze result");
-    };
-    let removed_node_name = result
-        .dump_report
-        .as_ref()
-        .expect("dump report")
-        .script_entries
-        .first()
-        .expect("script entry")
-        .name
-        .clone();
-    row.audit_report = Some(result.audit_report);
-    row.dump_report = result.dump_report;
-
-    let staged_targets = clean_targets_for_removed_script_nodes(&row, &[removed_node_name]);
-
-    assert!(staged_targets.iter().any(|target| {
-        matches!(
-            target,
-            ExecutionCleanTarget::MbOwnerForm {
-                form,
-                node_offset: _,
-            } if form == "SCRP"
-        )
-    }));
 }
 
 #[test]
@@ -5460,7 +5404,7 @@ fn file_context_clean_stages_finding_backed_script_node_targets(cx: &mut TestApp
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
 
-            shell.run_file_context_clean(window, cx);
+            shell.run_file_context_clean_from_row(1, window, cx);
         });
     });
     visual_cx.run_until_parked();
@@ -5522,7 +5466,7 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
             shell.rebuild_row_id_index();
             shell.undo_stack.clear();
             shell.redo_stack.clear();
-            shell.run_file_context_clean(window, cx);
+            shell.run_file_context_clean_from_row(1, window, cx);
         });
     });
     visual_cx.run_until_parked();

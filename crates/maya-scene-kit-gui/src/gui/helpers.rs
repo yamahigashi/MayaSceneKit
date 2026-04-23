@@ -136,56 +136,6 @@ fn dump_script_clean_target(
         })
 }
 
-pub(super) fn clean_targets_for_removed_script_nodes(
-    row: &SceneRow,
-    removed_node_names: &[String],
-) -> Vec<ExecutionCleanTarget> {
-    let removed_node_names = removed_node_names
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<String>>();
-    if removed_node_names.is_empty() {
-        return Vec::new();
-    }
-
-    let mut targets = BTreeSet::<ExecutionCleanTarget>::new();
-
-    if let Some(report) = row.display_audit_report() {
-        for finding in &report.findings {
-            let surface = report.surface_for(finding);
-            let Some(node_name) = surface.origin.node_name.as_ref() else {
-                continue;
-            };
-            if !removed_node_names.contains(node_name) {
-                continue;
-            }
-            if let Some(target) = clean_target_for_execution_origin(&surface.origin) {
-                targets.insert(target);
-            }
-        }
-    }
-
-    if let Some(report) = row.display_dump_report() {
-        for entry in &report.script_entries {
-            if !removed_node_names.contains(&entry.name) {
-                continue;
-            }
-            if let Some(target) = dump_script_clean_target(row, entry) {
-                targets.insert(target);
-            }
-        }
-    }
-
-    if targets.is_empty() {
-        return removed_node_names
-            .into_iter()
-            .map(|node_name| ExecutionCleanTarget::ScriptNode { node_name })
-            .collect();
-    }
-
-    targets.into_iter().collect()
-}
-
 fn dump_script_mb_owner_form_target(
     row: &SceneRow,
     entry: &ScriptNodeEntry,

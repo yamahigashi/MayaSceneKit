@@ -360,7 +360,7 @@ impl GuiShell {
         let row = self.rows.get(index)?;
         match row.dirty_kind? {
             DirtyKind::Replace => Some(row.path.clone()),
-            DirtyKind::Clean | DirtyKind::SceneEdits => row
+            DirtyKind::SceneEdits => row
                 .dirty_artifact
                 .as_ref()
                 .map(|artifact| artifact.input_path.clone()),
@@ -830,51 +830,6 @@ impl GuiShell {
                     self.complete_edit_transaction_success(edit_sequence, row_id);
                 }
             }
-            RowJobResult::Clean {
-                preview,
-                artifact,
-                staged_targets,
-            } => {
-                let removed = preview.cleaned_count();
-                let staged_targets = if !preview.removed_script_nodes.is_empty()
-                    && staged_targets.iter().all(|target| {
-                        matches!(
-                            target,
-                            ExecutionCleanTarget::ScriptNode { node_name }
-                                if preview.removed_script_nodes.iter().any(|name| name == node_name)
-                        )
-                    }) {
-                    clean_targets_for_removed_script_nodes(
-                        &self.rows[index],
-                        &preview.removed_script_nodes,
-                    )
-                } else {
-                    staged_targets
-                };
-                self.rows[index].dirty_artifact = Some(artifact);
-                self.rows[index].dirty_kind = Some(DirtyKind::Clean);
-                self.rows[index].clean_preview = Some(preview);
-                self.rows[index].path_owner_delete_preview = None;
-                self.rows[index].pending_clean_targets = staged_targets.into_iter().collect();
-                self.rows[index].pending_path_owner_delete_targets.clear();
-                self.rows[index].staged_audit_mode = None;
-                self.rows[index].staged_audit_report = None;
-                self.rows[index].staged_paths_report = None;
-                self.rows[index].staged_dump_report = None;
-                self.rows[index].staged_source_bytes = None;
-                self.rows[index].status = FileStatus::Dirty;
-                self.rows[index].sync_findings_count();
-                self.record_job(
-                    operation_key(operation),
-                    self.rows[index].path.clone(),
-                    None,
-                    format!("{removed} target(s) staged"),
-                    false,
-                );
-                if let Some(edit_sequence) = edit_sequence {
-                    self.complete_edit_transaction_success(edit_sequence, row_id);
-                }
-            }
             RowJobResult::ToAscii { report, artifact } => {
                 self.rows[index].dirty_artifact = Some(artifact);
                 self.rows[index].dirty_kind = Some(DirtyKind::ToAscii);
@@ -1018,16 +973,6 @@ impl GuiShell {
     }
 
     pub(super) fn run_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let targets_by_row = self.file_threat_clean_targets_by_row(self.ready_selected_indices());
-        if !bulk_enabled(targets_by_row.len()) {
-            self.status_message = Some(BannerMessage::SelectFilesFirst);
-            return;
-        }
-
-        self.stage_file_threat_targets(targets_by_row, window, cx);
-    }
-
-    pub(super) fn run_file_context_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let targets_by_row = self.file_threat_clean_targets_by_row(self.ready_selected_indices());
         if !bulk_enabled(targets_by_row.len()) {
             self.status_message = Some(BannerMessage::SelectFilesFirst);
@@ -1244,9 +1189,7 @@ impl GuiShell {
                                 .artifact
                             }
                         }
-                        Some(DirtyKind::Clean)
-                        | Some(DirtyKind::SceneEdits)
-                        | Some(DirtyKind::ToAscii) => artifact
+                        Some(DirtyKind::SceneEdits) | Some(DirtyKind::ToAscii) => artifact
                             .ok_or_else(|| "missing staged artifact for save".to_string())?,
                         None => return Err("missing dirty kind for save".to_string()),
                     };
