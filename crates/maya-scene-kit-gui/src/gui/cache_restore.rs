@@ -463,10 +463,7 @@ impl GuiShell {
 
     fn should_notify_cache_restore_progress(&self) -> bool {
         self.cache_restore_state.completed_count >= self.cache_restore_state.total_count
-            || self
-                .cache_restore_state
-                .completed_count
-                % CACHE_RESTORE_PROGRESS_NOTIFY_INTERVAL
+            || self.cache_restore_state.completed_count % CACHE_RESTORE_PROGRESS_NOTIFY_INTERVAL
                 == 0
     }
 }

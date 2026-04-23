@@ -766,9 +766,7 @@ impl GuiShell {
     fn should_notify_auto_analyze_progress(&self, row_id: u64) -> bool {
         self.auto_analyze_refresh_state.pending_completion_count == 0
             || self.auto_analyze_refresh_state.pending_completion_count == 1
-            || self
-                .auto_analyze_refresh_state
-                .pending_completion_count
+            || self.auto_analyze_refresh_state.pending_completion_count
                 % AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL
                 == 0
             || self.workspace_auto_analyze_started_at.is_none()
