@@ -320,7 +320,7 @@ pub fn collect_rtft_owner_traces_from_mb(mb: &MayaBinaryFile) -> Vec<MbRtftOwner
         let Some(node_name) = child
             .children
             .iter()
-            .find_map(|chunk| (chunk.tag == "CREA").then_some(chunk))
+            .find(|chunk| chunk.tag == "CREA")
             .and_then(|chunk| extract_node_name_from_crea_payload(mb.payload(chunk)))
         else {
             continue;

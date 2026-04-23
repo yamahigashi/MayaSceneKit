@@ -62,7 +62,7 @@ pub fn remove_raw_script_nodes_from_ma_by_name(
                 continue;
             }
         }
-        out.extend_from_slice(&lines[line_idx]);
+        out.extend_from_slice(lines[line_idx]);
         line_idx += 1;
     }
 
@@ -78,7 +78,7 @@ fn find_script_blocks_in_ma(lines: &[&[u8]]) -> Vec<(usize, usize, String)> {
             let name = extract_script_node_name_from_create(line, i);
             let mut j = i + 1;
             while j < lines.len() {
-                if is_top_level_command(&lines[j]) {
+                if is_top_level_command(lines[j]) {
                     break;
                 }
                 j += 1;

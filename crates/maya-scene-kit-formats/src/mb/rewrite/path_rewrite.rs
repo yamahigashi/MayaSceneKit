@@ -401,7 +401,7 @@ fn rewrite_head_child(
         }
         let payload_text = String::from_utf8_lossy(chunk_payload);
         let payload_text = payload_text.trim_end_matches(char::from(0));
-        let (new_text, count) = compiled_rules.apply(&payload_text);
+        let (new_text, count) = compiled_rules.apply(payload_text);
         if count == 0 {
             continue;
         }
@@ -700,7 +700,7 @@ fn replace_path_field_in_frdi_payload_with_rules(
         return (payload.to_vec(), 0);
     };
 
-    let (new_text, count) = compiled_rules.apply(&stripped_text);
+    let (new_text, count) = compiled_rules.apply(stripped_text);
     if count == 0 {
         return (payload.to_vec(), 0);
     }
@@ -838,29 +838,6 @@ mod tests {
 
         let mut child_payload = form.as_bytes().to_vec();
         child_payload.extend_from_slice(&inner);
-        let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
-            .expect("child chunk");
-
-        let mut root_payload = b"Maya".to_vec();
-        root_payload.extend_from_slice(&child);
-        let mut root = Vec::new();
-        append_chunk_header(
-            &mut root,
-            "FOR8",
-            0,
-            root_payload.len(),
-            SectionHeaderFormat::EightByte,
-        )
-        .expect("root chunk");
-        root.extend_from_slice(&root_payload);
-        root
-    }
-
-    fn build_mb_with_form_children(form: &str, children: &[Vec<u8>]) -> Vec<u8> {
-        let mut child_payload = form.as_bytes().to_vec();
-        for child in children {
-            child_payload.extend_from_slice(child);
-        }
         let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
             .expect("child chunk");
 
