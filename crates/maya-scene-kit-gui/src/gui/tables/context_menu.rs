@@ -38,6 +38,7 @@ pub(in crate::gui) fn audit_context_menu_state(rows: &[AuditTableRow]) -> AuditC
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct FileContextMenuState {
     pub can_clean: bool,
+    pub can_delete_ui_configuration_script_node: bool,
 }
 
 pub(in crate::gui) fn file_context_menu_state(
@@ -45,9 +46,13 @@ pub(in crate::gui) fn file_context_menu_state(
     row_id: u64,
 ) -> FileContextMenuState {
     let Some(row_index) = rows.iter().position(|row| row.id == row_id) else {
-        return FileContextMenuState { can_clean: false };
+        return FileContextMenuState {
+            can_clean: false,
+            can_delete_ui_configuration_script_node: false,
+        };
     };
     let selected = rows[row_index].selected;
+    let can_delete_ui_configuration_script_node = !rows[row_index].is_processing();
     let can_clean = rows
         .iter()
         .enumerate()
@@ -63,7 +68,10 @@ pub(in crate::gui) fn file_context_menu_state(
         })
         .any(|(_, row)| file_context_clean_targets(row).next().is_some());
 
-    FileContextMenuState { can_clean }
+    FileContextMenuState {
+        can_clean,
+        can_delete_ui_configuration_script_node,
+    }
 }
 
 fn file_context_clean_targets(row: &SceneRow) -> impl Iterator<Item = ExecutionCleanTarget> + '_ {

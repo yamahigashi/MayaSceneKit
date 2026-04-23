@@ -6,6 +6,7 @@
   "action.clean": "Remove Threat",
   "action.clean_audit_context": "Delete Selected Nodes",
   "action.clean_file_context": "Delete Threats",
+  "action.delete_ui_configuration_script_node": "Delete uiConfigurationScriptNode",
   "action.clean_selected": "Remove Selected Threats",
   "action.clear_workspace": "Clear",
   "action.detail": "Detail",

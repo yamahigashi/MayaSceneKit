@@ -95,6 +95,7 @@ mod tests {
             "action.clean_selected",
             "action.clean_audit_context",
             "action.clean_file_context",
+            "action.delete_ui_configuration_script_node",
             "action.copy_source_text",
             "action.detail",
             "action.discard_edits_and_exit",

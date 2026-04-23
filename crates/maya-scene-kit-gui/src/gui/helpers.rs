@@ -33,7 +33,11 @@ pub(super) fn build_audit_result_rows(
                     summary: render_audit_finding_detail(&finding.detail),
                     code: finding.code.as_str().to_string(),
                     sink: finding.sink.as_str().to_string(),
-                    preview: surface.preview.clone(),
+                    preview: report.finding_preview(finding).to_string(),
+                    provenance: audit_provenance_lines(
+                        &surface.origin,
+                        audit_source_line(row, &surface.origin),
+                    ),
                     source_line: audit_source_line(row, &surface.origin),
                     evidence: finding.evidence.iter().map(render_audit_evidence).collect(),
                     dirty,
@@ -80,6 +84,7 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
             code: "require".to_string(),
             sink: "observe".to_string(),
             preview: require.rendered.clone(),
+            provenance: Vec::new(),
             source_line: None,
             evidence: Vec::new(),
             dirty: audit_item_dirty(row, clean_target.as_ref()),
@@ -102,6 +107,7 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
             code: "script_node".to_string(),
             sink: "observe".to_string(),
             preview: entry.body.trim_end_matches('\n').to_string(),
+            provenance: vec![format!("node: {}", entry.name)],
             source_line: None,
             evidence: vec![format!("node: {}", entry.name)],
             dirty: audit_item_dirty(row, clean_target.as_ref()),
@@ -206,6 +212,25 @@ fn audit_source_line(row: &SceneRow, origin: &ExecutionOrigin) -> Option<usize> 
     )
 }
 
+fn audit_provenance_lines(origin: &ExecutionOrigin, source_line: Option<usize>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(node_name) = origin.node_name.as_deref() {
+        lines.push(format!("node: {node_name}"));
+    }
+    if let Some(attr_name) = origin.attr_name.as_deref() {
+        lines.push(format!("attribute: {attr_name}"));
+    }
+    lines.push(format!("surface: {}", origin.surface_kind.as_str()));
+    lines.push(format!("trigger: {}", origin.trigger.as_str()));
+    if let Some(source_kind) = origin.source_kind.as_deref() {
+        lines.push(format!("source: {source_kind}"));
+    }
+    if let Some(source_line) = source_line {
+        lines.push(format!("line: {source_line}"));
+    }
+    lines
+}
+
 pub(super) fn build_audit_table_model(
     rows: &[AuditResultRow],
     selected_keys: &BTreeSet<AuditResultRowKey>,
@@ -223,6 +248,7 @@ pub(super) fn build_audit_table_model(
         code: String,
         sink: String,
         preview: String,
+        provenance: Vec<String>,
         source_line: Option<usize>,
         evidence: Vec<String>,
         clean_target: Option<ExecutionCleanTarget>,
@@ -250,6 +276,7 @@ pub(super) fn build_audit_table_model(
                 code: row.code.clone(),
                 sink: row.sink.clone(),
                 preview: row.preview.clone(),
+                provenance: row.provenance.clone(),
                 source_line: row.source_line,
                 evidence: row.evidence.clone(),
                 clean_target: row.clean_target.clone(),
@@ -291,6 +318,7 @@ pub(super) fn build_audit_table_model(
                 code: group.row.code,
                 sink: group.row.sink,
                 preview: group.row.preview,
+                provenance: group.row.provenance,
                 source_line: group.row.source_line,
                 evidence: group.row.evidence,
                 dirty: group.row.dirty,
@@ -312,6 +340,7 @@ pub(super) fn build_audit_table_model(
                 code: row.code,
                 sink: row.sink,
                 preview: row.preview,
+                provenance: row.provenance,
                 source_line: row.source_line,
                 evidence: row.evidence,
                 dirty: row.dirty,
@@ -344,6 +373,7 @@ pub(super) fn resolve_audit_detail_view_model(
         code: row.code.clone(),
         sink: row.sink.clone(),
         preview: row.preview.clone(),
+        provenance: row.provenance.clone(),
         source_line: row.source_line,
         evidence: row.evidence.clone(),
         clean_target: row.clean_target.clone(),
@@ -357,6 +387,7 @@ pub(super) fn resolve_audit_clipboard_payload(
 ) -> Option<String> {
     let detail = resolve_audit_detail_view_model(rows, key)?;
     Some(build_audit_clipboard_payload(
+        &detail.provenance,
         &detail.preview,
         &detail.evidence,
     ))
@@ -889,20 +920,34 @@ pub(super) fn render_audit_evidence(evidence: &AuditEvidence) -> String {
     }
 }
 
-pub(super) fn build_audit_clipboard_payload(preview: &str, evidence: &[String]) -> String {
+pub(super) fn build_audit_clipboard_payload(
+    provenance: &[String],
+    preview: &str,
+    evidence: &[String],
+) -> String {
     let preview = preview.trim();
+    let provenance_lines = provenance
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
     let evidence_lines = evidence
         .iter()
         .map(|entry| entry.trim())
         .filter(|entry| !entry.is_empty())
         .collect::<Vec<_>>();
 
-    match (preview.is_empty(), evidence_lines.is_empty()) {
-        (false, false) => format!("{preview}\n\n{}", evidence_lines.join("\n")),
-        (false, true) => preview.to_string(),
-        (true, false) => evidence_lines.join("\n"),
-        (true, true) => String::new(),
+    let mut sections = Vec::new();
+    if !provenance_lines.is_empty() {
+        sections.push(provenance_lines.join("\n"));
     }
+    if !preview.is_empty() {
+        sections.push(preview.to_string());
+    }
+    if !evidence_lines.is_empty() {
+        sections.push(evidence_lines.join("\n"));
+    }
+    sections.join("\n\n")
 }
 
 pub(super) fn save_staged_artifact_with_backup(
@@ -1957,6 +2002,10 @@ pub(super) fn build_app_menus(
                 },
                 MenuItem::separator(),
                 MenuItem::action(i18n.text("action.clean"), MenuEditClean),
+                MenuItem::action(
+                    i18n.text("action.delete_ui_configuration_script_node"),
+                    MenuEditDeleteUiConfigurationScriptNode,
+                ),
                 MenuItem::action(i18n.text("action.replace_path"), MenuEditReplace),
                 MenuItem::action(i18n.text("action.to_ascii"), MenuEditToAscii),
             ],

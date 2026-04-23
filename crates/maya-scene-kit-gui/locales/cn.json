@@ -6,6 +6,7 @@
   "action.clean": "移除威胁",
   "action.clean_audit_context": "删除所选节点",
   "action.clean_file_context": "删除威胁",
+  "action.delete_ui_configuration_script_node": "删除 uiConfigurationScriptNode",
   "action.clean_selected": "移除所选威胁",
   "action.clear_workspace": "清空",
   "action.detail": "详情",

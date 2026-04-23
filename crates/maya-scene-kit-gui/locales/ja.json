@@ -6,6 +6,7 @@
   "action.clean": "脅威を除去",
   "action.clean_audit_context": "選択ノードを削除",
   "action.clean_file_context": "脅威を削除",
+  "action.delete_ui_configuration_script_node": "uiConfigurationScriptNode を削除",
   "action.clean_selected": "選択した脅威を除去",
   "action.clear_workspace": "クリア",
   "action.detail": "詳細",
