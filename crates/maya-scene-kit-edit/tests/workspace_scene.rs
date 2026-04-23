@@ -1363,8 +1363,8 @@ fn clean_execution_targets_supports_plugin_require_for_mb() {
         "HEAD",
         &[
             build_mb_chunk("VERS", b"2026\0"),
-            build_mb_chunk("PLUG", b"pluginA\x01.0\0"),
-            build_mb_chunk("PLUG", b"pluginB\x02.0\0"),
+            build_mb_chunk("PLUG", b"pluginA\x001.0\0"),
+            build_mb_chunk("PLUG", b"pluginB\x002.0\0"),
         ],
         4,
     );
