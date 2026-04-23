@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::super::{
-    AuditRowCleanState, AuditTableRow, ExecutionCleanTarget, PathCollectRewriteMode,
+    AuditRowCleanState, AuditTableRow, DirtyKind, ExecutionCleanTarget, PathCollectRewriteMode,
     PathEditTargets, SceneRow, clean_targets_for_threat_findings,
     path_edit::{
         absolute_override_value_for_entry, path_value_edit_supported_for_entry,
@@ -45,28 +45,23 @@ pub(in crate::gui) fn file_context_menu_state(
     rows: &[SceneRow],
     row_id: u64,
 ) -> FileContextMenuState {
-    let Some(row_index) = rows.iter().position(|row| row.id == row_id) else {
+    let Some(row_indices) = file_context_row_indices(rows, row_id) else {
         return FileContextMenuState {
             can_clean: false,
             can_delete_ui_configuration_script_node: false,
         };
     };
-    let selected = rows[row_index].selected;
-    let can_delete_ui_configuration_script_node = !rows[row_index].is_processing();
-    let can_clean = rows
-        .iter()
-        .enumerate()
-        .filter(|(index, row)| {
-            if row.is_processing() {
-                return false;
-            }
-            if selected {
-                row.selected
-            } else {
-                *index == row_index
-            }
+    let can_delete_ui_configuration_script_node = row_indices.iter().any(|&row_index| {
+        rows.get(row_index).is_some_and(|row| {
+            file_context_scene_edit_allowed(row)
+                && file_context_can_stage_ui_configuration_script_node(row)
         })
-        .any(|(_, row)| file_context_clean_targets(row).next().is_some());
+    });
+    let can_clean = row_indices.iter().any(|&row_index| {
+        rows.get(row_index).is_some_and(|row| {
+            file_context_scene_edit_allowed(row) && file_context_has_available_clean_targets(row)
+        })
+    });
 
     FileContextMenuState {
         can_clean,
@@ -74,11 +69,49 @@ pub(in crate::gui) fn file_context_menu_state(
     }
 }
 
-fn file_context_clean_targets(row: &SceneRow) -> impl Iterator<Item = ExecutionCleanTarget> + '_ {
-    row.pending_clean_targets
-        .iter()
-        .cloned()
-        .chain(clean_targets_for_threat_findings(row))
+fn file_context_row_indices(rows: &[SceneRow], row_id: u64) -> Option<Vec<usize>> {
+    let row_index = rows.iter().position(|row| row.id == row_id)?;
+    let row = rows.get(row_index)?;
+    if row.is_processing() {
+        return None;
+    }
+    if row.selected {
+        Some(
+            rows.iter()
+                .enumerate()
+                .filter_map(|(index, row)| (!row.is_processing() && row.selected).then_some(index))
+                .collect(),
+        )
+    } else {
+        Some(vec![row_index])
+    }
+}
+
+fn file_context_scene_edit_allowed(row: &SceneRow) -> bool {
+    !row.is_processing()
+        && !matches!(
+            row.dirty_kind,
+            Some(DirtyKind::Replace | DirtyKind::ToAscii)
+        )
+}
+
+fn file_context_has_available_clean_targets(row: &SceneRow) -> bool {
+    clean_targets_for_threat_findings(row)
+        .into_iter()
+        .any(|target| !row.pending_clean_targets.contains(&target))
+}
+
+fn file_context_can_stage_ui_configuration_script_node(row: &SceneRow) -> bool {
+    row.display_dump_report().is_some_and(|report| {
+        report
+            .script_entries
+            .iter()
+            .any(|entry| entry.name == "uiConfigurationScriptNode")
+    }) && !row
+        .pending_clean_targets
+        .contains(&ExecutionCleanTarget::ScriptNode {
+            node_name: "uiConfigurationScriptNode".to_string(),
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

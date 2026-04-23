@@ -2905,7 +2905,7 @@ fn file_context_menu_state_enables_clean_for_selected_finding_backed_row() {
     let state = file_context_menu_state(&[row], 1);
 
     assert!(state.can_clean);
-    assert!(state.can_delete_ui_configuration_script_node);
+    assert!(!state.can_delete_ui_configuration_script_node);
 }
 
 #[test]
@@ -2918,7 +2918,7 @@ fn file_context_menu_state_disables_clean_when_clicked_row_has_no_targets() {
     let state = file_context_menu_state(&[row], 1);
 
     assert!(!state.can_clean);
-    assert!(state.can_delete_ui_configuration_script_node);
+    assert!(!state.can_delete_ui_configuration_script_node);
 }
 
 #[test]
@@ -2942,7 +2942,7 @@ fn file_context_menu_state_ignores_other_selected_targets_when_clicked_row_is_un
     let state = file_context_menu_state(&[selected_row, clicked_row], 2);
 
     assert!(!state.can_clean);
-    assert!(state.can_delete_ui_configuration_script_node);
+    assert!(!state.can_delete_ui_configuration_script_node);
 }
 
 #[test]
@@ -2957,7 +2957,42 @@ fn file_context_menu_state_enables_clean_for_pending_clean_targets() {
 
     let state = file_context_menu_state(&[row], 1);
 
-    assert!(state.can_clean);
+    assert!(!state.can_clean);
+    assert!(!state.can_delete_ui_configuration_script_node);
+}
+
+#[test]
+fn file_context_menu_state_disables_delete_ui_configuration_script_node_when_already_staged() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("pending_ui_config_target.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+        node_name: "uiConfigurationScriptNode".to_string(),
+    }]);
+
+    let state = file_context_menu_state(&[row], 1);
+
+    assert!(!state.can_clean);
+    assert!(!state.can_delete_ui_configuration_script_node);
+}
+
+#[test]
+fn file_context_menu_state_enables_delete_ui_configuration_script_node_when_dump_has_node() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("ui_config_present_for_menu.ma");
+    write_ui_configuration_script_node_scene(&path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    let mut row = test_row(1, &path);
+    row.dump_report = result.dump_report;
+
+    let state = file_context_menu_state(&[row], 1);
+
     assert!(state.can_delete_ui_configuration_script_node);
 }
 
@@ -2971,6 +3006,105 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_for_proc
 
     let state = file_context_menu_state(&[row], 1);
 
+    assert!(!state.can_delete_ui_configuration_script_node);
+}
+
+#[test]
+fn file_context_menu_state_disables_delete_actions_for_replace_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("replace_context_disabled.ma");
+    write_literal_mel_python_scene(&path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    let mut row = test_row(1, &path);
+    row.selected = true;
+    row.audit_report = Some(result.audit_report);
+    row.dirty_kind = Some(DirtyKind::Replace);
+    row.path_overrides
+        .insert(0, "asset/example/edited.fbx".to_string());
+
+    let state = file_context_menu_state(&[row], 1);
+
+    assert!(!state.can_clean);
+    assert!(!state.can_delete_ui_configuration_script_node);
+}
+
+#[test]
+fn file_context_menu_state_keeps_clean_enabled_when_selected_rows_mix_eligible_and_replace() {
+    let dir = tempdir().expect("tmpdir");
+    let eligible_path = dir.path().join("eligible_target.ma");
+    let blocked_path = dir.path().join("blocked_target.ma");
+    write_literal_mel_python_scene(&eligible_path);
+    write_literal_mel_python_scene(&blocked_path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&eligible_path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    let mut eligible_row = test_row(1, &eligible_path);
+    eligible_row.selected = true;
+    eligible_row.audit_report = Some(result.audit_report);
+    let mut blocked_row = test_row(2, &blocked_path);
+    blocked_row.selected = true;
+    blocked_row.dirty_kind = Some(DirtyKind::Replace);
+    blocked_row
+        .path_overrides
+        .insert(0, "asset/example/edited.fbx".to_string());
+
+    let state = file_context_menu_state(&[eligible_row, blocked_row], 1);
+
+    assert!(state.can_clean);
+}
+
+#[test]
+fn file_context_menu_state_keeps_ui_configuration_delete_enabled_when_selection_has_one_match() {
+    let dir = tempdir().expect("tmpdir");
+    let eligible_path = dir.path().join("ui_config_match.ma");
+    let blocked_path = dir.path().join("ui_config_missing.ma");
+    write_ui_configuration_script_node_scene(&eligible_path);
+    fs::write(&blocked_path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let RowJobResult::Analyze(result) =
+        analyze_row(&eligible_path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    let mut eligible_row = test_row(1, &eligible_path);
+    eligible_row.selected = true;
+    eligible_row.dump_report = result.dump_report;
+    let mut blocked_row = test_row(2, &blocked_path);
+    blocked_row.selected = true;
+
+    let state = file_context_menu_state(&[eligible_row, blocked_row], 1);
+
+    assert!(state.can_delete_ui_configuration_script_node);
+}
+
+#[test]
+fn file_context_menu_state_disables_delete_actions_for_to_ascii_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("to_ascii_context_disabled.mb");
+    fs::write(&path, "FORM").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.selected = true;
+    row.dirty_kind = Some(DirtyKind::ToAscii);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: path.clone(),
+        suggested_output_path: dir.path().join("to_ascii_context_disabled.ma"),
+        scene_format: SceneFormat::Ma,
+        operation_mode: OperationMode::Forensic,
+        validation_state: ValidationState::Validated,
+        bytes: b"// ascii".to_vec(),
+    });
+
+    let state = file_context_menu_state(&[row], 1);
+
+    assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
 }
 
@@ -5928,6 +6062,194 @@ fn file_context_clean_from_unselected_row_is_noop(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn file_context_clean_from_replace_row_is_noop(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("replace_clean_noop.ma");
+    write_literal_mel_python_scene(&scene);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.audit_report = Some(result.audit_report.clone());
+            row.dirty_kind = Some(DirtyKind::Replace);
+            row.path_overrides
+                .insert(0, "asset/example/edited.fbx".to_string());
+            shell.rows = vec![row];
+            shell.rebuild_row_id_index();
+
+            shell.run_file_context_clean_from_row(1, window, cx);
+        });
+    });
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(shell.rows[0].pending_clean_targets.is_empty());
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Replace));
+        assert!(shell.undo_stack.is_empty());
+    });
+}
+
+#[gpui::test]
+fn file_context_clean_skips_replace_rows_in_selected_group(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let eligible_scene = dir.path().join("eligible_group_clean.ma");
+    let blocked_scene = dir.path().join("blocked_group_clean.ma");
+    write_literal_mel_python_scene(&eligible_scene);
+    write_literal_mel_python_scene(&blocked_scene);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&eligible_scene, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut eligible_row = test_row(1, &eligible_scene);
+            eligible_row.selected = true;
+            eligible_row.audit_report = Some(result.audit_report.clone());
+
+            let mut blocked_row = test_row(2, &blocked_scene);
+            blocked_row.selected = true;
+            blocked_row.dirty_kind = Some(DirtyKind::Replace);
+            blocked_row
+                .path_overrides
+                .insert(0, "asset/example/edited.fbx".to_string());
+
+            shell.rows = vec![eligible_row, blocked_row];
+            shell.rebuild_row_id_index();
+            shell.run_file_context_clean_from_row(1, window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(!shell.rows[0].pending_clean_targets.is_empty());
+        assert!(shell.rows[1].pending_clean_targets.is_empty());
+        assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::Replace));
+    });
+}
+
+#[gpui::test]
+fn file_context_delete_ui_configuration_script_node_from_replace_row_is_noop(
+    cx: &mut TestAppContext,
+) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("replace_ui_config_noop.ma");
+    write_ui_configuration_script_node_scene(&scene);
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.dirty_kind = Some(DirtyKind::Replace);
+            row.path_overrides
+                .insert(0, "asset/example/edited.fbx".to_string());
+            shell.rows = vec![row];
+            shell.rebuild_row_id_index();
+
+            shell.run_file_context_delete_ui_configuration_script_node_from_row(1, window, cx);
+        });
+    });
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(shell.rows[0].pending_clean_targets.is_empty());
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Replace));
+        assert!(shell.undo_stack.is_empty());
+    });
+}
+
+#[gpui::test]
+fn file_context_delete_ui_configuration_script_node_when_already_staged_is_noop(
+    cx: &mut TestAppContext,
+) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("ui_config_already_staged_noop.ma");
+    write_ui_configuration_script_node_scene(&scene);
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "uiConfigurationScriptNode".to_string(),
+            }]);
+            row.dirty_kind = Some(DirtyKind::SceneEdits);
+            shell.rows = vec![row];
+            shell.rebuild_row_id_index();
+
+            shell.run_file_context_delete_ui_configuration_script_node_from_row(1, window, cx);
+        });
+    });
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].pending_clean_targets,
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "uiConfigurationScriptNode".to_string(),
+            }])
+        );
+        assert!(shell.undo_stack.is_empty());
+    });
+}
+
+#[gpui::test]
+fn file_context_delete_ui_configuration_script_node_skips_non_matching_selected_rows(
+    cx: &mut TestAppContext,
+) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let eligible_scene = dir.path().join("eligible_ui_config_group.ma");
+    let blocked_scene = dir.path().join("blocked_ui_config_group.ma");
+    write_ui_configuration_script_node_scene(&eligible_scene);
+    fs::write(&blocked_scene, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let RowJobResult::Analyze(result) =
+        analyze_row(&eligible_scene, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut eligible_row = test_row(1, &eligible_scene);
+            eligible_row.selected = true;
+            eligible_row.dump_report = result.dump_report.clone();
+
+            let mut blocked_row = test_row(2, &blocked_scene);
+            blocked_row.selected = true;
+
+            shell.rows = vec![eligible_row, blocked_row];
+            shell.rebuild_row_id_index();
+            shell.run_file_context_delete_ui_configuration_script_node_from_row(1, window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].pending_clean_targets,
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "uiConfigurationScriptNode".to_string(),
+            }])
+        );
+        assert!(shell.rows[1].pending_clean_targets.is_empty());
+    });
+}
+
+#[gpui::test]
 fn file_context_undo_from_unselected_row_is_noop(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");
@@ -6035,12 +6357,24 @@ fn file_context_delete_ui_configuration_script_node_from_unselected_row_targets_
     let scene_b = dir.path().join("ui_config_context_b.ma");
     write_ui_configuration_script_node_scene(&scene_a);
     write_ui_configuration_script_node_scene(&scene_b);
+    let RowJobResult::Analyze(result_a) =
+        analyze_row(&scene_a, AuditModePreference::StrictDefault).expect("analyze row a")
+    else {
+        panic!("expected analyze result");
+    };
+    let RowJobResult::Analyze(result_b) =
+        analyze_row(&scene_b, AuditModePreference::StrictDefault).expect("analyze row b")
+    else {
+        panic!("expected analyze result");
+    };
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let mut row_a = test_row(1, &scene_a);
             row_a.selected = true;
-            let row_b = test_row(2, &scene_b);
+            row_a.dump_report = result_a.dump_report.clone();
+            let mut row_b = test_row(2, &scene_b);
+            row_b.dump_report = result_b.dump_report.clone();
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
 
@@ -6071,13 +6405,25 @@ fn file_context_delete_ui_configuration_script_node_from_selected_row_targets_se
     let scene_b = dir.path().join("ui_config_context_selected_b.ma");
     write_ui_configuration_script_node_scene(&scene_a);
     write_ui_configuration_script_node_scene(&scene_b);
+    let RowJobResult::Analyze(result_a) =
+        analyze_row(&scene_a, AuditModePreference::StrictDefault).expect("analyze row a")
+    else {
+        panic!("expected analyze result");
+    };
+    let RowJobResult::Analyze(result_b) =
+        analyze_row(&scene_b, AuditModePreference::StrictDefault).expect("analyze row b")
+    else {
+        panic!("expected analyze result");
+    };
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let mut row_a = test_row(1, &scene_a);
             row_a.selected = true;
+            row_a.dump_report = result_a.dump_report.clone();
             let mut row_b = test_row(2, &scene_b);
             row_b.selected = true;
+            row_b.dump_report = result_b.dump_report.clone();
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
 
@@ -6108,13 +6454,25 @@ fn file_context_delete_ui_configuration_script_node_skips_processing_rows(cx: &m
     let scene_b = dir.path().join("ui_config_processing_b.ma");
     write_ui_configuration_script_node_scene(&scene_a);
     write_ui_configuration_script_node_scene(&scene_b);
+    let RowJobResult::Analyze(result_a) =
+        analyze_row(&scene_a, AuditModePreference::StrictDefault).expect("analyze row a")
+    else {
+        panic!("expected analyze result");
+    };
+    let RowJobResult::Analyze(result_b) =
+        analyze_row(&scene_b, AuditModePreference::StrictDefault).expect("analyze row b")
+    else {
+        panic!("expected analyze result");
+    };
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let mut row_a = test_row(1, &scene_a);
             row_a.selected = true;
+            row_a.dump_report = result_a.dump_report.clone();
             let mut row_b = test_row(2, &scene_b);
             row_b.selected = true;
+            row_b.dump_report = result_b.dump_report.clone();
             row_b.status = FileStatus::Processing(RowOperation::Analyze);
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
