@@ -1195,10 +1195,7 @@ impl GuiShell {
         row.staged_paths_report = None;
         row.staged_dump_report = None;
         row.staged_source_bytes = None;
-        if matches!(
-            row.dirty_kind,
-            Some(DirtyKind::SceneEdits | DirtyKind::Clean)
-        ) {
+        if matches!(row.dirty_kind, Some(DirtyKind::SceneEdits)) {
             row.dirty_kind = None;
         }
         row.status = if row.audit_report.is_some()

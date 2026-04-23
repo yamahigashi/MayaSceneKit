@@ -899,7 +899,6 @@ enum BannerMessage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirtyKind {
-    Clean,
     SceneEdits,
     Replace,
     ToAscii,
@@ -1253,10 +1252,7 @@ impl SceneRow {
     }
 
     fn scene_edits_are_staged(&self) -> bool {
-        matches!(
-            self.dirty_kind,
-            Some(DirtyKind::SceneEdits | DirtyKind::Clean)
-        )
+        matches!(self.dirty_kind, Some(DirtyKind::SceneEdits))
     }
 
     fn analysis_current_for(&self, audit_mode: AuditModePreference) -> bool {
@@ -1382,11 +1378,6 @@ enum RowJobResult {
         staged_paths_report: ScenePathsReport,
         staged_dump_report: SceneDumpReport,
         staged_source_bytes: Vec<u8>,
-    },
-    Clean {
-        preview: ExecutionCleanPreview,
-        artifact: StagedSceneArtifact,
-        staged_targets: Vec<ExecutionCleanTarget>,
     },
     ToAscii {
         report: MayaAsciiConversionReport,
