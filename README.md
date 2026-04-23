@@ -12,6 +12,7 @@ Maya scene files (`.mb` / `.ma`) without requiring a Maya runtime.
 - stage clean or path replacement edits and save the resulting files
 - integrate pre-open scene checks into Python tools or batch pipelines
 
+![Image](docs/assets/Screenshot_71.png)
 
 It currently ships three practical entry points:
 
