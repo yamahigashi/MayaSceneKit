@@ -1,5 +1,6 @@
-use super::{OperationMode, SceneFormat, ValidationState, staging::StagedSceneArtifact};
 use std::path::PathBuf;
+
+use super::{OperationMode, SceneFormat, ValidationState, staging::StagedSceneArtifact};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PathOwnerDeleteTarget {

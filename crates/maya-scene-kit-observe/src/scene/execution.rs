@@ -6,13 +6,17 @@ pub(crate) mod surfaces;
 
 use std::sync::Arc;
 
-pub use self::mel_surface::{
-    MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceCommandMode, MelSurfaceDiagnostic,
-    MelSurfaceDiagnosticStage, MelSurfaceFacts, MelSurfaceNormalizedArg,
-    MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag, MelSurfaceNormalizedItem,
-    MelSurfaceValidationDiagnostic, collect_mel_surface_facts, collect_mel_surface_facts_shared,
+pub use self::{
+    mel_surface::{
+        MelCodeLikeValueFact, MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind,
+        MelStringAssemblyMarker, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceCommandMode,
+        MelSurfaceDiagnostic, MelSurfaceDiagnosticStage, MelSurfaceFacts, MelSurfaceNormalizedArg,
+        MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag, MelSurfaceNormalizedItem,
+        MelSurfaceValidationDiagnostic, collect_mel_surface_facts,
+        collect_mel_surface_facts_shared,
+    },
+    surfaces::ExecutionSurface,
 };
-pub use self::surfaces::ExecutionSurface;
 use crate::scene::{
     DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionUnitSummary,
     SceneDigestSet, UnknownSemanticFact,

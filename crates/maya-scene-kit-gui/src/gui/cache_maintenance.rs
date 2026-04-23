@@ -421,8 +421,9 @@ fn cache_maintenance_key(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::take_pending_accesses;
     use std::collections::{BTreeMap, VecDeque};
+
+    use super::take_pending_accesses;
 
     #[test]
     fn take_pending_accesses_preserves_latest_per_key() {

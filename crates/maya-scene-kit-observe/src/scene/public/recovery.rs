@@ -2,20 +2,21 @@
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-pub use crate::scene::forensics::{
-    ChunkRef, ChunkTrace, Confidence, DecodeQualityRecord, NodeRecoveryIssue, RawChunkRecord,
-    RecoveryForensics, RecoveryIssue, RecoveryIssueKind, SchemaDecodeAttempt,
-    SchemaDecodeAttemptResult, SemanticProvenance, TypeIdResolverStatus,
+pub use crate::scene::{
+    forensics::{
+        ChunkRef, ChunkTrace, Confidence, DecodeQualityRecord, NodeRecoveryIssue, RawChunkRecord,
+        RecoveryForensics, RecoveryIssue, RecoveryIssueKind, SchemaDecodeAttempt,
+        SchemaDecodeAttemptResult, SemanticProvenance, TypeIdResolverStatus,
+    },
+    model::{
+        AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, CreateNodeFlags, FlagState, LinkOp,
+        NumericValue, RecoveredAttrOp, RecoveredHeader, RecoveredNode, RecoveredScene, RefEditData,
+        RefEditGroup, RefEditGroupSource, RefEditParseStats, RefEditRecord, RefEditUnknownTail,
+        ReferenceFileOp, SelectBlock, SelectBlockNote, SelectBlockOp, SetAttrOp, SetAttrValue,
+        SkinWeightPair, SkinWeightRow, TimeValuePair,
+    },
+    schema::node_semantics::AngularAttrKind,
 };
-pub use crate::scene::model::{
-    AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, CreateNodeFlags, FlagState, LinkOp,
-    NumericValue, RecoveredAttrOp, RecoveredHeader, RecoveredNode, RecoveredScene, RefEditData,
-    RefEditGroup, RefEditGroupSource, RefEditParseStats, RefEditRecord, RefEditUnknownTail,
-    ReferenceFileOp, SelectBlock, SelectBlockNote, SelectBlockOp, SetAttrOp, SetAttrValue,
-    SkinWeightPair, SkinWeightRow, TimeValuePair,
-};
-pub use crate::scene::schema::node_semantics::AngularAttrKind;
-
 use crate::{
     addattr_semantics::{AddAttrAngularSemantics, add_attr_semantics},
     mb::extract_head_metadata,

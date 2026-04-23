@@ -1,5 +1,4 @@
-use super::super::*;
-use super::helpers::normalize_path_edit_targets;
+use super::{super::*, helpers::normalize_path_edit_targets};
 
 impl GuiShell {
     pub(in crate::gui) fn capture_path_order_snapshot(&self) -> Option<PathOrderSnapshot> {

@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
-use maya_scene_kit_observe::scene::evidence::{
-    DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionOrigin,
-    ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
+use maya_scene_kit_observe::scene::{
+    core::{SceneFormat, ValidationState},
+    evidence::{
+        DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionOrigin,
+        ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -173,6 +175,7 @@ impl AuditFindingCode {
 pub enum AuditReviewCode {
     MelCallbackBody,
     MelCallbackProcReference,
+    MelBodyAssemblyWithoutSink,
 }
 
 impl AuditReviewCode {
@@ -180,6 +183,7 @@ impl AuditReviewCode {
         match self {
             Self::MelCallbackBody => "mel_callback_body",
             Self::MelCallbackProcReference => "mel_callback_proc_reference",
+            Self::MelBodyAssemblyWithoutSink => "mel_body_assembly_without_sink",
         }
     }
 }
@@ -317,6 +321,7 @@ impl StaticAuditFindingDetail {
 pub enum StaticAuditReviewDetail {
     MelCallbackBodyDetected,
     MelCallbackProcReferenceDetected,
+    MelBodyAssemblyWithoutSinkDetected,
 }
 
 impl StaticAuditReviewDetail {
@@ -327,6 +332,9 @@ impl StaticAuditReviewDetail {
             }
             Self::MelCallbackProcReferenceDetected => {
                 "MEL callback flag references a proc name; offline behavior remains runtime-dependent"
+            }
+            Self::MelBodyAssemblyWithoutSinkDetected => {
+                "assembled MEL body reconstructs code-like text in execution context without a proven execution sink"
             }
         }
     }

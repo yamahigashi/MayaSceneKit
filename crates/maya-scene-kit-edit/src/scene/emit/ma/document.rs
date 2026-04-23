@@ -3,10 +3,10 @@ use std::{
     path::Path,
 };
 
-use maya_scene_kit_observe::scene::model::{
-    RecoveredAttrOp, RecoveredHeader, RecoveredNode, SceneModel, SetAttrValue,
+use maya_scene_kit_observe::scene::{
+    model::{RecoveredAttrOp, RecoveredHeader, RecoveredNode, SceneModel, SetAttrValue},
+    recovery::AngularAttrKind,
 };
-use maya_scene_kit_observe::scene::recovery::AngularAttrKind;
 
 use super::{
     add_attr::render_add_attr_op,

@@ -10,15 +10,15 @@ use maya_scene_kit_audit::{
         AuditSinkKind, AuditSurfaceDerivation,
     },
 };
-use maya_scene_kit_observe::scene::core::ValidationState;
-use maya_scene_kit_observe::scene::evidence::{
-    DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail, ExecutionCoverageState,
-    ExecutionLanguage,
-};
-use maya_scene_kit_observe::scene::paths::PathKind;
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, MbParseBudget, MelParseBudget, SceneToolError, check_script_nodes,
     collect_scene_paths, collect_script_node_entries,
+    core::ValidationState,
+    evidence::{
+        DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail,
+        ExecutionCoverageState, ExecutionLanguage,
+    },
+    paths::PathKind,
 };
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -180,6 +180,32 @@ fn write_model_editor_callback_scene(path: &std::path::Path, callback_body: &str
                 "    setAttr \".st\" 1;\n",
             ),
             callback_body = callback_body
+        ),
+    );
+}
+
+fn write_assembled_code_like_without_sink_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"assembledReviewScene\";\n",
+            "    setAttr \".b\" -type \"string\" \"$body = \\\"python(\\\" + \\\"\\\\\\\"print('ok')\\\\\\\"\\\" + \\\")\\\";\";\n",
+            "    setAttr \".st\" 0;\n",
+        ),
+    );
+}
+
+fn write_benign_namespace_assembly_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"namespaceAssemblyScene\";\n",
+            "    setAttr \".b\" -type \"string\" \"$side = \\\"Example\\\"; $kind = \\\"Control\\\"; $name = $side + \\\"_\\\" + $kind + \\\"_option_control\\\"; optionMenu -label $name sampleMenu;\";\n",
+            "    setAttr \".st\" 0;\n",
         ),
     );
 }
@@ -571,26 +597,25 @@ fn audit_mb_fref_fbx_source_metadata_is_not_raw_execution_surface() {
 }
 
 #[test]
-fn audit_inline_print_callback_is_review_without_callback_finding() {
+fn audit_inline_print_callback_denies_via_callback_sink() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("inline_print_callback.ma");
     write_model_editor_callback_scene(&source, r#"print \\\"ok\\\";"#);
 
     let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
 
-    assert_eq!(report.disposition, AuditDisposition::Review);
-    assert!(report.findings.is_empty());
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding_code_str(finding) == "mel_callback_flag")
+    );
     assert!(
         report
             .review_signals
             .iter()
             .any(|review| review.code.as_str() == "mel_callback_body")
-    );
-    assert!(
-        report
-            .findings
-            .iter()
-            .all(|finding| finding_code_str(finding) != "mel_callback_flag")
     );
 }
 
@@ -619,7 +644,75 @@ fn audit_inline_python_callback_denies_via_derived_sink_finding() {
         report
             .findings
             .iter()
-            .all(|finding| finding_code_str(finding) != "mel_callback_flag")
+            .any(|finding| finding_code_str(finding) == "mel_callback_flag")
+    );
+}
+
+#[test]
+fn audit_assembled_code_like_without_sink_is_review_in_strict_mode() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("assembled_code_like_without_sink.ma");
+    write_assembled_code_like_without_sink_scene(&source);
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::Review);
+    assert!(
+        report
+            .review_signals
+            .iter()
+            .any(|review| review.code.as_str() == "mel_body_assembly_without_sink")
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "obfuscation_markers")
+    );
+}
+
+#[test]
+fn audit_assembled_code_like_without_sink_is_deny_uncertain_in_hardened_mode() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("assembled_code_like_hardened.ma");
+    write_assembled_code_like_without_sink_scene(&source);
+
+    let report = audit_script_nodes_with_options(
+        &source,
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::hardened_untrusted(),
+    )
+    .expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyUncertain);
+    assert!(
+        report
+            .review_signals
+            .iter()
+            .any(|review| review.code.as_str() == "mel_body_assembly_without_sink")
+    );
+}
+
+#[test]
+fn audit_benign_namespace_assembly_does_not_emit_body_assembly_signals() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("benign_namespace_assembly.ma");
+    write_benign_namespace_assembly_scene(&source);
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert!(
+        report
+            .review_signals
+            .iter()
+            .all(|review| review.code.as_str() != "mel_body_assembly_without_sink")
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "obfuscation_markers")
     );
 }
 

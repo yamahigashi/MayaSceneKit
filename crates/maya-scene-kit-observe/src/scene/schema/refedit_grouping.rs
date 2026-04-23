@@ -1,8 +1,9 @@
+use std::collections::HashMap;
+
 use super::{
     super::ir::{RefEditGroup, RefEditGroupSource, RefEditRecord, RefEditUnknownTail},
     refedit_spec::RefEditSchema,
 };
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::scene) struct ParsedBoundary {

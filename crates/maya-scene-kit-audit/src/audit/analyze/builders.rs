@@ -114,6 +114,7 @@ fn audit_review_code(review_id: &str) -> AuditReviewCode {
     match review_id {
         "mel_callback_body" => AuditReviewCode::MelCallbackBody,
         "mel_callback_proc_reference" => AuditReviewCode::MelCallbackProcReference,
+        "mel_body_assembly_without_sink" => AuditReviewCode::MelBodyAssemblyWithoutSink,
         _ => panic!("unhandled review id: {review_id}"),
     }
 }
@@ -177,6 +178,9 @@ fn audit_review_detail(review_id: &str, message: &str) -> AuditReviewDetail {
         "mel_callback_body" => Some(StaticAuditReviewDetail::MelCallbackBodyDetected),
         "mel_callback_proc_reference" => {
             Some(StaticAuditReviewDetail::MelCallbackProcReferenceDetected)
+        }
+        "mel_body_assembly_without_sink" => {
+            Some(StaticAuditReviewDetail::MelBodyAssemblyWithoutSinkDetected)
         }
         _ => None,
     };

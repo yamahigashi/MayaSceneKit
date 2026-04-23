@@ -7,7 +7,6 @@ mod shared;
 mod trace;
 
 pub(crate) use self::shared::StringInterner;
-
 pub use self::{
     attrs::{
         AddAttrDefaultValue, AddAttrOp, AddAttrValueSpec, CreateNodeFlags, FlagState, NumericValue,

@@ -11,8 +11,11 @@ use crate::mb::{
         rebuild_section_with_payload_rewrites, rewrite_attr_payload_string_preserving_shape,
     },
 };
-use crate::reference_semantics::{ScenePathAttrKind, classify_scene_path_attr};
-use crate::{ma::types::PathReplaceRule, replace_rules::CompiledPathReplaceRules};
+use crate::{
+    ma::types::PathReplaceRule,
+    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
+    replace_rules::CompiledPathReplaceRules,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MbPathReplaceRule {
@@ -814,11 +817,13 @@ mod tests {
         replace_scene_paths_in_mb, replace_scene_paths_in_mb_cow,
         replace_text_payload_preserving_nul_suffix, rewrite_rtft_child,
     };
-    use crate::mb::{
-        parse_file, parse_section_chunks_full_with_hints, rewrite::encode_chunk,
-        section::SectionHeaderFormat,
+    use crate::{
+        mb::{
+            parse_file, parse_section_chunks_full_with_hints, rewrite::encode_chunk,
+            section::SectionHeaderFormat,
+        },
+        replace_rules::CompiledPathReplaceRules,
     };
-    use crate::replace_rules::CompiledPathReplaceRules;
 
     fn build_mb_with_single_form(
         form: &str,

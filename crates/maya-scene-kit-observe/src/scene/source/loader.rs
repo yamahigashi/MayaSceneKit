@@ -4,8 +4,10 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use maya_scene_kit_formats::ma::selective::{self, RawMaSelectiveSections};
-use maya_scene_kit_formats::mel::{MelParseBudget, first_mel_parse_budget_limit};
+use maya_scene_kit_formats::{
+    ma::selective::{self, RawMaSelectiveSections},
+    mel::{MelParseBudget, first_mel_parse_budget_limit},
+};
 
 use crate::{
     mb::MbParseBudget,
