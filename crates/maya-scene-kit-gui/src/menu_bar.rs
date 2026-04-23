@@ -570,23 +570,6 @@ fn action_is_explicitly_disabled(action: &dyn Action) -> bool {
         || action.as_any().is::<MenuRecentFolderUnavailable>()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::action_is_explicitly_disabled;
-    use crate::gui::{
-        MenuEditRedoUnavailable, MenuEditUndoUnavailable, MenuRecentFolderUnavailable,
-        MenuSelectFolder,
-    };
-
-    #[test]
-    fn explicit_disabled_action_detection_only_flags_unavailable_actions() {
-        assert!(action_is_explicitly_disabled(&MenuEditUndoUnavailable));
-        assert!(action_is_explicitly_disabled(&MenuEditRedoUnavailable));
-        assert!(action_is_explicitly_disabled(&MenuRecentFolderUnavailable));
-        assert!(!action_is_explicitly_disabled(&MenuSelectFolder));
-    }
-}
-
 fn is_recent_folder_action(action: &dyn Action) -> bool {
     recent_folder_action_index(action).is_some()
         || action.as_any().is::<MenuRecentFolderUnavailable>()
@@ -624,4 +607,21 @@ fn recent_folder_popup_max_width(window: &Window) -> Pixels {
 
 fn recent_folder_popup_min_width(window: &Window) -> Pixels {
     recent_folder_popup_max_width(window).min(px(640.))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_is_explicitly_disabled;
+    use crate::gui::{
+        MenuEditRedoUnavailable, MenuEditUndoUnavailable, MenuRecentFolderUnavailable,
+        MenuSelectFolder,
+    };
+
+    #[test]
+    fn explicit_disabled_action_detection_only_flags_unavailable_actions() {
+        assert!(action_is_explicitly_disabled(&MenuEditUndoUnavailable));
+        assert!(action_is_explicitly_disabled(&MenuEditRedoUnavailable));
+        assert!(action_is_explicitly_disabled(&MenuRecentFolderUnavailable));
+        assert!(!action_is_explicitly_disabled(&MenuSelectFolder));
+    }
 }

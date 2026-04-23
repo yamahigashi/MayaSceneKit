@@ -769,7 +769,8 @@ impl GuiShell {
             || self
                 .auto_analyze_refresh_state
                 .pending_completion_count
-                .is_multiple_of(AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL)
+                % AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL
+                == 0
             || self.workspace_auto_analyze_started_at.is_none()
             || self.index_of_row_id(row_id).is_some_and(|index| {
                 self.rows[index].selected || self.visible_position_for_row_index(index).is_some()

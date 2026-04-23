@@ -11,11 +11,12 @@ pub(super) fn build_audit_result_rows(
             continue;
         };
         if let Some(report) = row.display_audit_report() {
-            let mut row_findings = 0usize;
-            for (finding_index, finding) in report.findings.iter().enumerate() {
-                if row_findings >= AUDIT_RESULTS_PER_FILE {
-                    break;
-                }
+            for (finding_index, finding) in report
+                .findings
+                .iter()
+                .enumerate()
+                .take(AUDIT_RESULTS_PER_FILE)
+            {
                 let surface = report.surface_for(finding);
                 let clean_target = clean_target_for_execution_origin(&surface.origin);
                 let clean_state = audit_row_clean_state(row, clean_target.as_ref());
@@ -38,7 +39,6 @@ pub(super) fn build_audit_result_rows(
                     clean_target,
                     clean_state,
                 });
-                row_findings += 1;
             }
         }
         if let Some(dump_report) = row.display_dump_report() {
@@ -380,6 +380,7 @@ pub(super) fn build_job_history_log_lines(i18n: &I18n, entries: &[JobHistoryEntr
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_path_table_model(
     rows: &[SceneRow],
     selected: &[usize],
@@ -409,6 +410,7 @@ pub(super) fn build_path_table_model(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_path_table_model_with_order_snapshot(
     rows: &[SceneRow],
     selected: &[usize],
@@ -1288,8 +1290,10 @@ pub(super) fn compare_rows_for_sort(
     let ordering = match sort.key {
         FileSortKey::Name => workspace_relative_display_path(&left.path, state)
             .cmp(&workspace_relative_display_path(&right.path, state)),
-        FileSortKey::Workspace => (!left.scene_workspace_root.is_some())
-            .cmp(&!right.scene_workspace_root.is_some())
+        FileSortKey::Workspace => left
+            .scene_workspace_root
+            .is_none()
+            .cmp(&right.scene_workspace_root.is_none())
             .then_with(|| left.path.cmp(&right.path)),
         FileSortKey::Status => left
             .status
@@ -1742,8 +1746,7 @@ fn analyze_observation_result(
     };
     let plan = gui_audit_plan().map_err(|err| err.to_string())?;
     let options = audit_options_from_preference(audit_mode);
-    let audit_report =
-        audit_observation(&observation, &plan, options).map_err(|err| err.to_string())?;
+    let audit_report = audit_observation(observation, &plan, options).map_err(|err| err.to_string())?;
     let audit_snapshot =
         AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(&plan))
             .map_err(|err| err.to_string())?;

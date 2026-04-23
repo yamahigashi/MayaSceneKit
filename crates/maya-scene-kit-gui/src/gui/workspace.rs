@@ -568,9 +568,9 @@ impl GuiShell {
             legacy_root.join("observe-v4"),
             legacy_root.join("audit-v4"),
         ];
-        let purge_result = cache_roots.into_iter().fold(Ok(()), |result, root| {
-            result.and_then(|()| purge_cache_dir(&root))
-        });
+        let purge_result = cache_roots
+            .into_iter()
+            .try_fold((), |(), root| purge_cache_dir(&root));
         match purge_result {
             Ok(()) => {
                 self.status_message = Some(BannerMessage::CachePurged);
