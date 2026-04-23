@@ -34,6 +34,7 @@ pub(super) fn analyze_python_surface_impl(
                             .cloned()
                             .map(|value| AuditEvidence::FreeText { value })
                             .collect::<Vec<_>>(),
+                        None,
                     ));
                 }
                 let (sink, message) = match kind {
@@ -77,6 +78,7 @@ pub(super) fn analyze_python_surface_impl(
                     None,
                     message,
                     evidence,
+                    None,
                 ));
             }
             PythonSignal::Capability(kind) => {
@@ -115,6 +117,7 @@ pub(super) fn analyze_python_surface_impl(
                     None,
                     "Python call target could not be resolved without executing dynamic dispatch",
                     vec![AuditEvidence::FreeText { value: message }],
+                    None,
                 ));
             }
             PythonSignal::ParseFailure { message } => {
@@ -128,6 +131,7 @@ pub(super) fn analyze_python_surface_impl(
                     None,
                     "Python parse failed; audit blocked on unresolved Python semantics",
                     vec![AuditEvidence::FreeText { value: message }],
+                    None,
                 ));
             }
         }
@@ -148,6 +152,7 @@ pub(super) fn analyze_python_surface_impl(
                     .into_iter()
                     .map(|value| AuditEvidence::FreeText { value })
                     .collect::<Vec<_>>(),
+                None,
             ));
         }
     }

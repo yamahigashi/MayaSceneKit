@@ -438,9 +438,27 @@ fn surface_uncertainty_findings(
             detail: AuditFindingDetail::Static {
                 value: StaticAuditFindingDetail::ExecutionSurfaceLanguageCouldNotBeInferred,
             },
-            evidence: vec![AuditEvidence::FreeText {
-                value: surface.origin.source_kind.clone().unwrap_or_default(),
-            }],
+            evidence: surface
+                .origin
+                .node_name
+                .as_ref()
+                .map(|node_name| {
+                    vec![
+                        AuditEvidence::KeyValue {
+                            key: crate::scene::AuditEvidenceKey::NodeName,
+                            value: node_name.clone(),
+                        },
+                        AuditEvidence::FreeText {
+                            value: surface.origin.source_kind.clone().unwrap_or_default(),
+                        },
+                    ]
+                })
+                .unwrap_or_else(|| {
+                    vec![AuditEvidence::FreeText {
+                        value: surface.origin.source_kind.clone().unwrap_or_default(),
+                    }]
+                }),
+            preview_override: None,
         });
     }
     if surface.origin.trigger == crate::scene::ExecutionTrigger::Unknown {
@@ -453,9 +471,27 @@ fn surface_uncertainty_findings(
             detail: AuditFindingDetail::Static {
                 value: StaticAuditFindingDetail::ExecutionSurfaceTriggerCouldNotBeInferred,
             },
-            evidence: vec![AuditEvidence::FreeText {
-                value: surface.origin.source_kind.clone().unwrap_or_default(),
-            }],
+            evidence: surface
+                .origin
+                .node_name
+                .as_ref()
+                .map(|node_name| {
+                    vec![
+                        AuditEvidence::KeyValue {
+                            key: crate::scene::AuditEvidenceKey::NodeName,
+                            value: node_name.clone(),
+                        },
+                        AuditEvidence::FreeText {
+                            value: surface.origin.source_kind.clone().unwrap_or_default(),
+                        },
+                    ]
+                })
+                .unwrap_or_else(|| {
+                    vec![AuditEvidence::FreeText {
+                        value: surface.origin.source_kind.clone().unwrap_or_default(),
+                    }]
+                }),
+            preview_override: None,
         });
     }
     findings

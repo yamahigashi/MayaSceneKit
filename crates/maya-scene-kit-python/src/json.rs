@@ -195,6 +195,7 @@ fn audit_finding(finding: &AuditFinding) -> Value {
         "rule": finding.rule,
         "detail": finding.detail,
         "evidence": finding.evidence,
+        "preview_override": finding.preview_override.clone(),
     })
 }
 
@@ -204,6 +205,7 @@ fn audit_review_signal(review: &AuditReviewSignal) -> Value {
         "surface_index": review.surface_index,
         "detail": review.detail,
         "evidence": review.evidence,
+        "preview_override": review.preview_override.clone(),
     })
 }
 

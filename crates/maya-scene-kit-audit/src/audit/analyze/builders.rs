@@ -1,9 +1,9 @@
 pub(super) use super::super::policy::{preview_window, severity_for_trigger, snippet};
 use super::AnalysisSurface;
 use crate::scene::{
-    AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail, AuditReviewCode,
-    AuditReviewDetail, AuditReviewSignal, AuditSeverity, AuditSinkKind, StaticAuditFindingDetail,
-    StaticAuditReviewDetail,
+    AuditEvidence, AuditEvidenceKey, AuditFinding, AuditFindingCode, AuditFindingDetail,
+    AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity, AuditSinkKind,
+    StaticAuditFindingDetail, StaticAuditReviewDetail,
 };
 
 pub(super) fn capability_finding(
@@ -24,6 +24,7 @@ pub(super) fn capability_finding(
         vec![AuditEvidence::FreeText {
             value: surface.origin.source_kind.clone().unwrap_or_default(),
         }],
+        None,
     )
 }
 
@@ -45,19 +46,22 @@ pub(super) fn dynamic_exec_finding(
         vec![AuditEvidence::FreeText {
             value: "body reaches execution hook".to_string(),
         }],
+        None,
     )
 }
 
 pub(super) fn build_finding(
     surface_index: usize,
-    _surface: &AnalysisSurface,
+    surface: &AnalysisSurface,
     finding_id: &str,
     severity: AuditSeverity,
     sink: AuditSinkKind,
     rule: Option<String>,
     message: &str,
-    evidence: Vec<AuditEvidence>,
+    mut evidence: Vec<AuditEvidence>,
+    preview_override: Option<String>,
 ) -> AuditFinding {
+    prepend_node_name_evidence(&mut evidence, surface);
     AuditFinding {
         code: audit_finding_code(finding_id),
         severity,
@@ -66,21 +70,50 @@ pub(super) fn build_finding(
         rule,
         detail: audit_finding_detail(finding_id, message),
         evidence,
+        preview_override,
     }
 }
 
 pub(super) fn build_review_signal(
+    surface: &AnalysisSurface,
     surface_index: usize,
     review_id: &str,
     message: &str,
-    evidence: Vec<AuditEvidence>,
+    mut evidence: Vec<AuditEvidence>,
+    preview_override: Option<String>,
 ) -> AuditReviewSignal {
+    prepend_node_name_evidence(&mut evidence, surface);
     AuditReviewSignal {
         code: audit_review_code(review_id),
         surface_index,
         detail: audit_review_detail(review_id, message),
         evidence,
+        preview_override,
     }
+}
+
+fn prepend_node_name_evidence(evidence: &mut Vec<AuditEvidence>, surface: &AnalysisSurface) {
+    let Some(node_name) = surface.origin.node_name.as_deref() else {
+        return;
+    };
+    if evidence.iter().any(|entry| {
+        matches!(
+            entry,
+            AuditEvidence::KeyValue {
+                key: AuditEvidenceKey::NodeName,
+                ..
+            }
+        )
+    }) {
+        return;
+    }
+    evidence.insert(
+        0,
+        AuditEvidence::KeyValue {
+            key: AuditEvidenceKey::NodeName,
+            value: node_name.to_string(),
+        },
+    );
 }
 
 fn audit_finding_code(finding_id: &str) -> AuditFindingCode {

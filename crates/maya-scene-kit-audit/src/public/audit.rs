@@ -80,6 +80,8 @@ pub struct AuditFinding {
     pub detail: AuditFindingDetail,
     /// Evidence strings captured for debugging and reporting.
     pub evidence: Vec<AuditEvidence>,
+    /// Finding-specific preview when a more relevant snippet than the surface preview is known.
+    pub preview_override: Option<String>,
 }
 
 /// Non-malicious review signal emitted by script auditing.
@@ -93,6 +95,8 @@ pub struct AuditReviewSignal {
     pub detail: AuditReviewDetail,
     /// Evidence strings captured for debugging and reporting.
     pub evidence: Vec<AuditEvidence>,
+    /// Review-specific preview when a more relevant snippet than the surface preview is known.
+    pub preview_override: Option<String>,
 }
 
 /// Scene-level notice emitted by audit before surface analysis could proceed.
@@ -367,6 +371,7 @@ pub enum AuditEvidenceKey {
     Command,
     Flag,
     CallbackTarget,
+    NodeName,
 }
 
 impl AuditEvidenceKey {
@@ -375,6 +380,7 @@ impl AuditEvidenceKey {
             Self::Command => "command",
             Self::Flag => "flag",
             Self::CallbackTarget => "callback_target",
+            Self::NodeName => "node_name",
         }
     }
 }
@@ -481,6 +487,24 @@ impl AuditReport {
     /// Returns the report-local surface referenced by the review signal.
     pub fn surface_for_review(&self, review: &AuditReviewSignal) -> &AuditSurface {
         &self.surfaces[review.surface_index]
+    }
+
+    /// Returns the effective preview for the finding, preferring any finding-specific override.
+    pub fn finding_preview<'a>(&'a self, finding: &'a AuditFinding) -> &'a str {
+        finding
+            .preview_override
+            .as_deref()
+            .filter(|preview| !preview.is_empty())
+            .unwrap_or_else(|| self.surface_for(finding).preview.as_str())
+    }
+
+    /// Returns the effective preview for the review signal, preferring any review-specific override.
+    pub fn review_preview<'a>(&'a self, review: &'a AuditReviewSignal) -> &'a str {
+        review
+            .preview_override
+            .as_deref()
+            .filter(|preview| !preview.is_empty())
+            .unwrap_or_else(|| self.surface_for_review(review).preview.as_str())
     }
 }
 
