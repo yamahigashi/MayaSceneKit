@@ -28,7 +28,7 @@ use maya_scene_kit_audit::{
 use maya_scene_kit_edit::scene::{
     ExecutionCleanTarget, OperationMode, PathOwnerDeletePreview, PathOwnerDeleteTarget,
     PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem,
-    ValidationState,
+    ValidationState, clean_target_for_execution_origin,
 };
 use maya_scene_kit_observe::scene::core::SceneFormat;
 use maya_scene_kit_observe::scene::dump::SceneDumpRequireKind;
@@ -56,10 +56,10 @@ use super::{
     PathResolutionBadge, PathSortKey, PathTableSort, PathTypeFilter, ReplaceDialogPreviewSignature,
     ReplaceDialogPreviewState, ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState,
     RowJobResult, RowOperation, SceneRow, analyze_row, analyze_row_with_options,
-    apply_path_overrides_to_report, apply_persisted_column_widths, audit_clean_target,
-    audit_context_menu_state, audit_table_columns, backup_file_name, build_audit_clipboard_payload,
-    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
-    build_file_table_rows, build_job_history_log_lines, build_path_table_model,
+    apply_path_overrides_to_report, apply_persisted_column_widths, audit_context_menu_state,
+    audit_table_columns, backup_file_name, build_audit_clipboard_payload, build_audit_result_rows,
+    build_audit_table_model, build_file_copy_payload, build_file_table_rows,
+    build_job_history_log_lines, build_path_table_model,
     build_path_table_model_with_order_snapshot, clean_targets_for_removed_script_nodes,
     clean_targets_for_threat_findings, collect_scene_files_recursively,
     compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
@@ -2844,10 +2844,10 @@ fn build_audit_result_rows_marks_top_level_command_findings_cleanable() {
 }
 
 #[test]
-fn clean_targets_for_threat_findings_excludes_script_node_targets() {
+fn clean_targets_for_threat_findings_include_finding_backed_script_node_targets() {
     let dir = tempdir().expect("tmpdir");
-    let path = dir.path().join("mixed_threats.ma");
-    write_mixed_threat_scene(&path);
+    let path = dir.path().join("literal_script_threats.ma");
+    write_literal_mel_python_scene(&path);
     let mut row = test_row(1, &path);
     let RowJobResult::Analyze(result) =
         analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
@@ -2861,17 +2861,17 @@ fn clean_targets_for_threat_findings_excludes_script_node_targets() {
     assert!(
         targets
             .iter()
-            .any(|target| matches!(target, ExecutionCleanTarget::TopLevelCommand { .. })),
-        "expected top-level threat target",
+            .all(|target| { !matches!(target, ExecutionCleanTarget::PluginRequire { .. }) }),
+        "file-list threat clean should only include finding-backed execution targets",
     );
     assert!(
-        targets.iter().all(|target| {
-            !matches!(
+        targets.iter().any(|target| {
+            matches!(
                 target,
                 ExecutionCleanTarget::ScriptNode { .. } | ExecutionCleanTarget::MbOwnerForm { .. }
             )
         }),
-        "file-list threat clean should not include script-node targets",
+        "expected finding-backed script-node threat target",
     );
 }
 
@@ -2891,7 +2891,7 @@ fn audit_clean_target_maps_top_level_proc_definition_to_range_delete() {
         ..ExecutionOrigin::without_chunk_address()
     };
 
-    let target = audit_clean_target(ExecutionSurfaceKind::TopLevelProcDefinition, &origin);
+    let target = clean_target_for_execution_origin(&origin);
 
     assert_eq!(
         target,
@@ -2920,7 +2920,7 @@ fn audit_clean_target_maps_top_level_other_statement_to_range_delete() {
         ..ExecutionOrigin::without_chunk_address()
     };
 
-    let target = audit_clean_target(ExecutionSurfaceKind::TopLevelOtherStatement, &origin);
+    let target = clean_target_for_execution_origin(&origin);
 
     assert_eq!(
         target,
@@ -2989,7 +2989,7 @@ fn audit_clean_target_maps_raw_chunk_text_to_mb_owner_form() {
         ..ExecutionOrigin::without_chunk_address()
     };
 
-    let target = audit_clean_target(ExecutionSurfaceKind::RawChunkText, &origin);
+    let target = clean_target_for_execution_origin(&origin);
 
     assert_eq!(
         target,
@@ -3016,7 +3016,7 @@ fn audit_clean_target_prefers_mb_owner_form_for_script_node_body() {
         ..ExecutionOrigin::without_chunk_address()
     };
 
-    let target = audit_clean_target(ExecutionSurfaceKind::ScriptNodeBody, &origin);
+    let target = clean_target_for_execution_origin(&origin);
 
     assert_eq!(
         target,
@@ -5441,11 +5441,11 @@ fn path_context_undo_delete_owner_preserves_other_scene_edits(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn file_context_clean_stages_threats_without_script_node_targets(cx: &mut TestAppContext) {
+fn file_context_clean_stages_finding_backed_script_node_targets(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");
-    let scene = dir.path().join("mixed_context_clean.ma");
-    write_mixed_threat_scene(&scene);
+    let scene = dir.path().join("literal_context_clean.ma");
+    write_literal_mel_python_scene(&scene);
     let RowJobResult::Analyze(result) =
         analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze row")
     else {
@@ -5468,22 +5468,178 @@ fn file_context_clean_stages_threats_without_script_node_targets(cx: &mut TestAp
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert!(
-            shell.rows[0]
-                .pending_clean_targets
-                .iter()
-                .any(|target| matches!(target, ExecutionCleanTarget::TopLevelCommand { .. })),
-            "expected top-level threat target to be staged",
-        );
-        assert!(
-            shell.rows[0].pending_clean_targets.iter().all(|target| {
-                !matches!(
+            shell.rows[0].pending_clean_targets.iter().any(|target| {
+                matches!(
                     target,
                     ExecutionCleanTarget::ScriptNode { .. }
                         | ExecutionCleanTarget::MbOwnerForm { .. }
                 )
             }),
-            "file-list context clean should not stage script-node targets",
+            "file-list context clean should stage finding-backed script-node targets",
         );
+    });
+}
+
+#[gpui::test]
+fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("literal_clean_parity.ma");
+    write_literal_mel_python_scene(&scene);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.audit_report = Some(result.audit_report.clone());
+            shell.rows = vec![row];
+            shell.rebuild_row_id_index();
+            shell.run_clean(window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    let (menu_targets, menu_dirty_kind, menu_findings) = visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        (
+            shell.rows[0].pending_clean_targets.clone(),
+            shell.rows[0].dirty_kind,
+            shell.rows[0].findings,
+        )
+    });
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.audit_report = Some(result.audit_report.clone());
+            shell.rows = vec![row];
+            shell.rebuild_row_id_index();
+            shell.undo_stack.clear();
+            shell.redo_stack.clear();
+            shell.run_file_context_clean(window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(shell.rows[0].pending_clean_targets, menu_targets);
+        assert_eq!(shell.rows[0].dirty_kind, menu_dirty_kind);
+        assert_eq!(shell.rows[0].findings, menu_findings);
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+    });
+}
+
+#[gpui::test]
+fn file_context_clean_from_unselected_row_is_noop(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene_a = dir.path().join("gate_a.ma");
+    let scene_b = dir.path().join("gate_b.ma");
+    write_literal_mel_python_scene(&scene_a);
+    write_literal_mel_python_scene(&scene_b);
+    let RowJobResult::Analyze(result_a) =
+        analyze_row(&scene_a, AuditModePreference::StrictDefault).expect("analyze row a")
+    else {
+        panic!("expected analyze result");
+    };
+    let RowJobResult::Analyze(result_b) =
+        analyze_row(&scene_b, AuditModePreference::StrictDefault).expect("analyze row b")
+    else {
+        panic!("expected analyze result");
+    };
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row_a = test_row(1, &scene_a);
+            row_a.audit_report = Some(result_a.audit_report.clone());
+            let mut row_b = test_row(2, &scene_b);
+            row_b.selected = true;
+            row_b.audit_report = Some(result_b.audit_report.clone());
+            shell.rows = vec![row_a, row_b];
+            shell.rebuild_row_id_index();
+            shell.run_file_context_clean_from_row(1, window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(
+            shell
+                .rows
+                .iter()
+                .all(|row| row.pending_clean_targets.is_empty())
+        );
+        assert!(shell.undo_stack.is_empty());
+    });
+}
+
+#[gpui::test]
+fn file_context_undo_from_unselected_row_is_noop(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene_a = dir.path().join("undo_gate_a.ma");
+    let scene_b = dir.path().join("undo_gate_b.ma");
+    fs::write(&scene_a, "//Maya ASCII 2026 scene\n").expect("write scene a");
+    fs::write(&scene_b, "//Maya ASCII 2026 scene\n").expect("write scene b");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row_a = test_row(1, &scene_a);
+            row_a.dirty_artifact = Some(maya_scene_kit_edit::scene::StagedSceneArtifact {
+                input_path: scene_a.clone(),
+                suggested_output_path: scene_a.clone(),
+                scene_format: SceneFormat::Ma,
+                operation_mode: OperationMode::Forensic,
+                validation_state: ValidationState::Validated,
+                bytes: b"// staged a".to_vec(),
+            });
+            row_a.dirty_kind = Some(DirtyKind::SceneEdits);
+            row_a.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleA".to_string(),
+            }]);
+            row_a.status = FileStatus::Dirty;
+
+            let mut row_b = test_row(2, &scene_b);
+            row_b.selected = true;
+            row_b.dirty_artifact = Some(maya_scene_kit_edit::scene::StagedSceneArtifact {
+                input_path: scene_b.clone(),
+                suggested_output_path: scene_b.clone(),
+                scene_format: SceneFormat::Ma,
+                operation_mode: OperationMode::Forensic,
+                validation_state: ValidationState::Validated,
+                bytes: b"// staged b".to_vec(),
+            });
+            row_b.dirty_kind = Some(DirtyKind::SceneEdits);
+            row_b.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleB".to_string(),
+            }]);
+            row_b.status = FileStatus::Dirty;
+
+            shell.rows = vec![row_a, row_b];
+            shell.rebuild_row_id_index();
+            shell.undo_file_context_changes_from_row(1, window, cx);
+            assert_eq!(
+                shell.rows[0].pending_clean_targets,
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleA".to_string(),
+                }])
+            );
+            assert_eq!(
+                shell.rows[1].pending_clean_targets,
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleB".to_string(),
+                }])
+            );
+            assert!(shell.undo_stack.is_empty());
+        });
     });
 }
 

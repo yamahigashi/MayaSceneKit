@@ -17,7 +17,7 @@ pub(super) fn build_audit_result_rows(
                     break;
                 }
                 let surface = report.surface_for(finding);
-                let clean_target = audit_clean_target(surface.origin.surface_kind, &surface.origin);
+                let clean_target = clean_target_for_execution_origin(&surface.origin);
                 let clean_state = audit_row_clean_state(row, clean_target.as_ref());
                 let dirty = audit_item_dirty(row, clean_target.as_ref());
                 out.push(AuditResultRow {
@@ -55,10 +55,7 @@ pub(super) fn clean_targets_for_threat_findings(row: &SceneRow) -> Vec<Execution
     let mut targets = BTreeSet::<ExecutionCleanTarget>::new();
     for finding in &report.findings {
         let surface = report.surface_for(finding);
-        if surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody {
-            continue;
-        }
-        if let Some(target) = audit_clean_target(surface.origin.surface_kind, &surface.origin) {
+        if let Some(target) = clean_target_for_execution_origin(&surface.origin) {
             targets.insert(target);
         }
     }
@@ -129,9 +126,7 @@ fn dump_script_clean_target(
                     surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
                         && surface.origin.node_name.as_deref() == Some(entry.name.as_str())
                 })
-                .and_then(|surface| {
-                    audit_clean_target(surface.origin.surface_kind, &surface.origin)
-                })
+                .and_then(|surface| clean_target_for_execution_origin(&surface.origin))
         })
         .or_else(|| dump_script_mb_owner_form_target(row, entry))
         .or_else(|| {
@@ -164,7 +159,7 @@ pub(super) fn clean_targets_for_removed_script_nodes(
             if !removed_node_names.contains(node_name) {
                 continue;
             }
-            if let Some(target) = audit_clean_target(surface.origin.surface_kind, &surface.origin) {
+            if let Some(target) = clean_target_for_execution_origin(&surface.origin) {
                 targets.insert(target);
             }
         }
@@ -258,48 +253,6 @@ fn audit_source_line(row: &SceneRow, origin: &ExecutionOrigin) -> Option<usize> 
             .count()
             + 1,
     )
-}
-
-pub(super) fn audit_clean_target(
-    surface_kind: ExecutionSurfaceKind,
-    origin: &ExecutionOrigin,
-) -> Option<ExecutionCleanTarget> {
-    match surface_kind {
-        ExecutionSurfaceKind::ScriptNodeBody => origin
-            .chunk_form
-            .as_ref()
-            .zip(origin.chunk_node_offset)
-            .map(|(form, node_offset)| ExecutionCleanTarget::MbOwnerForm {
-                form: form.clone(),
-                node_offset,
-            })
-            .or_else(|| {
-                origin
-                    .node_name
-                    .as_ref()
-                    .map(|node_name| ExecutionCleanTarget::ScriptNode {
-                        node_name: node_name.clone(),
-                    })
-            }),
-        ExecutionSurfaceKind::TopLevelCommand => origin
-            .source_range
-            .map(|source_range| ExecutionCleanTarget::TopLevelCommand { source_range }),
-        ExecutionSurfaceKind::TopLevelProcDefinition
-        | ExecutionSurfaceKind::TopLevelOtherStatement => origin
-            .source_range
-            .map(|source_range| ExecutionCleanTarget::TopLevelCommand { source_range }),
-        ExecutionSurfaceKind::FileCommandCallback => origin
-            .source_range
-            .map(|source_range| ExecutionCleanTarget::FileCommandCallback { source_range }),
-        ExecutionSurfaceKind::RawChunkText => origin
-            .chunk_form
-            .as_ref()
-            .zip(origin.chunk_node_offset)
-            .map(|(form, node_offset)| ExecutionCleanTarget::MbOwnerForm {
-                form: form.clone(),
-                node_offset,
-            }),
-    }
 }
 
 pub(super) fn build_audit_table_model(

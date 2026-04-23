@@ -392,9 +392,10 @@ impl TableDelegate for FileTableDelegate {
         }));
         let menu = menu.item(PopupMenuItem::new(clean_label).on_click({
             let view = view.clone();
+            let row_id = row.id;
             move |_, window, cx| {
                 view.update(cx, |shell, cx| {
-                    shell.run_file_context_clean(window, cx);
+                    shell.run_file_context_clean_from_row(row_id, window, cx);
                 });
             }
         }));
@@ -421,20 +422,7 @@ impl TableDelegate for FileTableDelegate {
         .item(
             PopupMenuItem::new(undo_label).on_click(move |_, window, cx| {
                 view.update(cx, |shell, cx| {
-                    let row_ids = if shell
-                        .index_of_row_id(row.id)
-                        .and_then(|row_index| shell.rows.get(row_index))
-                        .is_some_and(|selected_row| selected_row.selected)
-                    {
-                        shell
-                            .selected_ready_dirty_indices()
-                            .into_iter()
-                            .filter_map(|row_index| shell.rows.get(row_index).map(|row| row.id))
-                            .collect::<Vec<_>>()
-                    } else {
-                        vec![row.id]
-                    };
-                    shell.undo_row_changes_for_ids(row_ids, window, cx);
+                    shell.undo_file_context_changes_from_row(row.id, window, cx);
                 });
             }),
         )

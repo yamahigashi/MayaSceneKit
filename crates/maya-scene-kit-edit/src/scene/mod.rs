@@ -19,7 +19,7 @@ pub(crate) mod public {
     pub use self::{
         clean::{
             ExecutionCleanPreview, ExecutionCleanResult, ExecutionCleanStageResult,
-            ExecutionCleanTarget,
+            ExecutionCleanTarget, clean_target_for_execution_origin,
         },
         composite_edit::{CompositeSceneEditsPreview, CompositeSceneEditsStageResult},
         conversion::{
@@ -58,7 +58,7 @@ pub use self::{
         PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem, PathReplaceResult,
         PathReplaceRule, PathReplaceStageResult, RawChunkDump, SceneFormat, ScriptNodeCleanPreview,
         ScriptNodeCleanResult, ScriptNodeCleanStageResult, SemanticProvenance, StagedSceneArtifact,
-        UnknownInventoryEntry, ValidationState,
+        UnknownInventoryEntry, ValidationState, clean_target_for_execution_origin,
     },
 };
 

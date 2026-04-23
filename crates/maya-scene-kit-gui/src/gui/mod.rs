@@ -38,10 +38,10 @@ use maya_scene_kit_edit::scene::{
     CompositeSceneEditsStageResult, ExecutionCleanPreview, ExecutionCleanTarget,
     MayaAsciiConversionReport, PathOwnerDeletePreview, PathOwnerDeleteTarget, PathReplaceMode,
     PathReplaceOverride, PathReplacePreview, PathReplaceRule, StagedSceneArtifact,
-    collect_raw_chunks, preview_replace_scene_path_candidates_in_report_with_options,
+    clean_target_for_execution_origin, collect_raw_chunks,
+    preview_replace_scene_path_candidates_in_report_with_options,
     preview_replace_scene_paths_with_overrides_in_report_with_options, save_staged_artifact,
-    stage_maya_ascii_with_options, stage_remove_script_nodes_with_options,
-    stage_replace_scene_paths_with_overrides_in_report_with_options,
+    stage_maya_ascii_with_options, stage_replace_scene_paths_with_overrides_in_report_with_options,
     stage_scene_edits_in_report_with_bytes_with_options, stage_scene_edits_with_options,
 };
 use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};

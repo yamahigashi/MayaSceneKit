@@ -1018,96 +1018,65 @@ impl GuiShell {
     }
 
     pub(super) fn run_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.ready_selected_indices();
-        if !bulk_enabled(selected.len()) {
-            self.status_message = Some(BannerMessage::SelectFilesFirst);
-            return;
-        }
-
-        let edit_sequence = self.begin_edit_transaction(&selected);
-        for index in selected {
-            let row_id = self.rows[index].id;
-            if self.rows[index].display_dump_report().is_none() {
-                let options = self.scene_materialize_options(OperationMode::Forensic);
-                self.spawn_row_job(
-                    row_id,
-                    RowOperation::Clean,
-                    None,
-                    edit_sequence,
-                    window,
-                    cx,
-                    move |path| {
-                        let staged = stage_remove_script_nodes_with_options(&path, &options)
-                            .map_err(|err| err.to_string())?;
-                        let staged_targets: Vec<ExecutionCleanTarget> = staged
-                            .preview
-                            .removed_nodes
-                            .iter()
-                            .cloned()
-                            .map(|node_name| ExecutionCleanTarget::ScriptNode { node_name })
-                            .collect();
-                        Ok(RowJobResult::Clean {
-                            preview: ExecutionCleanPreview {
-                                input_path: staged.preview.input_path,
-                                scene_format: staged.preview.scene_format,
-                                operation_mode: staged.preview.operation_mode,
-                                validation_state: staged.preview.validation_state,
-                                cleaned_targets: staged_targets.clone(),
-                                removed_script_nodes: staged.preview.removed_nodes,
-                                removed_plugin_requires: Vec::new(),
-                            },
-                            artifact: staged.artifact,
-                            staged_targets,
-                        })
-                    },
-                );
-                continue;
-            }
-            let targets = self.rows[index]
-                .display_dump_report()
-                .map(|report| {
-                    clean_targets_for_removed_script_nodes(
-                        &self.rows[index],
-                        &report
-                            .script_entries
-                            .iter()
-                            .map(|entry| entry.name.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-            let mut next_targets = self.rows[index].pending_clean_targets.clone();
-            next_targets.extend(targets);
-            self.stage_scene_edits_for_row(
-                index,
-                next_targets,
-                self.rows[index].pending_path_owner_delete_targets.clone(),
-                ResultTab::Audit,
-                edit_sequence,
-                false,
-                window,
-                cx,
-            );
-        }
-    }
-
-    pub(super) fn run_file_context_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let targets_by_row = self
-            .ready_selected_indices()
-            .into_iter()
-            .filter_map(|row_index| {
-                let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
-                next_targets.extend(clean_targets_for_threat_findings(&self.rows[row_index]));
-                (!next_targets.is_empty()).then_some((row_index, next_targets))
-            })
-            .collect::<Vec<_>>();
+        let targets_by_row = self.file_threat_clean_targets_by_row(self.ready_selected_indices());
         if !bulk_enabled(targets_by_row.len()) {
             self.status_message = Some(BannerMessage::SelectFilesFirst);
             return;
         }
 
+        self.stage_file_threat_targets(targets_by_row, window, cx);
+    }
+
+    pub(super) fn run_file_context_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets_by_row = self.file_threat_clean_targets_by_row(self.ready_selected_indices());
+        if !bulk_enabled(targets_by_row.len()) {
+            self.status_message = Some(BannerMessage::SelectFilesFirst);
+            return;
+        }
+
+        self.stage_file_threat_targets(targets_by_row, window, cx);
+    }
+
+    pub(super) fn run_file_context_clean_from_row(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row_indices) = self.selected_ready_indices_if_clicked_row_selected(row_id) else {
+            return;
+        };
+        let targets_by_row = self.file_threat_clean_targets_by_row(row_indices);
+        if !bulk_enabled(targets_by_row.len()) {
+            return;
+        }
+
+        self.stage_file_threat_targets(targets_by_row, window, cx);
+    }
+
+    pub(super) fn undo_file_context_changes_from_row(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row_indices) = self.selected_ready_dirty_indices_if_clicked_row_selected(row_id)
+        else {
+            return;
+        };
+        let row_ids = row_indices
+            .into_iter()
+            .filter_map(|row_index| self.rows.get(row_index).map(|row| row.id))
+            .collect::<Vec<_>>();
+        self.undo_row_changes_for_ids(row_ids, window, cx);
+    }
+
+    fn stage_file_threat_targets(
+        &mut self,
+        targets_by_row: Vec<(usize, BTreeSet<ExecutionCleanTarget>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let row_indices = targets_by_row
             .iter()
             .map(|(row_index, _)| *row_index)
@@ -1123,6 +1092,39 @@ impl GuiShell {
                 cx,
             );
         }
+    }
+
+    fn file_threat_clean_targets_by_row(
+        &self,
+        row_indices: Vec<usize>,
+    ) -> Vec<(usize, BTreeSet<ExecutionCleanTarget>)> {
+        row_indices
+            .into_iter()
+            .filter_map(|row_index| {
+                let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
+                next_targets.extend(clean_targets_for_threat_findings(&self.rows[row_index]));
+                (!next_targets.is_empty()).then_some((row_index, next_targets))
+            })
+            .collect()
+    }
+
+    fn selected_ready_indices_if_clicked_row_selected(&self, row_id: u64) -> Option<Vec<usize>> {
+        let row_index = self.index_of_row_id(row_id)?;
+        self.rows
+            .get(row_index)
+            .is_some_and(|row| row.selected)
+            .then(|| self.ready_selected_indices())
+    }
+
+    fn selected_ready_dirty_indices_if_clicked_row_selected(
+        &self,
+        row_id: u64,
+    ) -> Option<Vec<usize>> {
+        let row_index = self.index_of_row_id(row_id)?;
+        self.rows
+            .get(row_index)
+            .is_some_and(|row| row.selected)
+            .then(|| self.selected_ready_dirty_indices())
     }
 
     pub(super) fn run_to_ascii(&mut self, window: &mut Window, cx: &mut Context<Self>) {
