@@ -91,7 +91,15 @@ jobs:
           path: release/maya-scene-kit-${{ github.ref_name }}-windows.zip
 
   build_python:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_suffix: linux
+          - os: windows-latest
+            artifact_suffix: windows
 
     steps:
       - name: Checkout source
@@ -111,16 +119,11 @@ jobs:
       - name: Build Python wheel
         run: uv run --with maturin maturin build --release --features extension-module --manifest-path crates/maya-scene-kit-python/Cargo.toml
 
-      - name: Collect wheel artifact
-        run: |
-          mkdir -p release
-          cp target/wheels/maya_scene_kit-*.whl release/
-
       - name: Upload Python wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: maya-scene-kit-python-${{ github.ref_name }}
-          path: release/maya_scene_kit-*.whl
+          name: maya-scene-kit-python-${{ matrix.artifact_suffix }}-${{ github.ref_name }}
+          path: target/wheels/maya_scene_kit-*.whl
 
   release:
     needs:
@@ -143,7 +146,12 @@ jobs:
       - name: Download Python wheel artifact
         uses: actions/download-artifact@v4
         with:
-          name: maya-scene-kit-python-${{ github.ref_name }}
+          name: maya-scene-kit-python-linux-${{ github.ref_name }}
+
+      - name: Download Windows Python wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maya-scene-kit-python-windows-${{ github.ref_name }}
 
       - name: Generate SHA256 checksums
         run: |
