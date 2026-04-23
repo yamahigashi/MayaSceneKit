@@ -1,9 +1,5 @@
 use std::borrow::Cow;
 
-#[cfg(test)]
-use crate::ma::commands::Token;
-#[cfg(test)]
-use crate::ma::commands::token_text;
 use crate::{error::SceneToolError, ma::values::parse_f64_token, mel, model::NumericValue};
 
 pub(super) fn normalized_arg_text<'a>(
@@ -42,14 +38,4 @@ pub(super) fn find_flag<'a>(
 
 pub(super) fn parse_numeric_token(value: &str) -> Result<NumericValue, SceneToolError> {
     Ok(NumericValue::from_f64(parse_f64_token(value)?))
-}
-
-#[cfg(test)]
-pub(super) fn token_text_required<'a>(
-    token: Option<&'a Token>,
-    label: &str,
-) -> Result<&'a str, SceneToolError> {
-    token
-        .and_then(token_text)
-        .ok_or_else(|| SceneToolError::Message(format!("{label} missing value")))
 }

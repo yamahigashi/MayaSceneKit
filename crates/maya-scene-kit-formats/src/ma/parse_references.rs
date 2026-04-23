@@ -1,80 +1,8 @@
-#[cfg(test)]
-use crate::ma::commands::Token;
 use crate::{
     error::SceneToolError,
     ma::ast::{ParsedAsciiScene, ParsedFileCommand},
     mel,
 };
-
-#[cfg(test)]
-fn is_supported_legacy_file_flag(flag: &str) -> bool {
-    matches!(flag, "-r" | "-rdi" | "-ns" | "-rfn" | "-typ" | "-op")
-}
-
-#[cfg(test)]
-pub(super) fn parse_file_command(
-    tokens: &[Token],
-    scene: &mut ParsedAsciiScene,
-) -> Result<(), SceneToolError> {
-    use crate::ma::commands::token_text;
-
-    let mut namespace = None;
-    let mut reference_node = None;
-    let mut file_type = None;
-    let mut options = None;
-    let mut is_reference = false;
-    let mut idx = 1usize;
-    while idx < tokens.len() {
-        let Some(raw) = tokens.get(idx).and_then(token_text) else {
-            idx += 1;
-            continue;
-        };
-        if raw.starts_with('-') && !is_supported_legacy_file_flag(raw) {
-            idx += 1;
-            continue;
-        }
-        match raw {
-            "-r" | "-rdi" => {
-                is_reference = true;
-                idx += 1;
-            }
-            "-ns" => {
-                namespace = tokens.get(idx + 1).and_then(token_text).map(str::to_string);
-                idx += 2;
-            }
-            "-rfn" => {
-                reference_node = tokens.get(idx + 1).and_then(token_text).map(str::to_string);
-                idx += 2;
-            }
-            "-typ" => {
-                file_type = tokens.get(idx + 1).and_then(token_text).map(str::to_string);
-                idx += 2;
-            }
-            "-op" => {
-                options = tokens.get(idx + 1).and_then(token_text).map(str::to_string);
-                idx += 2;
-            }
-            _ => {
-                idx += 1;
-            }
-        }
-    }
-    let path = tokens
-        .iter()
-        .rev()
-        .find_map(token_text)
-        .ok_or_else(|| SceneToolError::AsciiSyntax("file command missing path".to_string()))?
-        .to_string();
-    scene.file_commands.push(ParsedFileCommand {
-        path,
-        namespace,
-        reference_node,
-        file_type,
-        options,
-        is_reference,
-    });
-    Ok(())
-}
 
 pub(super) fn parse_top_level_file_command(
     source_text: &str,
