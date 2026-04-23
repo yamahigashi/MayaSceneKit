@@ -11,8 +11,8 @@ use std::{
 use crate::default_analysis_cache_root;
 use encoding_rs::SHIFT_JIS;
 use gpui::{
-    AppContext, Axis, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
-    size,
+    AppContext, Axis, Entity, Focusable, Modifiers, OwnedMenuItem, TestAppContext,
+    VisualTestContext, point, px, size,
 };
 use gpui_component::{Root, table::ColumnSort};
 use maya_scene_kit_audit::{
@@ -58,15 +58,16 @@ use super::{
     ReplaceDialogPreviewState, ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState,
     RowJobResult, RowOperation, SceneRow, analyze_row, analyze_row_bytes_with_options,
     analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
-    audit_context_menu_state, audit_table_columns, backup_file_name, build_audit_clipboard_payload,
-    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
-    build_file_table_rows, build_job_history_log_lines, build_path_table_model,
-    build_path_table_model_with_order_snapshot, clean_targets_for_threat_findings,
-    collect_scene_files_recursively, compute_visible_row_indices_for,
-    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
-    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
-    filter_audit_result_rows, merge_column_widths, missing_path_count_for_row, next_backup_path,
-    path_context_menu_state,
+    audit_context_menu_state, audit_table_columns, backup_file_name, build_app_menus,
+    build_audit_clipboard_payload, build_audit_result_rows, build_audit_table_model,
+    build_file_copy_payload, build_file_table_rows, build_job_history_log_lines,
+    build_path_table_model, build_path_table_model_with_order_snapshot,
+    clean_targets_for_threat_findings, collect_scene_files_recursively,
+    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
+    default_path_form_filter, default_path_resolution_filter, default_path_sort,
+    default_path_type_filter, detect_format, exit_warning_required_for_rows,
+    file_context_menu_state, filter_audit_result_rows, merge_column_widths,
+    missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
@@ -151,6 +152,16 @@ fn write_cached_scene(path: &Path) {
         ),
     )
     .expect("write cached scene");
+}
+
+fn menu_action_names(items: &[OwnedMenuItem]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            OwnedMenuItem::Action { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
@@ -2854,6 +2865,76 @@ fn clean_targets_for_threat_findings_include_finding_backed_script_node_targets(
 }
 
 #[test]
+fn file_context_menu_state_enables_clean_for_selected_finding_backed_row() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("selected_finding_target.ma");
+    write_literal_mel_python_scene(&path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    let mut row = test_row(1, &path);
+    row.selected = true;
+    row.audit_report = Some(result.audit_report);
+
+    let state = file_context_menu_state(&[row], 1);
+
+    assert!(state.can_clean);
+}
+
+#[test]
+fn file_context_menu_state_disables_clean_when_clicked_row_has_no_targets() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("clean_context_no_targets.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let row = test_row(1, &path);
+
+    let state = file_context_menu_state(&[row], 1);
+
+    assert!(!state.can_clean);
+}
+
+#[test]
+fn file_context_menu_state_ignores_other_selected_targets_when_clicked_row_is_unselected() {
+    let dir = tempdir().expect("tmpdir");
+    let selected_path = dir.path().join("selected_target.ma");
+    let clicked_path = dir.path().join("clicked_row.ma");
+    write_literal_mel_python_scene(&selected_path);
+    fs::write(&clicked_path, "//Maya ASCII 2026 scene\n").expect("write clicked");
+    let RowJobResult::Analyze(result) =
+        analyze_row(&selected_path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+
+    let mut selected_row = test_row(1, &selected_path);
+    selected_row.selected = true;
+    selected_row.audit_report = Some(result.audit_report);
+    let clicked_row = test_row(2, &clicked_path);
+
+    let state = file_context_menu_state(&[selected_row, clicked_row], 2);
+
+    assert!(!state.can_clean);
+}
+
+#[test]
+fn file_context_menu_state_enables_clean_for_pending_clean_targets() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("pending_clean_target.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+        node_name: "Example".to_string(),
+    }]);
+
+    let state = file_context_menu_state(&[row], 1);
+
+    assert!(state.can_clean);
+}
+
+#[test]
 fn audit_clean_target_maps_top_level_proc_definition_to_range_delete() {
     let origin = ExecutionOrigin {
         lang: ExecutionLanguage::Mel,
@@ -4306,6 +4387,264 @@ fn render_workspace_auto_analyze_completed_banner_includes_elapsed_seconds() {
         rendered,
         "Workspace auto analyze completed for 12 file(s) in 2.50s"
     );
+}
+
+#[test]
+fn build_app_menus_removes_select_menu() {
+    let menus = build_app_menus(
+        &PersistedState::default(),
+        &I18n::new(SupportedLocale::English),
+        false,
+        false,
+    )
+    .into_iter()
+    .map(|menu| menu.owned())
+    .collect::<Vec<_>>();
+
+    assert!(
+        menus.iter().all(|menu| menu.name.as_ref() != "Select"),
+        "top-level Select menu should be removed",
+    );
+}
+
+#[test]
+fn build_app_menus_adds_exit_application_to_end_of_file_menu() {
+    let menus = build_app_menus(
+        &PersistedState::default(),
+        &I18n::new(SupportedLocale::English),
+        false,
+        false,
+    )
+    .into_iter()
+    .map(|menu| menu.owned())
+    .collect::<Vec<_>>();
+    let file_menu = menus
+        .into_iter()
+        .find(|menu| menu.name.as_ref() == "File")
+        .expect("file menu");
+
+    assert_eq!(
+        menu_action_names(&file_menu.items),
+        vec![
+            "Select Folder".to_string(),
+            "Save Selected".to_string(),
+            "Save All".to_string(),
+            "Exit Application".to_string(),
+        ]
+    );
+    assert!(matches!(
+        file_menu.items.last(),
+        Some(OwnedMenuItem::Action { name, .. }) if name == "Exit Application"
+    ));
+}
+
+#[test]
+fn exit_warning_required_is_false_for_clean_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("clean_exit_state.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let row = test_row(1, &path);
+
+    assert!(!exit_warning_required_for_rows(&[row]));
+}
+
+#[test]
+fn exit_warning_required_is_true_for_replace_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("replace_exit_state.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.dirty_kind = Some(DirtyKind::Replace);
+    row.path_overrides
+        .insert(0, "asset/example/edited.fbx".to_string());
+
+    assert!(exit_warning_required_for_rows(&[row]));
+}
+
+#[test]
+fn exit_warning_required_is_true_for_scene_edit_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("scene_edit_exit_state.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: path.clone(),
+        suggested_output_path: path.clone(),
+        scene_format: SceneFormat::Ma,
+        operation_mode: OperationMode::Forensic,
+        validation_state: ValidationState::Validated,
+        bytes: b"// staged edit".to_vec(),
+    });
+
+    assert!(exit_warning_required_for_rows(&[row]));
+}
+
+#[test]
+fn exit_warning_required_is_true_for_to_ascii_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let source_path = dir.path().join("to_ascii_exit_state.mb");
+    let output_path = dir.path().join("to_ascii_exit_state.ma");
+    fs::write(&source_path, "FORM").expect("write scene");
+    let mut row = test_row(1, &source_path);
+    row.dirty_kind = Some(DirtyKind::ToAscii);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: source_path.clone(),
+        suggested_output_path: output_path,
+        scene_format: SceneFormat::Ma,
+        operation_mode: OperationMode::Forensic,
+        validation_state: ValidationState::Validated,
+        bytes: b"// ascii".to_vec(),
+    });
+
+    assert!(exit_warning_required_for_rows(&[row]));
+}
+
+#[test]
+fn exit_warning_required_is_true_for_path_override_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("path_override_exit_state.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.path_overrides
+        .insert(1, "asset/example/override.fbx".to_string());
+
+    assert!(exit_warning_required_for_rows(&[row]));
+}
+
+#[test]
+fn exit_warning_required_is_true_for_pending_clean_rows() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("pending_clean_exit_state.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let mut row = test_row(1, &path);
+    row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+        node_name: "Example".to_string(),
+    }]);
+
+    assert!(exit_warning_required_for_rows(&[row]));
+}
+
+#[gpui::test]
+fn exit_application_closes_immediately_when_no_dirty_rows(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.on_menu_exit_application(&super::MenuExitApplication, window, cx);
+    });
+    visual_cx.run_until_parked();
+
+    assert_eq!(visual_cx.windows().len(), 0);
+}
+
+#[gpui::test]
+fn exit_application_cancel_keeps_window_open_when_dirty(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("dirty_cancel_exit.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &path);
+        row.path_overrides
+            .insert(0, "asset/example/edited.fbx".to_string());
+        shell.rows = vec![row];
+        shell.on_menu_exit_application(&super::MenuExitApplication, window, cx);
+    });
+    visual_cx.run_until_parked();
+
+    assert!(visual_cx.has_pending_prompt());
+    assert_eq!(
+        visual_cx.pending_prompt(),
+        Some((
+            "Exit Application".to_string(),
+            "There are unsaved edits. Discard them and exit the application?".to_string(),
+        ))
+    );
+
+    visual_cx.simulate_prompt_answer("Return to Application");
+    visual_cx.run_until_parked();
+
+    assert_eq!(visual_cx.windows().len(), 1);
+}
+
+#[gpui::test]
+fn exit_application_discard_closes_window_when_dirty(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("dirty_discard_exit.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &path);
+        row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+            node_name: "Example".to_string(),
+        }]);
+        shell.rows = vec![row];
+        shell.on_menu_exit_application(&super::MenuExitApplication, window, cx);
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.simulate_prompt_answer("Discard Edits and Exit");
+    visual_cx.run_until_parked();
+
+    assert_eq!(visual_cx.windows().len(), 0);
+}
+
+#[gpui::test]
+fn window_close_cancel_keeps_window_open_when_dirty(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("dirty_close_cancel.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+
+    shell.update_in(visual_cx, |shell, _window, _cx| {
+        let mut row = test_row(1, &path);
+        row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+            node_name: "Example".to_string(),
+        }]);
+        shell.rows = vec![row];
+    });
+    visual_cx.run_until_parked();
+
+    assert!(!visual_cx.simulate_close());
+    visual_cx.run_until_parked();
+    assert!(visual_cx.has_pending_prompt());
+
+    visual_cx.simulate_prompt_answer("Return to Application");
+    visual_cx.run_until_parked();
+
+    assert_eq!(visual_cx.windows().len(), 1);
+}
+
+#[gpui::test]
+fn window_close_discard_closes_window_when_dirty(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("dirty_close_discard.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+
+    shell.update_in(visual_cx, |shell, _window, _cx| {
+        let mut row = test_row(1, &path);
+        row.dirty_artifact = Some(StagedSceneArtifact {
+            input_path: path.clone(),
+            suggested_output_path: path.clone(),
+            scene_format: SceneFormat::Ma,
+            operation_mode: OperationMode::Forensic,
+            validation_state: ValidationState::Validated,
+            bytes: b"// staged edit".to_vec(),
+        });
+        row.dirty_kind = Some(DirtyKind::SceneEdits);
+        shell.rows = vec![row];
+    });
+    visual_cx.run_until_parked();
+
+    assert!(!visual_cx.simulate_close());
+    visual_cx.run_until_parked();
+    visual_cx.simulate_prompt_answer("Discard Edits and Exit");
+    visual_cx.run_until_parked();
+
+    assert_eq!(visual_cx.windows().len(), 0);
 }
 
 #[gpui::test]

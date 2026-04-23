@@ -380,6 +380,7 @@ impl TableDelegate for FileTableDelegate {
         let replace_label = i18n.text("action.replace_path");
         let save_label = i18n.text("action.save");
         let undo_label = i18n.text("action.undo_all_changes");
+        let clean_state = file_context_menu_state(&view.read(cx).rows, row.id);
         let menu = menu.item(PopupMenuItem::new(copy_label).on_click({
             let view = view.clone();
             let row_id = row.id;
@@ -390,15 +391,19 @@ impl TableDelegate for FileTableDelegate {
                 cx.write_to_clipboard(ClipboardItem::new_string(copied_path));
             }
         }));
-        let menu = menu.item(PopupMenuItem::new(clean_label).on_click({
-            let view = view.clone();
-            let row_id = row.id;
-            move |_, window, cx| {
-                view.update(cx, |shell, cx| {
-                    shell.run_file_context_clean_from_row(row_id, window, cx);
-                });
-            }
-        }));
+        let menu = if clean_state.can_clean {
+            menu.item(PopupMenuItem::new(clean_label).on_click({
+                let view = view.clone();
+                let row_id = row.id;
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.run_file_context_clean_from_row(row_id, window, cx);
+                    });
+                }
+            }))
+        } else {
+            menu.item(PopupMenuItem::new(clean_label).disabled(true))
+        };
         let menu = menu.item(PopupMenuItem::new(replace_label).on_click({
             let view = view.clone();
             move |_, window, cx| {

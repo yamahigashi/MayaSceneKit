@@ -1923,13 +1923,10 @@ pub(super) fn build_app_menus(
                     items: recent_folder_menu_items(state, i18n),
                 }),
                 MenuItem::separator(),
-                MenuItem::submenu(Menu {
-                    name: i18n.text("menu.file_operations").into(),
-                    items: vec![
-                        MenuItem::action(i18n.text("action.save_selected"), MenuSaveSelected),
-                        MenuItem::action(i18n.text("action.save_all"), MenuSaveAll),
-                    ],
-                }),
+                MenuItem::action(i18n.text("action.save_selected"), MenuSaveSelected),
+                MenuItem::action(i18n.text("action.save_all"), MenuSaveAll),
+                MenuItem::separator(),
+                MenuItem::action(i18n.text("action.exit_application"), MenuExitApplication),
             ],
         },
         Menu {
@@ -1957,13 +1954,6 @@ pub(super) fn build_app_menus(
                 MenuItem::action(i18n.text("action.clean"), MenuEditClean),
                 MenuItem::action(i18n.text("action.replace_path"), MenuEditReplace),
                 MenuItem::action(i18n.text("action.to_ascii"), MenuEditToAscii),
-            ],
-        },
-        Menu {
-            name: i18n.text("menu.select").into(),
-            items: vec![
-                MenuItem::action(i18n.text("action.select_visible"), MenuSelectVisible),
-                MenuItem::action(i18n.text("action.clear_selection"), MenuClearSelection),
             ],
         },
         Menu {

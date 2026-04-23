@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::super::{
-    AuditRowCleanState, AuditTableRow, PathCollectRewriteMode, PathEditTargets, SceneRow,
+    AuditRowCleanState, AuditTableRow, ExecutionCleanTarget, PathCollectRewriteMode,
+    PathEditTargets, SceneRow, clean_targets_for_threat_findings,
     path_edit::{
         absolute_override_value_for_entry, path_value_edit_supported_for_entry,
         resolved_target_file_path_for_entry, workspace_relative_override_value_for_entry,
@@ -32,6 +33,44 @@ pub(in crate::gui) fn audit_context_menu_state(rows: &[AuditTableRow]) -> AuditC
         can_undo,
         show_disabled_clean,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::gui) struct FileContextMenuState {
+    pub can_clean: bool,
+}
+
+pub(in crate::gui) fn file_context_menu_state(
+    rows: &[SceneRow],
+    row_id: u64,
+) -> FileContextMenuState {
+    let Some(row_index) = rows.iter().position(|row| row.id == row_id) else {
+        return FileContextMenuState { can_clean: false };
+    };
+    let selected = rows[row_index].selected;
+    let can_clean = rows
+        .iter()
+        .enumerate()
+        .filter(|(index, row)| {
+            if row.is_processing() {
+                return false;
+            }
+            if selected {
+                row.selected
+            } else {
+                *index == row_index
+            }
+        })
+        .any(|(_, row)| file_context_clean_targets(row).next().is_some());
+
+    FileContextMenuState { can_clean }
+}
+
+fn file_context_clean_targets(row: &SceneRow) -> impl Iterator<Item = ExecutionCleanTarget> + '_ {
+    row.pending_clean_targets
+        .iter()
+        .cloned()
+        .chain(clean_targets_for_threat_findings(row))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

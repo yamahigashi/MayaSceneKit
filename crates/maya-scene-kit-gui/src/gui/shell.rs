@@ -126,6 +126,10 @@ impl GuiShell {
         });
         let path_table_focus_handle = path_table.read(cx).focus_handle(cx);
         let view = cx.entity();
+        let close_view = view.clone();
+        window.on_window_should_close(cx, move |window, cx| {
+            close_view.update(cx, |shell, cx| shell.on_window_should_close(window, cx))
+        });
         let path_edit_view = view.clone();
         let path_table_view = view.clone();
         let subscriptions = vec![
@@ -301,6 +305,8 @@ impl GuiShell {
             path_collect_dialog: None,
             observe_cache_root,
             audit_cache_root,
+            exit_confirmation_pending: false,
+            bypass_next_exit_warning: false,
             _subscriptions: subscriptions,
         };
         if shell.state.workspace_root_path().is_some() {
