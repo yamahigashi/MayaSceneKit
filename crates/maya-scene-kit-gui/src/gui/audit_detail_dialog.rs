@@ -310,14 +310,13 @@ fn render_audit_detail_dialog_body(
                         )),
                 )
                 .child(div().text_sm().text_color(rgb(MUTED)).child(meta))
-                .when_some(detail.source_line, |this, source_line| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(format!("line {source_line}")),
-                    )
-                }),
+                .children(
+                    detail
+                        .provenance
+                        .iter()
+                        .cloned()
+                        .map(|line| div().text_sm().text_color(rgb(MUTED)).child(line)),
+                ),
         )
         .child(
             div()

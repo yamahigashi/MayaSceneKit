@@ -9,7 +9,7 @@ use maya_scene_kit_observe::scene::execution::{
 
 use super::{
     AnalysisSurface,
-    builders::{build_finding, build_review_signal, preview_window, severity_for_trigger},
+    builders::{build_finding, build_review_signal, preview_window, severity_for_trigger, snippet},
 };
 use crate::scene::{
     AuditEvidence, AuditEvidenceKey, AuditReviewSignal, AuditSeverity, AuditSinkKind,
@@ -67,14 +67,17 @@ pub(super) fn analyze_callback_flags(
                 value: body.to_string(),
             },
         ];
+        let preview_override = Some(snippet(body));
 
         match fact.resolved_kind {
             MelResolvedStringKind::ProcReference => {
                 analysis.review_signals.push(build_review_signal(
+                    surface,
                     surface_index,
                     "mel_callback_proc_reference",
                     "MEL callback flag references a proc name; offline behavior remains runtime-dependent",
                     evidence,
+                    preview_override,
                 ));
             }
             MelResolvedStringKind::Literal | MelResolvedStringKind::AssembledLiteral => {
@@ -87,12 +90,15 @@ pub(super) fn analyze_callback_flags(
                     None,
                     "script-bearing MEL callback flag detected",
                     evidence.clone(),
+                    preview_override.clone(),
                 ));
                 analysis.review_signals.push(build_review_signal(
+                    surface,
                     surface_index,
                     "mel_callback_body",
                     "MEL callback flag embeds inline script body; derived sink findings determine deny behavior",
                     evidence.clone(),
+                    preview_override.clone(),
                 ));
 
                 let body: Arc<str> = Arc::from(body);
@@ -124,6 +130,7 @@ pub(super) fn analyze_callback_flags(
                     None,
                     "script-bearing MEL callback flag detected",
                     evidence,
+                    preview_override,
                 ));
             }
         }

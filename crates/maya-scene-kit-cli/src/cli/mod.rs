@@ -327,6 +327,7 @@ mod tests {
                 value: StaticAuditFindingDetail::MelPythonLiteralBridgeNotAutoAllowed,
             },
             evidence: vec![],
+            preview_override: None,
         };
         let report = crate::scene::AuditReport {
             scene_path: PathBuf::from("a.ma"),
@@ -388,6 +389,7 @@ mod tests {
                 value: StaticAuditFindingDetail::ExecutionSurfaceLanguageCouldNotBeInferred,
             },
             evidence: vec![],
+            preview_override: None,
         };
         let report = crate::scene::AuditReport {
             scene_path: PathBuf::from("a.mb"),
@@ -462,6 +464,7 @@ mod tests {
                     value: "createNodeCommand".to_string(),
                 },
             ],
+            preview_override: None,
         };
         let report = crate::scene::AuditReport {
             scene_path: PathBuf::from("a.ma"),
@@ -567,6 +570,7 @@ mod tests {
                 key: AuditEvidenceKey::Command,
                 value: "nodeEditor".to_string(),
             }],
+            preview_override: None,
         };
         let report = crate::scene::AuditReport {
             scene_path: PathBuf::from("a.ma"),
@@ -634,6 +638,7 @@ mod tests {
                     value: "nodeEdCreateNodeCommand".to_string(),
                 },
             ],
+            preview_override: None,
         };
         let report = crate::scene::AuditReport {
             scene_path: PathBuf::from("a.ma"),
@@ -710,6 +715,7 @@ mod tests {
                     value: "print \"ok\";".to_string(),
                 },
             ],
+            preview_override: None,
         };
         let report = crate::scene::AuditReport {
             scene_path: PathBuf::from("a.ma"),

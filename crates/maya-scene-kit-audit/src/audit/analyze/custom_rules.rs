@@ -14,6 +14,7 @@ pub(super) fn findings_for_custom_rules(
         match rule {
             CompiledRule::Regex { raw, re } => {
                 for m in re.find_iter(&surface.text) {
+                    let preview = snippet(&surface.text[m.start()..m.end()]);
                     hits.push(build_finding(
                         surface_index,
                         surface,
@@ -23,8 +24,9 @@ pub(super) fn findings_for_custom_rules(
                         Some(raw.clone()),
                         "custom audit rule matched execution surface",
                         vec![AuditEvidence::FreeText {
-                            value: snippet(&surface.text[m.start()..m.end()]),
+                            value: preview.clone(),
                         }],
+                        Some(preview),
                     ));
                 }
             }

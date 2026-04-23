@@ -47,6 +47,7 @@ pub(super) fn analyze_mel_surface_impl(
                         value: diagnostic.message.to_string(),
                     })
                     .collect(),
+                None,
             ));
         }
 
@@ -124,6 +125,7 @@ pub(super) fn analyze_mel_surface_impl(
 
         for code_like in &mel.code_like_value_facts {
             analysis.review_signals.push(build_review_signal(
+                surface,
                 surface_index,
                 "mel_body_assembly_without_sink",
                 "assembled MEL body reconstructs code-like text in execution context without a proven execution sink",
@@ -135,6 +137,7 @@ pub(super) fn analyze_mel_surface_impl(
                         value: super::builders::snippet(code_like.rendered_text.as_ref()),
                     },
                 ],
+                Some(super::builders::snippet(code_like.rendered_text.as_ref())),
             ));
         }
 
@@ -224,6 +227,12 @@ where
         });
     }
 
+    let preview_override = fact
+        .rendered_text
+        .as_deref()
+        .map(super::builders::snippet)
+        .filter(|preview| !preview.is_empty());
+
     let findings = vec![build_finding(
         surface_index,
         surface,
@@ -233,6 +242,7 @@ where
         None,
         message,
         evidence,
+        preview_override,
     )];
 
     if bridge_python && fact.resolved_kind == MelResolvedStringKind::Literal {

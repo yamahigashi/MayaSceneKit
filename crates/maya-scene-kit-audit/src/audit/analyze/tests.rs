@@ -6,8 +6,8 @@ use super::{
     AnalysisSurface, analyze_mel_surface, mel::find_mel_call, text_scan::scan_mel_sink_word_hits,
 };
 use crate::scene::{
-    AuditSurfaceDerivation, ExecutionLanguage, ExecutionOrigin, ExecutionSurfaceKind,
-    ExecutionTrigger,
+    AuditEvidence, AuditEvidenceKey, AuditSurfaceDerivation, ExecutionLanguage, ExecutionOrigin,
+    ExecutionSurfaceKind, ExecutionTrigger,
     execution::{MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts},
 };
 
@@ -110,6 +110,24 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
             .iter()
             .any(|review| review.code.as_str() == "mel_callback_body")
     );
+    let callback_finding = analysis
+        .findings
+        .iter()
+        .find(|finding| finding.code.as_str() == "mel_callback_flag")
+        .expect("callback finding");
+    assert_eq!(
+        callback_finding.preview_override.as_deref(),
+        Some(r#"print "ok";"#)
+    );
+    assert!(callback_finding.evidence.iter().any(|evidence| {
+        matches!(
+            evidence,
+            AuditEvidence::KeyValue {
+                key: AuditEvidenceKey::NodeName,
+                value
+            } if value == "uiConfigScript"
+        )
+    }));
 }
 
 #[test]
@@ -146,6 +164,21 @@ fn bare_identifier_callback_flag_emits_review_signal_only() {
             .iter()
             .any(|review| { review.code.as_str() == "mel_callback_proc_reference" })
     );
+    let review = analysis
+        .review_signals
+        .iter()
+        .find(|review| review.code.as_str() == "mel_callback_proc_reference")
+        .expect("callback proc review");
+    assert_eq!(review.preview_override.as_deref(), Some("safeProc"));
+    assert!(review.evidence.iter().any(|evidence| {
+        matches!(
+            evidence,
+            AuditEvidence::KeyValue {
+                key: AuditEvidenceKey::NodeName,
+                value
+            } if value == "uiConfigScript"
+        )
+    }));
 }
 
 #[test]
@@ -218,4 +251,50 @@ fn bare_mel_variable_is_not_obfuscation_marker() {
             .iter()
             .all(|finding| finding.code.as_str() != "obfuscation_markers")
     );
+}
+
+#[test]
+fn mel_sink_finding_uses_rendered_body_as_preview_override() {
+    let surface = AnalysisSurface {
+        text: Arc::from(r#"eval("print \"sample\";");"#),
+        preview: "eval".to_string(),
+        origin: ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger: ExecutionTrigger::FileOpen,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            node_name: Some("ExampleScriptNode".to_string()),
+            attr_name: Some(".b".to_string()),
+            source_range: None,
+            source_kind: Some("scriptType=1".to_string()),
+            chunk_form: None,
+            chunk_tag: None,
+            chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
+        },
+        derivation: AuditSurfaceDerivation::Observed,
+        mel: Some(Arc::new(collect_mel_surface_facts(
+            r#"eval("print \"sample\";");"#,
+        ))),
+    };
+
+    let analysis = analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new());
+    let finding = analysis
+        .findings
+        .iter()
+        .find(|finding| finding.code.as_str() == "mel_eval")
+        .expect("mel eval finding");
+
+    assert_eq!(
+        finding.preview_override.as_deref(),
+        Some(r#"print "sample";"#)
+    );
+    assert!(finding.evidence.iter().any(|evidence| {
+        matches!(
+            evidence,
+            AuditEvidence::KeyValue {
+                key: AuditEvidenceKey::NodeName,
+                value
+            } if value == "ExampleScriptNode"
+        )
+    }));
 }

@@ -9,6 +9,7 @@ pub(in crate::cli) fn render_audit_hit_json(
     hit: &AuditFinding,
 ) -> serde_json::Value {
     let surface = report.surface_for(hit);
+    let preview = report.finding_preview(hit);
     json!({
         "path": scene_path,
         "scene_format": report.scene_format.as_str(),
@@ -18,7 +19,7 @@ pub(in crate::cli) fn render_audit_hit_json(
         "rule": hit.rule,
         "message": render_audit_finding_detail(&hit.detail),
         "evidence": hit.evidence.iter().map(render_audit_evidence).collect::<Vec<_>>(),
-        "preview": if surface.preview.is_empty() { None } else { Some(surface.preview.clone()) },
+        "preview": if preview.is_empty() { None } else { Some(preview.to_string()) },
         "origin": {
             "lang": surface.origin.lang.as_str(),
             "trigger": surface.origin.trigger.as_str(),
@@ -44,13 +45,14 @@ pub(in crate::cli) fn render_review_signal_json(
     review: &AuditReviewSignal,
 ) -> serde_json::Value {
     let surface = report.surface_for_review(review);
+    let preview = report.review_preview(review);
     json!({
         "path": scene_path,
         "scene_format": report.scene_format.as_str(),
         "review_id": review.code.as_str(),
         "message": render_audit_review_detail(&review.detail),
         "evidence": review.evidence.iter().map(render_audit_evidence).collect::<Vec<_>>(),
-        "preview": if surface.preview.is_empty() { None } else { Some(surface.preview.clone()) },
+        "preview": if preview.is_empty() { None } else { Some(preview.to_string()) },
         "origin": {
             "lang": surface.origin.lang.as_str(),
             "trigger": surface.origin.trigger.as_str(),

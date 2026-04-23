@@ -57,6 +57,7 @@ pub(in crate::cli) fn render_grouped_audit_hit_text(
     count: usize,
 ) -> String {
     let surface = report.surface_for(hit);
+    let preview = report.finding_preview(hit);
     let mut parts = vec!["- finding".to_string(), format!("path={scene_path}")];
     if count > 1 {
         parts.push(format!("count={count}"));
@@ -89,8 +90,8 @@ pub(in crate::cli) fn render_grouped_audit_hit_text(
                 .join("; ")
         ));
     }
-    if !surface.preview.is_empty() {
-        parts.push(format!("preview=\"{}\"", surface.preview));
+    if !preview.is_empty() {
+        parts.push(format!("preview=\"{}\"", preview));
     }
     parts.join(" ")
 }
@@ -102,6 +103,7 @@ pub(in crate::cli) fn render_grouped_review_signal_text(
     count: usize,
 ) -> String {
     let surface = report.surface_for_review(review);
+    let preview = report.review_preview(review);
     let mut parts = vec!["- review".to_string(), format!("path={scene_path}")];
     if count > 1 {
         parts.push(format!("count={count}"));
@@ -133,8 +135,8 @@ pub(in crate::cli) fn render_grouped_review_signal_text(
                 .join("; ")
         ));
     }
-    if !surface.preview.is_empty() {
-        parts.push(format!("preview=\"{}\"", surface.preview));
+    if !preview.is_empty() {
+        parts.push(format!("preview=\"{}\"", preview));
     }
     parts.join(" ")
 }
@@ -183,6 +185,7 @@ pub(in crate::cli) fn group_audit_hit_indexes(report: &AuditReport) -> Vec<(usiz
 
     for (hit_index, hit) in report.findings.iter().enumerate() {
         let surface = report.surface_for(hit);
+        let preview = report.finding_preview(hit);
         let key = GroupedAuditHitKey {
             finding_id: hit.code.as_str(),
             severity: hit.severity.as_str(),
@@ -203,7 +206,7 @@ pub(in crate::cli) fn group_audit_hit_indexes(report: &AuditReport) -> Vec<(usiz
             chunk_node_offset: surface.origin.chunk_node_offset,
             chunk_payload_offset: surface.origin.chunk_payload_offset,
             chunk_payload_size: surface.origin.chunk_payload_size,
-            preview: surface.preview.as_str(),
+            preview,
         };
         if let Some(group_index) = indexes.get(&key).copied() {
             groups[group_index].1 += 1;
@@ -222,6 +225,7 @@ pub(in crate::cli) fn group_review_signal_indexes(report: &AuditReport) -> Vec<(
 
     for (review_index, review) in report.review_signals.iter().enumerate() {
         let surface = report.surface_for_review(review);
+        let preview = report.review_preview(review);
         let key = GroupedReviewSignalKey {
             review_id: review.code.as_str(),
             message: render_audit_review_detail(&review.detail),
@@ -240,7 +244,7 @@ pub(in crate::cli) fn group_review_signal_indexes(report: &AuditReport) -> Vec<(
             chunk_node_offset: surface.origin.chunk_node_offset,
             chunk_payload_offset: surface.origin.chunk_payload_offset,
             chunk_payload_size: surface.origin.chunk_payload_size,
-            preview: surface.preview.as_str(),
+            preview,
         };
         if let Some(group_index) = indexes.get(&key).copied() {
             groups[group_index].1 += 1;
