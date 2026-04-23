@@ -16,6 +16,9 @@ signals affect final audit disposition.
 - Added the review signal `mel_body_assembly_without_sink` for reconstructed
   code-like MEL bodies that appear in execution context without proven sink
   reachability.
+- Added a dedicated GUI action to stage deletion of
+  `uiConfigurationScriptNode` from the main Edit menu and file-list context
+  menu using the existing scene-edit clean pipeline.
 
 ### Changed
 
@@ -29,6 +32,10 @@ signals affect final audit disposition.
   - `hardened_untrusted` now escalates to at least `DenyUncertain`
 - Updated CLI, GUI, and Python-facing audit surfaces to carry the new review
   semantics and MEL fact model.
+- Enriched audit finding and review previews so adapter surfaces prefer
+  finding-specific snippets, include node-name evidence, and expose richer
+  provenance in GUI detail views, clipboard payloads, CLI output, and Python
+  JSON.
 
 ### Fixed
 
