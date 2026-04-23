@@ -25,6 +25,38 @@ use crate::{
     },
 };
 
+const ADAPTIVE_MB_MAX_DEPTH: usize = 128;
+const ADAPTIVE_MB_MIN_CHILDREN_PER_GROUP: usize = 262_144;
+const ADAPTIVE_MB_MIN_TOTAL_CHUNKS: usize = 1_000_000;
+const ADAPTIVE_MB_CHILDREN_PER_GROUP_DIVISOR: usize = 1024;
+const ADAPTIVE_MB_TOTAL_CHUNKS_DIVISOR: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MbParseBudgetMode {
+    #[default]
+    Adaptive,
+    Exact,
+}
+
+pub(crate) fn materialize_adaptive_mb_parse_budget(
+    source_bytes_len: usize,
+    configured_max_parse_bytes: usize,
+) -> MbParseBudget {
+    let effective_bytes = std::cmp::min(source_bytes_len, configured_max_parse_bytes);
+    MbParseBudget {
+        max_depth: ADAPTIVE_MB_MAX_DEPTH,
+        max_children_per_group: std::cmp::max(
+            ADAPTIVE_MB_MIN_CHILDREN_PER_GROUP,
+            effective_bytes / ADAPTIVE_MB_CHILDREN_PER_GROUP_DIVISOR,
+        ),
+        max_total_chunks: std::cmp::max(
+            ADAPTIVE_MB_MIN_TOTAL_CHUNKS,
+            effective_bytes / ADAPTIVE_MB_TOTAL_CHUNKS_DIVISOR,
+        ),
+        max_parse_bytes: configured_max_parse_bytes,
+    }
+}
+
 pub(crate) struct SourceInput<'a> {
     path: &'a Path,
     scene_format: Option<SceneFormat>,
@@ -78,6 +110,7 @@ pub struct LoadOptions {
     structural_attr_schema_path: Option<PathBuf>,
     refedit_schema_path: Option<PathBuf>,
     additional_node_info_paths: Vec<PathBuf>,
+    mb_parse_budget_mode: MbParseBudgetMode,
     mb_parse_budget: MbParseBudget,
     mel_parse_budget: MelParseBudget,
 }
@@ -114,6 +147,7 @@ impl LoadOptions {
     }
 
     pub fn with_mb_parse_budget(mut self, budget: MbParseBudget) -> Self {
+        self.mb_parse_budget_mode = MbParseBudgetMode::Exact;
         self.mb_parse_budget = budget;
         self
     }
@@ -140,8 +174,35 @@ impl LoadOptions {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn mb_parse_budget(&self) -> &MbParseBudget {
         &self.mb_parse_budget
+    }
+
+    pub(crate) fn materialize_mb_parse_budget_for_path(
+        &self,
+        path: &Path,
+    ) -> Result<MbParseBudget, SceneToolError> {
+        let source_bytes_len = fs::metadata(path)?.len() as usize;
+        Ok(self.materialize_mb_parse_budget_for_bytes(source_bytes_len))
+    }
+
+    pub(crate) fn materialize_mb_parse_budget_for_bytes(
+        &self,
+        source_bytes_len: usize,
+    ) -> MbParseBudget {
+        match self.mb_parse_budget_mode {
+            MbParseBudgetMode::Adaptive => materialize_adaptive_mb_parse_budget(
+                source_bytes_len,
+                self.mb_parse_budget.max_parse_bytes,
+            ),
+            MbParseBudgetMode::Exact => self.mb_parse_budget,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mb_parse_budget_mode(&self) -> MbParseBudgetMode {
+        self.mb_parse_budget_mode
     }
 
     #[cfg(test)]
@@ -306,18 +367,18 @@ impl ObservationBundle {
             SceneFormat::Mb => {
                 let schema_context =
                     schema_context.expect("mb observation requires schema context");
+                let budget = match input.bytes.as_ref() {
+                    Some(bytes) => options.materialize_mb_parse_budget_for_bytes(bytes.len()),
+                    None => options.materialize_mb_parse_budget_for_path(path)?,
+                };
                 let session = match input.bytes {
                     Some(bytes) => MbReadSession::load_raw_bytes(
                         path,
                         bytes,
                         Arc::clone(schema_context),
-                        &options.mb_parse_budget,
+                        &budget,
                     )?,
-                    None => MbReadSession::load_raw(
-                        path,
-                        Arc::clone(schema_context),
-                        &options.mb_parse_budget,
-                    )?,
+                    None => MbReadSession::load_raw(path, Arc::clone(schema_context), &budget)?,
                 };
                 let validation_state = input
                     .validation_state

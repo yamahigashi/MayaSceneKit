@@ -4,7 +4,10 @@ pub use crate::scene::public::{MbInspectNode, MbInspectOptions, MbInspectReport}
 
 use crate::{
     mb::{Chunk, MbParseBudget, parse_file_with_budget},
-    scene::{SceneToolError, core::SceneFormat, ops},
+    scene::{
+        SceneToolError, core::SceneFormat, ops,
+        source::loader::materialize_adaptive_mb_parse_budget,
+    },
 };
 
 pub fn inspect_mb(
@@ -28,11 +31,10 @@ pub fn inspect_mb_with_max_parse_bytes(
     options: MbInspectOptions,
     max_parse_bytes: usize,
 ) -> Result<MbInspectReport, SceneToolError> {
-    let budget = MbParseBudget {
-        max_parse_bytes,
-        ..MbParseBudget::default()
-    };
-    inspect_mb_with_budget(path.as_ref(), options, &budget)
+    let scene_path = path.as_ref();
+    let source_bytes_len = std::fs::metadata(scene_path)?.len() as usize;
+    let budget = materialize_adaptive_mb_parse_budget(source_bytes_len, max_parse_bytes);
+    inspect_mb_with_budget(scene_path, options, &budget)
 }
 
 fn inspect_mb_with_budget(
