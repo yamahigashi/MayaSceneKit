@@ -20,6 +20,7 @@ jobs:
     - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
     - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
       with:
+        toolchain: stable
         components: clippy,rustfmt
     - name: Install Linux GUI dependencies
       run: |
