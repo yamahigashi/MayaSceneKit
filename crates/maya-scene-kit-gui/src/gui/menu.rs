@@ -46,6 +46,18 @@ impl GuiShell {
         self.run_clean(window, cx);
     }
 
+    pub(super) fn on_menu_edit_delete_ui_configuration_script_node(
+        &mut self,
+        _: &MenuEditDeleteUiConfigurationScriptNode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_scan_active() {
+            return;
+        }
+        self.run_delete_ui_configuration_script_node(window, cx);
+    }
+
     pub(super) fn on_menu_edit_undo(
         &mut self,
         _: &MenuEditUndo,

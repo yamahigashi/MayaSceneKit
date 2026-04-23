@@ -120,6 +120,7 @@ impl Render for GuiShell {
                 this.on_action(cx.listener(Self::on_menu_edit_redo))
             })
             .on_action(cx.listener(Self::on_menu_edit_clean))
+            .on_action(cx.listener(Self::on_menu_edit_delete_ui_configuration_script_node))
             .on_action(cx.listener(Self::on_menu_edit_replace))
             .on_action(cx.listener(Self::on_menu_edit_to_ascii))
             .on_action(cx.listener(Self::on_menu_exit_application))

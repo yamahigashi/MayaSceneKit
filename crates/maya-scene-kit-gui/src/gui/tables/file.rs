@@ -377,6 +377,8 @@ impl TableDelegate for FileTableDelegate {
         let i18n = I18n::new(self.locale);
         let copy_label = i18n.text("action.copy_path");
         let clean_label = i18n.text("action.clean_file_context");
+        let delete_ui_configuration_script_node_label =
+            i18n.text("action.delete_ui_configuration_script_node");
         let replace_label = i18n.text("action.replace_path");
         let save_label = i18n.text("action.save");
         let undo_label = i18n.text("action.undo_all_changes");
@@ -403,6 +405,23 @@ impl TableDelegate for FileTableDelegate {
             }))
         } else {
             menu.item(PopupMenuItem::new(clean_label).disabled(true))
+        };
+        let menu = if clean_state.can_delete_ui_configuration_script_node {
+            menu.item(
+                PopupMenuItem::new(delete_ui_configuration_script_node_label).on_click({
+                    let view = view.clone();
+                    let row_id = row.id;
+                    move |_, window, cx| {
+                        view.update(cx, |shell, cx| {
+                            shell.run_file_context_delete_ui_configuration_script_node_from_row(
+                                row_id, window, cx,
+                            );
+                        });
+                    }
+                }),
+            )
+        } else {
+            menu.item(PopupMenuItem::new(delete_ui_configuration_script_node_label).disabled(true))
         };
         let menu = menu.item(PopupMenuItem::new(replace_label).on_click({
             let view = view.clone();

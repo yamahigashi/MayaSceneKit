@@ -2,6 +2,8 @@ use maya_scene_kit_edit::scene::OperationMode;
 
 use super::*;
 
+const UI_CONFIGURATION_SCRIPT_NODE_NAME: &str = "uiConfigurationScriptNode";
+
 impl GuiShell {
     pub(super) fn rebuild_row_id_index(&mut self) {
         self.row_id_to_index = self
@@ -983,6 +985,26 @@ impl GuiShell {
         self.stage_file_threat_targets(targets_by_row, window, cx);
     }
 
+    pub(super) fn run_delete_ui_configuration_script_node(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.ready_selected_indices();
+        if !bulk_enabled(selected.len()) {
+            self.status_message = Some(BannerMessage::SelectFilesFirst);
+            return;
+        }
+
+        self.stage_script_node_clean_target(
+            selected,
+            UI_CONFIGURATION_SCRIPT_NODE_NAME,
+            ResultTab::Audit,
+            window,
+            cx,
+        );
+    }
+
     pub(super) fn run_file_context_clean_from_row(
         &mut self,
         row_id: u64,
@@ -998,6 +1020,28 @@ impl GuiShell {
         }
 
         self.stage_file_threat_targets(targets_by_row, window, cx);
+    }
+
+    pub(super) fn run_file_context_delete_ui_configuration_script_node_from_row(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row_indices) = self.ready_context_indices_from_row(row_id) else {
+            return;
+        };
+        if !bulk_enabled(row_indices.len()) {
+            return;
+        }
+
+        self.stage_script_node_clean_target(
+            row_indices,
+            UI_CONFIGURATION_SCRIPT_NODE_NAME,
+            ResultTab::Audit,
+            window,
+            cx,
+        );
     }
 
     pub(super) fn undo_file_context_changes_from_row(
@@ -1040,6 +1084,32 @@ impl GuiShell {
         }
     }
 
+    fn stage_script_node_clean_target(
+        &mut self,
+        row_indices: Vec<usize>,
+        node_name: &str,
+        target_tab: ResultTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = ExecutionCleanTarget::ScriptNode {
+            node_name: node_name.to_string(),
+        };
+        let edit_sequence = self.begin_edit_transaction(&row_indices);
+        for row_index in row_indices {
+            let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
+            next_targets.insert(target.clone());
+            self.stage_clean_targets_for_row(
+                row_index,
+                next_targets,
+                target_tab,
+                edit_sequence,
+                window,
+                cx,
+            );
+        }
+    }
+
     fn file_threat_clean_targets_by_row(
         &self,
         row_indices: Vec<usize>,
@@ -1060,6 +1130,19 @@ impl GuiShell {
             .get(row_index)
             .is_some_and(|row| row.selected)
             .then(|| self.ready_selected_indices())
+    }
+
+    fn ready_context_indices_from_row(&self, row_id: u64) -> Option<Vec<usize>> {
+        let row_index = self.index_of_row_id(row_id)?;
+        let row = self.rows.get(row_index)?;
+        if row.is_processing() {
+            return None;
+        }
+        if row.selected {
+            Some(self.ready_selected_indices())
+        } else {
+            Some(vec![row_index])
+        }
     }
 
     fn selected_ready_dirty_indices_if_clicked_row_selected(
