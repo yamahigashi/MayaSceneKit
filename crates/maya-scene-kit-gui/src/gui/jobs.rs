@@ -1014,6 +1014,17 @@ impl GuiShell {
         let Some(row_indices) = self.selected_ready_indices_if_clicked_row_selected(row_id) else {
             return;
         };
+        let row_indices = row_indices
+            .into_iter()
+            .filter(|&row_index| {
+                self.rows.get(row_index).is_some_and(|row| {
+                    !matches!(
+                        row.dirty_kind,
+                        Some(DirtyKind::Replace | DirtyKind::ToAscii)
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         let targets_by_row = self.file_threat_clean_targets_by_row(row_indices);
         if !bulk_enabled(targets_by_row.len()) {
             return;
@@ -1031,6 +1042,26 @@ impl GuiShell {
         let Some(row_indices) = self.ready_context_indices_from_row(row_id) else {
             return;
         };
+        let row_indices = row_indices
+            .into_iter()
+            .filter(|&row_index| {
+                self.rows.get(row_index).is_some_and(|row| {
+                    !matches!(
+                        row.dirty_kind,
+                        Some(DirtyKind::Replace | DirtyKind::ToAscii)
+                    ) && row.display_dump_report().is_some_and(|report| {
+                        report
+                            .script_entries
+                            .iter()
+                            .any(|entry| entry.name == UI_CONFIGURATION_SCRIPT_NODE_NAME)
+                    }) && !row
+                        .pending_clean_targets
+                        .contains(&ExecutionCleanTarget::ScriptNode {
+                            node_name: UI_CONFIGURATION_SCRIPT_NODE_NAME.to_string(),
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
         if !bulk_enabled(row_indices.len()) {
             return;
         }
