@@ -698,6 +698,31 @@ impl MelAuditSourceStore {
         }
     }
 
+    pub fn from_decoded_fragments(fragments: impl IntoIterator<Item = (MelSpan, String)>) -> Self {
+        let mut compact = String::new();
+        let mut source_fragments = Vec::new();
+        for (source_span, text) in fragments {
+            if source_span.start >= source_span.end {
+                continue;
+            }
+            let text_start = compact.len();
+            compact.push_str(&text);
+            let text_end = compact.len();
+            source_fragments.push(MelAuditSourceFragment {
+                source_span,
+                text_span: MelSpan {
+                    start: text_start,
+                    end: text_end,
+                },
+            });
+        }
+
+        Self {
+            text: Arc::from(compact),
+            fragments: source_fragments,
+        }
+    }
+
     pub fn source_text(&self, source_span: MelSpan) -> &str {
         self.remap_span_inner(source_span)
             .map(|span| span.slice(self.text.as_ref()))
@@ -721,14 +746,23 @@ impl MelAuditSourceStore {
             .fragments
             .partition_point(|fragment| fragment.source_span.end <= source_span.start);
         let fragment = self.fragments.get(index)?;
-        (source_span.start >= fragment.source_span.start
-            && source_span.end <= fragment.source_span.end)
-            .then(|| {
-                let start =
-                    fragment.text_span.start + (source_span.start - fragment.source_span.start);
-                let end = fragment.text_span.start + (source_span.end - fragment.source_span.start);
-                MelSpan { start, end }
-            })
+        if source_span.start < fragment.source_span.start
+            || source_span.end > fragment.source_span.end
+        {
+            return None;
+        }
+        if source_span == fragment.source_span {
+            return Some(fragment.text_span);
+        }
+        if fragment.source_span.end - fragment.source_span.start
+            != fragment.text_span.end - fragment.text_span.start
+        {
+            return None;
+        }
+
+        let start = fragment.text_span.start + (source_span.start - fragment.source_span.start);
+        let end = fragment.text_span.start + (source_span.end - fragment.source_span.start);
+        Some(MelSpan { start, end })
     }
 }
 
@@ -1069,5 +1103,20 @@ mod tests {
             MelSpan { start: 0, end: 0 }
         );
         assert_eq!(store.source_text(MelSpan { start: 4, end: 4 }), "");
+    }
+
+    #[test]
+    fn audit_source_store_decoded_fragment_preserves_exact_source_span() {
+        let store = MelAuditSourceStore::from_decoded_fragments([(
+            MelSpan { start: 10, end: 14 },
+            "sample".to_string(),
+        )]);
+
+        assert_eq!(store.source_text(MelSpan { start: 10, end: 14 }), "sample");
+        assert_eq!(
+            store.preview_span(MelSpan { start: 10, end: 14 }),
+            MelSpan { start: 0, end: 6 }
+        );
+        assert_eq!(store.source_text(MelSpan { start: 11, end: 13 }), "");
     }
 }

@@ -16,10 +16,11 @@ use maya_mel::{
     },
     parser::{
         LightCommandSurface, LightItem, LightItemSink, LightParseOptions, LightScanSummary,
-        LightWord, SourceEncoding, scan_light_bytes_with_options_and_sink_and_then,
+        LightSourceView, LightWord, SourceEncoding,
+        scan_light_bytes_with_options_and_sink_and_then,
     },
     sema::command_schema::{CommandRegistry, ValueShape},
-    syntax::{SourceView, TextRange, range_end, range_start},
+    syntax::{TextRange, range_end, range_start, text_range},
 };
 
 use crate::{
@@ -133,8 +134,50 @@ impl LineTracker {
     }
 }
 
+fn source_raw_bytes(source: LightSourceView<'_>) -> &[u8] {
+    source.raw_slice(text_range(0, source.len() as u32))
+}
+
+fn source_ascii_slice(source: LightSourceView<'_>, range: TextRange) -> Option<&str> {
+    source.try_ascii_slice(range)
+}
+
+fn source_decoded_string(source: LightSourceView<'_>, range: TextRange) -> String {
+    source.decode_slice(range).text.into_owned()
+}
+
+fn source_decoded_cow(source: LightSourceView<'_>, range: TextRange) -> Cow<'_, str> {
+    source.decode_slice(range).text
+}
+
+fn build_audit_source_store(
+    source: LightSourceView<'_>,
+    spans: impl IntoIterator<Item = MelSpan>,
+) -> MelAuditSourceStore {
+    let mut spans = spans
+        .into_iter()
+        .filter(|span| span.start < span.end)
+        .collect::<Vec<_>>();
+    spans.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end)));
+
+    let mut merged = Vec::<MelSpan>::new();
+    for span in spans {
+        match merged.last_mut() {
+            Some(active) if span.start <= active.end => {
+                active.end = active.end.max(span.end);
+            }
+            _ => merged.push(span),
+        }
+    }
+
+    MelAuditSourceStore::from_decoded_fragments(merged.into_iter().map(|span| {
+        let range = text_range(span.start as u32, span.end as u32);
+        (span, source_decoded_string(source, range))
+    }))
+}
+
 fn start_create_node_block(
-    source: SourceView<'_>,
+    source: LightSourceView<'_>,
     command_text: &str,
     create_node: &MayaSelectiveCreateNode,
     line_number: usize,
@@ -167,7 +210,7 @@ fn start_create_node_block(
 }
 
 fn apply_setattr_to_active_block(
-    source: SourceView<'_>,
+    source: LightSourceView<'_>,
     block: &mut ActiveCreateBlock,
     set_attr: &MayaSelectiveSetAttr,
     tracked_attr: Option<MayaTrackedSetAttrAttr>,
@@ -179,7 +222,7 @@ fn apply_setattr_to_active_block(
         ActiveCreateBlock::Script(script) => {
             if matches!(tracked_attr, Some(MayaTrackedSetAttrAttr::B))
                 && script.body.is_none()
-                && selective_setattr_type_name(source, set_attr) == Some("string")
+                && selective_setattr_type_name(source, set_attr).as_deref() == Some("string")
             {
                 if let Some(value) = selective_setattr_string_tail(source, set_attr) {
                     script.body = Some(value);
@@ -213,7 +256,7 @@ fn apply_setattr_to_active_block(
             };
 
             if matches!(
-                classify_scene_path_attr(attr_name),
+                classify_scene_path_attr(attr_name.as_str()),
                 Some(ScenePathAttrKind::FileTexturePath)
             ) {
                 push_path_entry(
@@ -222,19 +265,19 @@ fn apply_setattr_to_active_block(
                     ScenePathEntry {
                         node_type: path_block.node_type.clone(),
                         node_name: path_block.node_name.clone(),
-                        attr: attr_name.to_string(),
+                        attr: attr_name,
                         value,
                         meta: None,
                     },
                 );
-            } else if path_block.node_type == "reference" && is_reference_attr(attr_name) {
+            } else if path_block.node_type == "reference" && is_reference_attr(&attr_name) {
                 push_path_entry(
                     scene_paths,
                     seen_paths,
                     ScenePathEntry {
                         node_type: "reference".to_string(),
                         node_name: path_block.node_name.clone(),
-                        attr: attr_name.to_string(),
+                        attr: attr_name,
                         value,
                         meta: None,
                     },
@@ -244,22 +287,26 @@ fn apply_setattr_to_active_block(
     }
 }
 
-fn selective_setattr_type_name<'a>(
-    source: SourceView<'a>,
+fn selective_setattr_type_name(
+    source: LightSourceView<'_>,
     set_attr: &MayaSelectiveSetAttr,
-) -> Option<&'a str> {
+) -> Option<String> {
     let range = set_attr.type_name_range?;
-    string_literal_contents(source, range).or_else(|| Some(source.slice(range)))
+    let text = source_decoded_string(source, range);
+    Some(string_literal_contents(&text).unwrap_or(&text).to_string())
 }
 
 fn selective_setattr_string_tail(
-    source: SourceView<'_>,
+    source: LightSourceView<'_>,
     set_attr: &MayaSelectiveSetAttr,
 ) -> Option<String> {
-    (selective_setattr_type_name(source, set_attr) == Some("string"))
+    (selective_setattr_type_name(source, set_attr).as_deref() == Some("string"))
         .then_some(set_attr.opaque_tail)
         .flatten()
-        .and_then(|range| parse_setattr_string_value_tail(source.slice(range)))
+        .and_then(|range| {
+            let tail = source_decoded_cow(source, range);
+            parse_setattr_string_value_tail(tail.as_ref())
+        })
 }
 
 fn tracked_scene_path_attr_name(
@@ -273,20 +320,21 @@ fn tracked_scene_path_attr_name(
     }
 }
 
-fn selective_scene_path_attr_name<'a>(
-    source: SourceView<'a>,
+fn selective_scene_path_attr_name(
+    source: LightSourceView<'_>,
     set_attr: &MayaSelectiveSetAttr,
     tracked_attr: Option<MayaTrackedSetAttrAttr>,
-) -> Option<&'a str> {
+) -> Option<String> {
     if let Some(tracked) = tracked_scene_path_attr_name(tracked_attr) {
-        return Some(tracked);
+        return Some(tracked.to_string());
     }
-    let attr_path = strip_outer_quotes(source.slice(set_attr.attr_path_range?));
+    let text = source_decoded_string(source, set_attr.attr_path_range?);
+    let attr_path = strip_outer_quotes(&text);
     matches!(
         classify_scene_path_attr(attr_path),
         Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
     )
-    .then_some(attr_path)
+    .then(|| attr_path.to_string())
 }
 
 fn flush_active_block(
@@ -325,15 +373,16 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
     hasher.finish()
 }
 
-fn decode_range_value(source: SourceView<'_>, range: TextRange) -> String {
-    if let Some(contents) = string_literal_contents(source, range) {
+fn decode_range_value(source: LightSourceView<'_>, range: TextRange) -> String {
+    let text = source_decoded_string(source, range);
+    if let Some(contents) = string_literal_contents(&text) {
         return unescape_ma_string_literal(contents);
     }
-    source.slice(range).to_string()
+    text
 }
 
-fn string_literal_contents<'a>(source: SourceView<'a>, range: TextRange) -> Option<&'a str> {
-    source.slice(range).strip_prefix('"')?.strip_suffix('"')
+fn string_literal_contents(text: &str) -> Option<&str> {
+    text.strip_prefix('"')?.strip_suffix('"')
 }
 
 fn normalize_requires_command(command: &str) -> String {
@@ -345,7 +394,7 @@ fn normalize_requires_command(command: &str) -> String {
 }
 
 fn extract_reference_entry_from_selective_file_command(
-    source: SourceView<'_>,
+    source: LightSourceView<'_>,
     file: &MayaSelectiveFile,
     command: &str,
 ) -> Option<ScenePathEntry> {
@@ -477,7 +526,13 @@ fn map_light_source_encoding(encoding: SourceEncoding) -> MelSourceEncoding {
     }
 }
 
-fn selective_encoding_diagnostic(encoding: MelSourceEncoding) -> Option<MelParseDiagnostic> {
+fn selective_encoding_diagnostic(
+    source: LightSourceView<'_>,
+    encoding: MelSourceEncoding,
+) -> Option<MelParseDiagnostic> {
+    if !source_raw_bytes(source).iter().any(|byte| !byte.is_ascii()) {
+        return None;
+    }
     let label = match encoding {
         MelSourceEncoding::Utf8 => return None,
         MelSourceEncoding::Cp932 => "cp932",
@@ -590,15 +645,15 @@ struct SelectiveScanSink {
 }
 
 impl LightItemSink for SelectiveScanSink {
-    fn on_item(&mut self, source: SourceView<'_>, item: LightItem) {
+    fn on_item(&mut self, source: LightSourceView<'_>, item: LightItem) {
         let span = match &item {
             LightItem::Proc(proc_def) => proc_def.span,
             LightItem::Command(command) => command.span,
             LightItem::Other { span } => *span,
         };
-        let span_start = source.display_range(span).start;
+        let span_start = range_start(span) as usize;
         self.line_tracker
-            .advance_to(source.text().as_bytes(), span_start);
+            .advance_to(source_raw_bytes(source), span_start);
         let is_indented = self.line_tracker.is_indented();
         if !is_indented {
             flush_active_block(&mut self.active_block, &mut self.script_entries);
@@ -632,7 +687,8 @@ impl LightItemSink for SelectiveScanSink {
                 }
             }
             LightItem::Other { span } if is_indented => {
-                if let Some(head) = classify_top_level_other(source.slice(span)) {
+                let span_text = source_decoded_cow(source, span);
+                if let Some(head) = classify_top_level_other(span_text.as_ref()) {
                     self.push_indented_top_level_diagnostic(span);
                     if self.active_block.is_none() {
                         self.audit_items
@@ -648,7 +704,8 @@ impl LightItemSink for SelectiveScanSink {
                 }
             }
             LightItem::Other { span } if !is_indented => {
-                if let Some(head) = classify_top_level_other(source.slice(span)) {
+                let span_text = source_decoded_cow(source, span);
+                if let Some(head) = classify_top_level_other(span_text.as_ref()) {
                     self.audit_items
                         .push(MelAuditTopLevelItemFact::Command(Box::new(
                             MelAuditTopLevelCommandFact {
@@ -675,7 +732,7 @@ impl LightItemSink for SelectiveScanSink {
 impl SelectiveScanSink {
     fn finish(
         mut self,
-        source: SourceView<'_>,
+        source: LightSourceView<'_>,
         report: LightScanSummary,
     ) -> RawMaSelectiveSections {
         flush_active_block(&mut self.active_block, &mut self.script_entries);
@@ -684,11 +741,11 @@ impl SelectiveScanSink {
         let mut diagnostics = diagnostics;
         diagnostics.extend(self.selective_diagnostics);
         let source_encoding = map_light_source_encoding(report.source_encoding);
-        if let Some(diagnostic) = selective_encoding_diagnostic(source_encoding) {
+        if let Some(diagnostic) = selective_encoding_diagnostic(source, source_encoding) {
             diagnostics.push(diagnostic);
         }
-        let source_store = MelAuditSourceStore::from_relevant_spans(
-            source.text(),
+        let source_store = build_audit_source_store(
+            source,
             diagnostics
                 .iter()
                 .map(|diagnostic| diagnostic.span)
@@ -723,13 +780,14 @@ impl SelectiveScanSink {
 
     fn on_selective_item(
         &mut self,
-        source: SourceView<'_>,
+        source: LightSourceView<'_>,
         item: MayaSelectiveItem,
         is_indented: bool,
     ) {
         match item {
             MayaSelectiveItem::Requires(requires) if !is_indented => {
-                let normalized = normalize_requires_command(source.slice(requires.span));
+                let command_text = source_decoded_cow(source, requires.span);
+                let normalized = normalize_requires_command(command_text.as_ref());
                 if self.seen_requires.insert(normalized.clone()) {
                     let kind = classify_raw_require_kind(&normalized);
                     self.requires.push(normalized.clone());
@@ -742,21 +800,23 @@ impl SelectiveScanSink {
                 }
             }
             MayaSelectiveItem::File(file) if !is_indented => {
-                let command_text = source.slice(file.span);
-                if file_command_has_flag(command_text, "-rfn") {
+                let command_text = source_decoded_string(source, file.span);
+                if file_command_has_flag(&command_text, "-rfn") {
                     self.selective_diagnostics
                         .push(file_command_flag_heuristic_diagnostic("-rfn"));
                 }
-                if file_command_has_flag(command_text, "-command") {
+                if file_command_has_flag(&command_text, "-command") {
                     self.selective_diagnostics
                         .push(file_command_flag_heuristic_diagnostic("-command"));
                 }
-                if let Some(entry) =
-                    extract_reference_entry_from_selective_file_command(source, &file, command_text)
-                {
+                if let Some(entry) = extract_reference_entry_from_selective_file_command(
+                    source,
+                    &file,
+                    &command_text,
+                ) {
                     push_path_entry(&mut self.scene_paths, &mut self.seen_paths, entry);
                 }
-                if let Some(callback) = extract_file_command_callback(command_text) {
+                if let Some(callback) = extract_file_command_callback(&command_text) {
                     self.audit_items
                         .push(MelAuditTopLevelItemFact::Command(Box::new(
                             MelAuditTopLevelCommandFact {
@@ -769,9 +829,10 @@ impl SelectiveScanSink {
                 }
             }
             MayaSelectiveItem::CreateNode(create_node) if !is_indented => {
+                let command_text = source_decoded_cow(source, create_node.span);
                 self.active_block = start_create_node_block(
                     source,
-                    source.slice(create_node.span),
+                    command_text.as_ref(),
                     &create_node,
                     self.line_tracker.line_number(),
                 );
@@ -784,12 +845,13 @@ impl SelectiveScanSink {
                         .push(tracked_setattr_opaque_tail_diagnostic(attr));
                 }
                 if let Some(block) = self.active_block.as_mut() {
+                    let command_text = source_decoded_cow(source, set_attr.span);
                     apply_setattr_to_active_block(
                         source,
                         block,
                         &set_attr,
                         set_attr.tracked_attr,
-                        source.slice(set_attr.span),
+                        command_text.as_ref(),
                         &mut self.scene_paths,
                         &mut self.seen_paths,
                     );
@@ -798,7 +860,9 @@ impl SelectiveScanSink {
             MayaSelectiveItem::OtherCommand { head_range, span }
                 if !is_indented || self.active_block.is_none() =>
             {
-                let head = source.slice(head_range);
+                let Some(head) = source_ascii_slice(source, head_range) else {
+                    return;
+                };
                 if is_audit_top_level_command_head_cached(head, &mut self.audit_head_cache) {
                     self.audit_items
                         .push(MelAuditTopLevelItemFact::Command(Box::new(
@@ -838,11 +902,11 @@ fn selective_item_requires_top_level_context(
 }
 
 fn selective_item_from_command(
-    source: SourceView<'_>,
+    source: LightSourceView<'_>,
     command: &LightCommandSurface,
     audit_head_cache: &mut HashMap<String, bool>,
 ) -> Option<MayaSelectiveItem> {
-    let head = source.slice(command.head_range);
+    let head = source_ascii_slice(source, command.head_range)?;
     match head {
         "requires" => Some(MayaSelectiveItem::Requires(MayaSelectiveRequires {
             head_range: command.head_range,
@@ -856,7 +920,9 @@ fn selective_item_from_command(
         })),
         "createNode" => {
             let node_type_range = first_non_flag_range(&command.words);
-            let node_type = node_type_range.map(|range| strip_outer_quotes(source.slice(range)))?;
+            let node_type_text =
+                node_type_range.map(|range| source_decoded_string(source, range))?;
+            let node_type = strip_outer_quotes(&node_type_text);
             if node_type == "script" {
                 return Some(MayaSelectiveItem::CreateNode(MayaSelectiveCreateNode {
                     head_range: command.head_range,
@@ -881,10 +947,12 @@ fn selective_item_from_command(
             let attr_path_range = first_setattr_attr_path_range(source, &command.words);
             let type_name_range = first_flag_arg_range(source, &command.words, &["type", "typ"]);
             let tracked_attr = attr_path_range.and_then(|range| {
-                DefaultMayaSelectiveSetAttrSelector
-                    .classify(strip_outer_quotes(source.slice(range)))
+                let attr_path = source_decoded_string(source, range);
+                DefaultMayaSelectiveSetAttrSelector.classify(strip_outer_quotes(&attr_path))
             });
-            let attr_path = attr_path_range.map(|range| strip_outer_quotes(source.slice(range)))?;
+            let attr_path_text =
+                attr_path_range.map(|range| source_decoded_string(source, range))?;
+            let attr_path = strip_outer_quotes(&attr_path_text);
             if !matches!(attr_path, ".b" | ".st" | ".stp")
                 && tracked_attr.is_none()
                 && !matches!(
@@ -929,13 +997,16 @@ fn first_non_flag_range(words: &[LightWord]) -> Option<TextRange> {
     words.iter().find_map(non_flag_range)
 }
 
-fn first_setattr_attr_path_range(source: SourceView<'_>, words: &[LightWord]) -> Option<TextRange> {
+fn first_setattr_attr_path_range(
+    source: LightSourceView<'_>,
+    words: &[LightWord],
+) -> Option<TextRange> {
     let mut index = 0usize;
     while index < words.len() {
         match words.get(index)? {
             LightWord::Flag { text, .. } => {
-                let descriptor =
-                    command_flag_descriptor(FlagCommandKind::SetAttr, source.slice(*text));
+                let flag = source_ascii_slice(source, *text)?;
+                let descriptor = command_flag_descriptor(FlagCommandKind::SetAttr, flag);
                 index += 1 + descriptor.map_or(0, |descriptor| descriptor.arity);
             }
             word => return non_flag_range(word),
@@ -953,7 +1024,7 @@ fn non_flag_range(word: &LightWord) -> Option<TextRange> {
 }
 
 fn first_flag_arg_range(
-    source: SourceView<'_>,
+    source: LightSourceView<'_>,
     words: &[LightWord],
     names: &[&str],
 ) -> Option<TextRange> {
@@ -963,7 +1034,7 @@ fn first_flag_arg_range(
             index += 1;
             continue;
         };
-        let normalized = source.slice(*text).trim_start_matches('-');
+        let normalized = source_ascii_slice(source, *text)?.trim_start_matches('-');
         if names.contains(&normalized) {
             return words.get(index + 1).and_then(non_flag_range);
         }
@@ -1546,7 +1617,7 @@ mod tests {
 
     #[test]
     fn selective_sections_utf8_control_reports_utf8_encoding() {
-        let input = non_utf8_repro_source("アウトライナ プラス");
+        let input = non_utf8_repro_source("アウトライナ プラス").replace("//Codeset: 932\n", "");
 
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
 
