@@ -15,7 +15,6 @@ pub(super) fn analyze_python_surface_impl(
     surface: &AnalysisSurface,
 ) -> SurfaceAnalysis {
     let mut analysis = SurfaceAnalysis::default();
-    let mut parse_failed = false;
 
     for signal in collect_python_signals(&surface.text) {
         match signal {
@@ -121,7 +120,6 @@ pub(super) fn analyze_python_surface_impl(
                 ));
             }
             PythonSignal::ParseFailure { message } => {
-                parse_failed = true;
                 analysis.findings.push(build_finding(
                     surface_index,
                     surface,
@@ -137,24 +135,22 @@ pub(super) fn analyze_python_surface_impl(
         }
     }
 
-    if parse_failed {
-        let obfuscation = super::text_scan::scan_strong_obfuscation_markers(&surface.text);
-        if !obfuscation.is_empty() {
-            analysis.findings.push(build_finding(
-                surface_index,
-                surface,
-                "python_body_assembly",
-                severity_for_trigger(AuditSeverity::Critical, surface.origin.trigger),
-                AuditSinkKind::None,
-                None,
-                "Python body-assembly / obfuscation markers detected",
-                obfuscation
-                    .into_iter()
-                    .map(|value| AuditEvidence::FreeText { value })
-                    .collect::<Vec<_>>(),
-                None,
-            ));
-        }
+    let obfuscation = super::text_scan::scan_strong_obfuscation_markers(&surface.text);
+    if !obfuscation.is_empty() {
+        analysis.findings.push(build_finding(
+            surface_index,
+            surface,
+            "python_body_assembly",
+            severity_for_trigger(AuditSeverity::Critical, surface.origin.trigger),
+            AuditSinkKind::None,
+            None,
+            "Python body-assembly / obfuscation markers detected",
+            obfuscation
+                .into_iter()
+                .map(|value| AuditEvidence::FreeText { value })
+                .collect::<Vec<_>>(),
+            None,
+        ));
     }
 
     analysis
