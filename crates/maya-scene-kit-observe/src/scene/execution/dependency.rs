@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use super::catalog::ObservedExecutionSurfaceCore;
 use crate::scene::{
     DependencyFact, DependencyFactDetail, DependencyFactKind, DependencyRiskClass, SceneToolError,
-    paths::PathKind,
-    source::{ObservationBundle, ObservationData, mb},
+    source::{ObservationBundle, ObservationData},
 };
 
 pub(super) fn collect_dependency_facts(
@@ -52,9 +51,10 @@ pub(super) fn collect_dependency_facts(
                 );
             }
         }
-        ObservationData::Mb { .. } => {
+        ObservationData::Mb { session } => {
             let requires = observation.requires()?;
-            let scene_paths = observation.scene_paths(PathKind::All)?;
+            let scene_paths =
+                maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&session.mb);
             let base_fact_count = requires.len() + scene_paths.len();
             facts.reserve(base_fact_count);
             let mut seen = HashSet::with_capacity(base_fact_count);
@@ -71,7 +71,7 @@ pub(super) fn collect_dependency_facts(
             }
 
             for entry in &scene_paths {
-                let kind = if mb::canonical_scene_path_entry_kind(entry) == PathKind::Reference {
+                let kind = if entry.node_type == "reference" {
                     DependencyFactKind::ReferencePath
                 } else {
                     DependencyFactKind::FilePath

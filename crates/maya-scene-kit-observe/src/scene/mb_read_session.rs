@@ -205,6 +205,13 @@ impl MbReadSession {
     }
 
     #[cfg(test)]
+    pub(crate) fn cached_decoded_artifacts_ptr(&self) -> Option<*const MbDecodedArtifacts> {
+        self.decoded
+            .get()
+            .and_then(|result| result.as_ref().ok().map(Arc::as_ptr))
+    }
+
+    #[cfg(test)]
     pub(crate) fn cached_scene_facts_ptr(&self) -> Option<*const MbSceneFacts> {
         self.scene_facts
             .get()

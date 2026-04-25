@@ -121,7 +121,7 @@ pub fn audit_observation_with_digests(
             return Ok(build_parse_budget_blocked_audit_report(
                 scene_path,
                 scene_format,
-                validation_state,
+                ValidationState::Invalid,
                 plan,
                 options,
                 limit,
@@ -258,7 +258,7 @@ pub fn audit_script_nodes_with_options_and_digests(
 ) -> Result<AuditReport, SceneToolError> {
     let path = path.as_ref();
     let loader = Loader::new(load_options.clone());
-    let observation = match loader.observe_path(path) {
+    let observation = match loader.observe_path_for_execution(path) {
         Ok(observation) => observation,
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
             let scene_format = detect_scene_format(path)?;
