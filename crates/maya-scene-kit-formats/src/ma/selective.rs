@@ -332,6 +332,9 @@ fn collect_selected_node_attr_value(
     node_attr_values: &mut Vec<RawMaNodeAttrValue>,
     selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) {
+    if selected_node_attr_selectors.is_empty() {
+        return;
+    }
     let Some(attr_path) = selective_setattr_attr_path(source, set_attr) else {
         return;
     };
@@ -782,7 +785,7 @@ impl LightItemSink for SelectiveScanSink {
                     }));
             }
             LightItem::Command(command) => {
-                if !is_indented {
+                if !is_indented && !self.selected_node_attr_selectors.is_empty() {
                     if let Some(node_name) = selected_node_name_from_command(source, &command) {
                         self.active_block =
                             Some(ActiveCreateBlock::Selected(ActiveSelectedNodeBlock {
@@ -1081,9 +1084,10 @@ fn selective_item_from_command(
             let attr_path = strip_outer_quotes(&attr_path_text);
             if !matches!(attr_path, ".b" | ".st" | ".stp")
                 && tracked_attr.is_none()
-                && !selected_node_attr_selectors
-                    .iter()
-                    .any(|selector| selector.attr == attr_path)
+                && (selected_node_attr_selectors.is_empty()
+                    || !selected_node_attr_selectors
+                        .iter()
+                        .any(|selector| selector.attr == attr_path))
                 && !matches!(
                     classify_scene_path_attr(attr_path),
                     Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)

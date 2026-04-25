@@ -107,6 +107,18 @@ impl<'a> SourceInput<'a> {
         }
     }
 
+    pub(crate) fn from_analysis_path(path: &'a Path) -> Self {
+        Self {
+            path,
+            scene_format: None,
+            validation_state: None,
+            bytes: None,
+            retain_ma_bytes: true,
+            ma_capture_mode: MaCaptureMode::Execution,
+            mb_integrity_mode: MbIntegrityMode::Eager,
+        }
+    }
+
     pub(crate) fn from_path_without_retained_ma_bytes(path: &'a Path) -> Self {
         Self {
             path,
@@ -132,6 +144,23 @@ impl<'a> SourceInput<'a> {
             bytes: Some(bytes),
             retain_ma_bytes: true,
             ma_capture_mode: MaCaptureMode::Base,
+            mb_integrity_mode: MbIntegrityMode::Eager,
+        }
+    }
+
+    pub(crate) fn from_analysis_bytes(
+        path: &'a Path,
+        scene_format: SceneFormat,
+        validation_state: ValidationState,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            path,
+            scene_format: Some(scene_format),
+            validation_state: Some(validation_state),
+            bytes: Some(bytes),
+            retain_ma_bytes: true,
+            ma_capture_mode: MaCaptureMode::Execution,
             mb_integrity_mode: MbIntegrityMode::Eager,
         }
     }
@@ -316,6 +345,13 @@ impl Loader {
             .map(ExecutionObservationBundle::new)
     }
 
+    pub fn observe_analysis_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ObservationBundle, SceneToolError> {
+        self.observe(SourceInput::from_analysis_path(path.as_ref()))
+    }
+
     pub(crate) fn observe_path_without_retained_ma_bytes(
         &self,
         path: impl AsRef<Path>,
@@ -333,6 +369,21 @@ impl Loader {
         bytes: Vec<u8>,
     ) -> Result<ObservationBundle, SceneToolError> {
         self.observe(SourceInput::from_bytes(
+            path.as_ref(),
+            scene_format,
+            validation_state,
+            bytes,
+        ))
+    }
+
+    pub fn observe_analysis_bytes(
+        &self,
+        path: impl AsRef<Path>,
+        scene_format: SceneFormat,
+        validation_state: ValidationState,
+        bytes: Vec<u8>,
+    ) -> Result<ObservationBundle, SceneToolError> {
+        self.observe(SourceInput::from_analysis_bytes(
             path.as_ref(),
             scene_format,
             validation_state,
@@ -690,6 +741,14 @@ impl ObservationBundle {
     pub(crate) fn cached_ma_bytes_ptr(&self) -> Option<*const Vec<u8>> {
         match &self.data {
             ObservationData::Ma { data } => data.bytes.get().map(std::ptr::from_ref),
+            ObservationData::Mb { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_ma_execution_sections_ptr(&self) -> Option<*const RawMaSelectiveSections> {
+        match &self.data {
+            ObservationData::Ma { data } => data.execution_sections.get().map(std::ptr::from_ref),
             ObservationData::Mb { .. } => None,
         }
     }

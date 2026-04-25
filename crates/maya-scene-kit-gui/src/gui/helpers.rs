@@ -1666,7 +1666,7 @@ pub(super) fn analyze_row_with_options(
     load_options: &LoadOptions,
 ) -> Result<RowJobResult, String> {
     let started_at = Instant::now();
-    match Loader::new(load_options.clone()).observe_path(path) {
+    match Loader::new(load_options.clone()).observe_analysis_path(path) {
         Ok(observation) => {
             analyze_observation(&observation, audit_mode, load_options, started_at.elapsed())
         }
@@ -1707,7 +1707,7 @@ pub(super) fn analyze_row_bytes_with_options(
     load_options: &LoadOptions,
 ) -> Result<AnalyzeRowResult, String> {
     let started_at = Instant::now();
-    match Loader::new(load_options.clone()).observe_bytes(
+    match Loader::new(load_options.clone()).observe_analysis_bytes(
         path,
         scene_format,
         validation_state,
