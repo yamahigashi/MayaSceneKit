@@ -10,13 +10,12 @@ use crate::{
     scene::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
         ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind, ExecutionTrigger,
-        SceneToolError,
-        decode::attr::decode_attr_payload,
-        ir::{DecodedChunkRecord, DecodedEvent, SetAttrValue},
-        recover::{collect_decoded_chunk_records, collect_raw_chunk_records_with_budget},
-        schema::{SchemaRegistry, default_schema_registry},
+        SceneToolError, decode::attr::decode_attr_payload,
+        recover::collect_raw_chunk_records_with_budget,
     },
 };
+
+const MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionSurface {
@@ -322,13 +321,6 @@ fn collect_mb_coverage(
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
     let mut surfaces = collect_mb_native_script_surfaces(mb);
     let raw_chunks = collect_raw_chunk_records_with_budget(mb, budget)?;
-    let decoded_chunks = collect_decoded_chunk_records(
-        &raw_chunks,
-        mb.data.as_ref(),
-        Arc::new(SchemaRegistry::new(
-            default_schema_registry().paths().clone(),
-        )),
-    );
     let canonical_bodies = surfaces
         .iter()
         .filter_map(|surface| {
@@ -337,13 +329,15 @@ fn collect_mb_coverage(
         })
         .collect::<HashSet<_>>();
     let mut seen_raw = HashSet::new();
-    for (raw, decoded) in raw_chunks.into_iter().zip(decoded_chunks.iter()) {
-        if !decoded_chunk_may_contain_execution_text(decoded) {
+    for raw in raw_chunks {
+        let payload = raw.payload(mb.data.as_ref());
+        if !raw_chunk_tag_may_contain_execution_text(raw.chunk_ref.tag.as_str(), payload.len()) {
             continue;
         }
-        let Some(text) =
-            decode_raw_chunk_text(raw.chunk_ref.tag.as_str(), raw.payload(mb.data.as_ref()))
-        else {
+        if !payload_may_contain_audit_marker(payload) {
+            continue;
+        }
+        let Some(text) = decode_raw_chunk_text(raw.chunk_ref.tag.as_str(), payload) else {
             continue;
         };
         if !contains_any_audit_marker(&text) {
@@ -390,35 +384,6 @@ fn collect_mb_coverage(
         surfaces,
         coverage_issues: Vec::new(),
     })
-}
-
-fn decoded_chunk_may_contain_execution_text(decoded: &DecodedChunkRecord) -> bool {
-    decoded
-        .events
-        .iter()
-        .any(decoded_event_may_contain_execution_text)
-        || matches!(
-            decoded.quality,
-            crate::scene::ir::SchemaDecodeAttemptResult::Failed
-        )
-}
-
-fn decoded_event_may_contain_execution_text(event: &DecodedEvent) -> bool {
-    match event {
-        DecodedEvent::ScriptBody { body } => !body.trim().is_empty(),
-        DecodedEvent::SetAttr(op) => {
-            op.attr_name_or_path == ".b"
-                && matches!(&op.value, SetAttrValue::String(body) if !body.trim().is_empty())
-        }
-        DecodedEvent::Unknown(_) => true,
-        DecodedEvent::CreateNode { .. }
-        | DecodedEvent::AddAttr(_)
-        | DecodedEvent::Connect { .. }
-        | DecodedEvent::Relationship { .. }
-        | DecodedEvent::SelectTarget { .. }
-        | DecodedEvent::RefEdit { .. }
-        | DecodedEvent::ReferenceFile { .. } => false,
-    }
 }
 
 fn collect_mb_native_script_surfaces(
@@ -616,7 +581,34 @@ fn decode_raw_chunk_text(tag: &str, payload: &[u8]) -> Option<String> {
             }
         }
     }
+    if payload.len() > MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES {
+        return None;
+    }
     decode_text_like_payload(payload)
+}
+
+fn raw_chunk_tag_may_contain_execution_text(tag: &str, payload_len: usize) -> bool {
+    tag == "STR " || payload_len <= MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES
+}
+
+fn payload_may_contain_audit_marker(payload: &[u8]) -> bool {
+    contains_ascii_case_insensitive(payload, b"python")
+        || contains_ascii_case_insensitive(payload, b"exec")
+        || contains_ascii_case_insensitive(payload, b"chr")
+        || contains_ascii_case_insensitive(payload, b"eval")
+        || contains_ascii_case_insensitive(payload, b"scriptjob")
+        || contains_ascii_case_insensitive(payload, b"commandport")
+        || contains_ascii_case_insensitive(payload, b"loadplugin")
+        || contains_ascii_case_insensitive(payload, b"source")
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn contains_any_audit_marker(text: &str) -> bool {
@@ -733,14 +725,11 @@ mod tests {
     use maya_scene_kit_formats::{ma, mel};
 
     use super::{
-        collect_execution_coverage_from_ma_parts, collect_execution_coverage_from_mb,
-        contains_any_audit_marker, decoded_chunk_may_contain_execution_text,
+        MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES, collect_execution_coverage_from_ma_parts,
+        collect_execution_coverage_from_mb, contains_any_audit_marker, decode_raw_chunk_text,
+        payload_may_contain_audit_marker, raw_chunk_tag_may_contain_execution_text,
     };
-    use crate::scene::{
-        ExecutionSurfaceKind,
-        ir::{ChunkRef, CreateNodeFlags, DecodedChunkRecord, DecodedEvent},
-        model::{SetAttrOp, SetAttrValue},
-    };
+    use crate::scene::ExecutionSurfaceKind;
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -810,42 +799,28 @@ mod tests {
     }
 
     #[test]
-    fn structured_non_script_chunks_do_not_remain_raw_execution_candidates() {
-        let create_node = DecodedChunkRecord {
-            chunk_ref: ChunkRef {
-                form: "SCRP".to_string(),
-                tag: "CREA".to_string(),
-                node_offset: 0x1234,
-                parent_tag: Some("FOR8".to_string()),
-                chunk_aux: Some(0x7702_0000),
-                child_alignment: Some(4),
-                child_header_size: Some(16),
-                payload_size: 16,
-            },
-            events: vec![DecodedEvent::CreateNode {
-                name: Some("python_socket_manual".to_string()),
-                parent: None,
-                uid: None,
-                create_flags: CreateNodeFlags::default(),
-                used_len_prefixed_fields: false,
-            }],
-            quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
-        };
-        assert!(!decoded_chunk_may_contain_execution_text(&create_node));
+    fn raw_payload_prefilter_detects_ascii_audit_markers() {
+        assert!(payload_may_contain_audit_marker(b"\0Python\0"));
+        assert!(payload_may_contain_audit_marker(b"evalDeferred"));
+        assert!(payload_may_contain_audit_marker(b"commandPort"));
+        assert!(!payload_may_contain_audit_marker(b"socket_blinn1SG"));
+        assert!(!payload_may_contain_audit_marker(b"SampleReferenceNode"));
+    }
 
-        let script_body = DecodedChunkRecord {
-            chunk_ref: create_node.chunk_ref.clone(),
-            events: vec![DecodedEvent::SetAttr(SetAttrOp {
-                attr_name_or_path: ".b".to_string(),
-                array_size: None,
-                channel_hint: None,
-                lock: None,
-                keyable: None,
-                value: SetAttrValue::String(r#"python("import socket")"#.to_string()),
-            })],
-            quality: crate::scene::ir::SchemaDecodeAttemptResult::Exact,
-        };
-        assert!(decoded_chunk_may_contain_execution_text(&script_body));
+    #[test]
+    fn generic_raw_text_decode_skips_large_binary_payloads() {
+        let mut payload = vec![0u8; MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES + 1];
+        payload.extend_from_slice(b"source \"tools/startup.mel\"");
+
+        assert!(!raw_chunk_tag_may_contain_execution_text(
+            "DATA",
+            payload.len()
+        ));
+        assert!(raw_chunk_tag_may_contain_execution_text(
+            "STR ",
+            payload.len()
+        ));
+        assert!(decode_raw_chunk_text("DATA", &payload).is_none());
     }
 
     #[test]

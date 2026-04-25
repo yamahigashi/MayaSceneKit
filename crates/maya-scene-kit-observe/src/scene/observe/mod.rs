@@ -615,6 +615,29 @@ mod tests {
     }
 
     #[test]
+    fn execution_observe_path_defers_mb_integrity_decode() {
+        let source = repo_root().join("tests/02/sphere.mb");
+        let observation = Loader::new(LoadOptions::default())
+            .observe_path_for_execution(&source)
+            .expect("observation");
+
+        assert_eq!(observation.validation_state(), ValidationState::Partial);
+        assert!(observation.cached_mb_decoded_artifacts_ptr().is_none());
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
+        assert!(observation.cached_mb_build_ptr().is_none());
+
+        let catalog = observation
+            .observed_execution_catalog(24)
+            .expect("execution catalog");
+
+        assert!(!catalog.surfaces.is_empty());
+        assert!(observation.cached_execution_core_ptr().is_some());
+        assert!(observation.cached_mb_decoded_artifacts_ptr().is_none());
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
+        assert!(observation.cached_mb_build_ptr().is_none());
+    }
+
+    #[test]
     fn mb_scene_paths_do_not_force_full_build() {
         let source = repo_root().join("tests/02/sphere.mb");
         let observation = Loader::new(LoadOptions::default())

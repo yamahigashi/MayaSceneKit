@@ -40,6 +40,12 @@ pub(crate) enum MbParseBudgetMode {
     Exact,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MbIntegrityMode {
+    Eager,
+    DeferredForExecution,
+}
+
 pub(crate) fn materialize_adaptive_mb_parse_budget(
     source_bytes_len: usize,
     configured_max_parse_bytes: usize,
@@ -65,6 +71,7 @@ pub(crate) struct SourceInput<'a> {
     validation_state: Option<ValidationState>,
     bytes: Option<Vec<u8>>,
     retain_ma_bytes: bool,
+    mb_integrity_mode: MbIntegrityMode,
 }
 
 impl<'a> SourceInput<'a> {
@@ -75,6 +82,18 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: true,
+            mb_integrity_mode: MbIntegrityMode::Eager,
+        }
+    }
+
+    pub(crate) fn from_path_for_execution(path: &'a Path) -> Self {
+        Self {
+            path,
+            scene_format: None,
+            validation_state: None,
+            bytes: None,
+            retain_ma_bytes: false,
+            mb_integrity_mode: MbIntegrityMode::DeferredForExecution,
         }
     }
 
@@ -85,6 +104,7 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: false,
+            mb_integrity_mode: MbIntegrityMode::Eager,
         }
     }
 
@@ -100,6 +120,7 @@ impl<'a> SourceInput<'a> {
             validation_state: Some(validation_state),
             bytes: Some(bytes),
             retain_ma_bytes: true,
+            mb_integrity_mode: MbIntegrityMode::Eager,
         }
     }
 }
@@ -255,6 +276,13 @@ impl Loader {
         self.observe(SourceInput::from_path(path.as_ref()))
     }
 
+    pub fn observe_path_for_execution(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ObservationBundle, SceneToolError> {
+        self.observe(SourceInput::from_path_for_execution(path.as_ref()))
+    }
+
     pub(crate) fn observe_path_without_retained_ma_bytes(
         &self,
         path: impl AsRef<Path>,
@@ -382,9 +410,13 @@ impl ObservationBundle {
                     )?,
                     None => MbReadSession::load_raw(path, Arc::clone(schema_context), &budget)?,
                 };
-                let validation_state = input
-                    .validation_state
-                    .unwrap_or(session.integrity()?.validation_state);
+                let validation_state = match input.validation_state {
+                    Some(validation_state) => validation_state,
+                    None => match input.mb_integrity_mode {
+                        MbIntegrityMode::Eager => session.integrity()?.validation_state,
+                        MbIntegrityMode::DeferredForExecution => ValidationState::Partial,
+                    },
+                };
                 Ok(Self {
                     scene_path: path.to_path_buf(),
                     scene_format,
@@ -548,6 +580,16 @@ impl ObservationBundle {
         match &self.data {
             ObservationData::Ma { data } => data.bytes.get().map(std::ptr::from_ref),
             ObservationData::Mb { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_mb_decoded_artifacts_ptr(
+        &self,
+    ) -> Option<*const crate::scene::mb_read_session::MbDecodedArtifacts> {
+        match &self.data {
+            ObservationData::Ma { .. } => None,
+            ObservationData::Mb { session } => session.cached_decoded_artifacts_ptr(),
         }
     }
 
