@@ -184,6 +184,19 @@ fn write_model_editor_callback_scene(path: &std::path::Path, callback_body: &str
     );
 }
 
+fn write_dynamic_model_editor_callback_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"callbackAuditScene\";\n",
+            "    setAttr \".b\" -type \"string\" \"$callback = `optionVar -q sampleCallbackName`; modelEditor -e -editorChanged $callback modelPanel4;\";\n",
+            "    setAttr \".st\" 1;\n",
+        ),
+    );
+}
+
 fn write_assembled_code_like_without_sink_scene(path: &std::path::Path) {
     write_scene(
         path,
@@ -597,25 +610,26 @@ fn audit_mb_fref_fbx_source_metadata_is_not_raw_execution_surface() {
 }
 
 #[test]
-fn audit_inline_print_callback_denies_via_callback_sink() {
+fn audit_inline_print_callback_is_review_without_callback_finding() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("inline_print_callback.ma");
     write_model_editor_callback_scene(&source, r#"print \\\"ok\\\";"#);
 
     let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
 
-    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
-    assert!(
-        report
-            .findings
-            .iter()
-            .any(|finding| finding_code_str(finding) == "mel_callback_flag")
-    );
+    assert_eq!(report.disposition, AuditDisposition::Review);
+    assert!(report.findings.is_empty());
     assert!(
         report
             .review_signals
             .iter()
             .any(|review| review.code.as_str() == "mel_callback_body")
+    );
+    assert!(
+        report
+            .surfaces
+            .iter()
+            .any(|surface| surface.derivation == AuditSurfaceDerivation::MelCallbackLiteral)
     );
 }
 
@@ -640,6 +654,23 @@ fn audit_inline_python_callback_denies_via_derived_sink_finding() {
             .iter()
             .any(|finding| finding.sink == AuditSinkKind::MelPython)
     );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_callback_flag")
+    );
+}
+
+#[test]
+fn audit_dynamic_callback_payload_still_denies_via_callback_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("dynamic_callback.ma");
+    write_dynamic_model_editor_callback_scene(&source);
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
     assert!(
         report
             .findings

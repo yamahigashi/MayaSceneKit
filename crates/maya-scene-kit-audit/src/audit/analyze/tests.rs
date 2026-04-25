@@ -92,12 +92,7 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
 
     let analysis = analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new());
 
-    assert!(
-        analysis
-            .findings
-            .iter()
-            .any(|finding| finding.code.as_str() == "mel_callback_flag")
-    );
+    assert!(analysis.findings.is_empty());
     assert!(
         analysis
             .derived_surfaces
@@ -110,16 +105,16 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
             .iter()
             .any(|review| review.code.as_str() == "mel_callback_body")
     );
-    let callback_finding = analysis
-        .findings
+    let callback_review = analysis
+        .review_signals
         .iter()
-        .find(|finding| finding.code.as_str() == "mel_callback_flag")
-        .expect("callback finding");
+        .find(|review| review.code.as_str() == "mel_callback_body")
+        .expect("callback review");
     assert_eq!(
-        callback_finding.preview_override.as_deref(),
+        callback_review.preview_override.as_deref(),
         Some(r#"print "ok";"#)
     );
-    assert!(callback_finding.evidence.iter().any(|evidence| {
+    assert!(callback_review.evidence.iter().any(|evidence| {
         matches!(
             evidence,
             AuditEvidence::KeyValue {
