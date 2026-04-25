@@ -588,7 +588,13 @@ fn decode_raw_chunk_text(tag: &str, payload: &[u8]) -> Option<String> {
 }
 
 fn raw_chunk_tag_may_contain_execution_text(tag: &str, payload_len: usize) -> bool {
-    tag == "STR " || payload_len <= MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES
+    match tag {
+        "STR " => true,
+        // Reference/path inventory chunks can contain words such as "Source" in
+        // exporter metadata, but they are dependency evidence rather than code.
+        "FRDI" | "FREF" | "RTFT" => false,
+        _ => payload_len <= MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES,
+    }
 }
 
 fn payload_may_contain_audit_marker(payload: &[u8]) -> bool {
@@ -821,6 +827,13 @@ mod tests {
             payload.len()
         ));
         assert!(decode_raw_chunk_text("DATA", &payload).is_none());
+    }
+
+    #[test]
+    fn reference_metadata_chunks_are_not_raw_execution_candidates() {
+        for tag in ["FRDI", "FREF", "RTFT"] {
+            assert!(!raw_chunk_tag_may_contain_execution_text(tag, 128));
+        }
     }
 
     #[test]

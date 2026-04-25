@@ -516,7 +516,7 @@ fn audit_sphere_pair_reviews_for_proc_callback_flags_without_mb_unknown_surface_
 fn audit_mb_frdi_fbx_source_metadata_is_not_raw_execution_surface() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("frdi_fbx_source.mb");
-    let frdi_payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|\0FBX export\0";
+    let frdi_payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|UVER|undef|MADE|undef|CHNG|Mon, Jan 01, 2024 00:00:00 AM|ICON|undef|INFO|undef|OBJN|123|INCL|undef(|LUNI|cm|TUNI|ntscf|AUNI|deg|TDUR|120|\0FBX export\0";
     std::fs::write(
         &source,
         build_mb_root(&[build_mb_form(
@@ -558,7 +558,7 @@ fn audit_mb_frdi_fbx_source_metadata_is_not_raw_execution_surface() {
 fn audit_mb_fref_fbx_source_metadata_is_not_raw_execution_surface() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("fref_fbx_source.mb");
-    let fref_payload = b"assets/example/ExampleAsset.fbx\0Source\0\x01\x01SourceRN\0\0\0\0\0VERS|2020|\0FBX export\0";
+    let fref_payload = b"assets/example/ExampleAsset.fbx\0Source\0\x01\x01SourceRN\0\0\0\0\0VERS|2020|UVER|undef|MADE|undef|CHNG|Mon, Jan 01, 2024 00:00:00 AM|ICON|undef|INFO|undef|OBJN|123|INCL|undef(|LUNI|cm|TUNI|ntscf|AUNI|deg|TDUR|120|\0FBX export\0";
     std::fs::write(
         &source,
         build_mb_root(&[build_mb_form(
