@@ -1295,8 +1295,10 @@ mod tests {
         extract_raw_selective_sections_from_ma_with_budget,
         extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors,
     };
-    use crate::ma::raw_dump::RawMaNodeAttrSelector;
-    use crate::mel::{MelDiagnosticStage, MelParseBudget, MelSourceEncoding};
+    use crate::{
+        ma::raw_dump::RawMaNodeAttrSelector,
+        mel::{MelDiagnosticStage, MelParseBudget, MelSourceEncoding},
+    };
 
     fn non_utf8_repro_source(label: &str) -> String {
         let body = format!(
