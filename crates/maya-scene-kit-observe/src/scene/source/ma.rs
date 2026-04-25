@@ -1,12 +1,18 @@
-use std::fs;
+use std::{fs, sync::Arc};
 
 use maya_scene_kit_formats::{
-    ma::{raw_dump::RawMaDumpSections, scripts::RawMaScriptEntry},
-    mel,
+    ma::{
+        raw_dump::{RawMaDumpSections, RawMaNodeAttrValue},
+        scripts::RawMaScriptEntry,
+        selective,
+    },
+    mel::{self, first_mel_parse_budget_limit},
 };
 
 use crate::scene::{
+    SceneToolError,
     paths::{ScenePathEntry, ScenePathMeta},
+    schema::SchemaContext,
     scripts::ScriptNodeEntry,
     source::MaObservationData,
 };
@@ -22,6 +28,56 @@ impl MaObservationData {
 
     pub(crate) fn script_entries(&self) -> &[RawMaScriptEntry] {
         self.dump_sections().script_entries.as_slice()
+    }
+
+    pub(crate) fn execution_node_attr_values(
+        &self,
+    ) -> Result<&[RawMaNodeAttrValue], SceneToolError> {
+        if self.selective_sections_include_execution_attrs {
+            return Ok(self.selective_sections().node_attr_values.as_slice());
+        }
+        Ok(self.execution_sections()?.node_attr_values.as_slice())
+    }
+
+    pub(crate) fn node_execution_semantics(
+        &self,
+    ) -> Result<
+        std::sync::Arc<crate::scene::schema::node_semantics::NodeExecutionSemantics>,
+        crate::scene::SceneToolError,
+    > {
+        self.schema_context()?.node_execution_semantics()
+    }
+
+    fn schema_context(&self) -> Result<Arc<SchemaContext>, SceneToolError> {
+        if let Some(schema_context) = &self.schema_context {
+            return Ok(Arc::clone(schema_context));
+        }
+        SchemaContext::from_inputs_cached(&self.load_options.schema_inputs())
+    }
+
+    fn execution_sections(
+        &self,
+    ) -> Result<&maya_scene_kit_formats::ma::selective::RawMaSelectiveSections, SceneToolError>
+    {
+        if let Some(sections) = self.execution_sections.get() {
+            return Ok(sections);
+        }
+        let schema_context = self.schema_context()?;
+        let execution_semantics = schema_context.node_execution_semantics()?;
+        let sections =
+            selective::extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+                self.bytes()?,
+                self.load_options.mel_parse_budget(),
+                execution_semantics.ma_capture_attr_selectors(),
+            );
+        if let Some(limit) = first_mel_parse_budget_limit(&sections.audit_top_level.diagnostics) {
+            return Err(SceneToolError::MelParseBudgetExceeded { limit });
+        }
+        let _ = self.execution_sections.set(sections);
+        Ok(self
+            .execution_sections
+            .get()
+            .expect("ma execution sections initialized"))
     }
 
     pub(crate) fn scene_paths(&self) -> &[ScenePathEntry] {

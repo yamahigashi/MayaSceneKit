@@ -158,6 +158,10 @@ impl MbReadSession {
         &self.budget
     }
 
+    pub(crate) fn schema_context(&self) -> &SchemaContext {
+        self.schema_context.as_ref()
+    }
+
     pub(crate) fn scene_nodes(&self) -> Result<&[RecoveredNode], SceneToolError> {
         Ok(self.scene_facts()?.nodes.as_slice())
     }
@@ -202,13 +206,6 @@ impl MbReadSession {
         }));
         let _ = self.scene_facts.set(scene_facts);
         map_cached_parse_result(self.scene_facts.get().expect("mb scene facts initialized"))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_decoded_artifacts_ptr(&self) -> Option<*const MbDecodedArtifacts> {
-        self.decoded
-            .get()
-            .and_then(|result| result.as_ref().ok().map(Arc::as_ptr))
     }
 
     #[cfg(test)]

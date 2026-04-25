@@ -84,7 +84,7 @@ pub use self::{
         find_scene_workspace_root, resolve_scene_path_value, resolve_scene_path_values_batch,
     },
     source::{
-        LoadOptions, Loader, ObservationBundle, check_script_nodes,
+        ExecutionObservationBundle, LoadOptions, Loader, ObservationBundle, check_script_nodes,
         check_script_nodes_with_options, collect_scene_dump, collect_scene_dump_with_options,
         collect_scene_paths, collect_scene_paths_with_options, collect_script_node_entries,
         collect_script_node_entries_with_options, detect_scene_format,

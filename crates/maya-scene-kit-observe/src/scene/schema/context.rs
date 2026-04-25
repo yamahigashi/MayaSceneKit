@@ -70,6 +70,13 @@ impl SchemaContext {
     pub(crate) fn typeid_resolver(&self) -> &TypeIdTypeNameResolver {
         &self.typeid_resolver
     }
+
+    pub(crate) fn node_execution_semantics(
+        &self,
+    ) -> Result<Arc<super::node_semantics::NodeExecutionSemantics>, SceneToolError> {
+        super::node_semantics::node_execution_semantics_with_registry(self.registry.as_ref())
+            .map_err(SceneToolError::Config)
+    }
 }
 
 fn cached_schema_context(

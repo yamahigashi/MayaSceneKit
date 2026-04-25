@@ -46,6 +46,13 @@ pub(crate) enum MbIntegrityMode {
     DeferredForExecution,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MaCaptureMode {
+    #[default]
+    Base,
+    Execution,
+}
+
 pub(crate) fn materialize_adaptive_mb_parse_budget(
     source_bytes_len: usize,
     configured_max_parse_bytes: usize,
@@ -71,6 +78,7 @@ pub(crate) struct SourceInput<'a> {
     validation_state: Option<ValidationState>,
     bytes: Option<Vec<u8>>,
     retain_ma_bytes: bool,
+    ma_capture_mode: MaCaptureMode,
     mb_integrity_mode: MbIntegrityMode,
 }
 
@@ -82,17 +90,19 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: true,
+            ma_capture_mode: MaCaptureMode::Base,
             mb_integrity_mode: MbIntegrityMode::Eager,
         }
     }
 
-    pub(crate) fn from_path_for_execution(path: &'a Path) -> Self {
+    pub(crate) fn from_execution_path(path: &'a Path) -> Self {
         Self {
             path,
             scene_format: None,
             validation_state: None,
             bytes: None,
             retain_ma_bytes: false,
+            ma_capture_mode: MaCaptureMode::Execution,
             mb_integrity_mode: MbIntegrityMode::DeferredForExecution,
         }
     }
@@ -104,6 +114,7 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: false,
+            ma_capture_mode: MaCaptureMode::Base,
             mb_integrity_mode: MbIntegrityMode::Eager,
         }
     }
@@ -120,7 +131,25 @@ impl<'a> SourceInput<'a> {
             validation_state: Some(validation_state),
             bytes: Some(bytes),
             retain_ma_bytes: true,
+            ma_capture_mode: MaCaptureMode::Base,
             mb_integrity_mode: MbIntegrityMode::Eager,
+        }
+    }
+
+    pub(crate) fn from_execution_bytes(
+        path: &'a Path,
+        scene_format: SceneFormat,
+        validation_state: ValidationState,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            path,
+            scene_format: Some(scene_format),
+            validation_state: Some(validation_state),
+            bytes: Some(bytes),
+            retain_ma_bytes: true,
+            ma_capture_mode: MaCaptureMode::Execution,
+            mb_integrity_mode: MbIntegrityMode::DeferredForExecution,
         }
     }
 }
@@ -228,7 +257,6 @@ impl LoadOptions {
         self.mb_parse_budget_mode
     }
 
-    #[cfg(test)]
     pub(crate) fn mel_parse_budget(&self) -> &MelParseBudget {
         &self.mel_parse_budget
     }
@@ -253,8 +281,12 @@ impl Loader {
             None => ops::detect_scene_format(input.path)?,
         };
         let schema_context = match scene_format {
+            SceneFormat::Ma if input.ma_capture_mode == MaCaptureMode::Execution => {
+                Some(self.schema_context()?)
+            }
+            SceneFormat::Ma => None,
             SceneFormat::Mb => Some(self.schema_context()?),
-            SceneFormat::Ma | SceneFormat::Unknown => None,
+            SceneFormat::Unknown => None,
         };
         ObservationBundle::load(input, scene_format, &self.options, schema_context)
     }
@@ -276,11 +308,12 @@ impl Loader {
         self.observe(SourceInput::from_path(path.as_ref()))
     }
 
-    pub fn observe_path_for_execution(
+    pub fn observe_execution_path(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<ObservationBundle, SceneToolError> {
-        self.observe(SourceInput::from_path_for_execution(path.as_ref()))
+    ) -> Result<ExecutionObservationBundle, SceneToolError> {
+        self.observe(SourceInput::from_execution_path(path.as_ref()))
+            .map(ExecutionObservationBundle::new)
     }
 
     pub(crate) fn observe_path_without_retained_ma_bytes(
@@ -306,6 +339,64 @@ impl Loader {
             bytes,
         ))
     }
+
+    pub fn observe_execution_bytes(
+        &self,
+        path: impl AsRef<Path>,
+        scene_format: SceneFormat,
+        validation_state: ValidationState,
+        bytes: Vec<u8>,
+    ) -> Result<ExecutionObservationBundle, SceneToolError> {
+        self.observe(SourceInput::from_execution_bytes(
+            path.as_ref(),
+            scene_format,
+            validation_state,
+            bytes,
+        ))
+        .map(ExecutionObservationBundle::new)
+    }
+}
+
+pub struct ExecutionObservationBundle {
+    observation: ObservationBundle,
+}
+
+impl ExecutionObservationBundle {
+    fn new(observation: ObservationBundle) -> Self {
+        Self { observation }
+    }
+
+    pub fn scene_path(&self) -> &Path {
+        self.observation.scene_path()
+    }
+
+    pub fn scene_format(&self) -> SceneFormat {
+        self.observation.scene_format()
+    }
+
+    pub fn validation_state(&self) -> ValidationState {
+        self.observation.validation_state()
+    }
+
+    pub fn scene_digests(&self, max_preview: usize) -> Result<SceneDigestSet, SceneToolError> {
+        self.observation.scene_digests(max_preview)
+    }
+
+    pub fn observed_execution_catalog(
+        &self,
+        max_preview: usize,
+    ) -> Result<ObservedExecutionCatalog, SceneToolError> {
+        self.observation.observed_execution_catalog(max_preview)
+    }
+
+    pub fn observed_execution_catalog_with_digests(
+        &self,
+        max_preview: usize,
+        include_digests: bool,
+    ) -> Result<ObservedExecutionCatalog, SceneToolError> {
+        self.observation
+            .observed_execution_catalog_with_digests(max_preview, include_digests)
+    }
 }
 
 pub struct ObservationBundle {
@@ -320,8 +411,12 @@ pub struct ObservationBundle {
 
 pub(crate) struct MaObservationData {
     pub(crate) source_path: PathBuf,
+    pub(crate) load_options: LoadOptions,
+    pub(crate) schema_context: Option<Arc<SchemaContext>>,
+    pub(crate) selective_sections_include_execution_attrs: bool,
     pub(crate) bytes: OnceLock<Vec<u8>>,
     pub(crate) selective_sections: OnceLock<RawMaSelectiveSections>,
+    pub(crate) execution_sections: OnceLock<RawMaSelectiveSections>,
     pub(crate) scene_paths: OnceLock<Vec<ScenePathEntry>>,
 }
 
@@ -344,10 +439,21 @@ impl ObservationBundle {
                     Some(bytes) => bytes,
                     None => fs::read(path)?,
                 };
-                let sections = selective::extract_raw_selective_sections_from_ma_with_budget(
-                    &bytes,
-                    &options.mel_parse_budget,
-                );
+                let sections = if input.ma_capture_mode == MaCaptureMode::Execution {
+                    let execution_semantics = schema_context
+                        .expect("ma execution observation requires schema context")
+                        .node_execution_semantics()?;
+                    selective::extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+                        &bytes,
+                        &options.mel_parse_budget,
+                        execution_semantics.ma_capture_attr_selectors(),
+                    )
+                } else {
+                    selective::extract_raw_selective_sections_from_ma_with_budget(
+                        &bytes,
+                        &options.mel_parse_budget,
+                    )
+                };
                 if let Some(limit) =
                     first_mel_parse_budget_limit(&sections.audit_top_level.diagnostics)
                 {
@@ -368,8 +474,13 @@ impl ObservationBundle {
                 };
                 let data = Box::new(MaObservationData {
                     source_path: path.to_path_buf(),
+                    load_options: options.clone(),
+                    schema_context: schema_context.map(Arc::clone),
+                    selective_sections_include_execution_attrs: input.ma_capture_mode
+                        == MaCaptureMode::Execution,
                     bytes: retained_bytes,
                     selective_sections,
+                    execution_sections: OnceLock::new(),
                     scene_paths: OnceLock::new(),
                 });
                 let validation_state = input.validation_state.unwrap_or_else(|| {
@@ -580,16 +691,6 @@ impl ObservationBundle {
         match &self.data {
             ObservationData::Ma { data } => data.bytes.get().map(std::ptr::from_ref),
             ObservationData::Mb { .. } => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cached_mb_decoded_artifacts_ptr(
-        &self,
-    ) -> Option<*const crate::scene::mb_read_session::MbDecodedArtifacts> {
-        match &self.data {
-            ObservationData::Ma { .. } => None,
-            ObservationData::Mb { session } => session.cached_decoded_artifacts_ptr(),
         }
     }
 

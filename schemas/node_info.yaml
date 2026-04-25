@@ -205964,6 +205964,12 @@ nodes:
         aliases: ["worldMatrix"]
   "renderGlobals":
     typeid: 0x52474C42
+    execution:
+      profiles:
+        - kind: attr_callbacks
+          default_language: mel
+          default_trigger: render
+          attrs: ["pfrm", "prm", "prlm", "pram", "pfom", "pom", "polm", "poam"]
     attrs:
       "afp":
         unit: none
@@ -220802,6 +220808,14 @@ nodes:
         aliases: ["maxTransZLimit"]
   "script":
     typeid: 0x53435250
+    execution:
+      profiles:
+        - kind: script_node
+          body_attrs: ["a", "b"]
+          trigger_attr: "st"
+          trigger_decoder: maya_script_node_script_type
+          language_attr: "stp"
+          language_decoder: maya_script_node_source_type
     attrs:
       "a":
         unit: none

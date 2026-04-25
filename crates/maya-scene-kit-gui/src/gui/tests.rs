@@ -4475,6 +4475,69 @@ fn analyze_row_with_options_keeps_paths_and_audit_after_cp932_prefix_line() {
     );
 }
 
+#[test]
+fn analyze_row_with_options_reports_ma_render_globals_callbacks() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("render-callbacks.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "select -ne :defaultRenderGlobals;\n",
+            "    setAttr \".poam\" -type \"string\" \"eval(\\\"ExampleCallback;\\\")\";\n",
+            "    setAttr \".prlm\" -type \"string\" \"python(\\\"print(\\\\\\\"Example\\\\\\\")\\\")\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let RowJobResult::Analyze(result) = analyze_row_with_options(
+        &scene,
+        AuditModePreference::StrictDefault,
+        &LoadOptions::default(),
+    )
+    .expect("analyze") else {
+        panic!("expected analyze result");
+    };
+
+    assert!(result.audit_report.surfaces.iter().any(|surface| {
+        surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+            && surface.origin.node_name.as_deref() == Some("defaultRenderGlobals")
+            && surface.origin.attr_name.as_deref() == Some(".poam")
+    }));
+    assert!(!result.audit_report.findings.is_empty());
+}
+
+#[test]
+fn analyze_row_bytes_with_options_reports_ma_render_globals_callbacks() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("staged-render-callbacks.ma");
+    let bytes = concat!(
+        "//Maya ASCII 2026 scene\n",
+        "select -ne :defaultRenderGlobals;\n",
+        "    setAttr \".poam\" -type \"string\" \"eval(\\\"ExampleCallback;\\\")\";\n",
+    )
+    .as_bytes()
+    .to_vec();
+    fs::write(&scene, &bytes).expect("write source placeholder");
+
+    let result = analyze_row_bytes_with_options(
+        &scene,
+        SceneFormat::Ma,
+        ValidationState::Validated,
+        bytes,
+        AuditModePreference::StrictDefault,
+        &LoadOptions::default(),
+    )
+    .expect("analyze bytes");
+
+    assert!(result.audit_report.surfaces.iter().any(|surface| {
+        surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+            && surface.origin.node_name.as_deref() == Some("defaultRenderGlobals")
+            && surface.origin.attr_name.as_deref() == Some(".poam")
+    }));
+    assert!(!result.audit_report.findings.is_empty());
+}
+
 #[gpui::test]
 fn selected_audit_notice_lines_include_budget_notice(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);

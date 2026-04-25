@@ -6,20 +6,25 @@ use std::{
 use once_cell::sync::Lazy;
 
 use super::{
-    ChunkSchema, addattr_tokens::AddAttrTokenRule, locator::SchemaPaths,
-    node_semantics::AngularAttrKind, refedit_loader::RefEditSchema,
+    ChunkSchema,
+    addattr_tokens::AddAttrTokenRule,
+    locator::SchemaPaths,
+    node_semantics::{AngularAttrKind, NodeExecutionSemantics},
+    refedit_loader::RefEditSchema,
     structural_attr::StructuralAttrHandlerRule,
 };
 
 type ChunkSchemaCache = Mutex<HashMap<(String, String), Option<Arc<ChunkSchema>>>>;
 type NodeSemanticsMap = Arc<HashMap<String, HashMap<String, AngularAttrKind>>>;
 type NodeSemanticsCache = Mutex<Option<NodeSemanticsMap>>;
+type NodeExecutionSemanticsCache = Mutex<Option<Arc<NodeExecutionSemantics>>>;
 
 #[derive(Debug, Default)]
 pub(crate) struct SchemaRegistryCaches {
     pub(in crate::scene) chunk_schemas: ChunkSchemaCache,
     pub(in crate::scene) addattr_tokens: Mutex<Option<Arc<HashMap<String, AddAttrTokenRule>>>>,
     pub(in crate::scene) node_semantics: NodeSemanticsCache,
+    pub(in crate::scene) node_execution_semantics: NodeExecutionSemanticsCache,
     pub(in crate::scene) structural_attrs: Mutex<Option<Arc<Vec<StructuralAttrHandlerRule>>>>,
     pub(in crate::scene) refedit_schema: Mutex<Option<Option<Arc<RefEditSchema>>>>,
 }

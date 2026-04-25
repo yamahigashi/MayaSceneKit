@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use maya_scene_kit_formats::{
-    ma::scripts::RawMaScriptEntry,
+    ma::{raw_dump::RawMaNodeAttrValue, scripts::RawMaScriptEntry},
     mel::{self, MelAuditTopLevelItemFact},
 };
 
@@ -10,8 +10,12 @@ use crate::{
     scene::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
         ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind, ExecutionTrigger,
-        SceneToolError, decode::attr::decode_attr_payload,
+        SceneToolError,
+        decode::attr::decode_attr_payload,
         recover::collect_raw_chunk_records_with_budget,
+        schema::node_semantics::{
+            ExecutionDecoder, NodeExecutionProfileKind, NodeExecutionSemantics,
+        },
     },
 };
 
@@ -68,30 +72,52 @@ pub(crate) struct ExecutionCoverageCollection {
 
 pub(crate) fn collect_execution_coverage_from_ma_parts(
     script_nodes: &[RawMaScriptEntry],
+    node_attr_values: &[RawMaNodeAttrValue],
     top_level: &mel::MelAuditTopLevelFacts,
+    execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    collect_ma_coverage(script_nodes, top_level)
+    collect_ma_coverage(
+        script_nodes,
+        node_attr_values,
+        top_level,
+        execution_semantics,
+    )
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn collect_execution_coverage_from_mb(
     mb: &crate::mb::MayaBinaryFile,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    collect_execution_coverage_from_mb_with_budget(mb, &MbParseBudget::default())
+    let semantics = crate::scene::schema::node_semantics::node_execution_semantics_with_registry(
+        crate::scene::schema::default_schema_registry(),
+    )
+    .map_err(SceneToolError::Config)?;
+    collect_execution_coverage_from_mb_with_budget(
+        mb,
+        &MbParseBudget::default(),
+        semantics.as_ref(),
+    )
 }
 
 pub(crate) fn collect_execution_coverage_from_mb_with_budget(
     mb: &crate::mb::MayaBinaryFile,
     budget: &MbParseBudget,
+    execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    collect_mb_coverage(mb, budget)
+    collect_mb_coverage(mb, budget, execution_semantics)
 }
 
 fn collect_ma_coverage(
     script_nodes: &[RawMaScriptEntry],
+    node_attr_values: &[RawMaNodeAttrValue],
     top_level: &mel::MelAuditTopLevelFacts,
+    execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
     let mut surfaces = collect_ma_script_node_surfaces(script_nodes);
+    surfaces.extend(collect_ma_profile_node_attr_surfaces(
+        node_attr_values,
+        execution_semantics,
+    ));
     let coverage_issues = top_level
         .diagnostics
         .iter()
@@ -277,6 +303,143 @@ fn collect_ma_script_node_surfaces(
     surfaces
 }
 
+fn collect_ma_profile_node_attr_surfaces(
+    node_attr_values: &[RawMaNodeAttrValue],
+    execution_semantics: &NodeExecutionSemantics,
+) -> Vec<ExecutionSurfaceRecord> {
+    let mut surfaces = Vec::new();
+    for value in node_attr_values {
+        let node_type = ma_node_attr_effective_node_type(value);
+        if node_type.is_empty() {
+            continue;
+        }
+        let attr_name = value.attr.trim_start_matches('.');
+        for profile in execution_semantics.profiles_for_node(node_type) {
+            match &profile.kind {
+                NodeExecutionProfileKind::ScriptNode(profile)
+                    if profile.body_attrs.iter().any(|attr| attr == attr_name) =>
+                {
+                    if value.node_type == "script" && attr_name == "b" {
+                        continue;
+                    }
+                    let Some(body) = value.string_value.as_ref() else {
+                        continue;
+                    };
+                    if body.is_empty() {
+                        continue;
+                    }
+                    let script_type = profile.trigger_attr.as_ref().and_then(|trigger_attr| {
+                        ma_node_u32_attr(
+                            node_attr_values,
+                            node_type,
+                            &value.node_name,
+                            trigger_attr,
+                        )
+                    });
+                    let source_type = profile.language_attr.as_ref().and_then(|language_attr| {
+                        ma_node_u32_attr(
+                            node_attr_values,
+                            node_type,
+                            &value.node_name,
+                            language_attr,
+                        )
+                    });
+                    let trigger = match profile.trigger_decoder {
+                        Some(ExecutionDecoder::MayaScriptNodeScriptType) => script_type
+                            .map(script_type_to_trigger)
+                            .unwrap_or(ExecutionTrigger::Manual),
+                        _ => ExecutionTrigger::Manual,
+                    };
+                    let lang = match profile.language_decoder {
+                        Some(ExecutionDecoder::MayaScriptNodeSourceType) => source_type
+                            .map(script_source_type_to_language)
+                            .unwrap_or(ExecutionLanguage::Mel),
+                        _ => ExecutionLanguage::Mel,
+                    };
+                    surfaces.push(ExecutionSurfaceRecord {
+                        text: Arc::<str>::from(body.as_str()),
+                        origin: ExecutionOrigin {
+                            lang,
+                            trigger,
+                            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+                            node_name: Some(value.node_name.clone()),
+                            attr_name: Some(value.attr.clone()),
+                            source_range: None,
+                            source_kind: script_node_source_kind(script_type, source_type)
+                                .or_else(|| Some(attr_name.to_string())),
+                            chunk_form: None,
+                            chunk_tag: None,
+                            chunk_node_offset: None,
+                            ..ExecutionOrigin::without_chunk_address()
+                        },
+                    });
+                }
+                NodeExecutionProfileKind::AttrCallbacks(profile)
+                    if profile
+                        .attrs
+                        .iter()
+                        .any(|attr| attr.short_name == attr_name) =>
+                {
+                    let Some(body) = value.string_value.as_ref() else {
+                        continue;
+                    };
+                    if body.is_empty() {
+                        continue;
+                    }
+                    surfaces.push(ExecutionSurfaceRecord {
+                        text: Arc::<str>::from(body.as_str()),
+                        origin: ExecutionOrigin {
+                            lang: profile.default_language,
+                            trigger: profile.default_trigger,
+                            surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+                            node_name: Some(value.node_name.clone()),
+                            attr_name: Some(value.attr.clone()),
+                            source_range: None,
+                            source_kind: execution_semantics
+                                .source_label(node_type, attr_name)
+                                .map(str::to_string)
+                                .or_else(|| Some(attr_name.to_string())),
+                            chunk_form: None,
+                            chunk_tag: None,
+                            chunk_node_offset: None,
+                            ..ExecutionOrigin::without_chunk_address()
+                        },
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    surfaces
+}
+
+fn ma_node_attr_effective_node_type(value: &RawMaNodeAttrValue) -> &str {
+    if !value.node_type.is_empty() {
+        return value.node_type.as_str();
+    }
+    match value.node_name.as_str() {
+        "defaultRenderGlobals" => "renderGlobals",
+        _ => "",
+    }
+}
+
+fn ma_node_u32_attr(
+    node_attr_values: &[RawMaNodeAttrValue],
+    node_type: &str,
+    node_name: &str,
+    attr_name: &str,
+) -> Option<u32> {
+    let attr_path = format!(".{attr_name}");
+    node_attr_values
+        .iter()
+        .find(|value| {
+            ma_node_attr_effective_node_type(value) == node_type
+                && value.node_name == node_name
+                && value.attr == attr_path
+        })
+        .and_then(|value| value.u32_value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaTopLevelAuditClass {
     ExecutionSurface,
@@ -318,8 +481,9 @@ fn classify_top_level_other(source_text: &str) -> Option<&'static str> {
 fn collect_mb_coverage(
     mb: &crate::mb::MayaBinaryFile,
     budget: &MbParseBudget,
+    execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    let mut surfaces = collect_mb_native_script_surfaces(mb);
+    let mut surfaces = collect_mb_native_script_surfaces(mb, execution_semantics);
     let raw_chunks = collect_raw_chunk_records_with_budget(mb, budget)?;
     let canonical_bodies = surfaces
         .iter()
@@ -388,14 +552,15 @@ fn collect_mb_coverage(
 
 fn collect_mb_native_script_surfaces(
     mb: &crate::mb::MayaBinaryFile,
+    execution_semantics: &NodeExecutionSemantics,
 ) -> Vec<ExecutionSurfaceRecord> {
     let mut surfaces = Vec::new();
     let mut seen = HashSet::new();
 
     for child in &mb.root.children {
-        if child.form_type.as_deref() != Some("SCRP") {
+        let Some(form_type) = child.form_type.as_deref() else {
             continue;
-        }
+        };
         let (child_alignment, child_header_size) = resolve_section_layout_hints(
             &child.tag,
             child.form_type.as_deref(),
@@ -403,25 +568,56 @@ fn collect_mb_native_script_surfaces(
             child.child_header_size,
         );
         let payload = &mb.data[child.payload_offset..child.payload_end];
-        if payload.len() < 4 || &payload[..4] != b"SCRP" {
+        if payload.len() < 4 || &payload[..4] != form_type.as_bytes() {
             continue;
         }
 
         let parsed =
             parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
-        let mut node_name = format!("<SCRP@0x{:X}>", child.offset);
+        let selected_node_name = if form_type == "SLCT" {
+            parsed.chunks.iter().find_map(|chunk| {
+                if chunk.tag != "SLCT" {
+                    return None;
+                }
+                let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
+                let trimmed = text.trim_matches(char::from(0)).trim();
+                (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
+            })
+        } else {
+            None
+        };
+        let Some(node_type) = form_typeid(form_type)
+            .and_then(|typeid| execution_semantics.node_type_for_typeid(typeid))
+            .or_else(|| {
+                selected_node_name
+                    .as_deref()
+                    .and_then(mb_default_selected_node_type)
+            })
+        else {
+            continue;
+        };
+        let profiles = execution_semantics.profiles_for_node(node_type);
+        if profiles.is_empty() {
+            continue;
+        }
+        let mut node_name = format!("<{}@0x{:X}>", form_type, child.offset);
+        if let Some(selected_node_name) = &selected_node_name {
+            node_name = selected_node_name.clone();
+        }
         let mut script_type = None;
         let mut source_type = None;
-        let mut bodies = Vec::new();
+        let mut attr_values = Vec::<(String, Vec<u8>)>::new();
 
         for chunk in parsed.chunks {
             if chunk.tag == "CREA" {
-                if let Some(name) = crate::mb::paths::extract_mb_script_node_name_with_layout(
-                    payload,
-                    child_alignment,
-                    child_header_size,
-                ) {
-                    node_name = name;
+                if form_type == "SCRP" {
+                    if let Some(name) = crate::mb::paths::extract_mb_script_node_name_with_layout(
+                        payload,
+                        child_alignment,
+                        child_header_size,
+                    ) {
+                        node_name = name;
+                    }
                 }
                 continue;
             }
@@ -430,69 +626,137 @@ fn collect_mb_native_script_surfaces(
             else {
                 continue;
             };
-            match attr_name.as_str() {
-                "b" => {
-                    let body = crate::mb::decode_best_effort_script_text(&value);
-                    if !body.is_empty() && !bodies.iter().any(|existing| existing == &body) {
-                        bodies.push(body);
-                    }
-                }
-                "st" => {
-                    script_type = raw_u32_prefix(&value);
-                }
-                "stp" => {
-                    source_type = raw_u32_prefix(&value);
-                }
-                _ => {}
-            }
+            attr_values.push((attr_name, value));
         }
 
-        let trigger = script_type
-            .map(script_type_to_trigger)
-            .unwrap_or(ExecutionTrigger::Manual);
-        let lang = source_type
-            .map(script_source_type_to_language)
-            .unwrap_or(ExecutionLanguage::Mel);
-        let source_kind = match (script_type, source_type) {
-            (Some(script_type), Some(source_type)) => {
-                Some(format!("scriptType={script_type},sourceType={source_type}"))
+        for profile in profiles {
+            if let NodeExecutionProfileKind::ScriptNode(profile) = &profile.kind {
+                if let Some(trigger_attr) = &profile.trigger_attr {
+                    script_type = attr_values
+                        .iter()
+                        .find(|(attr, _)| attr == trigger_attr)
+                        .and_then(|(_, value)| raw_u32_prefix(value));
+                }
+                if let Some(language_attr) = &profile.language_attr {
+                    source_type = attr_values
+                        .iter()
+                        .find(|(attr, _)| attr == language_attr)
+                        .and_then(|(_, value)| raw_u32_prefix(value));
+                }
+                let trigger = match profile.trigger_decoder {
+                    Some(ExecutionDecoder::MayaScriptNodeScriptType) => script_type
+                        .map(script_type_to_trigger)
+                        .unwrap_or(ExecutionTrigger::Manual),
+                    _ => ExecutionTrigger::Manual,
+                };
+                let lang = match profile.language_decoder {
+                    Some(ExecutionDecoder::MayaScriptNodeSourceType) => source_type
+                        .map(script_source_type_to_language)
+                        .unwrap_or(ExecutionLanguage::Mel),
+                    _ => ExecutionLanguage::Mel,
+                };
+                let source_kind = script_node_source_kind(script_type, source_type);
+                for body_attr in &profile.body_attrs {
+                    for (_, value) in attr_values.iter().filter(|(attr, _)| attr == body_attr) {
+                        let body = crate::mb::decode_best_effort_script_text(value);
+                        if body.is_empty() {
+                            continue;
+                        }
+                        let key = (
+                            node_name.clone(),
+                            format!("{body_attr}:{body}"),
+                            lang.as_str(),
+                            trigger.as_str(),
+                            child.offset,
+                        );
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        surfaces.push(ExecutionSurfaceRecord {
+                            text: Arc::<str>::from(body),
+                            origin: ExecutionOrigin {
+                                lang,
+                                trigger,
+                                surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+                                node_name: Some(node_name.clone()),
+                                attr_name: Some(format!(".{body_attr}")),
+                                source_range: None,
+                                source_kind: source_kind.clone(),
+                                chunk_form: Some(form_type.to_string()),
+                                chunk_tag: Some("STR ".to_string()),
+                                chunk_node_offset: Some(child.offset),
+                                ..ExecutionOrigin::without_chunk_address()
+                            },
+                        });
+                    }
+                }
             }
-            (Some(script_type), None) => Some(format!("scriptType={script_type}")),
-            (None, Some(source_type)) => Some(format!("sourceType={source_type}")),
-            (None, None) => None,
-        };
-
-        for body in bodies {
-            let key = (
-                node_name.clone(),
-                body.clone(),
-                lang.as_str(),
-                trigger.as_str(),
-                child.offset,
-            );
-            if !seen.insert(key) {
-                continue;
+            if let NodeExecutionProfileKind::AttrCallbacks(profile) = &profile.kind {
+                for callback_attr in &profile.attrs {
+                    for (_, value) in attr_values
+                        .iter()
+                        .filter(|(attr, _)| attr == &callback_attr.short_name)
+                    {
+                        let body = crate::mb::decode_best_effort_script_text(value);
+                        if body.is_empty() {
+                            continue;
+                        }
+                        let key = (
+                            node_name.clone(),
+                            format!("{}:{body}", callback_attr.short_name),
+                            profile.default_language.as_str(),
+                            profile.default_trigger.as_str(),
+                            child.offset,
+                        );
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        surfaces.push(ExecutionSurfaceRecord {
+                            text: Arc::<str>::from(body),
+                            origin: ExecutionOrigin {
+                                lang: profile.default_language,
+                                trigger: profile.default_trigger,
+                                surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+                                node_name: Some(node_name.clone()),
+                                attr_name: Some(format!(".{}", callback_attr.short_name)),
+                                source_range: None,
+                                source_kind: Some(callback_attr.display_name.clone()),
+                                chunk_form: Some(form_type.to_string()),
+                                chunk_tag: Some("STR ".to_string()),
+                                chunk_node_offset: Some(child.offset),
+                                ..ExecutionOrigin::without_chunk_address()
+                            },
+                        });
+                    }
+                }
             }
-            surfaces.push(ExecutionSurfaceRecord {
-                text: Arc::<str>::from(body),
-                origin: ExecutionOrigin {
-                    lang,
-                    trigger,
-                    surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
-                    node_name: Some(node_name.clone()),
-                    attr_name: Some(".b".to_string()),
-                    source_range: None,
-                    source_kind: source_kind.clone(),
-                    chunk_form: Some("SCRP".to_string()),
-                    chunk_tag: Some("STR ".to_string()),
-                    chunk_node_offset: Some(child.offset),
-                    ..ExecutionOrigin::without_chunk_address()
-                },
-            });
         }
     }
 
     surfaces
+}
+
+fn form_typeid(form_type: &str) -> Option<u32> {
+    let bytes: [u8; 4] = form_type.as_bytes().try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
+}
+
+fn mb_default_selected_node_type(node_name: &str) -> Option<&'static str> {
+    match node_name {
+        "defaultRenderGlobals" => Some("renderGlobals"),
+        _ => None,
+    }
+}
+
+fn script_node_source_kind(script_type: Option<u32>, source_type: Option<u32>) -> Option<String> {
+    match (script_type, source_type) {
+        (Some(script_type), Some(source_type)) => {
+            Some(format!("scriptType={script_type},sourceType={source_type}"))
+        }
+        (Some(script_type), None) => Some(format!("scriptType={script_type}")),
+        (None, Some(source_type)) => Some(format!("sourceType={source_type}")),
+        (None, None) => None,
+    }
 }
 
 fn push_command_surface(
@@ -571,16 +835,7 @@ fn decode_text_like_payload(payload: &[u8]) -> Option<String> {
 
 fn decode_raw_chunk_text(tag: &str, payload: &[u8]) -> Option<String> {
     if tag == "STR " {
-        if let Some((attr_name, _kind, value)) = decode_attr_payload(payload) {
-            if attr_name == "b" {
-                let body = crate::mb::decode_best_effort_script_text(&value);
-                let trimmed = body.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-            return None;
-        }
+        return None;
     }
     if payload.len() > MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES {
         return None;
@@ -736,7 +991,10 @@ mod tests {
         collect_execution_coverage_from_mb, contains_any_audit_marker, decode_raw_chunk_text,
         payload_may_contain_audit_marker, raw_chunk_tag_may_contain_execution_text,
     };
-    use crate::scene::ExecutionSurfaceKind;
+    use crate::scene::{
+        ExecutionSurfaceKind,
+        schema::{default_schema_registry, node_semantics::node_execution_semantics_with_registry},
+    };
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -752,8 +1010,11 @@ mod tests {
 
         let script_entries = ma::scripts::extract_raw_script_entries_from_ma(input.as_bytes());
         let top_level = mel::collect_top_level_audit_candidates_from_bytes(input.as_bytes());
-        let coverage = collect_execution_coverage_from_ma_parts(&script_entries, &top_level)
-            .expect("coverage");
+        let semantics = node_execution_semantics_with_registry(default_schema_registry())
+            .expect("execution semantics");
+        let coverage =
+            collect_execution_coverage_from_ma_parts(&script_entries, &[], &top_level, &semantics)
+                .expect("coverage");
         let surfaces = coverage.surfaces;
 
         assert!(surfaces.iter().any(|surface| {
@@ -777,8 +1038,11 @@ mod tests {
 
         let script_entries = ma::scripts::extract_raw_script_entries_from_ma(input.as_bytes());
         let top_level = mel::collect_top_level_audit_candidates_from_bytes(input.as_bytes());
-        let coverage = collect_execution_coverage_from_ma_parts(&script_entries, &top_level)
-            .expect("coverage");
+        let semantics = node_execution_semantics_with_registry(default_schema_registry())
+            .expect("execution semantics");
+        let coverage =
+            collect_execution_coverage_from_ma_parts(&script_entries, &[], &top_level, &semantics)
+                .expect("coverage");
 
         assert!(coverage.surfaces.iter().any(|surface| {
             surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelCommand
@@ -794,6 +1058,59 @@ mod tests {
                 crate::scene::evidence::ExecutionCoverageIssueDetail::UnsupportedTopLevelStatement
             )
         }));
+    }
+
+    #[test]
+    fn ma_surfaces_include_schema_selected_node_attr_callbacks() {
+        let input = concat!(
+            "createNode script -n \"ExampleScript\";\n",
+            "    setAttr \".a\" -type \"string\" \"print \\\"after\\\";\";\n",
+            "    setAttr \".b\" -type \"string\" \"print \\\"before\\\";\";\n",
+            "    setAttr \".st\" 1;\n",
+            "    setAttr \".stp\" 0;\n",
+            "createNode renderGlobals -n \"ExampleRenderGlobals\";\n",
+            "    setAttr \".prm\" -type \"string\" \"print \\\"render\\\";\";\n",
+            "createNode transform -n \"ExampleTransform\";\n",
+            "    setAttr \".a\" -type \"string\" \"print \\\"ignored\\\";\";\n",
+        );
+        let semantics = node_execution_semantics_with_registry(default_schema_registry())
+            .expect("execution semantics");
+        let sections = ma::selective::extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+            input.as_bytes(),
+            &maya_scene_kit_formats::mel::MelParseBudget::default(),
+            semantics.ma_capture_attr_selectors(),
+        );
+
+        let coverage = collect_execution_coverage_from_ma_parts(
+            sections.dump_sections.script_entries.as_slice(),
+            sections.node_attr_values.as_slice(),
+            &sections.audit_top_level,
+            &semantics,
+        )
+        .expect("coverage");
+
+        assert!(coverage.surfaces.iter().any(|surface| {
+            surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                && surface.origin.attr_name.as_deref() == Some(".a")
+                && surface.text.as_ref() == r#"print "after";"#
+        }));
+        assert!(coverage.surfaces.iter().any(|surface| {
+            surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                && surface.origin.attr_name.as_deref() == Some(".b")
+                && surface.text.as_ref() == r#"print "before";"#
+        }));
+        assert!(coverage.surfaces.iter().any(|surface| {
+            surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                && surface.origin.attr_name.as_deref() == Some(".prm")
+                && surface.origin.source_kind.as_deref() == Some("preRenderMel")
+                && surface.text.as_ref() == r#"print "render";"#
+        }));
+        assert!(
+            !coverage
+                .surfaces
+                .iter()
+                .any(|surface| { surface.origin.node_name.as_deref() == Some("ExampleTransform") })
+        );
     }
 
     #[test]
