@@ -67,15 +67,33 @@ pub(in crate::gui) fn reveal_file_paths_in_system_file_manager(
     #[cfg(target_os = "windows")]
     {
         let paths = existing_absolute_paths(paths)?;
-        let common_parent = common_parent_dir(&paths)?;
-        let folder_literal = powershell_string_literal(&common_parent.to_string_lossy());
-        let path_literals = paths
-            .iter()
-            .map(|path| powershell_string_literal(&path.to_string_lossy()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let script = format!(
-            r#"
+        let groups = paths_grouped_by_parent_dir(paths)?;
+        for (folder, paths) in groups {
+            reveal_file_group_in_explorer(&folder, &paths)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = paths;
+        Err("reveal file in Explorer is only supported on Windows".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_file_group_in_explorer(
+    folder: &std::path::Path,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    let folder_literal = powershell_string_literal(&folder.to_string_lossy());
+    let path_literals = paths
+        .iter()
+        .map(|path| powershell_string_literal(&path.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        r#"
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -138,34 +156,27 @@ try {{
     }}
 }}
 "#
-        );
-        let output = std::process::Command::new("powershell.exe")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-STA",
-                "-Command",
-                script.as_str(),
-            ])
-            .output()
-            .map_err(|err| format!("failed to reveal file in Explorer: {err}"))?;
-        if output.status.success() {
-            Ok(())
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-STA",
+            "-Command",
+            script.as_str(),
+        ])
+        .output()
+        .map_err(|err| format!("failed to reveal file in Explorer: {err}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "failed to reveal file in Explorer".to_string()
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(if stderr.is_empty() {
-                "failed to reveal file in Explorer".to_string()
-            } else {
-                format!("failed to reveal file in Explorer: {stderr}")
-            })
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = paths;
-        Err("reveal file in Explorer is only supported on Windows".to_string())
+            format!("failed to reveal file in Explorer: {stderr}")
+        })
     }
 }
 
@@ -176,6 +187,7 @@ fn existing_absolute_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         .filter(|path| path.exists())
         .map(|path| {
             path.canonicalize()
+                .map(shell_compatible_path)
                 .map_err(|err| format!("failed to resolve {}: {err}", path.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -187,27 +199,55 @@ fn existing_absolute_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn common_parent_dir(paths: &[PathBuf]) -> Result<PathBuf, String> {
-    let mut parents = paths
-        .iter()
-        .map(|path| path.parent().map(PathBuf::from))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| "failed to determine target folder".to_string())?;
-    parents.sort();
-    parents.dedup();
-    if parents.len() == 1 {
-        let parent = parents.remove(0);
-        if parent.is_dir() {
-            Ok(parent)
-        } else {
-            Err(format!("folder not found: {}", parent.display()))
+fn paths_grouped_by_parent_dir(
+    paths: Vec<PathBuf>,
+) -> Result<Vec<(PathBuf, Vec<PathBuf>)>, String> {
+    let mut groups = Vec::<(PathBuf, Vec<PathBuf>)>::new();
+    for path in paths {
+        let parent = path
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| "failed to determine target folder".to_string())?;
+        if !parent.is_dir() {
+            return Err(format!("folder not found: {}", parent.display()));
         }
-    } else {
-        Err("multiple folders specified".to_string())
+        match groups.iter_mut().find(|(folder, _)| folder == &parent) {
+            Some((_, paths)) => paths.push(path),
+            None => groups.push((parent, vec![path])),
+        }
     }
+    Ok(groups)
 }
 
 #[cfg(target_os = "windows")]
 fn powershell_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn shell_compatible_path(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let normalized = {
+        let mut components = path.components();
+        match components.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => {
+                    let mut normalized = PathBuf::from(format!("{}:", drive as char));
+                    normalized.extend(components);
+                    Some(normalized)
+                }
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut normalized = PathBuf::from(r"\\");
+                    normalized.push(server);
+                    normalized.push(share);
+                    normalized.extend(components);
+                    Some(normalized)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    normalized.unwrap_or(path)
 }

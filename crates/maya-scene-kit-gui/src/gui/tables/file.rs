@@ -413,6 +413,7 @@ impl TableDelegate for FileTableDelegate {
                 });
             }
         }));
+        let menu = menu.separator();
         let menu = if clean_state.can_clean {
             menu.item(PopupMenuItem::new(clean_label).on_click({
                 let view = view.clone();
@@ -455,20 +456,21 @@ impl TableDelegate for FileTableDelegate {
             return menu;
         }
 
-        menu.item(PopupMenuItem::new(save_label).on_click({
-            let view = view.clone();
-            move |_, window, cx| {
-                view.update(cx, |shell, cx| {
-                    shell.run_context_save_from_row(row.id, window, cx);
-                });
-            }
-        }))
-        .item(
-            PopupMenuItem::new(undo_label).on_click(move |_, window, cx| {
-                view.update(cx, |shell, cx| {
-                    shell.undo_file_context_changes_from_row(row.id, window, cx);
-                });
-            }),
-        )
+        menu.separator()
+            .item(PopupMenuItem::new(save_label).on_click({
+                let view = view.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.run_context_save_from_row(row.id, window, cx);
+                    });
+                }
+            }))
+            .item(
+                PopupMenuItem::new(undo_label).on_click(move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.undo_file_context_changes_from_row(row.id, window, cx);
+                    });
+                }),
+            )
     }
 }
