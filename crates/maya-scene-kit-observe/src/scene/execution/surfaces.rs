@@ -579,6 +579,7 @@ fn decode_raw_chunk_text(tag: &str, payload: &[u8]) -> Option<String> {
                     return Some(trimmed.to_string());
                 }
             }
+            return None;
         }
     }
     if payload.len() > MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES {
@@ -834,6 +835,19 @@ mod tests {
         for tag in ["FRDI", "FREF", "RTFT"] {
             assert!(!raw_chunk_tag_may_contain_execution_text(tag, 128));
         }
+    }
+
+    #[test]
+    fn non_script_str_attrs_do_not_fall_back_to_raw_text() {
+        let mut payload = b"ExampleOptions\0 ".to_vec();
+        payload.extend_from_slice(b"Viewer_Script_D3D=1;TextureType=Default (Match Source Image);");
+
+        assert!(payload_may_contain_audit_marker(&payload));
+        assert!(raw_chunk_tag_may_contain_execution_text(
+            "STR ",
+            payload.len()
+        ));
+        assert!(decode_raw_chunk_text("STR ", &payload).is_none());
     }
 
     #[test]
