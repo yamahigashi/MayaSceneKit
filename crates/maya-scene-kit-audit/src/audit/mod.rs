@@ -17,9 +17,9 @@ use crate::scene::{
     AuditDisposition, AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail,
     AuditNotice, AuditOptions, AuditProfile, AuditReport, AuditSeverity, AuditSinkKind,
     DependencyFact, DependencyRiskClass, EffectCertainty, ExecutionCoverageState,
-    ExecutionEffectClass, ExecutionLanguage, ExecutionSemanticClass, ExecutionUnitSummary,
-    LoadOptions, Loader, ObservationBundle, SceneDigestSet, SceneFormat, SceneToolError,
-    StaticAuditFindingDetail, ValidationState, execution::ObservedExecutionCatalog,
+    ExecutionEffectClass, ExecutionLanguage, ExecutionObservationBundle, ExecutionSemanticClass,
+    ExecutionUnitSummary, LoadOptions, Loader, ObservationBundle, SceneDigestSet, SceneFormat,
+    SceneToolError, StaticAuditFindingDetail, ValidationState, execution::ObservedExecutionCatalog,
 };
 
 pub fn build_script_audit_plan(
@@ -78,6 +78,88 @@ pub fn audit_observation(
 
 pub fn audit_observation_with_digests(
     observation: &ObservationBundle,
+    plan: &ScriptAuditPlan,
+    options: AuditOptions,
+    include_digests: bool,
+) -> Result<AuditReport, SceneToolError> {
+    audit_observation_source_with_digests(observation, plan, options, include_digests)
+}
+
+fn audit_execution_observation_with_digests(
+    observation: &ExecutionObservationBundle,
+    plan: &ScriptAuditPlan,
+    options: AuditOptions,
+    include_digests: bool,
+) -> Result<AuditReport, SceneToolError> {
+    audit_observation_source_with_digests(observation, plan, options, include_digests)
+}
+
+trait AuditObservationSource {
+    fn scene_path(&self) -> &Path;
+    fn scene_format(&self) -> SceneFormat;
+    fn validation_state(&self) -> ValidationState;
+    fn scene_digests(&self, max_preview: usize) -> Result<SceneDigestSet, SceneToolError>;
+    fn observed_execution_catalog_with_digests(
+        &self,
+        max_preview: usize,
+        include_digests: bool,
+    ) -> Result<ObservedExecutionCatalog, SceneToolError>;
+}
+
+impl AuditObservationSource for ObservationBundle {
+    fn scene_path(&self) -> &Path {
+        self.scene_path()
+    }
+
+    fn scene_format(&self) -> SceneFormat {
+        self.scene_format()
+    }
+
+    fn validation_state(&self) -> ValidationState {
+        self.validation_state()
+    }
+
+    fn scene_digests(&self, max_preview: usize) -> Result<SceneDigestSet, SceneToolError> {
+        self.scene_digests(max_preview)
+    }
+
+    fn observed_execution_catalog_with_digests(
+        &self,
+        max_preview: usize,
+        include_digests: bool,
+    ) -> Result<ObservedExecutionCatalog, SceneToolError> {
+        self.observed_execution_catalog_with_digests(max_preview, include_digests)
+    }
+}
+
+impl AuditObservationSource for ExecutionObservationBundle {
+    fn scene_path(&self) -> &Path {
+        self.scene_path()
+    }
+
+    fn scene_format(&self) -> SceneFormat {
+        self.scene_format()
+    }
+
+    fn validation_state(&self) -> ValidationState {
+        self.validation_state()
+    }
+
+    fn scene_digests(&self, max_preview: usize) -> Result<SceneDigestSet, SceneToolError> {
+        self.scene_digests(max_preview)
+    }
+
+    fn observed_execution_catalog_with_digests(
+        &self,
+        max_preview: usize,
+        include_digests: bool,
+    ) -> Result<ObservedExecutionCatalog, SceneToolError> {
+        self.observed_execution_catalog_with_digests(max_preview, include_digests)
+    }
+}
+
+fn audit_observation_source_with_digests(
+    observation: &impl AuditObservationSource,
     plan: &ScriptAuditPlan,
     options: AuditOptions,
     include_digests: bool,
@@ -258,7 +340,7 @@ pub fn audit_script_nodes_with_options_and_digests(
 ) -> Result<AuditReport, SceneToolError> {
     let path = path.as_ref();
     let loader = Loader::new(load_options.clone());
-    let observation = match loader.observe_path_for_execution(path) {
+    let observation = match loader.observe_execution_path(path) {
         Ok(observation) => observation,
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
             let scene_format = detect_scene_format(path)?;
@@ -286,7 +368,7 @@ pub fn audit_script_nodes_with_options_and_digests(
         }
         Err(err) => return Err(err),
     };
-    audit_observation_with_digests(&observation, plan, options, include_digests)
+    audit_execution_observation_with_digests(&observation, plan, options, include_digests)
 }
 
 pub fn audit_script_nodes(

@@ -41,7 +41,7 @@ pub fn clean_target_for_execution_origin(origin: &ExecutionOrigin) -> Option<Exe
         ExecutionSurfaceKind::FileCommandCallback => origin
             .source_range
             .map(|source_range| ExecutionCleanTarget::FileCommandCallback { source_range }),
-        ExecutionSurfaceKind::RawChunkText => origin
+        ExecutionSurfaceKind::NodeAttrCallback | ExecutionSurfaceKind::RawChunkText => origin
             .chunk_form
             .as_ref()
             .zip(origin.chunk_node_offset)

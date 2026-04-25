@@ -4,7 +4,7 @@ pub(crate) mod mb;
 
 use std::path::Path;
 
-pub use self::loader::{LoadOptions, Loader, ObservationBundle};
+pub use self::loader::{ExecutionObservationBundle, LoadOptions, Loader, ObservationBundle};
 pub(crate) use self::loader::{MaObservationData, ObservationData};
 use crate::scene::{
     SceneToolError,

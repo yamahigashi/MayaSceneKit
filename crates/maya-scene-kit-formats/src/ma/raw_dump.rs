@@ -20,6 +20,22 @@ pub struct RawMaScriptEntry {
     pub source_type: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawMaNodeAttrValue {
+    pub node_type: String,
+    pub node_name: String,
+    pub attr: String,
+    pub string_value: Option<String>,
+    pub u32_value: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RawMaNodeAttrSelector {
+    pub node_type: String,
+    pub node_name: Option<String>,
+    pub attr: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RawMaDumpSections {
     pub requires: Vec<String>,

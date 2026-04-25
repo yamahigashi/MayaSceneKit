@@ -59,12 +59,24 @@ pub(crate) fn build_observed_execution_core(
     observation: &ObservationBundle,
 ) -> Result<ObservedExecutionCore, SceneToolError> {
     let mut coverage = match &observation.data {
-        ObservationData::Ma { data } => surfaces::collect_execution_coverage_from_ma_parts(
-            data.script_entries(),
-            data.top_level(),
-        ),
+        ObservationData::Ma { data } => {
+            let semantics = data.node_execution_semantics()?;
+            surfaces::collect_execution_coverage_from_ma_parts(
+                data.script_entries(),
+                data.execution_node_attr_values()?,
+                data.top_level(),
+                semantics.as_ref(),
+            )
+        }
         ObservationData::Mb { session } => {
-            surfaces::collect_execution_coverage_from_mb_with_budget(&session.mb, session.budget())
+            surfaces::collect_execution_coverage_from_mb_with_budget(
+                &session.mb,
+                session.budget(),
+                session
+                    .schema_context()
+                    .node_execution_semantics()?
+                    .as_ref(),
+            )
         }
     }?;
 
@@ -499,6 +511,7 @@ fn should_model_as_execution_unit(origin: &ExecutionOrigin) -> bool {
     match origin.surface_kind {
         ExecutionSurfaceKind::ScriptNodeBody
         | ExecutionSurfaceKind::FileCommandCallback
+        | ExecutionSurfaceKind::NodeAttrCallback
         | ExecutionSurfaceKind::RawChunkText => true,
         ExecutionSurfaceKind::TopLevelProcDefinition
         | ExecutionSurfaceKind::TopLevelOtherStatement => false,

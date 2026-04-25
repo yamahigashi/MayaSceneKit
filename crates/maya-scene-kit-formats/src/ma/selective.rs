@@ -35,7 +35,10 @@ use crate::{
             parse_ma_quoted_literal, parse_setattr_string_command, parse_setattr_string_value,
             parse_setattr_string_value_tail, unescape_ma_string_literal,
         },
-        raw_dump::{RawMaDumpSections, RawMaRequireEntry, RawMaRequireKind, RawMaScriptEntry},
+        raw_dump::{
+            RawMaDumpSections, RawMaNodeAttrSelector, RawMaNodeAttrValue, RawMaRequireEntry,
+            RawMaRequireKind, RawMaScriptEntry,
+        },
     },
     mel::{
         MelAuditSourceStore, MelAuditTopLevelCommandFact, MelAuditTopLevelFacts,
@@ -49,6 +52,7 @@ use crate::{
 pub struct RawMaSelectiveSections {
     pub dump_sections: RawMaDumpSections,
     pub scene_paths: Vec<ScenePathEntry>,
+    pub node_attr_values: Vec<RawMaNodeAttrValue>,
     pub audit_top_level: MelAuditTopLevelFacts,
 }
 
@@ -68,7 +72,22 @@ pub fn extract_raw_selective_sections_from_ma_with_budget(
     data: &[u8],
     budget: &MelParseBudget,
 ) -> RawMaSelectiveSections {
-    let mut sink = SelectiveScanSink::default();
+    extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+        data,
+        budget,
+        &HashSet::new(),
+    )
+}
+
+pub fn extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+    data: &[u8],
+    budget: &MelParseBudget,
+    node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
+) -> RawMaSelectiveSections {
+    let mut sink = SelectiveScanSink {
+        selected_node_attr_selectors: node_attr_selectors.clone(),
+        ..SelectiveScanSink::default()
+    };
     scan_light_bytes_with_options_and_sink_and_then(
         data,
         selective_light_parse_options(budget),
@@ -81,6 +100,7 @@ pub fn extract_raw_selective_sections_from_ma_with_budget(
 enum ActiveCreateBlock {
     Script(ActiveScriptBlock),
     ScenePath(ActiveScenePathBlock),
+    Selected(ActiveSelectedNodeBlock),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +114,11 @@ struct ActiveScriptBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveScenePathBlock {
     node_type: String,
+    node_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveSelectedNodeBlock {
     node_name: String,
 }
 
@@ -217,7 +242,18 @@ fn apply_setattr_to_active_block(
     command_text: &str,
     scene_paths: &mut Vec<ScenePathEntry>,
     seen_paths: &mut HashSet<u64>,
+    node_attr_values: &mut Vec<RawMaNodeAttrValue>,
+    selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) {
+    collect_selected_node_attr_value(
+        source,
+        block,
+        set_attr,
+        command_text,
+        node_attr_values,
+        selected_node_attr_selectors,
+    );
+
     match block {
         ActiveCreateBlock::Script(script) => {
             if matches!(tracked_attr, Some(MayaTrackedSetAttrAttr::B))
@@ -284,7 +320,79 @@ fn apply_setattr_to_active_block(
                 );
             }
         }
+        ActiveCreateBlock::Selected(_) => {}
     }
+}
+
+fn collect_selected_node_attr_value(
+    source: LightSourceView<'_>,
+    block: &ActiveCreateBlock,
+    set_attr: &MayaSelectiveSetAttr,
+    command_text: &str,
+    node_attr_values: &mut Vec<RawMaNodeAttrValue>,
+    selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
+) {
+    let Some(attr_path) = selective_setattr_attr_path(source, set_attr) else {
+        return;
+    };
+    let (node_type, node_name) = active_block_node(block);
+    if !node_attr_selector_matches(
+        selected_node_attr_selectors,
+        node_type,
+        node_name,
+        &attr_path,
+    ) {
+        return;
+    }
+    let string_value = selective_setattr_string_tail(source, set_attr)
+        .or_else(|| parse_setattr_string_value(command_text));
+    let u32_value = parse_setattr_scalar_u32_command(command_text)
+        .and_then(|(attr, value)| (attr == attr_path).then_some(value));
+    if string_value.is_none() && u32_value.is_none() {
+        return;
+    }
+    node_attr_values.push(RawMaNodeAttrValue {
+        node_type: node_type.to_string(),
+        node_name: node_name.to_string(),
+        attr: attr_path,
+        string_value,
+        u32_value,
+    });
+}
+
+fn node_attr_selector_matches(
+    selectors: &HashSet<RawMaNodeAttrSelector>,
+    node_type: &str,
+    node_name: &str,
+    attr_path: &str,
+) -> bool {
+    selectors.iter().any(|selector| {
+        selector.attr == attr_path
+            && selector.node_type.eq_ignore_ascii_case(node_type)
+            && selector
+                .node_name
+                .as_deref()
+                .map(|selected_name| selected_name == node_name)
+                .unwrap_or(true)
+    })
+}
+
+fn active_block_node(block: &ActiveCreateBlock) -> (&str, &str) {
+    match block {
+        ActiveCreateBlock::Script(script) => ("script", script.name.as_str()),
+        ActiveCreateBlock::ScenePath(path_block) => {
+            (path_block.node_type.as_str(), path_block.node_name.as_str())
+        }
+        ActiveCreateBlock::Selected(selected) => ("", selected.node_name.as_str()),
+    }
+}
+
+fn selective_setattr_attr_path(
+    source: LightSourceView<'_>,
+    set_attr: &MayaSelectiveSetAttr,
+) -> Option<String> {
+    let text = source_decoded_string(source, set_attr.attr_path_range?);
+    Some(strip_outer_quotes(&text).to_string())
 }
 
 fn selective_setattr_type_name(
@@ -637,6 +745,8 @@ struct SelectiveScanSink {
     scene_paths: Vec<ScenePathEntry>,
     seen_paths: HashSet<u64>,
     script_entries: Vec<RawMaScriptEntry>,
+    node_attr_values: Vec<RawMaNodeAttrValue>,
+    selected_node_attr_selectors: HashSet<RawMaNodeAttrSelector>,
     audit_items: Vec<MelAuditTopLevelItemFact>,
     audit_head_cache: HashMap<String, bool>,
     selective_diagnostics: Vec<MelParseDiagnostic>,
@@ -672,9 +782,21 @@ impl LightItemSink for SelectiveScanSink {
                     }));
             }
             LightItem::Command(command) => {
-                if let Some(item) =
-                    selective_item_from_command(source, &command, &mut self.audit_head_cache)
-                {
+                if !is_indented {
+                    if let Some(node_name) = selected_node_name_from_command(source, &command) {
+                        self.active_block =
+                            Some(ActiveCreateBlock::Selected(ActiveSelectedNodeBlock {
+                                node_name,
+                            }));
+                        return;
+                    }
+                }
+                if let Some(item) = selective_item_from_command(
+                    source,
+                    &command,
+                    &mut self.audit_head_cache,
+                    &self.selected_node_attr_selectors,
+                ) {
                     if is_indented
                         && selective_item_requires_top_level_context(
                             &item,
@@ -759,6 +881,7 @@ impl SelectiveScanSink {
                 script_entries: self.script_entries,
             },
             scene_paths: self.scene_paths,
+            node_attr_values: self.node_attr_values,
             audit_top_level: MelAuditTopLevelFacts {
                 source_store,
                 source_encoding,
@@ -854,6 +977,8 @@ impl SelectiveScanSink {
                         command_text.as_ref(),
                         &mut self.scene_paths,
                         &mut self.seen_paths,
+                        &mut self.node_attr_values,
+                        &self.selected_node_attr_selectors,
                     );
                 }
             }
@@ -905,6 +1030,7 @@ fn selective_item_from_command(
     source: LightSourceView<'_>,
     command: &LightCommandSurface,
     audit_head_cache: &mut HashMap<String, bool>,
+    selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) -> Option<MayaSelectiveItem> {
     let head = source_ascii_slice(source, command.head_range)?;
     match head {
@@ -955,6 +1081,9 @@ fn selective_item_from_command(
             let attr_path = strip_outer_quotes(&attr_path_text);
             if !matches!(attr_path, ".b" | ".st" | ".stp")
                 && tracked_attr.is_none()
+                && !selected_node_attr_selectors
+                    .iter()
+                    .any(|selector| selector.attr == attr_path)
                 && !matches!(
                     classify_scene_path_attr(attr_path),
                     Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
@@ -979,6 +1108,38 @@ fn selective_item_from_command(
         }
         _ => None,
     }
+}
+
+fn selected_node_name_from_command(
+    source: LightSourceView<'_>,
+    command: &LightCommandSurface,
+) -> Option<String> {
+    let head = source_ascii_slice(source, command.head_range)?;
+    if head != "select" {
+        return None;
+    }
+    let mut saw_no_expand = false;
+    let mut selected = None;
+    for word in &command.words {
+        match word {
+            LightWord::Flag { text, .. } => {
+                let flag = source_ascii_slice(source, *text)?;
+                if matches!(flag, "-ne" | "-noExpand") {
+                    saw_no_expand = true;
+                }
+            }
+            _ => {
+                let range = non_flag_range(word)?;
+                let text = source_decoded_string(source, range);
+                selected = Some(
+                    strip_outer_quotes(&text)
+                        .trim_start_matches(':')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    saw_no_expand.then_some(selected).flatten()
 }
 
 fn audit_item_source_span(item: &MelAuditTopLevelItemFact) -> MelSpan {
@@ -1115,17 +1276,22 @@ fn tracked_opaque_tail_attr_name(
             matches!(set_attr.tracked_attr, Some(MayaTrackedSetAttrAttr::B)).then_some(".b")
         }
         ActiveCreateBlock::ScenePath(_) => tracked_scene_path_attr_name(set_attr.tracked_attr),
+        ActiveCreateBlock::Selected(_) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use encoding_rs::SHIFT_JIS;
 
     use super::{
         RawMaRequireKind, extract_raw_selective_sections_from_ma,
         extract_raw_selective_sections_from_ma_with_budget,
+        extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors,
     };
+    use crate::ma::raw_dump::RawMaNodeAttrSelector;
     use crate::mel::{MelDiagnosticStage, MelParseBudget, MelSourceEncoding};
 
     fn non_utf8_repro_source(label: &str) -> String {
@@ -1200,6 +1366,59 @@ mod tests {
             Some(1)
         );
         assert_eq!(sections.scene_paths.len(), 3);
+    }
+
+    #[test]
+    fn selective_sections_capture_caller_selected_node_attrs() {
+        let input = concat!(
+            "createNode script -n \"ExampleScript\";\n",
+            "    setAttr \".a\" -type \"string\" \"print \\\"after\\\";\";\n",
+            "    setAttr \".st\" 1;\n",
+            "createNode renderGlobals -n \"ExampleRenderGlobals\";\n",
+            "    setAttr \".prm\" -type \"string\" \"print \\\"render\\\";\";\n",
+            "createNode transform -n \"ExampleTransform\";\n",
+            "    setAttr \".b\" -type \"string\" \"print \\\"ignored\\\";\";\n",
+        );
+        let selected = HashSet::from([
+            RawMaNodeAttrSelector {
+                node_type: "script".to_string(),
+                node_name: None,
+                attr: ".a".to_string(),
+            },
+            RawMaNodeAttrSelector {
+                node_type: "script".to_string(),
+                node_name: None,
+                attr: ".st".to_string(),
+            },
+            RawMaNodeAttrSelector {
+                node_type: "renderGlobals".to_string(),
+                node_name: None,
+                attr: ".prm".to_string(),
+            },
+        ]);
+
+        let sections = extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+            input.as_bytes(),
+            &MelParseBudget::default(),
+            &selected,
+        );
+
+        assert_eq!(sections.node_attr_values.len(), 3);
+        assert!(sections.node_attr_values.iter().any(|value| {
+            value.node_type == "script"
+                && value.node_name == "ExampleScript"
+                && value.attr == ".a"
+                && value.string_value.as_deref() == Some(r#"print "after";"#)
+        }));
+        assert!(sections.node_attr_values.iter().any(|value| {
+            value.node_type == "script" && value.attr == ".st" && value.u32_value == Some(1)
+        }));
+        assert!(sections.node_attr_values.iter().any(|value| {
+            value.node_type == "renderGlobals"
+                && value.node_name == "ExampleRenderGlobals"
+                && value.attr == ".prm"
+                && value.string_value.as_deref() == Some(r#"print "render";"#)
+        }));
     }
 
     #[test]

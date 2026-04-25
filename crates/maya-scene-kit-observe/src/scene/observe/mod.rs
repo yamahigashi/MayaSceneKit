@@ -13,8 +13,8 @@ mod tests {
         scene::{
             DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
             ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
-            LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit, SceneToolError,
-            ValidationState, collect_scene_dump, collect_scene_paths,
+            ExecutionSurfaceKind, LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit,
+            SceneToolError, ValidationState, collect_scene_dump, collect_scene_paths,
             core::SceneFormat,
             dump::SceneDumpRequireKind,
             find_scene_workspace_root,
@@ -615,26 +615,132 @@ mod tests {
     }
 
     #[test]
-    fn execution_observe_path_defers_mb_integrity_decode() {
+    fn execution_observation_path_defers_mb_integrity_decode() {
         let source = repo_root().join("tests/02/sphere.mb");
         let observation = Loader::new(LoadOptions::default())
-            .observe_path_for_execution(&source)
+            .observe_execution_path(&source)
             .expect("observation");
 
         assert_eq!(observation.validation_state(), ValidationState::Partial);
-        assert!(observation.cached_mb_decoded_artifacts_ptr().is_none());
-        assert!(observation.cached_mb_scene_facts_ptr().is_none());
-        assert!(observation.cached_mb_build_ptr().is_none());
 
         let catalog = observation
             .observed_execution_catalog(24)
             .expect("execution catalog");
 
         assert!(!catalog.surfaces.is_empty());
-        assert!(observation.cached_execution_core_ptr().is_some());
-        assert!(observation.cached_mb_decoded_artifacts_ptr().is_none());
-        assert!(observation.cached_mb_scene_facts_ptr().is_none());
-        assert!(observation.cached_mb_build_ptr().is_none());
+    }
+
+    #[test]
+    fn ma_observation_catalog_includes_render_globals_callbacks_from_path_and_bytes() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source = dir.path().join("render_callbacks.ma");
+        let bytes = concat!(
+            "//Maya ASCII 2026 scene\n",
+            "select -ne :defaultRenderGlobals;\n",
+            "    setAttr \".poam\" -type \"string\" \"eval(\\\"ExampleCallback;\\\")\";\n",
+            "    setAttr \".prlm\" -type \"string\" \"python(\\\"print(\\\\\\\"Example\\\\\\\")\\\")\";\n",
+        )
+        .as_bytes()
+        .to_vec();
+        fs::write(&source, &bytes).expect("write scene");
+
+        let path_observation = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("path observation");
+        let bytes_observation = Loader::new(LoadOptions::default())
+            .observe_bytes(&source, SceneFormat::Ma, ValidationState::Validated, bytes)
+            .expect("bytes observation");
+
+        for observation in [&path_observation, &bytes_observation] {
+            let catalog = observation
+                .observed_execution_catalog(64)
+                .expect("execution catalog");
+            assert!(catalog.surfaces.iter().any(|surface| {
+                surface.surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && surface.surface.origin.node_name.as_deref() == Some("defaultRenderGlobals")
+                    && surface.surface.origin.attr_name.as_deref() == Some(".poam")
+            }));
+            assert!(catalog.surfaces.iter().any(|surface| {
+                surface.surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && surface.surface.origin.attr_name.as_deref() == Some(".prlm")
+            }));
+        }
+    }
+
+    #[test]
+    fn ma_execution_observation_matches_regular_observation_catalog() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source = dir.path().join("execution_match.ma");
+        fs::write(
+            &source,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "createNode script -n \"ExampleScript\";\n",
+                "    setAttr \".a\" -type \"string\" \"print \\\"After\\\";\";\n",
+                "    setAttr \".b\" -type \"string\" \"print \\\"Before\\\";\";\n",
+                "    setAttr \".st\" 1;\n",
+                "select -ne :defaultRenderGlobals;\n",
+                "    setAttr \".prm\" -type \"string\" \"print \\\"Render\\\";\";\n",
+            ),
+        )
+        .expect("write scene");
+
+        let regular = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("regular observation")
+            .observed_execution_catalog(64)
+            .expect("regular catalog");
+        let execution = Loader::new(LoadOptions::default())
+            .observe_execution_path(&source)
+            .expect("execution observation")
+            .observed_execution_catalog(64)
+            .expect("execution catalog");
+        let execution_bytes = Loader::new(LoadOptions::default())
+            .observe_execution_bytes(
+                &source,
+                SceneFormat::Ma,
+                ValidationState::Validated,
+                fs::read(&source).expect("read scene"),
+            )
+            .expect("execution bytes observation")
+            .observed_execution_catalog(64)
+            .expect("execution bytes catalog");
+
+        let regular_origins = regular
+            .surfaces
+            .iter()
+            .map(|surface| {
+                (
+                    surface.surface.origin.surface_kind,
+                    surface.surface.origin.node_name.clone(),
+                    surface.surface.origin.attr_name.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let execution_origins = execution
+            .surfaces
+            .iter()
+            .map(|surface| {
+                (
+                    surface.surface.origin.surface_kind,
+                    surface.surface.origin.node_name.clone(),
+                    surface.surface.origin.attr_name.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(regular_origins, execution_origins);
+        let execution_bytes_origins = execution_bytes
+            .surfaces
+            .iter()
+            .map(|surface| {
+                (
+                    surface.surface.origin.surface_kind,
+                    surface.surface.origin.node_name.clone(),
+                    surface.surface.origin.attr_name.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(regular_origins, execution_bytes_origins);
     }
 
     #[test]

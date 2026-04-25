@@ -15,7 +15,7 @@ pub mod scene {
     };
     #[allow(unused_imports)]
     pub(crate) use maya_scene_kit_observe::scene::{
-        LoadOptions, Loader, ObservationBundle, SceneToolError,
+        ExecutionObservationBundle, LoadOptions, Loader, ObservationBundle, SceneToolError,
     };
 
     pub use crate::{

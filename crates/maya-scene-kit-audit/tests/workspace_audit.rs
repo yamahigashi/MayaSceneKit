@@ -16,7 +16,7 @@ use maya_scene_kit_observe::scene::{
     core::ValidationState,
     evidence::{
         DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail,
-        ExecutionCoverageState, ExecutionLanguage,
+        ExecutionCoverageState, ExecutionLanguage, ExecutionSurfaceKind,
     },
     paths::PathKind,
 };
@@ -884,6 +884,37 @@ fn audit_observation_matches_path_entrypoint_for_existing_fixture() {
     assert_eq!(via_observation.disposition, via_path.disposition);
     assert_eq!(via_observation.surface_count, via_path.surface_count);
     assert_eq!(via_observation.finding_count(), via_path.finding_count());
+}
+
+#[test]
+fn audit_observation_matches_path_entrypoint_for_ma_render_callbacks() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("render_callbacks.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "select -ne :defaultRenderGlobals;\n",
+            "    setAttr \".poam\" -type \"string\" \"eval(\\\"ExampleCallback;\\\")\";\n",
+            "    setAttr \".prlm\" -type \"string\" \"python(\\\"print(\\\\\\\"Example\\\\\\\")\\\")\";\n",
+        ),
+    );
+    let plan = audit_plan();
+    let observation = Loader::new(LoadOptions::default())
+        .observe_path(&source)
+        .expect("observe");
+
+    let via_observation = audit_observation(&observation, &plan, AuditOptions::strict_default())
+        .expect("audit via observation");
+    let via_path = audit_script_nodes(&source, &plan).expect("audit via path");
+
+    assert_eq!(via_observation.disposition, via_path.disposition);
+    assert_eq!(via_observation.surface_count, via_path.surface_count);
+    assert_eq!(via_observation.finding_count(), via_path.finding_count());
+    assert!(via_observation.surfaces.iter().any(|surface| {
+        surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+            && surface.origin.attr_name.as_deref() == Some(".poam")
+    }));
 }
 
 #[test]

@@ -137,6 +137,8 @@ pub enum ExecutionSurfaceKind {
     ScriptNodeBody,
     /// `file -command` callback text.
     FileCommandCallback,
+    /// Node attribute callback text.
+    NodeAttrCallback,
     /// Top-level MEL command text.
     TopLevelCommand,
     /// Top-level MEL proc definition text.
@@ -153,6 +155,7 @@ impl ExecutionSurfaceKind {
         match self {
             Self::ScriptNodeBody => "script_node_body",
             Self::FileCommandCallback => "file_command_callback",
+            Self::NodeAttrCallback => "node_attr_callback",
             Self::TopLevelCommand => "top_level_command",
             Self::TopLevelProcDefinition => "top_level_proc_definition",
             Self::TopLevelOtherStatement => "top_level_other_statement",
@@ -446,4 +449,21 @@ pub struct SceneDigestSet {
     pub scene_sha256: String,
     pub schema_bundle_sha256: Option<String>,
     pub policy_bundle_sha256: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionSurfaceKind;
+
+    #[test]
+    fn node_attr_callback_surface_kind_uses_stable_label() {
+        assert_eq!(
+            ExecutionSurfaceKind::NodeAttrCallback.as_str(),
+            "node_attr_callback"
+        );
+        assert_eq!(
+            serde_json::to_string(&ExecutionSurfaceKind::NodeAttrCallback).expect("serialize"),
+            r#""node_attr_callback""#
+        );
+    }
 }
