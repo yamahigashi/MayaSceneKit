@@ -5,13 +5,13 @@ use std::{
     sync::Arc,
 };
 
+use maya_scene_kit_formats::ma::raw_dump::RawMaNodeAttrSelector;
 use serde::Deserialize;
 
 use super::SchemaRegistry;
 #[cfg(test)]
 use super::default_schema_registry;
 use crate::scene::{ExecutionLanguage, ExecutionTrigger};
-use maya_scene_kit_formats::ma::raw_dump::RawMaNodeAttrSelector;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AngularAttrKind {
