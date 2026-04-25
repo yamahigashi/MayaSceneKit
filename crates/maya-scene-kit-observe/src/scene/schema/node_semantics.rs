@@ -115,7 +115,11 @@ pub(crate) fn node_execution_semantics_with_registry(
             return Ok(Arc::clone(cached));
         }
     }
-    let loaded = Arc::new(load_parsed_node_info_from_registry(registry)?.execution_semantics);
+    let loaded = Arc::new(
+        parsed_node_info_with_registry(registry)?
+            .execution_semantics
+            .clone(),
+    );
     if let Ok(mut cache) = registry.caches().node_execution_semantics.lock() {
         *cache = Some(Arc::clone(&loaded));
     }
@@ -197,7 +201,7 @@ struct ExternalNodeExecutionProfile {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ParsedNodeInfo {
+pub(in crate::scene) struct ParsedNodeInfo {
     typeid_to_typename: HashMap<u32, String>,
     angular_attrs: HashMap<String, HashMap<String, AngularAttrKind>>,
     execution_semantics: NodeExecutionSemantics,
@@ -214,31 +218,41 @@ struct NormalizedNodeInfoEntry {
 fn load_node_angular_attr_rules(
     registry: &SchemaRegistry,
 ) -> HashMap<String, HashMap<String, AngularAttrKind>> {
-    load_parsed_node_info_from_registry(registry)
-        .map(|parsed| parsed.angular_attrs)
+    parsed_node_info_with_registry(registry)
+        .map(|parsed| parsed.angular_attrs.clone())
         .unwrap_or_default()
 }
 
-pub(in crate::scene) fn validate_node_info_schema_file(path: &Path) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse_external_node_info(&bytes)
-        .map(|_| ())
-        .map_err(|err| format!("{}: {err}", path.display()))
+pub(in crate::scene) fn validate_node_info_with_registry(
+    registry: &SchemaRegistry,
+) -> Result<(), String> {
+    parsed_node_info_with_registry(registry).map(|_| ())
 }
 
 pub(in crate::scene) fn load_typeid_typename_map_with_registry(
     registry: &SchemaRegistry,
 ) -> Result<HashMap<u32, String>, String> {
-    load_parsed_node_info_from_registry(registry).map(|parsed| parsed.typeid_to_typename)
+    parsed_node_info_with_registry(registry).map(|parsed| parsed.typeid_to_typename.clone())
 }
 
-fn load_parsed_node_info_from_registry(
+fn parsed_node_info_with_registry(
     registry: &SchemaRegistry,
-) -> Result<ParsedNodeInfo, String> {
-    load_parsed_node_info_from_paths(
+) -> Result<Arc<ParsedNodeInfo>, String> {
+    if let Ok(cache) = registry.caches().parsed_node_info.lock() {
+        if let Some(cached) = cache.as_ref() {
+            return cached.clone();
+        }
+    }
+
+    let loaded = load_parsed_node_info_from_paths(
         &registry.paths().node_info_schema_file,
         &registry.paths().additional_node_info_files,
     )
+    .map(Arc::new);
+    if let Ok(mut cache) = registry.caches().parsed_node_info.lock() {
+        *cache = Some(loaded.clone());
+    }
+    loaded
 }
 
 fn load_parsed_node_info_from_paths(
@@ -657,10 +671,14 @@ fn parse_typeid_string(raw: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
         AngularAttrKind, NodeExecutionProfileKind, load_parsed_node_info_from_paths,
+        load_typeid_typename_map_with_registry, node_execution_semantics_with_registry,
         parse_external_node_info, parse_external_node_info_angular_rules,
     };
     use crate::scene::{
@@ -887,6 +905,69 @@ nodes:
         assert_eq!(profile.default_trigger, ExecutionTrigger::Render);
         assert_eq!(profile.attrs[0].short_name, "pram");
         assert_eq!(profile.attrs[0].display_name, "preMel");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn registry_reuses_parsed_node_info_for_derived_semantics() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("node_info_shared_cache_{unique}.yaml"));
+        std::fs::write(
+            &path,
+            r#"
+version: 1
+nodes:
+  ExampleNode:
+    typeid: 0x12345678
+    execution:
+      profiles:
+        - kind: attr_callbacks
+          default_language: mel
+          default_trigger: render
+          attrs: [callback]
+    attrs:
+      cb: { unit: none, kind: scalar, aliases: [callback] }
+"#,
+        )
+        .expect("write");
+        let mut paths = SchemaPaths::from_defaults();
+        paths.node_info_schema_file = path.clone();
+        let registry = SchemaRegistry::new(paths);
+
+        let typeid_map = load_typeid_typename_map_with_registry(&registry).expect("typeid map");
+        assert_eq!(
+            typeid_map.get(&0x1234_5678).map(String::as_str),
+            Some("ExampleNode")
+        );
+        let cached_before = {
+            let cache = registry.caches().parsed_node_info.lock().expect("cache");
+            let parsed = cache
+                .as_ref()
+                .expect("parsed cache populated")
+                .as_ref()
+                .expect("parsed cache ok");
+            Arc::as_ptr(parsed)
+        };
+
+        let semantics =
+            node_execution_semantics_with_registry(&registry).expect("execution semantics");
+        assert_eq!(
+            semantics.node_type_for_typeid(0x1234_5678),
+            Some("examplenode")
+        );
+        let cached_after = {
+            let cache = registry.caches().parsed_node_info.lock().expect("cache");
+            let parsed = cache
+                .as_ref()
+                .expect("parsed cache still populated")
+                .as_ref()
+                .expect("parsed cache still ok");
+            Arc::as_ptr(parsed)
+        };
+        assert_eq!(cached_before, cached_after);
         let _ = std::fs::remove_file(&path);
     }
 
