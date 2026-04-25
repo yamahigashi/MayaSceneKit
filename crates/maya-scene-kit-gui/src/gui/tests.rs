@@ -58,13 +58,14 @@ use super::{
     apply_path_overrides_to_report, apply_persisted_column_widths, audit_context_menu_state,
     audit_table_columns, backup_file_name, build_app_menus, build_audit_clipboard_payload,
     build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
-    build_file_table_rows, build_job_history_log_lines, build_path_table_model,
-    build_path_table_model_with_order_snapshot, clean_targets_for_threat_findings,
-    collect_scene_files_recursively, compute_visible_row_indices_for,
-    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
-    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
-    exit_warning_required_for_rows, file_context_menu_state, filter_audit_result_rows,
-    merge_column_widths, missing_path_count_for_row, next_backup_path, path_context_menu_state,
+    build_file_operation_paths, build_file_table_rows, build_job_history_log_lines,
+    build_path_table_model, build_path_table_model_with_order_snapshot,
+    clean_targets_for_threat_findings, collect_scene_files_recursively,
+    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
+    default_path_form_filter, default_path_resolution_filter, default_path_sort,
+    default_path_type_filter, detect_format, exit_warning_required_for_rows,
+    file_context_menu_state, filter_audit_result_rows, merge_column_widths,
+    missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
@@ -5392,6 +5393,45 @@ fn build_file_copy_payload_falls_back_to_target_row_when_not_selected() {
     let payload = build_file_copy_payload(&[first_row, second_row], 2).expect("copy payload");
 
     assert_eq!(payload, second.display().to_string());
+}
+
+#[test]
+fn build_file_operation_paths_uses_all_selected_rows_when_target_is_selected() {
+    let dir = tempdir().expect("tmpdir");
+    let first = dir.path().join("first.ma");
+    let second = dir.path().join("second.ma");
+    let third = dir.path().join("third.ma");
+    fs::write(&first, "").expect("write first");
+    fs::write(&second, "").expect("write second");
+    fs::write(&third, "").expect("write third");
+
+    let mut first_row = test_row(1, &first);
+    first_row.selected = true;
+    let mut second_row = test_row(2, &second);
+    second_row.selected = true;
+    let third_row = test_row(3, &third);
+
+    let paths = build_file_operation_paths(&[first_row, second_row, third_row], 2)
+        .expect("operation paths");
+
+    assert_eq!(paths, vec![first, second]);
+}
+
+#[test]
+fn build_file_operation_paths_falls_back_to_target_row_when_not_selected() {
+    let dir = tempdir().expect("tmpdir");
+    let first = dir.path().join("first.ma");
+    let second = dir.path().join("second.ma");
+    fs::write(&first, "").expect("write first");
+    fs::write(&second, "").expect("write second");
+
+    let mut first_row = test_row(1, &first);
+    first_row.selected = true;
+    let second_row = test_row(2, &second);
+
+    let paths = build_file_operation_paths(&[first_row, second_row], 2).expect("operation paths");
+
+    assert_eq!(paths, vec![second]);
 }
 
 #[test]

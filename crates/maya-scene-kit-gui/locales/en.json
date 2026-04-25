@@ -22,6 +22,7 @@
   "action.copy_file": "Copy File to Clipboard",
   "action.copy_path": "Copy Path",
   "action.copy_path_name": "Copy Path Text",
+  "action.reveal_in_explorer": "Show in Explorer",
   "action.collect_files_to_folder": "Collect Files to Folder",
   "action.collect_files_to_absolute": "Collect Files and Make Absolute",
   "action.collect_files_to_workspace_double_slash_relative": "Collect Files and Make Relative (WORKSPACE//relpath)",

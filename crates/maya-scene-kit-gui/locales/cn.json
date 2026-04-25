@@ -22,6 +22,7 @@
   "action.copy_file": "复制文件到剪贴板",
   "action.copy_path": "复制路径",
   "action.copy_path_name": "复制路径名",
+  "action.reveal_in_explorer": "在 Explorer 中显示",
   "action.collect_files_to_folder": "收集文件到文件夹",
   "action.collect_files_to_absolute": "收集文件并改为绝对路径",
   "action.collect_files_to_workspace_double_slash_relative": "收集文件并改为相对路径 (WORKSPACE//relpath)",

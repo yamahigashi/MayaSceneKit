@@ -22,6 +22,7 @@
   "action.copy_file": "ファイルをクリップボードへコピー",
   "action.copy_path": "パスをコピー",
   "action.copy_path_name": "パス名をコピー",
+  "action.reveal_in_explorer": "Explorer で開く",
   "action.collect_files_to_folder": "ファイルをフォルダへ収集",
   "action.collect_files_to_absolute": "ファイル収集＆絶対化",
   "action.collect_files_to_workspace_double_slash_relative": "ファイル収集＆相対化 (WORKSPACE//relpath)",
