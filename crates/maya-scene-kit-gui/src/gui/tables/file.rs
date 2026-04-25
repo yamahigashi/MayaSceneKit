@@ -376,6 +376,8 @@ impl TableDelegate for FileTableDelegate {
 
         let i18n = I18n::new(self.locale);
         let copy_label = i18n.text("action.copy_path");
+        let copy_file_label = i18n.text("action.copy_file");
+        let reveal_label = i18n.text("action.reveal_in_explorer");
         let clean_label = i18n.text("action.clean_file_context");
         let delete_ui_configuration_script_node_label =
             i18n.text("action.delete_ui_configuration_script_node");
@@ -391,6 +393,24 @@ impl TableDelegate for FileTableDelegate {
                     return;
                 };
                 cx.write_to_clipboard(ClipboardItem::new_string(copied_path));
+            }
+        }));
+        let menu = menu.item(PopupMenuItem::new(copy_file_label).on_click({
+            let view = view.clone();
+            let row_id = row.id;
+            move |_, window, cx| {
+                view.update(cx, |shell, cx| {
+                    shell.copy_file_rows_to_clipboard(row_id, window, cx);
+                });
+            }
+        }));
+        let menu = menu.item(PopupMenuItem::new(reveal_label).on_click({
+            let view = view.clone();
+            let row_id = row.id;
+            move |_, window, cx| {
+                view.update(cx, |shell, cx| {
+                    shell.reveal_file_rows_in_explorer(row_id, window, cx);
+                });
             }
         }));
         let menu = if clean_state.can_clean {

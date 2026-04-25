@@ -1103,18 +1103,31 @@ fn file_list_filters_match(row: &SceneRow, state: &PersistedState) -> bool {
 }
 
 pub(super) fn build_file_copy_payload(rows: &[SceneRow], row_id: u64) -> Option<String> {
-    let target = rows.iter().find(|row| row.id == row_id)?;
-    let selected_paths = rows
-        .iter()
-        .filter(|row| row.selected)
-        .map(|row| row.path.display().to_string())
-        .collect::<Vec<_>>();
+    let paths = build_file_operation_paths(rows, row_id)?;
 
-    if target.selected && !selected_paths.is_empty() {
-        Some(selected_paths.join("\n"))
-    } else {
-        Some(target.path.display().to_string())
+    Some(
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+pub(super) fn build_file_operation_paths(rows: &[SceneRow], row_id: u64) -> Option<Vec<PathBuf>> {
+    let target = rows.iter().find(|row| row.id == row_id)?;
+    if target.selected {
+        let selected_paths = rows
+            .iter()
+            .filter(|row| row.selected)
+            .map(|row| row.path.clone())
+            .collect::<Vec<_>>();
+        if !selected_paths.is_empty() {
+            return Some(selected_paths);
+        }
     }
+
+    Some(vec![target.path.clone()])
 }
 
 pub(super) fn build_file_table_rows(

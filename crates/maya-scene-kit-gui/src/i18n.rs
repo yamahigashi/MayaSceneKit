@@ -97,6 +97,7 @@ mod tests {
             "action.clean_file_context",
             "action.delete_ui_configuration_script_node",
             "action.copy_source_text",
+            "action.reveal_in_explorer",
             "action.detail",
             "action.discard_edits_and_exit",
             "action.exit_application",

@@ -421,6 +421,76 @@ impl GuiShell {
             .detach();
     }
 
+    pub(super) fn copy_file_rows_to_clipboard(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(paths) = build_file_operation_paths(&self.rows, row_id) else {
+            return;
+        };
+
+        let view = cx.entity();
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    let result = executor
+                        .spawn(async move { copy_file_drop_paths_to_system_clipboard(&paths) })
+                        .await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        move |shell: &mut GuiShell,
+                              _window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
+                            if let Err(err) = result {
+                                shell.status_message = Some(BannerMessage::Raw(err));
+                            }
+                            cx.notify();
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
+    pub(super) fn reveal_file_rows_in_explorer(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(paths) = build_file_operation_paths(&self.rows, row_id) else {
+            return;
+        };
+
+        let view = cx.entity();
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    let result = executor
+                        .spawn(async move { reveal_file_paths_in_system_file_manager(&paths) })
+                        .await;
+                    let _ = async_cx.update_window_entity(
+                        &view,
+                        move |shell: &mut GuiShell,
+                              _window: &mut Window,
+                              cx: &mut Context<GuiShell>| {
+                            if let Err(err) = result {
+                                shell.status_message = Some(BannerMessage::Raw(err));
+                            }
+                            cx.notify();
+                        },
+                    );
+                }
+            })
+            .detach();
+    }
+
     pub(super) fn convert_path_targets_to_workspace_relative(
         &mut self,
         edit_targets: PathEditTargets,
