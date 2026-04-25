@@ -43,13 +43,12 @@ pub(super) fn analyze_callback_flags(
         let Some(flag_name) = fact.flag_name.as_deref() else {
             continue;
         };
-        let Some(body) = fact.rendered_text.as_deref().map(str::trim) else {
-            continue;
-        };
-        if body.is_empty() || is_empty_callback_placeholder(body) {
+        let body = fact.rendered_text.as_deref().map(str::trim);
+        if body.is_some_and(|body| body.is_empty() || is_empty_callback_placeholder(body)) {
             continue;
         }
-        if !seen_payloads.insert((command_name, flag_name, body, fact.resolved_kind)) {
+        let body_key = body.unwrap_or("<dynamic or unresolved>");
+        if !seen_payloads.insert((command_name, flag_name, body_key, fact.resolved_kind)) {
             continue;
         }
 
@@ -64,13 +63,16 @@ pub(super) fn analyze_callback_flags(
             },
             AuditEvidence::KeyValue {
                 key: AuditEvidenceKey::CallbackTarget,
-                value: body.to_string(),
+                value: body_key.to_string(),
             },
         ];
-        let preview_override = Some(snippet(body));
+        let preview_override = body.map(snippet);
 
         match fact.resolved_kind {
             MelResolvedStringKind::ProcReference => {
+                if body.is_none() {
+                    continue;
+                }
                 analysis.review_signals.push(build_review_signal(
                     surface,
                     surface_index,
@@ -81,22 +83,14 @@ pub(super) fn analyze_callback_flags(
                 ));
             }
             MelResolvedStringKind::Literal | MelResolvedStringKind::AssembledLiteral => {
-                analysis.findings.push(build_finding(
-                    surface_index,
-                    surface,
-                    "mel_callback_flag",
-                    severity_for_trigger(AuditSeverity::High, surface.origin.trigger),
-                    AuditSinkKind::None,
-                    None,
-                    "script-bearing MEL callback flag detected",
-                    evidence.clone(),
-                    preview_override.clone(),
-                ));
+                let Some(body) = body else {
+                    continue;
+                };
                 analysis.review_signals.push(build_review_signal(
                     surface,
                     surface_index,
                     "mel_callback_body",
-                    "MEL callback flag embeds inline script body; derived sink findings determine deny behavior",
+                    "MEL callback flag embeds inline script body; derived analysis determines whether it remains review-only or is denied",
                     evidence.clone(),
                     preview_override.clone(),
                 ));

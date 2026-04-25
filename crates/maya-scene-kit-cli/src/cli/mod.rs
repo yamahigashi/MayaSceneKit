@@ -761,7 +761,7 @@ mod tests {
         assert_eq!(group_review_signal_indexes(&report), vec![(0, 2)]);
         assert_eq!(
             render_grouped_review_signal_text("a.ma", &report, &review, 2),
-            "- review path=a.ma count=2 review_id=mel_callback_body node=script1 attr=.b chunk=-:-@- msg=\"MEL callback flag embeds inline script body; derived sink findings determine deny behavior\" evidence=\"command=modelEditor; flag=editorChanged; callback_target=print \"ok\";\""
+            "- review path=a.ma count=2 review_id=mel_callback_body node=script1 attr=.b chunk=-:-@- msg=\"MEL callback flag embeds inline script body; derived analysis determines whether it remains review-only or is denied\" evidence=\"command=modelEditor; flag=editorChanged; callback_target=print \"ok\";\""
         );
         let json = render_review_signal_json("a.ma", &report, &review);
         assert_eq!(json["review_id"].as_str(), Some("mel_callback_body"));

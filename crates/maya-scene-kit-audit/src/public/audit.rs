@@ -332,7 +332,7 @@ impl StaticAuditReviewDetail {
     pub fn message(self) -> &'static str {
         match self {
             Self::MelCallbackBodyDetected => {
-                "MEL callback flag embeds inline script body; derived sink findings determine deny behavior"
+                "MEL callback flag embeds inline script body; derived analysis determines whether it remains review-only or is denied"
             }
             Self::MelCallbackProcReferenceDetected => {
                 "MEL callback flag references a proc name; offline behavior remains runtime-dependent"
