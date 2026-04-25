@@ -478,6 +478,10 @@ impl SignalVisitor {
             self.current_capability_aliases(),
         ) {
             self.signals.push(PythonSignal::Capability(capability));
+        } else if is_maya_python_bridge_name(&call.func) {
+            self.signals.push(PythonSignal::UnresolvedCallTarget {
+                message: "python call target named `python` is not a Python built-in".to_string(),
+            });
         } else if unresolved_dynamic_call(&call.func) {
             self.signals.push(PythonSignal::UnresolvedCallTarget {
                 message: "python call target resolved through dynamic dispatch".to_string(),
@@ -687,6 +691,10 @@ fn direct_call_kind(name: &str) -> Option<PythonCallKind> {
         "__import__" | "import_module" => Some(PythonCallKind::Import),
         _ => None,
     }
+}
+
+fn is_maya_python_bridge_name(func: &ast::Expr) -> bool {
+    matches!(func, ast::Expr::Name(name) if name.id.as_str() == "python")
 }
 
 fn indirect_call_name(call: &ast::ExprCall) -> Option<&str> {

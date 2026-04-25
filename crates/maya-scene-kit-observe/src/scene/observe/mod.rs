@@ -668,6 +668,48 @@ mod tests {
     }
 
     #[test]
+    fn ma_analysis_observation_captures_execution_attrs_without_lazy_execution_sections() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source = dir.path().join("analysis_render_callbacks.ma");
+        let bytes = concat!(
+            "//Maya ASCII 2026 scene\n",
+            "select -ne :defaultRenderGlobals;\n",
+            "    setAttr \".poam\" -type \"string\" \"eval(\\\"ExampleCallback;\\\")\";\n",
+            "    setAttr \".prlm\" -type \"string\" \"python(\\\"print(\\\\\\\"Example\\\\\\\")\\\")\";\n",
+        )
+        .as_bytes()
+        .to_vec();
+        fs::write(&source, &bytes).expect("write scene");
+
+        let path_observation = Loader::new(LoadOptions::default())
+            .observe_analysis_path(&source)
+            .expect("path analysis observation");
+        let bytes_observation = Loader::new(LoadOptions::default())
+            .observe_analysis_bytes(&source, SceneFormat::Ma, ValidationState::Validated, bytes)
+            .expect("bytes analysis observation");
+
+        for observation in [&path_observation, &bytes_observation] {
+            assert!(observation.cached_ma_bytes_ptr().is_some());
+            assert!(observation.cached_ma_execution_sections_ptr().is_none());
+
+            let catalog = observation
+                .observed_execution_catalog(64)
+                .expect("execution catalog");
+
+            assert!(catalog.surfaces.iter().any(|surface| {
+                surface.surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && surface.surface.origin.node_name.as_deref() == Some("defaultRenderGlobals")
+                    && surface.surface.origin.attr_name.as_deref() == Some(".poam")
+            }));
+            assert!(catalog.surfaces.iter().any(|surface| {
+                surface.surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && surface.surface.origin.attr_name.as_deref() == Some(".prlm")
+            }));
+            assert!(observation.cached_ma_execution_sections_ptr().is_none());
+        }
+    }
+
+    #[test]
     fn ma_execution_observation_matches_regular_observation_catalog() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let source = dir.path().join("execution_match.ma");
