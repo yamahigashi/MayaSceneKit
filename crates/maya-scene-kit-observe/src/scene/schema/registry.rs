@@ -9,7 +9,7 @@ use super::{
     ChunkSchema,
     addattr_tokens::AddAttrTokenRule,
     locator::SchemaPaths,
-    node_semantics::{AngularAttrKind, NodeExecutionSemantics},
+    node_semantics::{AngularAttrKind, NodeExecutionSemantics, ParsedNodeInfo},
     refedit_loader::RefEditSchema,
     structural_attr::StructuralAttrHandlerRule,
 };
@@ -18,11 +18,13 @@ type ChunkSchemaCache = Mutex<HashMap<(String, String), Option<Arc<ChunkSchema>>
 type NodeSemanticsMap = Arc<HashMap<String, HashMap<String, AngularAttrKind>>>;
 type NodeSemanticsCache = Mutex<Option<NodeSemanticsMap>>;
 type NodeExecutionSemanticsCache = Mutex<Option<Arc<NodeExecutionSemantics>>>;
+type ParsedNodeInfoCache = Mutex<Option<Result<Arc<ParsedNodeInfo>, String>>>;
 
 #[derive(Debug, Default)]
 pub(crate) struct SchemaRegistryCaches {
     pub(in crate::scene) chunk_schemas: ChunkSchemaCache,
     pub(in crate::scene) addattr_tokens: Mutex<Option<Arc<HashMap<String, AddAttrTokenRule>>>>,
+    pub(in crate::scene) parsed_node_info: ParsedNodeInfoCache,
     pub(in crate::scene) node_semantics: NodeSemanticsCache,
     pub(in crate::scene) node_execution_semantics: NodeExecutionSemanticsCache,
     pub(in crate::scene) structural_attrs: Mutex<Option<Arc<Vec<StructuralAttrHandlerRule>>>>,

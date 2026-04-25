@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use once_cell::sync::Lazy;
@@ -11,7 +11,7 @@ use crate::scene::SceneToolError;
 
 type CachedSchemaContext = Result<Arc<SchemaContext>, String>;
 
-static SCHEMA_CONTEXT_CACHE: Lazy<Mutex<HashMap<SchemaPaths, CachedSchemaContext>>> =
+static SCHEMA_CONTEXT_CACHE: Lazy<Mutex<HashMap<SchemaPaths, Arc<OnceLock<CachedSchemaContext>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy)]
@@ -39,13 +39,21 @@ impl SchemaContext {
             return cached;
         }
 
-        let built = Self::from_paths(paths.clone())
-            .map(Arc::new)
-            .map_err(|err| err.to_string());
-        let mut cache = SCHEMA_CONTEXT_CACHE
-            .lock()
-            .expect("schema context cache lock poisoned");
-        let cached = cache.entry(paths).or_insert(built);
+        let cell = {
+            let mut cache = SCHEMA_CONTEXT_CACHE
+                .lock()
+                .expect("schema context cache lock poisoned");
+            Arc::clone(
+                cache
+                    .entry(paths.clone())
+                    .or_insert_with(|| Arc::new(OnceLock::new())),
+            )
+        };
+        let cached = cell.get_or_init(|| {
+            Self::from_paths(paths)
+                .map(Arc::new)
+                .map_err(|err| err.to_string())
+        });
         clone_cached_schema_context(cached)
     }
 
@@ -85,7 +93,10 @@ fn cached_schema_context(
     let cache = SCHEMA_CONTEXT_CACHE
         .lock()
         .expect("schema context cache lock poisoned");
-    cache.get(paths).map(clone_cached_schema_context)
+    cache
+        .get(paths)
+        .and_then(|cell| cell.get())
+        .map(clone_cached_schema_context)
 }
 
 fn clone_cached_schema_context(
@@ -108,14 +119,8 @@ fn validate_registry_inputs(registry: &SchemaRegistry) -> Result<(), SceneToolEr
         &paths.addattr_schema_file,
     )
     .map_err(SceneToolError::Config)?;
-    crate::scene::schema::node_semantics::validate_node_info_schema_file(
-        &paths.node_info_schema_file,
-    )
-    .map_err(SceneToolError::Config)?;
-    for path in &paths.additional_node_info_files {
-        crate::scene::schema::node_semantics::validate_node_info_schema_file(path)
-            .map_err(SceneToolError::Config)?;
-    }
+    crate::scene::schema::node_semantics::validate_node_info_with_registry(registry)
+        .map_err(SceneToolError::Config)?;
     crate::scene::schema::structural_attr::validate_structural_attr_schema_file(
         &paths.structural_attr_schema_file,
     )
