@@ -165,13 +165,20 @@ pub(crate) fn build_scene_path_dependency_fact(
 ) -> DependencyFact {
     DependencyFact {
         kind,
-        risk: classify_dependency_risk(value),
+        risk: scene_path_dependency_risk(kind, value),
         target: value.to_string(),
         detail: DependencyFactDetail::ScenePath {
             node_type: node_type.to_string(),
             attr: attr.to_string(),
         },
         origin: None,
+    }
+}
+
+fn scene_path_dependency_risk(kind: DependencyFactKind, value: &str) -> DependencyRiskClass {
+    match kind {
+        DependencyFactKind::FilePath => DependencyRiskClass::Informational,
+        _ => classify_dependency_risk(value),
     }
 }
 
