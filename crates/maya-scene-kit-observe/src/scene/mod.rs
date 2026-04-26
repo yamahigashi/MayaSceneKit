@@ -81,7 +81,8 @@ pub use self::{
     },
     public::{AsciiDecodePolicy, OperationMode, SceneFormat, ValidationState},
     query::resolve::{
-        find_scene_workspace_root, resolve_scene_path_value, resolve_scene_path_values_batch,
+        SceneFileIdentity, SceneResourceResolver, find_scene_workspace_root,
+        resolve_scene_path_value, resolve_scene_path_values_batch,
     },
     source::{
         ExecutionObservationBundle, LoadOptions, Loader, ObservationBundle, check_script_nodes,

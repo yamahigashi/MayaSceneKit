@@ -46,7 +46,7 @@ use maya_scene_kit_edit::scene::{
 };
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot,
-    collect_scene_paths_with_options,
+    SceneResourceResolver, collect_scene_paths_with_options,
     core::{SceneFormat, ValidationState},
     dump::{SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind},
     evidence::{ExecutionOrigin, ExecutionSurfaceKind},

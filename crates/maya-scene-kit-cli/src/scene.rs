@@ -3,15 +3,16 @@ use std::path::Path;
 #[allow(unused_imports)]
 pub use maya_scene_kit_audit::{
     audit::{
-        ScriptAuditPlan, audit_observation, build_parse_budget_blocked_audit_report,
-        build_script_audit_plan,
+        ScriptAuditPlan, audit_observation, audit_reference_graph_roots_with_options_and_digests,
+        build_parse_budget_blocked_audit_report, build_script_audit_plan,
     },
     scene::{
         AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
-        AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode, AuditOptions,
-        AuditProfile, AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal,
-        AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation, ScriptAuditReport,
-        StaticAuditFindingDetail, StaticAuditReviewDetail,
+        AuditFindingCode, AuditFindingDetail, AuditGraphReport, AuditGraphRoot, AuditHit,
+        AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile, AuditReferenceEdge, AuditReport,
+        AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity, AuditSinkKind,
+        AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue, AuditTraversalIssueKind,
+        ScriptAuditReport, StaticAuditFindingDetail, StaticAuditReviewDetail,
     },
 };
 #[allow(unused_imports)]
@@ -50,21 +51,6 @@ pub use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, MbParseBudget, ObservationBundle, check_script_nodes_with_options,
     collect_scene_paths, collect_scene_paths_with_options,
 };
-
-pub fn audit_script_nodes_with_options_without_digests(
-    path: impl AsRef<Path>,
-    plan: &ScriptAuditPlan,
-    load_options: &LoadOptions,
-    options: AuditOptions,
-) -> Result<AuditReport, SceneToolError> {
-    maya_scene_kit_audit::audit::audit_script_nodes_with_options_and_digests(
-        path,
-        plan,
-        load_options,
-        options,
-        false,
-    )
-}
 
 #[cfg(test)]
 pub fn render_script_dump(path: impl AsRef<Path>) -> Result<String, SceneToolError> {

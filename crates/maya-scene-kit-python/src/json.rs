@@ -1,5 +1,5 @@
 use maya_scene_kit_audit::scene::{
-    AuditFinding, AuditNotice, AuditReport, AuditReviewSignal, AuditSurface,
+    AuditFinding, AuditGraphReport, AuditNotice, AuditReport, AuditReviewSignal, AuditSurface,
 };
 use maya_scene_kit_edit::scene::{
     DecodeQualityDistributionEntry, MayaAsciiConversionReport, MayaAsciiDecodeAttempt,
@@ -69,6 +69,31 @@ pub(crate) fn audit_report(report: &AuditReport) -> Value {
         "notice_count": report.notice_count(),
         "finding_count": report.finding_count(),
         "review_signal_count": report.review_signal_count(),
+    })
+}
+
+pub(crate) fn audit_graph_report(report: &AuditGraphReport) -> Value {
+    json!({
+        "scene_path": report.roots.first().map(|root| root.path.clone()),
+        "profile": report.reports.first().map(|scene_report| scene_report.profile.as_str()),
+        "disposition": report.disposition.as_str(),
+        "root_count": report.roots.len(),
+        "scene_count": report.reports.len(),
+        "edge_count": report.edges.len(),
+        "traversal_issue_count": report.traversal_issues.len(),
+        "finding_count": report.finding_count(),
+        "review_signal_count": report.review_signal_count(),
+        "notice_count": report.notice_count(),
+        "roots": &report.roots,
+        "edges": &report.edges,
+        "traversal_issues": &report.traversal_issues,
+        "reports": report.reports.iter().map(audit_report).collect::<Vec<_>>(),
+        "root_report": report
+            .roots
+            .first()
+            .and_then(|root| root.report_index)
+            .and_then(|index| report.reports.get(index))
+            .map(audit_report),
     })
 }
 

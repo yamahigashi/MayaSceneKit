@@ -25,10 +25,12 @@ pub mod scene {
         },
         public::audit::{
             AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
-            AuditFindingCode, AuditFindingDetail, AuditHit, AuditNotice, AuditNoticeCode,
-            AuditOptions, AuditProfile, AuditReport, AuditReviewCode, AuditReviewDetail,
-            AuditReviewSignal, AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation,
-            ScriptAuditReport, StaticAuditFindingDetail, StaticAuditReviewDetail,
+            AuditFindingCode, AuditFindingDetail, AuditGraphReport, AuditGraphRoot, AuditHit,
+            AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile, AuditReferenceEdge,
+            AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity,
+            AuditSinkKind, AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue,
+            AuditTraversalIssueKind, ScriptAuditReport, StaticAuditFindingDetail,
+            StaticAuditReviewDetail,
         },
     };
 

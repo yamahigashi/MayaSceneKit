@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use maya_scene_kit_audit::{
     audit::{
-        ScriptAuditPlan, audit_observation, audit_script_nodes, audit_script_nodes_with_options,
-        build_script_audit_plan,
+        ScriptAuditPlan, audit_observation, audit_reference_graph_roots_with_options_and_digests,
+        audit_script_nodes, audit_script_nodes_with_options, build_script_audit_plan,
     },
     scene::{
         AuditDisposition, AuditFinding, AuditNoticeCode, AuditOptions, AuditReport, AuditSeverity,
-        AuditSinkKind, AuditSurfaceDerivation,
+        AuditSinkKind, AuditSurfaceDerivation, AuditTraversalIssueKind,
     },
 };
 use maya_scene_kit_observe::scene::{
@@ -48,6 +48,29 @@ fn finding_severity(report: &AuditReport, code: &str) -> Option<AuditSeverity> {
 
 fn write_scene(path: &std::path::Path, text: &str) {
     std::fs::write(path, text).expect("write fixture");
+}
+
+fn write_basic_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!("//Maya ASCII 2026 scene\n", "requires maya \"2026\";\n"),
+    );
+}
+
+fn write_reference_scene(path: &std::path::Path, reference_path: &str, reference_node: &str) {
+    write_scene(
+        path,
+        &format!(
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "file -r -rfn \"{}\" \"{}\";\n",
+                "createNode reference -n \"{}\";\n",
+                "    setAttr \".fn\" -type \"string\" \"{}\";\n",
+            ),
+            reference_node, reference_path, reference_node, reference_path
+        ),
+    );
 }
 
 fn build_mb_chunk(tag: &str, payload: &[u8]) -> Vec<u8> {
@@ -946,6 +969,61 @@ fn audit_observation_matches_path_entrypoint_for_ma_render_callbacks() {
         surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
             && surface.origin.attr_name.as_deref() == Some(".poam")
     }));
+}
+
+#[test]
+fn reference_graph_multi_root_audits_shared_child_once_and_preserves_edges() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    write_scene(&dir.path().join("workspace.mel"), "// workspace\n");
+    let root_a = dir.path().join("root_a.ma");
+    let root_b = dir.path().join("root_b.ma");
+    let child = dir.path().join("shared_child.ma");
+    write_reference_scene(&root_a, "shared_child.ma", "sharedChildARn");
+    write_reference_scene(&root_b, "shared_child.ma", "sharedChildBRn");
+    write_basic_scene(&child);
+
+    let graph = audit_reference_graph_roots_with_options_and_digests(
+        [&root_a, &root_b],
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+        false,
+    );
+
+    assert_eq!(graph.roots.len(), 2);
+    assert_eq!(graph.edges.len(), 2);
+    assert_eq!(graph.reports.len(), 3);
+    assert!(graph.traversal_issues.is_empty());
+    let child_edge_indexes = graph
+        .edges
+        .iter()
+        .map(|edge| edge.target_report_index.expect("child report index"))
+        .collect::<Vec<_>>();
+    assert_eq!(child_edge_indexes[0], child_edge_indexes[1]);
+}
+
+#[test]
+fn reference_graph_cycle_emits_cycle_issue() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    write_scene(&dir.path().join("workspace.mel"), "// workspace\n");
+    let root = dir.path().join("root.ma");
+    let child = dir.path().join("child.ma");
+    write_reference_scene(&root, "child.ma", "childRn");
+    write_reference_scene(&child, "root.ma", "rootRn");
+
+    let graph = audit_reference_graph_roots_with_options_and_digests(
+        [&root],
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+        false,
+    );
+
+    assert!(graph.traversal_issues.iter().any(|issue| {
+        issue.kind == AuditTraversalIssueKind::Cycle
+            && issue.raw_target.as_deref() == Some("root.ma")
+    }));
+    assert_eq!(graph.disposition, AuditDisposition::Review);
 }
 
 #[test]

@@ -4,18 +4,22 @@ mod policy;
 mod rules;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use maya_scene_kit_observe::scene::detect_scene_format;
+use maya_scene_kit_observe::scene::{
+    SceneFileIdentity, SceneResourceResolver, detect_scene_format,
+    paths::{PathKind, ScenePathResolutionStatus},
+};
 
 pub use self::rules::ScriptAuditPlan;
 use crate::scene::{
     AuditDisposition, AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail,
-    AuditNotice, AuditOptions, AuditProfile, AuditReport, AuditSeverity, AuditSinkKind,
+    AuditGraphReport, AuditGraphRoot, AuditNotice, AuditOptions, AuditProfile, AuditReferenceEdge,
+    AuditReport, AuditSeverity, AuditSinkKind, AuditTraversalIssue, AuditTraversalIssueKind,
     DependencyFact, DependencyRiskClass, EffectCertainty, ExecutionCoverageState,
     ExecutionEffectClass, ExecutionLanguage, ExecutionObservationBundle, ExecutionSemanticClass,
     ExecutionUnitSummary, LoadOptions, Loader, ObservationBundle, SceneDigestSet, SceneFormat,
@@ -381,6 +385,336 @@ pub fn audit_script_nodes(
         &LoadOptions::default(),
         AuditOptions::strict_default(),
     )
+}
+
+const DEFAULT_REFERENCE_GRAPH_MAX_DEPTH: usize = 64;
+const DEFAULT_REFERENCE_GRAPH_MAX_SCENES: usize = 4096;
+
+pub fn audit_reference_graph_roots_with_options_and_digests<I, P>(
+    roots: I,
+    plan: &ScriptAuditPlan,
+    load_options: &LoadOptions,
+    options: AuditOptions,
+    include_digests: bool,
+) -> AuditGraphReport
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    ReferenceAuditRun::new(plan, load_options, options, include_digests).run(roots)
+}
+
+struct ReferenceAuditRun<'a> {
+    plan: &'a ScriptAuditPlan,
+    load_options: &'a LoadOptions,
+    options: AuditOptions,
+    include_digests: bool,
+    resolver: SceneResourceResolver,
+    roots: Vec<AuditGraphRoot>,
+    reports: Vec<AuditReport>,
+    report_by_identity: HashMap<String, usize>,
+    failed_by_identity: HashMap<String, usize>,
+    queued: HashSet<String>,
+    visited: HashSet<String>,
+    queue: VecDeque<ReferenceQueueEntry>,
+    edges: Vec<AuditReferenceEdge>,
+    traversal_issues: Vec<AuditTraversalIssue>,
+    disposition: AuditDisposition,
+}
+
+struct ReferenceQueueEntry {
+    path: PathBuf,
+    identity: SceneFileIdentity,
+    depth: usize,
+    ancestors: Vec<String>,
+}
+
+impl<'a> ReferenceAuditRun<'a> {
+    fn new(
+        plan: &'a ScriptAuditPlan,
+        load_options: &'a LoadOptions,
+        options: AuditOptions,
+        include_digests: bool,
+    ) -> Self {
+        Self {
+            plan,
+            load_options,
+            options,
+            include_digests,
+            resolver: SceneResourceResolver::new(),
+            roots: Vec::new(),
+            reports: Vec::new(),
+            report_by_identity: HashMap::new(),
+            failed_by_identity: HashMap::new(),
+            queued: HashSet::new(),
+            visited: HashSet::new(),
+            queue: VecDeque::new(),
+            edges: Vec::new(),
+            traversal_issues: Vec::new(),
+            disposition: AuditDisposition::Allow,
+        }
+    }
+
+    fn run<I, P>(mut self, roots: I) -> AuditGraphReport
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        for root in roots {
+            self.enqueue_root(root.as_ref());
+        }
+        while let Some(entry) = self.queue.pop_front() {
+            self.audit_queue_entry(entry);
+        }
+        self.finalize_graph_indexes();
+        AuditGraphReport {
+            roots: self.roots,
+            reports: self.reports,
+            edges: self.edges,
+            traversal_issues: self.traversal_issues,
+            disposition: self.disposition,
+        }
+    }
+
+    fn enqueue_root(&mut self, path: &Path) {
+        let identity = self.resolver.scene_file_identity(path);
+        self.roots.push(AuditGraphRoot {
+            path: path.to_path_buf(),
+            identity: Some(identity.key.clone()),
+            report_index: None,
+            issue_index: None,
+        });
+        if self.queued.insert(identity.key.clone()) {
+            self.queue.push_back(ReferenceQueueEntry {
+                path: path.to_path_buf(),
+                identity,
+                depth: 0,
+                ancestors: Vec::new(),
+            });
+        }
+    }
+
+    fn audit_queue_entry(&mut self, entry: ReferenceQueueEntry) {
+        if self.visited.contains(&entry.identity.key) {
+            return;
+        }
+        self.visited.insert(entry.identity.key.clone());
+        match self.audit_graph_scene(&entry.path) {
+            Ok((report, reference_targets)) => self.record_report(entry, report, reference_targets),
+            Err(err) => {
+                let issue_index = self.push_issue(AuditTraversalIssue {
+                    kind: AuditTraversalIssueKind::LoadFailed,
+                    scene_path: Some(entry.path),
+                    source_path: None,
+                    raw_target: None,
+                    message: err.to_string(),
+                });
+                self.failed_by_identity
+                    .insert(entry.identity.key.clone(), issue_index);
+            }
+        }
+    }
+
+    fn audit_graph_scene(&self, path: &Path) -> Result<(AuditReport, Vec<String>), SceneToolError> {
+        let loader = Loader::new(self.load_options.clone());
+        let observation = match loader.observe_analysis_path(path) {
+            Ok(observation) => observation,
+            Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
+                let scene_format = detect_scene_format(path)?;
+                return Ok((
+                    build_parse_budget_blocked_audit_report(
+                        path.to_path_buf(),
+                        scene_format,
+                        ValidationState::Invalid,
+                        self.plan,
+                        self.options,
+                        limit,
+                        None,
+                    ),
+                    Vec::new(),
+                ));
+            }
+            Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
+                let scene_format = detect_scene_format(path)?;
+                return Ok((
+                    build_parse_budget_blocked_audit_report(
+                        path.to_path_buf(),
+                        scene_format,
+                        ValidationState::Invalid,
+                        self.plan,
+                        self.options,
+                        limit,
+                        None,
+                    ),
+                    Vec::new(),
+                ));
+            }
+            Err(err) => return Err(err),
+        };
+        let reference_targets = observation
+            .scene_paths(PathKind::Reference)?
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect::<Vec<_>>();
+        let report = audit_observation_with_digests(
+            &observation,
+            self.plan,
+            self.options,
+            self.include_digests,
+        )?;
+        Ok((report, reference_targets))
+    }
+
+    fn record_report(
+        &mut self,
+        entry: ReferenceQueueEntry,
+        report: AuditReport,
+        reference_targets: Vec<String>,
+    ) {
+        let report_index = self.reports.len();
+        self.disposition = max_disposition(self.disposition, report.disposition);
+        self.report_by_identity
+            .insert(entry.identity.key.clone(), report_index);
+
+        let source_path = report.scene_path.clone();
+        let mut next_ancestors = entry.ancestors.clone();
+        next_ancestors.push(entry.identity.key.clone());
+        self.reports.push(report);
+
+        for raw_target in reference_targets {
+            self.record_reference_edge(
+                &entry.identity,
+                &source_path,
+                &raw_target,
+                entry.depth,
+                &next_ancestors,
+            );
+        }
+    }
+
+    fn record_reference_edge(
+        &mut self,
+        source_identity: &SceneFileIdentity,
+        source_path: &Path,
+        raw_target: &str,
+        source_depth: usize,
+        next_ancestors: &[String],
+    ) {
+        let resolution = self
+            .resolver
+            .resolve_reference_scene_path_value(raw_target, source_path);
+        let mut edge = AuditReferenceEdge {
+            source_identity: source_identity.key.clone(),
+            source_path: source_path.to_path_buf(),
+            raw_target: raw_target.to_string(),
+            resolved_path: resolution.resolved_path.clone(),
+            resolution_status: resolution.status,
+            target_identity: None,
+            target_report_index: None,
+            issue_index: None,
+        };
+
+        match (resolution.status, resolution.resolved_path.as_deref()) {
+            (ScenePathResolutionStatus::Exists, Some(child_path)) => {
+                let child_identity = self.resolver.scene_file_identity(child_path);
+                edge.target_identity = Some(child_identity.key.clone());
+                if next_ancestors
+                    .iter()
+                    .any(|ancestor| ancestor == &child_identity.key)
+                {
+                    edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
+                        kind: AuditTraversalIssueKind::Cycle,
+                        scene_path: Some(child_path.to_path_buf()),
+                        source_path: Some(source_path.to_path_buf()),
+                        raw_target: Some(raw_target.to_string()),
+                        message: "reference cycle detected".to_string(),
+                    }));
+                } else if source_depth + 1 > DEFAULT_REFERENCE_GRAPH_MAX_DEPTH {
+                    edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
+                        kind: AuditTraversalIssueKind::DepthLimit,
+                        scene_path: Some(child_path.to_path_buf()),
+                        source_path: Some(source_path.to_path_buf()),
+                        raw_target: Some(raw_target.to_string()),
+                        message: format!(
+                            "reference graph depth limit exceeded: {}",
+                            DEFAULT_REFERENCE_GRAPH_MAX_DEPTH
+                        ),
+                    }));
+                } else if !self.visited.contains(&child_identity.key)
+                    && !self.queued.contains(&child_identity.key)
+                {
+                    if self.visited.len() + self.queued.len() >= DEFAULT_REFERENCE_GRAPH_MAX_SCENES
+                    {
+                        edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
+                            kind: AuditTraversalIssueKind::SceneLimit,
+                            scene_path: Some(child_path.to_path_buf()),
+                            source_path: Some(source_path.to_path_buf()),
+                            raw_target: Some(raw_target.to_string()),
+                            message: format!(
+                                "reference graph scene limit exceeded: {}",
+                                DEFAULT_REFERENCE_GRAPH_MAX_SCENES
+                            ),
+                        }));
+                    } else {
+                        self.queued.insert(child_identity.key.clone());
+                        self.queue.push_back(ReferenceQueueEntry {
+                            path: child_path.to_path_buf(),
+                            identity: child_identity,
+                            depth: source_depth + 1,
+                            ancestors: next_ancestors.to_vec(),
+                        });
+                    }
+                }
+            }
+            (ScenePathResolutionStatus::Missing, _) => {
+                edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
+                    kind: AuditTraversalIssueKind::MissingReference,
+                    scene_path: resolution.resolved_path.clone(),
+                    source_path: Some(source_path.to_path_buf()),
+                    raw_target: Some(raw_target.to_string()),
+                    message: "reference target is missing".to_string(),
+                }));
+            }
+            (ScenePathResolutionStatus::Unresolved, _) => {
+                edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
+                    kind: AuditTraversalIssueKind::UnresolvedReference,
+                    scene_path: None,
+                    source_path: Some(source_path.to_path_buf()),
+                    raw_target: Some(raw_target.to_string()),
+                    message: "reference target could not be resolved".to_string(),
+                }));
+            }
+            (ScenePathResolutionStatus::Exists, None) => {}
+        }
+
+        self.edges.push(edge);
+    }
+
+    fn push_issue(&mut self, issue: AuditTraversalIssue) -> usize {
+        let issue_index = self.traversal_issues.len();
+        self.traversal_issues.push(issue);
+        self.disposition = max_disposition(self.disposition, AuditDisposition::Review);
+        issue_index
+    }
+
+    fn finalize_graph_indexes(&mut self) {
+        for root in &mut self.roots {
+            let Some(identity) = root.identity.as_deref() else {
+                continue;
+            };
+            root.report_index = self.report_by_identity.get(identity).copied();
+            root.issue_index = self.failed_by_identity.get(identity).copied();
+        }
+        for edge in &mut self.edges {
+            let Some(identity) = edge.target_identity.as_deref() else {
+                continue;
+            };
+            edge.target_report_index = self.report_by_identity.get(identity).copied();
+            if edge.issue_index.is_none() {
+                edge.issue_index = self.failed_by_identity.get(identity).copied();
+            }
+        }
+    }
 }
 
 fn determine_disposition(
