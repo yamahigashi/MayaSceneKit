@@ -1125,6 +1125,70 @@ fn audit_source_command_emits_review_dependency_fact() {
 }
 
 #[test]
+fn audit_file_path_absolute_dependency_remains_allow() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("absolute_file_path.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode file -n \"SampleFile\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"/asset/example/albedo.png\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::Allow);
+    assert!(report.dependency_facts.iter().any(|fact| {
+        fact.kind == DependencyFactKind::FilePath
+            && fact.risk == DependencyRiskClass::Informational
+            && fact.target == "/asset/example/albedo.png"
+    }));
+}
+
+#[test]
+fn audit_file_path_parent_segments_dependency_remains_allow() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("parent_segment_file_path.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode file -n \"SampleFile\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"assets/../textures/albedo.png\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::Allow);
+    assert!(report.dependency_facts.iter().any(|fact| {
+        fact.kind == DependencyFactKind::FilePath
+            && fact.risk == DependencyRiskClass::Informational
+            && fact.target == "assets/../textures/albedo.png"
+    }));
+}
+
+#[test]
+fn audit_reference_path_absolute_dependency_remains_review() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("absolute_reference_path.ma");
+    write_reference_scene(&source, "/asset/example/child.ma", "SampleReferenceRN");
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::Review);
+    assert!(report.dependency_facts.iter().any(|fact| {
+        fact.kind == DependencyFactKind::ReferencePath
+            && fact.risk == DependencyRiskClass::Uncertain
+            && fact.target == "/asset/example/child.ma"
+    }));
+}
+
+#[test]
 fn audit_script_bearing_setattr_write_is_deny_malicious() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("script_attr_write.ma");
