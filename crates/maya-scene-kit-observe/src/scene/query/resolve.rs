@@ -121,6 +121,7 @@ fn push_lexical_segment<'a>(
     segments.push(segment);
 }
 
+#[cfg(test)]
 fn build_resolution_from_candidate(
     style: ScenePathValueStyle,
     resolved_path: Option<PathBuf>,
@@ -146,6 +147,157 @@ fn build_resolution_from_candidate(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneFileIdentity {
+    pub path: PathBuf,
+    pub key: String,
+    pub canonical: bool,
+}
+
+pub struct SceneResourceResolver {
+    workspace_roots: BTreeMap<String, Option<PathBuf>>,
+    file_exists: BTreeMap<String, bool>,
+    identities: BTreeMap<String, SceneFileIdentity>,
+}
+
+impl SceneResourceResolver {
+    pub fn new() -> Self {
+        Self {
+            workspace_roots: BTreeMap::new(),
+            file_exists: BTreeMap::new(),
+            identities: BTreeMap::new(),
+        }
+    }
+
+    pub fn find_scene_workspace_root(&mut self, scene_path: impl AsRef<Path>) -> Option<PathBuf> {
+        let scene_path = scene_path.as_ref();
+        let key = scene_path
+            .parent()
+            .map(lexical_probe_key)
+            .unwrap_or_else(|| lexical_probe_key(scene_path));
+        if let Some(root) = self.workspace_roots.get(&key) {
+            return root.clone();
+        }
+        let root = find_scene_workspace_root_uncached(scene_path);
+        self.workspace_roots.insert(key, root.clone());
+        root
+    }
+
+    pub fn resolve_scene_path_value(
+        &mut self,
+        raw_value: &str,
+        workspace_root: Option<&Path>,
+    ) -> ScenePathResolution {
+        let (style, resolved_path) = resolve_scene_path_candidate(raw_value, workspace_root);
+        self.resolution_from_candidate(style, resolved_path)
+    }
+
+    pub fn resolve_scene_path_values<'a>(
+        &mut self,
+        raw_values: impl IntoIterator<Item = &'a str>,
+        workspace_root: Option<&Path>,
+    ) -> Vec<ScenePathResolution> {
+        raw_values
+            .into_iter()
+            .map(|raw_value| self.resolve_scene_path_value(raw_value, workspace_root))
+            .collect()
+    }
+
+    pub fn resolve_reference_scene_path_value(
+        &mut self,
+        raw_value: &str,
+        source_scene_path: impl AsRef<Path>,
+    ) -> ScenePathResolution {
+        let source_scene_path = source_scene_path.as_ref();
+        let workspace_root = self.find_scene_workspace_root(source_scene_path);
+        let workspace_resolution =
+            self.resolve_scene_path_value(raw_value, workspace_root.as_deref());
+        if workspace_resolution.status == ScenePathResolutionStatus::Exists {
+            return workspace_resolution;
+        }
+
+        let Some(source_parent) = source_scene_path.parent() else {
+            return workspace_resolution;
+        };
+        let style = classify_scene_path_value_style(raw_value);
+        let fallback_path = match style {
+            ScenePathValueStyle::PlainRelative => {
+                let trimmed = raw_value.trim_start_matches('/');
+                (!trimmed.is_empty()).then(|| source_parent.join(trimmed))
+            }
+            ScenePathValueStyle::DoubleSlashWorkspaceRelative => {
+                workspace_relative_suffix(raw_value).map(|suffix| source_parent.join(suffix))
+            }
+            ScenePathValueStyle::Absolute | ScenePathValueStyle::UncAbsolute => None,
+        };
+        let Some(fallback_path) = fallback_path else {
+            return workspace_resolution;
+        };
+        let fallback_resolution = self.resolution_from_candidate(style, Some(fallback_path));
+        if fallback_resolution.status == ScenePathResolutionStatus::Exists
+            || workspace_resolution.status == ScenePathResolutionStatus::Unresolved
+        {
+            fallback_resolution
+        } else {
+            workspace_resolution
+        }
+    }
+
+    pub fn scene_file_identity(&mut self, path: impl AsRef<Path>) -> SceneFileIdentity {
+        let path = path.as_ref();
+        let lexical_key = lexical_probe_key(path);
+        if let Some(identity) = self.identities.get(&lexical_key) {
+            return identity.clone();
+        }
+        let identity = match path.canonicalize() {
+            Ok(canonical_path) => SceneFileIdentity {
+                key: lexical_probe_key(&canonical_path),
+                path: canonical_path,
+                canonical: true,
+            },
+            Err(_) => SceneFileIdentity {
+                key: lexical_key.clone(),
+                path: path.to_path_buf(),
+                canonical: false,
+            },
+        };
+        self.identities.insert(lexical_key, identity.clone());
+        identity
+    }
+
+    fn resolution_from_candidate(
+        &mut self,
+        style: ScenePathValueStyle,
+        resolved_path: Option<PathBuf>,
+    ) -> ScenePathResolution {
+        let status = match resolved_path.as_ref() {
+            Some(path) if self.is_file(path) => ScenePathResolutionStatus::Exists,
+            Some(_) => ScenePathResolutionStatus::Missing,
+            None => ScenePathResolutionStatus::Unresolved,
+        };
+        ScenePathResolution {
+            style,
+            resolved_path,
+            status,
+        }
+    }
+
+    fn is_file(&mut self, path: &Path) -> bool {
+        let key = lexical_probe_key(path);
+        *self
+            .file_exists
+            .entry(key.clone())
+            .or_insert_with(|| Path::new(&key).is_file())
+    }
+}
+
+impl Default for SceneResourceResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
 fn resolve_scene_path_candidates_with_probe<F>(
     candidates: Vec<(ScenePathValueStyle, Option<PathBuf>)>,
     mut probe: F,
@@ -172,8 +324,8 @@ where
         .collect()
 }
 
-pub fn find_scene_workspace_root(scene_path: impl AsRef<Path>) -> Option<PathBuf> {
-    let mut current = scene_path.as_ref().parent()?;
+fn find_scene_workspace_root_uncached(scene_path: &Path) -> Option<PathBuf> {
+    let mut current = scene_path.parent()?;
     loop {
         if current.join("workspace.mel").is_file() {
             return Some(current.to_path_buf());
@@ -182,26 +334,22 @@ pub fn find_scene_workspace_root(scene_path: impl AsRef<Path>) -> Option<PathBuf
     }
 }
 
+pub fn find_scene_workspace_root(scene_path: impl AsRef<Path>) -> Option<PathBuf> {
+    SceneResourceResolver::new().find_scene_workspace_root(scene_path)
+}
+
 pub fn resolve_scene_path_value(
     raw_value: &str,
     workspace_root: Option<&Path>,
 ) -> ScenePathResolution {
-    let candidate = resolve_scene_path_candidate(raw_value, workspace_root);
-    resolve_scene_path_candidates_with_probe(vec![candidate], |path| path.is_file())
-        .into_iter()
-        .next()
-        .expect("single path resolution")
+    SceneResourceResolver::new().resolve_scene_path_value(raw_value, workspace_root)
 }
 
 pub fn resolve_scene_path_values_batch<'a>(
     raw_values: impl IntoIterator<Item = &'a str>,
     workspace_root: Option<&Path>,
 ) -> Vec<ScenePathResolution> {
-    let candidates = raw_values
-        .into_iter()
-        .map(|raw_value| resolve_scene_path_candidate(raw_value, workspace_root))
-        .collect::<Vec<_>>();
-    resolve_scene_path_candidates_with_probe(candidates, |path| path.is_file())
+    SceneResourceResolver::new().resolve_scene_path_values(raw_values, workspace_root)
 }
 
 #[cfg(test)]
@@ -209,9 +357,9 @@ mod tests {
     use std::{cell::Cell, fs, path::PathBuf};
 
     use super::{
-        find_scene_workspace_root, lexical_normalize_path_string, resolve_scene_path_candidate,
-        resolve_scene_path_candidates_with_probe, resolve_scene_path_value,
-        resolve_scene_path_values_batch,
+        SceneResourceResolver, find_scene_workspace_root, lexical_normalize_path_string,
+        resolve_scene_path_candidate, resolve_scene_path_candidates_with_probe,
+        resolve_scene_path_value, resolve_scene_path_values_batch,
     };
     use crate::scene::paths::{ScenePathResolutionStatus, ScenePathValueStyle};
 
@@ -334,6 +482,38 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(batch, singles);
+    }
+
+    #[test]
+    fn resolver_context_matches_free_function_resolution() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let workspace = dir.path().join("project");
+        fs::create_dir_all(workspace.join("scenes")).expect("mkdir scenes");
+        let target = workspace.join("scenes/child.ma");
+        fs::write(&target, "// scene").expect("write scene");
+
+        let mut resolver = SceneResourceResolver::new();
+        let via_resolver = resolver.resolve_scene_path_value("scenes/child.ma", Some(&workspace));
+        let via_free_function = resolve_scene_path_value("scenes/child.ma", Some(&workspace));
+
+        assert_eq!(via_resolver, via_free_function);
+    }
+
+    #[test]
+    fn resolver_reference_resolution_uses_source_parent_fallback() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source_dir = dir.path().join("shots");
+        fs::create_dir_all(&source_dir).expect("mkdir shots");
+        let source = source_dir.join("root.ma");
+        let child = source_dir.join("child.ma");
+        fs::write(&source, "// root").expect("write root");
+        fs::write(&child, "// child").expect("write child");
+
+        let mut resolver = SceneResourceResolver::new();
+        let resolution = resolver.resolve_reference_scene_path_value("child.ma", &source);
+
+        assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
+        assert_eq!(resolution.resolved_path, Some(child));
     }
 
     #[test]

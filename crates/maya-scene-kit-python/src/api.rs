@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use maya_scene_kit_audit::{
-    audit::{audit_script_nodes_with_options_and_digests, build_script_audit_plan},
+    audit::{audit_reference_graph_roots_with_options_and_digests, build_script_audit_plan},
     scene::AuditOptions,
 };
 use maya_scene_kit_edit::scene::{
@@ -123,14 +123,14 @@ pub(crate) fn audit_json(
 ) -> Result<Value, SceneToolError> {
     let load_options = load_options(node_info_paths, max_bytes)?;
     let plan = build_script_audit_plan(rules.to_vec(), max_preview)?;
-    let report = audit_script_nodes_with_options_and_digests(
-        path,
+    let report = audit_reference_graph_roots_with_options_and_digests(
+        [PathBuf::from(path)],
         &plan,
         &load_options,
         AuditOptions::strict_default(),
         include_digests,
-    )?;
-    Ok(json_map::audit_report(&report))
+    );
+    Ok(json_map::audit_graph_report(&report))
 }
 
 pub(crate) fn preview_clean_json(

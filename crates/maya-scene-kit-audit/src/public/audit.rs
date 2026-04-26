@@ -6,6 +6,7 @@ use maya_scene_kit_observe::scene::{
         DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionOrigin,
         ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
     },
+    paths::ScenePathResolutionStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -454,6 +455,84 @@ pub struct AuditReport {
     pub review_signals: Vec<AuditReviewSignal>,
     /// Findings emitted for the scene.
     pub findings: Vec<AuditFinding>,
+}
+
+/// Aggregate report returned by recursive reference graph auditing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditGraphReport {
+    /// Root scenes supplied by the caller.
+    pub roots: Vec<AuditGraphRoot>,
+    /// Unique scene audit reports produced during the graph run.
+    pub reports: Vec<AuditReport>,
+    /// Reference edges discovered during traversal. Duplicate edges are preserved.
+    pub edges: Vec<AuditReferenceEdge>,
+    /// Traversal or child-scene issues that affected the aggregate disposition.
+    pub traversal_issues: Vec<AuditTraversalIssue>,
+    /// Aggregate disposition across reports and traversal issues.
+    pub disposition: AuditDisposition,
+}
+
+impl AuditGraphReport {
+    pub fn finding_count(&self) -> usize {
+        self.reports
+            .iter()
+            .map(AuditReport::finding_count)
+            .sum::<usize>()
+    }
+
+    pub fn review_signal_count(&self) -> usize {
+        self.reports
+            .iter()
+            .map(AuditReport::review_signal_count)
+            .sum::<usize>()
+    }
+
+    pub fn notice_count(&self) -> usize {
+        self.reports
+            .iter()
+            .map(AuditReport::notice_count)
+            .sum::<usize>()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditGraphRoot {
+    pub path: PathBuf,
+    pub identity: Option<String>,
+    pub report_index: Option<usize>,
+    pub issue_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditReferenceEdge {
+    pub source_identity: String,
+    pub source_path: PathBuf,
+    pub raw_target: String,
+    pub resolved_path: Option<PathBuf>,
+    pub resolution_status: ScenePathResolutionStatus,
+    pub target_identity: Option<String>,
+    pub target_report_index: Option<usize>,
+    pub issue_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditTraversalIssue {
+    pub kind: AuditTraversalIssueKind,
+    pub scene_path: Option<PathBuf>,
+    pub source_path: Option<PathBuf>,
+    pub raw_target: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditTraversalIssueKind {
+    UnresolvedReference,
+    MissingReference,
+    Cycle,
+    DepthLimit,
+    SceneLimit,
+    LoadFailed,
 }
 
 impl AuditReport {

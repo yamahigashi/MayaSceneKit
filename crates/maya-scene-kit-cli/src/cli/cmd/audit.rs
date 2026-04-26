@@ -20,7 +20,7 @@ use super::super::{
     runtime_context::load_options,
 };
 use crate::scene::{
-    AuditOptions, SceneToolError, audit_script_nodes_with_options_without_digests,
+    AuditOptions, SceneToolError, audit_reference_graph_roots_with_options_and_digests,
     build_script_audit_plan,
 };
 
@@ -71,28 +71,17 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
     };
 
     let audit_options = AuditOptions::strict_default();
+    let graph_report = audit_reference_graph_roots_with_options_and_digests(
+        files.iter().map(PathBuf::as_path),
+        &plan,
+        &load_options,
+        audit_options,
+        false,
+    );
 
     if json_output {
-        let mut reports = Vec::new();
         let mut file_summaries = Vec::new();
-        for file in &files {
-            let report = match audit_script_nodes_with_options_without_digests(
-                file,
-                &plan,
-                &load_options,
-                audit_options,
-            ) {
-                Ok(r) => r,
-                Err(SceneToolError::Io(e)) => {
-                    eprintln!("error: {e}");
-                    return 2;
-                }
-                Err(e) => {
-                    eprintln!("scene error: {e}");
-                    return 1;
-                }
-            };
-
+        for report in &graph_report.reports {
             let file_hit_count = report.finding_count();
             let file_review_count = report.review_signal_count();
             let file_notice_count = report.notice_count();
@@ -110,9 +99,9 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 report.blocked_on_uncertainty,
                 report.disposition,
             ));
-            reports.push(report);
         }
 
+        let reports = &graph_report.reports;
         let all_hit_count = reports
             .iter()
             .map(|report| report.findings.len())
@@ -129,6 +118,16 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
             "contract_version": JSON_CONTRACT_VERSION,
             "input": input.display().to_string(),
             "profile": audit_options.profile.as_str(),
+            "graph": {
+                "root_count": graph_report.roots.len(),
+                "scene_count": graph_report.reports.len(),
+                "edge_count": graph_report.edges.len(),
+                "traversal_issue_count": graph_report.traversal_issues.len(),
+                "disposition": graph_report.disposition.as_str(),
+                "roots": &graph_report.roots,
+                "edges": &graph_report.edges,
+                "traversal_issues": &graph_report.traversal_issues,
+            },
             "files": file_summaries.iter().map(|(path, format, hit_count, review_count, notice_count, surface_count, validation_state, coverage_state, coverage_issue_count, blocked_on_uncertainty, disposition)| json!({
                 "path": path,
                 "scene_format": format.as_str(),
@@ -283,13 +282,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
             }
         }
 
-        let overall_disposition = file_summaries
-            .iter()
-            .map(|(_, _, _, _, _, _, _, _, _, _, disposition)| *disposition)
-            .max_by_key(|disposition| disposition_rank(*disposition))
-            .unwrap_or(crate::scene::AuditDisposition::Allow);
-
-        match overall_disposition {
+        match graph_report.disposition {
             crate::scene::AuditDisposition::Allow
             | crate::scene::AuditDisposition::AllowWithNotice => 0,
             crate::scene::AuditDisposition::Review => 20,
@@ -300,31 +293,12 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
         let stdout = io::stdout();
         let mut output = io::BufWriter::with_capacity(256 * 1024, stdout.lock());
         let mut total_findings = 0usize;
-        let mut overall_disposition = crate::scene::AuditDisposition::Allow;
 
-        for file in &files {
-            let report = match audit_script_nodes_with_options_without_digests(
-                file,
-                &plan,
-                &load_options,
-                audit_options,
-            ) {
-                Ok(r) => r,
-                Err(SceneToolError::Io(e)) => {
-                    eprintln!("error: {e}");
-                    return 2;
-                }
-                Err(e) => {
-                    eprintln!("scene error: {e}");
-                    return 1;
-                }
-            };
-
+        for report in &graph_report.reports {
             let file_hit_count = report.finding_count();
             let file_review_count = report.review_signal_count();
             let file_notice_count = report.notice_count();
             let scene_path = report.scene_path.to_string_lossy();
-            overall_disposition = max_disposition(overall_disposition, report.disposition);
 
             let _ = writeln!(
                 output,
@@ -363,20 +337,20 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                     render_audit_notice_text(scene_path.as_ref(), notice)
                 );
             }
-            for (review_index, count) in group_review_signal_indexes(&report) {
+            for (review_index, count) in group_review_signal_indexes(report) {
                 let review = &report.review_signals[review_index];
                 let _ = writeln!(
                     output,
                     "{}",
-                    render_grouped_review_signal_text(scene_path.as_ref(), &report, review, count)
+                    render_grouped_review_signal_text(scene_path.as_ref(), report, review, count)
                 );
             }
-            for (hit_index, count) in group_audit_hit_indexes(&report) {
+            for (hit_index, count) in group_audit_hit_indexes(report) {
                 let hit = &report.findings[hit_index];
                 let _ = writeln!(
                     output,
                     "{}",
-                    render_grouped_audit_hit_text(scene_path.as_ref(), &report, hit, count)
+                    render_grouped_audit_hit_text(scene_path.as_ref(), report, hit, count)
                 );
             }
             for fact in &report.dependency_facts {
@@ -402,36 +376,34 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 );
             }
         }
+        for issue in &graph_report.traversal_issues {
+            let _ = writeln!(
+                output,
+                "- reference_graph_issue kind={:?} scene_path={} source_path={} target=\"{}\" msg=\"{}\"",
+                issue.kind,
+                issue
+                    .scene_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+                issue
+                    .source_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string()),
+                issue.raw_target.as_deref().unwrap_or(""),
+                issue.message,
+            );
+        }
         let _ = writeln!(output, "total_findings={total_findings}");
 
-        match overall_disposition {
+        match graph_report.disposition {
             crate::scene::AuditDisposition::Allow
             | crate::scene::AuditDisposition::AllowWithNotice => 0,
             crate::scene::AuditDisposition::Review => 20,
             crate::scene::AuditDisposition::DenyMalicious => 10,
             crate::scene::AuditDisposition::DenyUncertain => 11,
         }
-    }
-}
-
-fn max_disposition(
-    left: crate::scene::AuditDisposition,
-    right: crate::scene::AuditDisposition,
-) -> crate::scene::AuditDisposition {
-    if disposition_rank(left) >= disposition_rank(right) {
-        left
-    } else {
-        right
-    }
-}
-
-fn disposition_rank(disposition: crate::scene::AuditDisposition) -> usize {
-    match disposition {
-        crate::scene::AuditDisposition::Allow => 0,
-        crate::scene::AuditDisposition::AllowWithNotice => 1,
-        crate::scene::AuditDisposition::Review => 2,
-        crate::scene::AuditDisposition::DenyUncertain => 3,
-        crate::scene::AuditDisposition::DenyMalicious => 4,
     }
 }
 

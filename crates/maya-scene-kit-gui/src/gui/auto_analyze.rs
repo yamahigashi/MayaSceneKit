@@ -26,12 +26,13 @@ struct PathResolutionRefreshOutput {
 
 fn resolve_path_resolution_refresh_input(
     input: PathResolutionRefreshInput,
+    resolver: &mut SceneResourceResolver,
 ) -> PathResolutionRefreshOutput {
     let scene_workspace_root = input
         .scene_workspace_root
-        .or_else(|| find_scene_workspace_root(&input.scene_path));
+        .or_else(|| resolver.find_scene_workspace_root(&input.scene_path));
     let workspace_root = scene_workspace_root.as_deref();
-    let resolutions = resolve_scene_path_values_batch(
+    let resolutions = resolver.resolve_scene_path_values(
         input
             .effective_values
             .iter()
@@ -686,9 +687,12 @@ impl GuiShell {
 
                     let results = executor
                         .spawn(async move {
+                            let mut resolver = SceneResourceResolver::new();
                             inputs
                                 .into_iter()
-                                .map(resolve_path_resolution_refresh_input)
+                                .map(|input| {
+                                    resolve_path_resolution_refresh_input(input, &mut resolver)
+                                })
                                 .collect::<Vec<_>>()
                         })
                         .await;
