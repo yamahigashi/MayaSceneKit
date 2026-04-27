@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::{self, Write as _},
     path::{Path, PathBuf},
 };
@@ -20,8 +21,8 @@ use super::super::{
     runtime_context::load_options,
 };
 use crate::scene::{
-    AuditOptions, SceneToolError, audit_reference_graph_roots_with_options_and_digests,
-    build_script_audit_plan,
+    AuditOptions, AuditReport, ExecutionCoverageIssue, SceneToolError,
+    audit_reference_graph_roots_with_options_and_digests, build_script_audit_plan,
 };
 
 pub(crate) struct ScriptAuditArgs<'a> {
@@ -78,6 +79,17 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
         audit_options,
         false,
     );
+    if graph_report.reports.is_empty()
+        && graph_report
+            .traversal_issues
+            .iter()
+            .any(|issue| issue.kind == crate::scene::AuditTraversalIssueKind::LoadFailed)
+    {
+        for issue in &graph_report.traversal_issues {
+            eprintln!("scene error: {}", issue.message);
+        }
+        return 1;
+    }
 
     if json_output {
         let mut file_summaries = Vec::new();
@@ -273,6 +285,40 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                     })
                 })
                 .collect::<Vec<_>>(),
+            "coverage_issue_groups": reports
+                .iter()
+                .flat_map(|report| {
+                    let scene_path = report.scene_path.to_string_lossy();
+                    grouped_coverage_issues(report).into_iter().map(move |group| {
+                        let issue = group.issue;
+                        json!({
+                            "path": scene_path.as_ref(),
+                            "scene_format": report.scene_format.as_str(),
+                            "coverage_state": report.coverage_state.as_str(),
+                            "kind": issue.kind.as_str(),
+                            "message": group.message,
+                            "count": group.count,
+                            "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
+                            "origin": issue.origin.as_ref().map(|origin| json!({
+                                "lang": origin.lang.as_str(),
+                                "trigger": origin.trigger.as_str(),
+                                "surface_kind": origin.surface_kind.as_str(),
+                                "node_name": null,
+                                "attr_name": origin.attr_name.clone(),
+                                "source_kind": origin.source_kind.clone(),
+                                "chunk_form": origin.chunk_form.clone(),
+                                "chunk_tag": origin.chunk_tag.clone(),
+                                "chunk_node_offset": origin.chunk_node_offset,
+                                "chunk_aux": origin.chunk_aux,
+                                "chunk_payload_offset": origin.chunk_payload_offset,
+                                "chunk_payload_size": origin.chunk_payload_size,
+                                "chunk_child_alignment": origin.chunk_child_alignment,
+                                "chunk_child_header_size": origin.chunk_child_header_size,
+                            })),
+                        })
+                    })
+                })
+                .collect::<Vec<_>>(),
         });
         match serde_json::to_string_pretty(&doc) {
             Ok(s) => println!("{s}"),
@@ -364,14 +410,16 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                     render_dependency_fact_detail(&fact.detail),
                 );
             }
-            for issue in &report.coverage_issues {
+            for group in grouped_coverage_issues(report) {
+                let issue = group.issue;
                 let _ = writeln!(
                     output,
-                    "- coverage path={} gate=block coverage_state={} kind={} msg=\"{}\" preview=\"{}\"",
+                    "- coverage path={} gate=block coverage_state={} kind={} count={} msg=\"{}\" preview=\"{}\"",
                     scene_path.as_ref(),
                     report.coverage_state.as_str(),
                     issue.kind.as_str(),
-                    render_coverage_issue_detail(&issue.detail),
+                    group.count,
+                    group.message,
                     issue.preview,
                 );
             }
@@ -407,13 +455,64 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
     }
 }
 
+struct GroupedCoverageIssue<'a> {
+    issue: &'a ExecutionCoverageIssue,
+    message: String,
+    count: usize,
+}
+
+fn grouped_coverage_issues(report: &AuditReport) -> Vec<GroupedCoverageIssue<'_>> {
+    let mut groups = Vec::<GroupedCoverageIssue<'_>>::new();
+    let mut index_by_key = BTreeMap::<String, usize>::new();
+    for issue in &report.coverage_issues {
+        let message = render_coverage_issue_detail(&issue.detail);
+        let key = coverage_issue_group_key(issue, &message);
+        if let Some(index) = index_by_key.get(&key).copied() {
+            groups[index].count += 1;
+        } else {
+            index_by_key.insert(key, groups.len());
+            groups.push(GroupedCoverageIssue {
+                issue,
+                message,
+                count: 1,
+            });
+        }
+    }
+    groups
+}
+
+fn coverage_issue_group_key(issue: &ExecutionCoverageIssue, message: &str) -> String {
+    let origin = issue.origin.as_ref();
+    format!(
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        issue.kind.as_str(),
+        message,
+        origin.map(|value| value.lang.as_str()).unwrap_or(""),
+        origin
+            .map(|value| value.surface_kind.as_str())
+            .unwrap_or(""),
+        origin
+            .and_then(|value| value.attr_name.as_deref())
+            .unwrap_or(""),
+        origin
+            .and_then(|value| value.source_kind.as_deref())
+            .unwrap_or(""),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use tempfile::tempdir;
 
-    use super::{ScriptAuditArgs, run_script_audit};
+    use super::{ScriptAuditArgs, grouped_coverage_issues, run_script_audit};
+    use crate::scene::{
+        AuditDisposition, AuditProfile, AuditReport, ExecutionCoverageIssue,
+        ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
+        ExecutionLanguage, ExecutionOrigin, ExecutionSurfaceKind, ExecutionTrigger, SceneDigestSet,
+        SceneFormat, ValidationState,
+    };
 
     #[test]
     fn run_script_audit_budget_exceed_returns_review_exit_code() {
@@ -442,5 +541,59 @@ mod tests {
         });
 
         assert_eq!(code, 20);
+    }
+
+    #[test]
+    fn coverage_issue_grouping_ignores_node_names() {
+        let origin = |node_name: &str| ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger: ExecutionTrigger::TimeChanged,
+            surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+            node_name: Some(node_name.to_string()),
+            attr_name: Some(".ixp".to_string()),
+            source_range: None,
+            source_kind: Some("internalExpression".to_string()),
+            chunk_form: None,
+            chunk_tag: None,
+            chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
+        };
+        let issue = |node_name: &str| ExecutionCoverageIssue {
+            kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+            detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+                diagnostic: "unexpected token while parsing item".to_string(),
+            },
+            origin: Some(origin(node_name)),
+            preview: String::new(),
+        };
+        let report = AuditReport {
+            scene_path: PathBuf::from("example.ma"),
+            scene_format: SceneFormat::Ma,
+            profile: AuditProfile::StrictDefault,
+            validation_state: ValidationState::Validated,
+            effective_rules: Vec::new(),
+            surface_count: 2,
+            coverage_state: ExecutionCoverageState::Incomplete,
+            coverage_issues: vec![issue("ExampleExpressionA"), issue("ExampleExpressionB")],
+            blocked_on_uncertainty: true,
+            disposition: AuditDisposition::Review,
+            unit_summaries: Vec::new(),
+            dependency_facts: Vec::new(),
+            unknown_semantics: Vec::new(),
+            digests: SceneDigestSet {
+                scene_sha256: String::new(),
+                schema_bundle_sha256: None,
+                policy_bundle_sha256: None,
+            },
+            notices: Vec::new(),
+            surfaces: Vec::new(),
+            review_signals: Vec::new(),
+            findings: Vec::new(),
+        };
+
+        let groups = grouped_coverage_issues(&report);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].count, 2);
     }
 }

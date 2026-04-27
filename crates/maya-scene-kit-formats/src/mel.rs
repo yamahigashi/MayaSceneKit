@@ -20,6 +20,8 @@ pub use self::{
         collect_call_facts, collect_call_facts_from_bytes,
         collect_call_facts_from_bytes_with_budget, collect_call_facts_shared,
         collect_call_facts_shared_with_budget, collect_call_facts_with_budget,
+        collect_expression_call_facts, collect_expression_call_facts_shared_with_budget,
+        collect_expression_call_facts_with_budget,
     },
     mel_top_level::{
         collect_top_level_audit_candidates_from_bytes,

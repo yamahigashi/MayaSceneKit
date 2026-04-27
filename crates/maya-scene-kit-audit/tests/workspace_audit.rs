@@ -1216,6 +1216,76 @@ fn audit_script_bearing_setattr_write_is_deny_malicious() {
 }
 
 #[test]
+fn audit_expression_internal_expression_assignment_is_not_parse_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("expression_assignment.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode expression -n \"ExampleExpression\";\n",
+            "    setAttr \".ixp\" -type \"string\" \".exampleAttr[0] = frame;\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::AllowWithNotice);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_parse_diagnostics"),
+        "unexpected MEL diagnostics finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report.coverage_issues.iter().all(|issue| !matches!(
+            issue.detail,
+            ExecutionCoverageIssueDetail::SurfaceDiagnostics { .. }
+        )),
+        "unexpected surface diagnostics coverage issue: {:?}",
+        report.coverage_issues
+    );
+}
+
+#[test]
+fn audit_expression_internal_expression_sink_still_denies() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("expression_sink.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode expression -n \"ExampleExpression\";\n",
+            "    setAttr \".ixp\" -type \"string\" \"python(\\\"import os\\\");\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding_code_str(finding) == "mel_python"),
+        "expected MEL python finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report.coverage_issues.iter().all(|issue| !matches!(
+            issue.detail,
+            ExecutionCoverageIssueDetail::SurfaceDiagnostics { .. }
+        )),
+        "unexpected surface diagnostics coverage issue: {:?}",
+        report.coverage_issues
+    );
+}
+
+#[test]
 fn audit_budget_exceed_returns_blocked_report_instead_of_error() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("budget_blocked_top_level.ma");

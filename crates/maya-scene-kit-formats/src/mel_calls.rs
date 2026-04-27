@@ -40,6 +40,39 @@ pub fn collect_call_facts_with_budget(source: &str, budget: &MelParseBudget) -> 
     ))
 }
 
+pub fn collect_expression_call_facts(source: &str) -> MelParseFacts {
+    collect_expression_call_facts_with_budget(source, &MelParseBudget::default())
+}
+
+pub fn collect_expression_call_facts_with_budget(
+    source: &str,
+    budget: &MelParseBudget,
+) -> MelParseFacts {
+    let parse = parse_source_with_options(
+        source,
+        ParseOptions {
+            mode: ParseMode::ExpressionAllowTrailingStmtWithoutSemi,
+            budgets: budget.to_parse_budgets(),
+        },
+    );
+    if parse.errors.is_empty() {
+        return call_facts_from_parse(parse);
+    }
+    if let Some(normalized) = normalize_leading_dot_expression_attrs(source) {
+        let normalized_parse = parse_source_with_options(
+            &normalized,
+            ParseOptions {
+                mode: ParseMode::ExpressionAllowTrailingStmtWithoutSemi,
+                budgets: budget.to_parse_budgets(),
+            },
+        );
+        if normalized_parse.errors.len() < parse.errors.len() {
+            return call_facts_from_parse(normalized_parse);
+        }
+    }
+    call_facts_from_parse(parse)
+}
+
 pub fn collect_call_facts_shared(source: Arc<str>) -> MelParseFacts {
     collect_call_facts_shared_with_budget(source, &MelParseBudget::default())
 }
@@ -55,6 +88,35 @@ pub fn collect_call_facts_shared_with_budget(
             budgets: budget.to_parse_budgets(),
         },
     ))
+}
+
+pub fn collect_expression_call_facts_shared_with_budget(
+    source: Arc<str>,
+    budget: &MelParseBudget,
+) -> MelParseFacts {
+    let parse = parse_shared_source_with_options(
+        Arc::clone(&source),
+        ParseOptions {
+            mode: ParseMode::ExpressionAllowTrailingStmtWithoutSemi,
+            budgets: budget.to_parse_budgets(),
+        },
+    );
+    if parse.errors.is_empty() {
+        return call_facts_from_shared_parse(parse);
+    }
+    if let Some(normalized) = normalize_leading_dot_expression_attrs(source.as_ref()) {
+        let normalized_parse = parse_shared_source_with_options(
+            Arc::<str>::from(normalized),
+            ParseOptions {
+                mode: ParseMode::ExpressionAllowTrailingStmtWithoutSemi,
+                budgets: budget.to_parse_budgets(),
+            },
+        );
+        if normalized_parse.errors.len() < parse.errors.len() {
+            return call_facts_from_shared_parse(normalized_parse);
+        }
+    }
+    call_facts_from_shared_parse(parse)
 }
 
 pub fn collect_call_facts_from_bytes(bytes: &[u8]) -> MelParseFacts {
@@ -103,6 +165,74 @@ fn call_facts_from_shared_parse(parse: SharedParse) -> MelParseFacts {
         sink_arg_facts: parts.sink_arg_facts,
         code_like_value_facts: parts.code_like_value_facts,
     }
+}
+
+fn normalize_leading_dot_expression_attrs(source: &str) -> Option<String> {
+    let mut out = source.to_string();
+    let mut changed = false;
+    let mut previous_significant = None;
+    let mut in_string = false;
+    let mut escape = false;
+    for (offset, ch) in source.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            previous_significant = Some(ch);
+            continue;
+        }
+
+        if ch == '.'
+            && source[offset + 1..]
+                .chars()
+                .next()
+                .is_some_and(is_expression_attr_start)
+            && previous_significant.is_none_or(allows_leading_dot_expr_attr)
+        {
+            out.replace_range(offset..offset + 1, "_");
+            changed = true;
+        }
+        if !ch.is_whitespace() {
+            previous_significant = Some(ch);
+        }
+    }
+    changed.then_some(out)
+}
+
+fn is_expression_attr_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn allows_leading_dot_expr_attr(ch: char) -> bool {
+    matches!(
+        ch,
+        '(' | '{'
+            | '['
+            | '='
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | ','
+            | '?'
+            | ':'
+            | ';'
+            | '<'
+            | '>'
+            | '!'
+            | '&'
+            | '|'
+    )
 }
 
 struct CallFactParts {
@@ -1180,7 +1310,10 @@ fn expr_contains_invoke(expr: &Expr) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use super::{collect_call_facts, collect_call_facts_from_bytes, collect_call_facts_shared};
+    use super::{
+        collect_call_facts, collect_call_facts_from_bytes, collect_call_facts_shared,
+        collect_expression_call_facts,
+    };
     use crate::mel::{
         MelAuditTopLevelItemFact, MelCallSurfaceKind, MelDiagnosticStage,
         MelNormalizedCommandItemFact, MelParseDiagnostic, MelSinkArgKind, MelSourceEncoding,
@@ -1261,6 +1394,43 @@ mod tests {
             Some("evil.mel")
         );
         assert!(facts.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn expression_mode_parses_direct_attribute_assignment_without_command_diagnostics() {
+        let facts = collect_expression_call_facts("ExampleNode.translateX = frame;");
+        assert!(facts.diagnostics.is_empty());
+        assert!(facts.calls.is_empty());
+    }
+
+    #[test]
+    fn expression_mode_parses_current_node_attribute_assignment_without_command_diagnostics() {
+        let facts = collect_expression_call_facts(".exampleAttr[0] = frame;");
+        assert!(facts.diagnostics.is_empty());
+        assert!(facts.calls.is_empty());
+    }
+
+    #[test]
+    fn expression_mode_parses_current_node_attribute_conditionals() {
+        let facts = collect_expression_call_facts(
+            "if (.exampleAttr[0] > 0) { .otherAttr[0] = 1; } else { .otherAttr[0] = 0; }",
+        );
+        assert!(facts.diagnostics.is_empty());
+        assert!(facts.calls.is_empty());
+    }
+
+    #[test]
+    fn expression_mode_still_collects_sink_calls() {
+        let facts = collect_expression_call_facts(r#"python("import os");"#);
+        assert!(facts.diagnostics.is_empty());
+        assert_eq!(facts.calls.len(), 1);
+        assert_eq!(facts.calls[0].name.as_ref(), "python");
+        assert!(
+            facts
+                .sink_arg_facts
+                .iter()
+                .any(|fact| fact.sink_kind == MelSinkArgKind::Python)
+        );
     }
 
     #[test]
