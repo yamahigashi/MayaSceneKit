@@ -449,7 +449,7 @@ enum MaTopLevelAuditClass {
 
 fn classify_top_level_command(head: &str) -> MaTopLevelAuditClass {
     match head {
-        "python" | "eval" | "evalDeferred" | "scriptJob" | "source" | "loadPlugin"
+        "python" | "eval" | "evalDeferred" | "exec" | "scriptJob" | "source" | "loadPlugin"
         | "commandPort" | "print" | "warning" | "error" | "confirmDialog" | "headsUpMessage" => {
             MaTopLevelAuditClass::ExecutionSurface
         }
@@ -464,6 +464,7 @@ fn classify_top_level_other(source_text: &str) -> Option<&'static str> {
         "python",
         "eval",
         "evalDeferred",
+        "exec",
         "scriptJob",
         "source",
         "loadPlugin",
@@ -876,7 +877,7 @@ fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
 fn contains_any_audit_marker(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     contains_call_like_token(&lower, "python")
-        || contains_call_like_token(&lower, "exec")
+        || contains_standalone_token(&lower, "exec")
         || contains_call_like_token(&lower, "chr")
         || contains_standalone_token(&lower, "eval")
         || contains_standalone_token(&lower, "evaldeferred")
@@ -1116,6 +1117,7 @@ mod tests {
     #[test]
     fn raw_marker_detection_requires_standalone_tokens() {
         assert!(contains_any_audit_marker(r#"source "tools/startup.mel""#));
+        assert!(contains_any_audit_marker(r#"exec "SampleTool.exe""#));
         assert!(!contains_any_audit_marker(
             "setAttr \".x\" -type \"string\" \"fogSource\";"
         ));
@@ -1125,6 +1127,7 @@ mod tests {
     #[test]
     fn raw_payload_prefilter_detects_ascii_audit_markers() {
         assert!(payload_may_contain_audit_marker(b"\0Python\0"));
+        assert!(payload_may_contain_audit_marker(b"Exec"));
         assert!(payload_may_contain_audit_marker(b"evalDeferred"));
         assert!(payload_may_contain_audit_marker(b"commandPort"));
         assert!(!payload_may_contain_audit_marker(b"socket_blinn1SG"));

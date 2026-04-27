@@ -123,6 +123,7 @@ fn audit_finding_code(finding_id: &str) -> AuditFindingCode {
         "mel_callback_flag" => AuditFindingCode::MelCallbackFlag,
         "mel_eval" => AuditFindingCode::MelEval,
         "mel_evaldeferred" => AuditFindingCode::MelEvalDeferred,
+        "mel_exec" => AuditFindingCode::MelExec,
         "mel_parse_diagnostics" => AuditFindingCode::MelParseDiagnostics,
         "mel_python" => AuditFindingCode::MelPython,
         "mel_scriptjob" => AuditFindingCode::MelScriptjob,
@@ -169,6 +170,7 @@ fn audit_finding_detail(finding_id: &str, message: &str) -> AuditFindingDetail {
         "mel_evaldeferred" if message == "dynamic or assembled evalDeferred body detected" => {
             Some(StaticAuditFindingDetail::DynamicOrAssembledEvalDeferredBodyDetected)
         }
+        "mel_exec" => Some(StaticAuditFindingDetail::MelExecCommandDetected),
         "mel_parse_diagnostics" => Some(StaticAuditFindingDetail::MelParseDiagnosticsPresent),
         "mel_python"
             if message == "MEL -> python(...) fixed-literal bridge is not auto-allowed" =>

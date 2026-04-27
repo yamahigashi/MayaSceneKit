@@ -530,6 +530,7 @@ fn should_model_as_execution_unit(origin: &ExecutionOrigin) -> bool {
                 "python"
                     | "eval"
                     | "evalDeferred"
+                    | "exec"
                     | "scriptJob"
                     | "source"
                     | "loadPlugin"

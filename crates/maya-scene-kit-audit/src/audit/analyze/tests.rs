@@ -6,8 +6,8 @@ use super::{
     AnalysisSurface, analyze_mel_surface, mel::find_mel_call, text_scan::scan_mel_sink_word_hits,
 };
 use crate::scene::{
-    AuditEvidence, AuditEvidenceKey, AuditSurfaceDerivation, ExecutionLanguage, ExecutionOrigin,
-    ExecutionSurfaceKind, ExecutionTrigger,
+    AuditEvidence, AuditEvidenceKey, AuditSinkKind, AuditSurfaceDerivation, ExecutionLanguage,
+    ExecutionOrigin, ExecutionSurfaceKind, ExecutionTrigger,
     execution::{MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceFacts},
 };
 
@@ -64,6 +64,77 @@ fn parser_backed_lookup_matches_call_name_case_insensitively() {
 
     let call = find_mel_call(&surface, "Source").expect("parser-backed source call");
     assert_eq!(call.literal_first_arg.as_deref(), Some("evil.mel"));
+}
+
+#[test]
+fn mel_exec_command_emits_dedicated_finding() {
+    let surface = AnalysisSurface {
+        text: Arc::from(r#"exec "SampleTool.exe";"#),
+        preview: "exec".to_string(),
+        origin: ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger: ExecutionTrigger::FileOpen,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            node_name: Some("ExampleExecScript".to_string()),
+            attr_name: Some(".b".to_string()),
+            source_range: None,
+            source_kind: Some("scriptType=1".to_string()),
+            chunk_form: None,
+            chunk_tag: None,
+            chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
+        },
+        derivation: AuditSurfaceDerivation::Observed,
+        mel: Some(Arc::new(collect_mel_surface_facts(
+            r#"exec "SampleTool.exe";"#,
+        ))),
+    };
+
+    let analysis = analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new());
+
+    assert!(analysis.findings.iter().any(|finding| {
+        finding.code.as_str() == "mel_exec" && finding.sink == AuditSinkKind::MelExec
+    }));
+}
+
+#[test]
+fn mel_exec_detection_does_not_scan_nested_python_strings() {
+    let surface = AnalysisSurface {
+        text: Arc::from(r#"python("exec('print(1)')");"#),
+        preview: "python".to_string(),
+        origin: ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger: ExecutionTrigger::FileOpen,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            node_name: Some("ExamplePythonBridgeScript".to_string()),
+            attr_name: Some(".b".to_string()),
+            source_range: None,
+            source_kind: Some("scriptType=1".to_string()),
+            chunk_form: None,
+            chunk_tag: None,
+            chunk_node_offset: None,
+            ..ExecutionOrigin::without_chunk_address()
+        },
+        derivation: AuditSurfaceDerivation::Observed,
+        mel: Some(Arc::new(collect_mel_surface_facts(
+            r#"python("exec('print(1)')");"#,
+        ))),
+    };
+
+    let analysis = analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new());
+
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .all(|finding| finding.code.as_str() != "mel_exec")
+    );
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .any(|finding| finding.sink == AuditSinkKind::MelPython)
+    );
 }
 
 #[test]

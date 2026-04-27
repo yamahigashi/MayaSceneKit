@@ -118,7 +118,7 @@ pub(crate) fn classify_mel_command(name: &str) -> Option<EffectRule> {
             EffectCertainty::Proven,
             ReasonKind::MelHookLikeCommand,
         )),
-        "source" | "loadPlugin" | "file" => Some(EffectRule::new(
+        "exec" | "source" | "loadPlugin" | "file" => Some(EffectRule::new(
             ExecutionEffectClass::ExternalDependency,
             ExecutionSemanticClass::DependencyWrite,
             EffectCertainty::Proven,
@@ -473,6 +473,10 @@ mod tests {
 
         let eval = classify_mel_command("eval").expect("eval rule");
         assert_eq!(eval.effect, ExecutionEffectClass::DynamicEvaluation);
+
+        let exec = classify_mel_command("exec").expect("exec rule");
+        assert_eq!(exec.effect, ExecutionEffectClass::ExternalDependency);
+        assert_eq!(exec.semantic_class, ExecutionSemanticClass::DependencyWrite);
 
         let source = classify_mel_command("source").expect("source rule");
         assert_eq!(source.effect, ExecutionEffectClass::ExternalDependency);
