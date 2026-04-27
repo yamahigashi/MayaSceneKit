@@ -12,7 +12,7 @@ use super::{
     text_scan::{MelSinkWordHits, MelTextScan},
 };
 use crate::scene::{
-    AuditEvidence, AuditFinding, AuditSeverity, AuditSinkKind, ExecutionLanguage,
+    AuditEvidence, AuditEvidenceKey, AuditFinding, AuditSeverity, AuditSinkKind, ExecutionLanguage,
     execution::{MelSurfaceCall, MelSurfaceFacts},
 };
 
@@ -136,6 +136,12 @@ pub(super) fn analyze_mel_surface_impl(
         }
     }
 
+    if let Some(exec_call) = mel_sink_calls.exec {
+        analysis
+            .findings
+            .push(mel_exec_finding(surface_index, surface, exec_call));
+    }
+
     if has_mel_call_or_word(
         surface,
         mel_sink_calls.command_port,
@@ -153,6 +159,43 @@ pub(super) fn analyze_mel_surface_impl(
     }
 
     analysis
+}
+
+fn mel_exec_finding(
+    surface_index: usize,
+    surface: &AnalysisSurface,
+    call: &MelSurfaceCall,
+) -> AuditFinding {
+    let mut evidence = vec![AuditEvidence::KeyValue {
+        key: AuditEvidenceKey::Command,
+        value: call.name.to_string(),
+    }];
+    let preview_override = call
+        .literal_first_arg
+        .as_deref()
+        .map(super::builders::snippet)
+        .filter(|preview| !preview.is_empty());
+    if let Some(arg) = call.literal_first_arg.as_deref() {
+        evidence.push(AuditEvidence::FreeText {
+            value: format!("fixed literal command: {}", super::builders::snippet(arg)),
+        });
+    } else if call.dynamic {
+        evidence.push(AuditEvidence::FreeText {
+            value: "dynamic or unresolved command".to_string(),
+        });
+    }
+
+    build_finding(
+        surface_index,
+        surface,
+        "mel_exec",
+        severity_for_trigger(AuditSeverity::High, surface.origin.trigger),
+        AuditSinkKind::MelExec,
+        None,
+        "MEL exec command detected",
+        evidence,
+        preview_override,
+    )
 }
 
 fn analyze_mel_sink<F>(
@@ -278,6 +321,7 @@ fn ensure_sink_word_hits<'a>(
 #[derive(Debug, Clone, Copy, Default)]
 struct MelSinkCalls<'a> {
     command_port: Option<&'a MelSurfaceCall>,
+    exec: Option<&'a MelSurfaceCall>,
 }
 
 impl<'a> MelSinkCalls<'a> {
@@ -286,6 +330,10 @@ impl<'a> MelSinkCalls<'a> {
         for call in &facts.calls {
             if calls.command_port.is_none() && call.name.eq_ignore_ascii_case("commandPort") {
                 calls.command_port = Some(call);
+            } else if calls.exec.is_none() && call.name.eq_ignore_ascii_case("exec") {
+                calls.exec = Some(call);
+            }
+            if calls.command_port.is_some() && calls.exec.is_some() {
                 break;
             }
         }

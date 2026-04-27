@@ -684,6 +684,7 @@ fn is_audit_top_level_command_head(head: &str) -> bool {
         "python"
             | "eval"
             | "evalDeferred"
+            | "exec"
             | "scriptJob"
             | "source"
             | "loadPlugin"
@@ -711,6 +712,7 @@ fn classify_top_level_other(source_text: &str) -> Option<&'static str> {
         "python",
         "eval",
         "evalDeferred",
+        "exec",
         "scriptJob",
         "source",
         "loadPlugin",
@@ -1561,6 +1563,18 @@ mod tests {
                 if command.head.as_ref() == "python"
                     && command.source_text(&sections.audit_top_level)
                         == "python(\"print(\\\"hi\\\")\");"
+        ));
+    }
+
+    #[test]
+    fn selective_sections_preserve_shell_style_exec_audit_head() {
+        let sections = extract_raw_selective_sections_from_ma(b"exec \"SampleTool.exe\";\n");
+        assert!(matches!(
+            sections.audit_top_level.items.first(),
+            Some(crate::mel::MelAuditTopLevelItemFact::Command(command))
+                if command.head.as_ref() == "exec"
+                    && command.source_text(&sections.audit_top_level)
+                        == "exec \"SampleTool.exe\";"
         ));
     }
 

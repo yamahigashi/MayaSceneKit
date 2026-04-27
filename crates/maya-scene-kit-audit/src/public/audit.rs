@@ -129,6 +129,7 @@ pub enum AuditFindingCode {
     MelCallbackFlag,
     MelEval,
     MelEvalDeferred,
+    MelExec,
     MelParseDiagnostics,
     MelPython,
     MelScriptjob,
@@ -155,6 +156,7 @@ impl AuditFindingCode {
             Self::MelCallbackFlag => "mel_callback_flag",
             Self::MelEval => "mel_eval",
             Self::MelEvalDeferred => "mel_evaldeferred",
+            Self::MelExec => "mel_exec",
             Self::MelParseDiagnostics => "mel_parse_diagnostics",
             Self::MelPython => "mel_python",
             Self::MelScriptjob => "mel_scriptjob",
@@ -254,6 +256,7 @@ pub enum StaticAuditFindingDetail {
     ExecutionSurfaceTriggerCouldNotBeInferred,
     EvalFixedLiteralBodyDetected,
     EvalDeferredFixedLiteralBodyDetected,
+    MelExecCommandDetected,
     MelParseDiagnosticsPresent,
     PythonBodyAssemblyMarkersDetected,
     PythonCallTargetCouldNotBeResolved,
@@ -291,6 +294,7 @@ impl StaticAuditFindingDetail {
             Self::EvalDeferredFixedLiteralBodyDetected => {
                 "evalDeferred fixed-literal body detected"
             }
+            Self::MelExecCommandDetected => "MEL exec command detected",
             Self::MelParseDiagnosticsPresent => {
                 "MEL parse diagnostics present; audit blocked on unresolved MEL semantics"
             }
@@ -658,6 +662,8 @@ pub enum AuditSinkKind {
     MelEval,
     /// MEL `evalDeferred`.
     MelEvalDeferred,
+    /// MEL `exec`.
+    MelExec,
     /// MEL `scriptJob`.
     MelScriptJob,
     /// MEL `source`.
@@ -691,6 +697,7 @@ impl AuditSinkKind {
             Self::MelPython => "mel_python",
             Self::MelEval => "mel_eval",
             Self::MelEvalDeferred => "mel_eval_deferred",
+            Self::MelExec => "mel_exec",
             Self::MelScriptJob => "mel_script_job",
             Self::MelSource => "mel_source",
             Self::MelCommandPort => "mel_command_port",

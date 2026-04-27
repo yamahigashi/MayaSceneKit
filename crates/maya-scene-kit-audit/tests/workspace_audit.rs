@@ -16,7 +16,7 @@ use maya_scene_kit_observe::scene::{
     core::ValidationState,
     evidence::{
         DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail,
-        ExecutionCoverageState, ExecutionLanguage, ExecutionSurfaceKind,
+        ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage, ExecutionSurfaceKind,
     },
     paths::PathKind,
 };
@@ -139,6 +139,30 @@ fn write_top_level_command_port_scene(path: &std::path::Path) {
             "//Maya ASCII 2026 scene\n",
             "requires maya \"2026\";\n",
             "commandPort -n \":7001\";\n",
+        ),
+    );
+}
+
+fn write_mel_exec_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"ExampleExecScript\";\n",
+            "    setAttr \".b\" -type \"string\" \"exec \\\"SampleTool.exe\\\"\";\n",
+            "    setAttr \".st\" 1;\n",
+        ),
+    );
+}
+
+fn write_top_level_exec_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "exec \"SampleTool.exe\";\n",
         ),
     );
 }
@@ -327,6 +351,53 @@ fn audit_top_level_command_port_is_block() {
             .iter()
             .any(|finding| finding.sink == AuditSinkKind::MelCommandPort)
     );
+}
+
+#[test]
+fn audit_mel_exec_script_node_is_block_without_unknown_semantics() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("mel_exec_script_node.ma");
+    write_mel_exec_scene(&source);
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(!report.blocked_on_uncertainty);
+    assert!(report.unknown_semantics.is_empty());
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding_code_str(finding) == "mel_exec"
+                && finding.sink == AuditSinkKind::MelExec
+                && finding.severity == AuditSeverity::Critical
+        }),
+        "missing MEL exec finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .unit_summaries
+            .iter()
+            .any(|summary| summary.effect == ExecutionEffectClass::ExternalDependency)
+    );
+}
+
+#[test]
+fn audit_top_level_exec_is_block() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("top_level_exec.ma");
+    write_top_level_exec_scene(&source);
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.sink == AuditSinkKind::MelExec)
+    );
+    assert!(report.surfaces.iter().any(|surface| {
+        surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelCommand
+            && surface.origin.source_kind.as_deref() == Some("exec")
+    }));
 }
 
 #[test]
