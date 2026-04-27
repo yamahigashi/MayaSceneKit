@@ -15,8 +15,17 @@ Current CLI commands:
 - `dump`: dump `requires` plus script nodes from a file or directory
 - `paths`: extract file and reference paths from a file or directory, including `fileTextureName` owners such as `file`, `psdFileTex`, and `movie`
 - `audit`: audit execution-capable surfaces
+- `to-ascii`: convert Maya Binary scenes to Maya ASCII and optionally emit decode issues
 - `clean`: remove script nodes and save in forensic mode
 - `replace`: replace file and reference paths in forensic mode
+
+Common options:
+
+- `--node-info <path>` can be repeated on `dump`, `paths`, `audit`,
+  `to-ascii`, `clean`, and `replace` to load additional node semantics files
+- `--max-bytes <bytes>` caps scene parsing for defensive batch runs
+- `dump`, `paths`, and `replace` use `--out` for single-file output and
+  `--out-dir` for directory output
 
 ## Execution Modes
 
@@ -36,9 +45,10 @@ Public reports expose `validation_state` as one of:
 
 `audit` is conservative by design:
 
-- `.ma` execution surfaces are audited directly
-- `.mb` strict audit remains fail-closed until binary surface extraction is authoritative
-- parse failures on autorun Python surfaces are treated conservatively in strict-capable paths
+- `.ma` and `.mb` execution surfaces are collected through the observe layer
+- reference graph traversal is included, and traversal failures are reported separately
+- incomplete coverage, unknown semantics, degraded validation, or parse-budget exhaustion can make `blocked_on_uncertainty` true
+- review-only signals affect disposition under both built-in audit profiles
 
 ## Current Scope
 
@@ -48,12 +58,13 @@ Public reports expose `validation_state` as one of:
 - Requires extraction for `.ma/.mb`
 - File and reference path extraction for `.ma/.mb`
 - File and reference path rewrite for `.ma/.mb`
+- Best-effort `.mb` to `.ma` conversion with structured issue reporting
 
 ## Embedded Schema And `node_info` Overlays
 
 CLI commands use the embedded schema bundle shipped with the binary.
 The only external schema-like input accepted by the CLI is repeatable `--node-info`
-overlay files.
+files.
 
 Node-info merge order for `.mb` reads and `to-ascii` is:
 
@@ -64,116 +75,45 @@ Angular `setAttr` conversion (radian payload to degree output) uses node-local
 rules from merged `node_info` data (`node_type + attrs.{token}.unit/kind`), plus
 `addAttr`-defined custom `doubleAngle` and `floatAngle` attributes in the scene.
 
-## Generate `plugin_node_info.yaml`
+Execution-surface extraction also uses curated node-local `node_info` profiles.
+The checked-in profile set is intentionally small:
 
-Use this `mayapy` snippet to dump a single YAML file (`plugin_node_info.yaml`) as
-seed data for node-based semantics review (`node_type + typeid + attrs(unit=angle)`).
+- `script`: `script_node` profile with body attrs `a` and `b`, trigger attr `st`,
+  and language attr `stp`
+- `expression`: `attr_callbacks` profile for `expression` and
+  `internalExpression`, using MEL and the `time_changed` trigger
+- `renderGlobals`: `attr_callbacks` profile for MEL render callback attrs such as
+  `preRenderMel`, `preMel`, and `postRenderMel`
 
-```python
-import maya.standalone
-maya.standalone.initialize(name="python")
+Profile attr references may use either short names or aliases from `attrs`, but
+they are normalized to the node-local short attr. Long report labels come from
+`attrs.*.aliases`; profiles do not carry their own display labels.
 
-import re
-import maya.cmds as cmds
-import maya.api.OpenMaya as om
+For plugin or custom node entries, include the full node entry because later
+`--node-info` files replace earlier node entries as a whole:
 
-# Load one or more plugins before collecting node type ids.
-plugins = ["yourPluginA", "yourPluginB"]
-for plugin in plugins:
-    if not cmds.pluginInfo(plugin, q=True, loaded=True):
-        cmds.loadPlugin(plugin, quiet=True)
-
-node_types = []
-for plugin in plugins:
-    node_types.extend(cmds.pluginInfo(plugin, q=True, dependNode=True) or [])
-
-def yaml_quote(value):
-    value = value.replace("\\", "\\\\").replace("\"", "\\\"")
-    return f"\"{value}\""
-
-def yaml_token(value):
-    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
-        return value
-    return yaml_quote(value)
-
-def collect_angle_attrs(node_class):
-    out = {}
-    attr_count = node_class.attributeCount
-    for idx in range(attr_count):
-        attr_obj = node_class.attribute(idx)
-        fn_attr = om.MFnAttribute(attr_obj)
-        short_name = fn_attr.shortName
-        long_name = fn_attr.name
-
-        if attr_obj.hasFn(om.MFn.kUnitAttribute):
-            fn_unit = om.MFnUnitAttribute(attr_obj)
-            if fn_unit.unitType == om.MFnUnitAttribute.kAngle:
-                key = short_name or long_name
-                aliases = [name for name in [long_name] if name and name != key]
-                out[key] = {"kind": "scalar", "aliases": aliases}
-                continue
-
-        if attr_obj.hasFn(om.MFn.kCompoundAttribute):
-            fn_compound = om.MFnCompoundAttribute(attr_obj)
-            angle_children = []
-            for cidx in range(fn_compound.numChildren):
-                child_obj = fn_compound.child(cidx)
-                if not child_obj.hasFn(om.MFn.kUnitAttribute):
-                    continue
-                fn_child_unit = om.MFnUnitAttribute(child_obj)
-                if fn_child_unit.unitType != om.MFnUnitAttribute.kAngle:
-                    continue
-                fn_child_attr = om.MFnAttribute(child_obj)
-                angle_children.append((fn_child_attr.shortName, fn_child_attr.name))
-
-            if len(angle_children) >= 2:
-                key = short_name or long_name
-                aliases = [name for name in [long_name] if name and name != key]
-                out[key] = {"kind": "vector3", "aliases": aliases}
-                for child_short, child_long in angle_children:
-                    child_key = child_short or child_long
-                    child_aliases = [name for name in [child_long] if name and name != child_key]
-                    out[child_key] = {"kind": "scalar", "aliases": child_aliases}
-    return out
-
-node_info = {}
-for node_type in sorted(set(node_types)):
-    try:
-        node_class = om.MNodeClass(node_type)
-        type_id = node_class.typeId.id()
-    except Exception:
-        continue
-
-    node_info[node_type] = {
-        "typeid": f"0x{type_id:08X}",
-        "attrs": collect_angle_attrs(node_class),
-    }
-
-out_path = "plugin_node_info.yaml"
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write("version: 1\n")
-    f.write("nodes:\n")
-    for node_type in sorted(node_info.keys()):
-        info = node_info[node_type]
-        f.write(f"  {yaml_token(node_type)}:\n")
-        f.write(f"    typeid: {info['typeid']}\n")
-        f.write("    attrs:\n")
-        attrs = info["attrs"]
-        if not attrs:
-            f.write("      {}\n")
-            continue
-        for attr_name in sorted(attrs.keys()):
-            rule = attrs[attr_name]
-            aliases = ", ".join(yaml_quote(v) for v in rule["aliases"])
-            f.write(
-                f"      {yaml_token(attr_name)}: "
-                f"{{ unit: angle, kind: {rule['kind']}, aliases: [{aliases}] }}\n"
-            )
-
-print(f"written: {out_path} ({len(node_info)} node types)")
+```yaml
+version: 1
+nodes:
+  ExampleRenderNode:
+    typeid: 0x45584D50
+    execution:
+      profiles:
+        - kind: attr_callbacks
+          default_language: mel
+          default_trigger: render
+          attrs: [preRenderMel]
+    attrs:
+      prm: { unit: none, kind: scalar, aliases: [preRenderMel] }
 ```
 
-Use `plugin_node_info.yaml` as review input when curating node-specific semantics.
+Generated execution candidates are review input only. Runtime audit only consumes
+curated `node_info.execution` profiles that are checked into the schema bundle or
+provided through explicit `--node-info` files.
+
+Additional `node_info` files are primarily for studio or pipeline administrators
+who maintain site-specific Maya/plugin semantics. For guidance, see
+[Supplying and extrapolating studio-specific Maya node knowledge](node_info_authoring.md).
 
 ## `to-ascii --issues-json`
 
@@ -220,3 +160,5 @@ Exit codes:
 
 - [README](../README.md)
 - [Python usage](python_usage.md)
+- [Development](development.md)
+- [Supplying and extrapolating studio-specific Maya node knowledge](node_info_authoring.md)

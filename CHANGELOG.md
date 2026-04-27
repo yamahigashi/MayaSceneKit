@@ -2,11 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [v0.2.2] - 2026-04-23
+## [v0.2.4] - 2026-04-27
 
-This release tightens MEL audit behavior by replacing whole-surface
-body-assembly heuristics with sink-aware analysis and by making review-only
-signals affect final audit disposition.
+This release tightens execution-surface detection across Maya ASCII and Maya
+Binary scenes. MEL audit behavior now uses sink-aware analysis instead of
+whole-surface body-assembly heuristics, schema data can drive execution
+observation for script-bearing attributes, and adapter surfaces expose richer
+evidence for review.
 
 ### Added
 
@@ -19,6 +21,10 @@ signals affect final audit disposition.
 - Added a dedicated GUI action to stage deletion of
   `uiConfigurationScriptNode` from the main Edit menu and file-list context
   menu using the existing scene-edit clean pipeline.
+- Added schema-driven execution observation profiles for script-bearing Maya
+  node attributes, backed by `schemas/node_info.yaml`.
+- Added file-list Explorer actions in the GUI so users can open selected scene
+  files or their containing folders directly from workspace tables.
 
 ### Changed
 
@@ -36,16 +42,47 @@ signals affect final audit disposition.
   finding-specific snippets, include node-name evidence, and expose richer
   provenance in GUI detail views, clipboard payloads, CLI output, and Python
   JSON.
+- Updated `maya-mel` to `0.1.3` and aligned selective Maya ASCII parsing with
+  the newer MEL parsing behavior.
+- Cached parsed schema node information so repeated observe/audit flows can
+  reuse the same node semantics more efficiently.
 
 ### Fixed
 
 - Fixed false positives where ordinary MEL string assembly for names,
   namespaces, attribute paths, and UI labels could be escalated as malicious
   body assembly.
+- Fixed false positives where non-script string attributes and Maya Binary
+  reference metadata could be treated as raw execution surfaces.
+- Fixed Maya ASCII analysis coverage so execution-bearing attributes discovered
+  during selective loading are included in audit analysis.
+- Fixed Python obfuscation marker detection so markers produced after parsing
+  still affect audit results.
+- Fixed GUI file-list Explorer actions for path-owner rows and missing-file
+  cases.
 - Fixed a dead review path where audit review signals were collected but could
   not influence the final disposition.
 - Removed retired MEL text-scan code that was no longer part of the active
   audit model.
+
+### Performance
+
+- Optimized Maya Binary audit execution scans by reusing loaded scene/source
+  data and reducing redundant execution-surface extraction work.
+
+### Documentation
+
+- Updated README coverage for GUI workflows, Maya Binary to Maya ASCII
+  conversion, release wheel installation, and Python binding entry points.
+- Split Python source-build guidance into the development docs and expanded
+  Python usage docs with wheel extraction, API signatures, and a sanitized Maya
+  pre-open audit callback example.
+- Added studio-specific `node_info` authoring guidance, including curated
+  execution profiles, overlay behavior, validation steps, and public fixture
+  sanitization rules.
+- Expanded advanced usage docs for repeatable `--node-info` overlays,
+  schema-driven execution profiles, conservative audit disposition, and
+  `to-ascii --issues-json`.
 
 ## [v0.2.1] - 2026-04-23
 

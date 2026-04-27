@@ -1,7 +1,7 @@
 # maya-scene-kit
 
-`maya-scene-kit` is an open-source toolkit for inspecting, auditing, and rewriting
-Maya scene files (`.mb` / `.ma`) without requiring a Maya runtime.
+`maya-scene-kit` is an open-source toolkit for inspecting, auditing, converting,
+and rewriting Maya scene files (`.mb` / `.ma`) without requiring a Maya runtime.
 
 `maya-scene-kit` can be used to:
 
@@ -9,7 +9,8 @@ Maya scene files (`.mb` / `.ma`) without requiring a Maya runtime.
 - audit script nodes and other execution-capable scene content
 - scan folders from the GUI and review audit results and reference paths in one place
 - extract file, reference, texture, and cache paths from `.ma` / `.mb` scenes
-- stage clean or path replacement edits and save the resulting files
+- stage clean, path replacement, path-owner deletion, or `.mb` to `.ma`
+  conversion edits and save the resulting files
 - integrate pre-open scene checks into Python tools or batch pipelines
 
 ![Image](docs/assets/Screenshot_71.png)
@@ -24,11 +25,17 @@ It currently ships three practical entry points:
 
 - `clean` and `replace` currently run only in `forensic` mode in both the CLI and the GUI
 - They are intended for investigation and temporary remediation, and **do not guarantee a fully validated rewrite**
+- `audit` is conservative: incomplete coverage, unknown semantics, parse
+  budgets, or degraded validation can move a scene to review or deny depending
+  on the audit profile
 
 Related docs:
 
+- [Japanese README](README.jp.md)
 - [Python usage](docs/python_usage.md)
 - [Advanced usage](docs/advanced_usage.md)
+- [Development](docs/development.md)
+- [Supplying and extrapolating studio-specific Maya node knowledge](docs/node_info_authoring.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Quick Starts
@@ -51,17 +58,19 @@ maya-scene-kit-gui.exe
 Use the GUI when you want to load files or folders, inspect audit findings, review
 dump and path data, apply edits in stages, and save results without dropping into the CLI.
 
-- TODO: Screenshots of the GUI
-- TODO: Documentation of the GUI workflow and features
+The GUI has Overview, Audit, Paths, and Log tabs. It can scan folders, filter
+workspace rows, show audit details, stage clean, path-owner deletion, and path
+replacement operations, convert scenes to Maya ASCII, create backups when
+saving over existing files, and save selected or all dirty files.
 
 #### Typical GUI workflow
 
 The GUI is aimed at interactive scene triage and staged rewrite work:
 
-1. Open a folder, enable `Auto Analyse`, and let it scan
-2. Use the `Audit` tab to review results and run clean (quarantine) when needed
+1. Open a folder, enable `Auto`, and let it scan
+2. Use the `Audit` tab to review results and stage clean actions when needed
 3. Use the `Paths` tab to review reference paths and run replacements or related actions
-4. Save the changes
+4. Check dirty file rows in the workspace list, then save selected files or save all changes
 
 ### CLI
 
@@ -103,6 +112,7 @@ maya-scene-kit audit input.mb
 maya-scene-kit dump input.mb --out /tmp/scene_dump.txt
 maya-scene-kit paths input.mb --kind reference --json
 maya-scene-kit inspect input.mb --max-depth 2
+maya-scene-kit to-ascii input.mb output.ma --issues-json /tmp/issues.json
 maya-scene-kit clean input.mb output_clean.mb
 maya-scene-kit replace input.mb --rule "V:/dcc=X:/dcc" --out output.mb
 ```
@@ -113,17 +123,18 @@ Python bindings can be installed directly from a release wheel downloaded from G
 You can install them with `pip`, or unpack the zip and place them manually as a normal Python package.
 
 ```powershell
-uv pip install --system .\maya_scene_kit-0.1.0-*.whl
+uv pip install --system .\maya_scene_kit-*.whl
 ```
 
-Quick check:
+Quick import check:
 
 ```powershell
-python -c "import maya_scene_kit; print(maya_scene_kit.inspect_mb('tests/02/sphere.mb', max_depth=0)['scene_format'])"
+python -c "import maya_scene_kit; print('maya_scene_kit ok')"
 ```
 
 See [docs/python_usage.md](docs/python_usage.md) for practical Maya integration
-examples, source builds, editable installs, and other details.
+examples and API details. For source builds and editable installs, see
+[docs/development.md](docs/development.md).
 
 #### Typical Python workflow
 
@@ -149,11 +160,13 @@ if report["disposition"] not in {"allow", "allow_with_notice"}:
 ```
 
 Other Python entry points include `inspect_mb`, `collect_paths`, `dump_requires`,
-`dump_scripts`, `preview_clean`, `clean`, `preview_replace`, and `replace`.
+`dump_scripts`, `preview_clean`, `clean`, `preview_replace`, `replace`, and
+`to_ascii`.
 
 ---
 
 For deeper reference material, including the CLI command summary, execution
-modes, current scope, `--node-info` overlays, and `plugin_node_info`
-generation, see
-[docs/advanced_usage.md](docs/advanced_usage.md).
+modes, current scope, and runtime `--node-info` files, see
+[docs/advanced_usage.md](docs/advanced_usage.md). For supplying and
+extrapolating studio-specific Maya node knowledge, see
+[docs/node_info_authoring.md](docs/node_info_authoring.md).
