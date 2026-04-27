@@ -11,10 +11,11 @@ mod tests {
     use crate::{
         mb::{MbParseBudget, MbParseBudgetLimit},
         scene::{
-            DependencyFactDetail, DependencyFactKind, DependencyRiskClass,
+            DependencyFactDetail, DependencyFactKind, DependencyRiskClass, EffectCertainty,
             ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
-            ExecutionSurfaceKind, LoadOptions, Loader, MelParseBudget, MelParseBudgetLimit,
-            SceneToolError, ValidationState, collect_scene_dump, collect_scene_paths,
+            ExecutionEffectClass, ExecutionSemanticClass, ExecutionSurfaceKind, LoadOptions,
+            Loader, MelParseBudget, MelParseBudgetLimit, SceneToolError, ValidationState,
+            collect_scene_dump, collect_scene_paths,
             core::SceneFormat,
             dump::SceneDumpRequireKind,
             find_scene_workspace_root,
@@ -665,6 +666,76 @@ mod tests {
                     && surface.surface.origin.attr_name.as_deref() == Some(".prlm")
             }));
         }
+    }
+
+    #[test]
+    fn ma_expression_literal_python_bridge_uses_inner_python_summary() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source = dir.path().join("expression_python_print.ma");
+        fs::write(
+            &source,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "createNode expression -n \"ExampleExpression\";\n",
+                "    setAttr \".ixp\" -type \"string\" \"python(\\\"print('Sample')\\\");\";\n",
+            ),
+        )
+        .expect("write scene");
+
+        let catalog = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("observation")
+            .observed_execution_catalog(64)
+            .expect("execution catalog");
+        let summary = catalog
+            .unit_summaries
+            .iter()
+            .find(|summary| {
+                summary.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && summary.origin.attr_name.as_deref() == Some(".ixp")
+            })
+            .expect("expression summary");
+
+        assert_eq!(
+            summary.origin.source_kind.as_deref(),
+            Some("internalExpression")
+        );
+        assert_eq!(summary.effect, ExecutionEffectClass::DiagnosticOutput);
+        assert_eq!(summary.semantic_class, ExecutionSemanticClass::General);
+        assert_eq!(summary.certainty, EffectCertainty::Proven);
+    }
+
+    #[test]
+    fn ma_expression_dynamic_python_bridge_keeps_mel_dynamic_summary() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source = dir.path().join("expression_python_dynamic.ma");
+        fs::write(
+            &source,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "createNode expression -n \"ExampleExpression\";\n",
+                "    setAttr \".ixp\" -type \"string\" \"$body = \\\"print('Sample')\\\"; python($body);\";\n",
+            ),
+        )
+        .expect("write scene");
+
+        let catalog = Loader::new(LoadOptions::default())
+            .observe_path(&source)
+            .expect("observation")
+            .observed_execution_catalog(64)
+            .expect("execution catalog");
+        let summary = catalog
+            .unit_summaries
+            .iter()
+            .find(|summary| {
+                summary.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && summary.origin.attr_name.as_deref() == Some(".ixp")
+            })
+            .expect("expression summary");
+
+        assert_eq!(summary.effect, ExecutionEffectClass::DynamicEvaluation);
     }
 
     #[test]

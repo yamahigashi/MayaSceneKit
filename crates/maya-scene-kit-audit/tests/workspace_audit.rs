@@ -1322,7 +1322,38 @@ fn audit_expression_internal_expression_assignment_is_not_parse_finding() {
 }
 
 #[test]
-fn audit_expression_internal_expression_sink_still_denies() {
+fn audit_expression_literal_python_print_is_allowed_with_notice_without_mel_python_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("expression_python_print.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode expression -n \"ExampleExpression\";\n",
+            "    setAttr \".ixp\" -type \"string\" \"python(\\\"print('Sample')\\\");\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::AllowWithNotice);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_python"),
+        "unexpected MEL python finding: {:?}",
+        report.findings
+    );
+    assert!(report.surfaces.iter().any(|surface| {
+        surface.derivation == AuditSurfaceDerivation::MelPythonLiteralBridge
+            && surface.origin.lang == ExecutionLanguage::Python
+    }));
+}
+
+#[test]
+fn audit_expression_literal_python_import_is_review_without_mel_python_finding() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("expression_sink.ma");
     write_scene(
@@ -1332,6 +1363,81 @@ fn audit_expression_internal_expression_sink_still_denies() {
             "requires maya \"2026\";\n",
             "createNode expression -n \"ExampleExpression\";\n",
             "    setAttr \".ixp\" -type \"string\" \"python(\\\"import os\\\");\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::Review);
+    assert!(report.unit_summaries.iter().any(|summary| {
+        summary.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+            && summary.origin.attr_name.as_deref() == Some(".ixp")
+            && summary.effect == ExecutionEffectClass::ExternalDependency
+    }));
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_python"),
+        "unexpected MEL python finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report.coverage_issues.iter().all(|issue| !matches!(
+            issue.detail,
+            ExecutionCoverageIssueDetail::SurfaceDiagnostics { .. }
+        )),
+        "unexpected surface diagnostics coverage issue: {:?}",
+        report.coverage_issues
+    );
+}
+
+#[test]
+fn audit_expression_literal_python_dangerous_body_uses_python_findings() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("expression_python_subprocess.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode expression -n \"ExampleExpression\";\n",
+            "    setAttr \".ixp\" -type \"string\" \"python(\\\"import subprocess\\\\nsubprocess.call(['echo', 'Sample'])\\\");\";\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_python"),
+        "unexpected MEL python finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.sink == AuditSinkKind::PySubprocess),
+        "expected Python subprocess finding: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn audit_expression_dynamic_python_bridge_keeps_mel_python_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("expression_python_dynamic.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode expression -n \"ExampleExpression\";\n",
+            "    setAttr \".ixp\" -type \"string\" \"$body = \\\"print('Sample')\\\"; python($body);\";\n",
         ),
     );
 
