@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-audit"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "encoding_rs",
  "maya-scene-kit-observe",
@@ -3694,7 +3694,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-cli"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "clap",
  "maya-scene-kit-audit",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-edit"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "maya-scene-kit-formats",
@@ -3726,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-formats"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "encoding_rs",
@@ -3743,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-gui"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "embed-resource",
@@ -3761,7 +3761,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-observe"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "include_dir",
@@ -3781,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "maya-scene-kit-python"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "include_dir",
  "maya-scene-kit-audit",

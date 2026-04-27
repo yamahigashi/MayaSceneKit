@@ -1,7 +1,7 @@
 # maya-scene-kit
 
 `maya-scene-kit` は、Maya ランタイムを必要とせずに Maya シーンファイル
-（`.mb` / `.ma`）を調査、監査、書き換えるためのオープンソースツールキットです。
+（`.mb` / `.ma`）を調査、監査、変換、書き換えるためのオープンソースツールキットです。
 
 `maya-scene-kit` では、次のような作業を行えます。
 
@@ -9,25 +9,33 @@
 - script node や実行可能なシーン要素を監査する
 - GUI でフォルダを読み込み、audit 結果や参照パスをまとめて確認する
 - `.ma` / `.mb` から file、reference、texture、cache などのパスを抽出する
-- clean や path replacement の編集を段階的に適用し、結果を保存する
+- clean、path replacement、path-owner deletion、`.mb` から `.ma` への変換を
+  段階的に適用し、結果を保存する
 - Python ツールやバッチ処理に、シーンを開く前の検査を組み込む
 
 
-3経路の利用形態があります。
+3 つの利用形態があります。
 
 - 対話的な確認と段階的編集のための GUI
 - バッチ検査と自動化のための CLI
 - 他ツールへシーン検査を組み込むための Python バインディング
 
+![Image](docs/assets/Screenshot_71.png)
+
 ## 現在の制約
 
 - `clean` と `replace` は、CLI / GUI ともに現在 `forensic` モードでのみ動作します
 - これらは調査や一時的な対処を目的とした機能であり、 **書き換え結果が安全かつ完全に検証済みであることを保証するものではありません**
+- `audit` は保守的に判定します。coverage 不足、unknown semantics、parse budget、
+  degraded validation がある場合、audit profile に応じて review または deny になります
 
 関連ドキュメント:
 
+- [English README](README.md)
 - [Python usage](docs/python_usage.md)
 - [Advanced usage](docs/advanced_usage.md)
+- [Development](docs/development.md)
+- [スタジオ固有の Maya node 情報の注入・外挿](docs/node_info_authoring.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## クイックスタート
@@ -50,17 +58,19 @@ maya-scene-kit-gui.exe
 GUI はフォルダを読み込み、解析結果を確認し、それらを段階的に編集・破棄し、
 結果を保存できます。
 
-- TODO: GUI のスクリーンショットを追加する
-- TODO: 専用ページを作成する
+GUI には Overview、Audit、Paths、Log タブがあります。フォルダスキャン、
+ワークスペース行のフィルタ、audit detail の表示、clean、path-owner deletion、
+path replacement 操作の stage、Maya ASCII への変換、既存ファイルへ保存するときの
+backup 作成、選択ファイルまたは dirty file 全体の保存を行えます。
 
 #### GUI の典型的な使い方
 
 GUI は、対話的なシーントリアージと段階的な書き換え作業向けです。
 
-1. フォルダを開き `Auto Analyse` を有効にしスキャンする
-2. `Audit` タブより結果を確認し、必要に応じて clean（検疫）を実行する
+1. フォルダを開き `Auto` を有効にしスキャンする
+2. `Audit` タブより結果を確認し、必要に応じて clean 操作を stage する
 3. `Paths` タブより参照パスを確認し、置換や各種操作を実行する
-4. 変更を保存する
+4. ワークスペース一覧で dirty file を確認し、選択ファイルまたは全変更を保存する
 
 ### CLI
 
@@ -102,6 +112,7 @@ maya-scene-kit audit input.mb
 maya-scene-kit dump input.mb --out /tmp/scene_dump.txt
 maya-scene-kit paths input.mb --kind reference --json
 maya-scene-kit inspect input.mb --max-depth 2
+maya-scene-kit to-ascii input.mb output.ma --issues-json /tmp/issues.json
 maya-scene-kit clean input.mb output_clean.mb
 maya-scene-kit replace input.mb --rule "V:/dcc=X:/dcc" --out output.mb
 ```
@@ -110,20 +121,20 @@ maya-scene-kit replace input.mb --rule "V:/dcc=X:/dcc" --out output.mb
 ### Python
 
 Python バインディングは GitHub Releases からリリース済み wheel をダウンロードして直接インストールできます。
-pip を用いる方法、あるいは zip から展開して 通常の Python パッケージとして手動で配置を行い使用する方法があります。
+pip を用いる方法、あるいは zip から展開して通常の Python パッケージとして手動で配置する方法があります。
 
 ```powershell
-uv pip install --system .\maya_scene_kit-0.1.0-*.whl
+uv pip install --system .\maya_scene_kit-*.whl
 ```
 
-簡単な確認例:
+簡単な import 確認:
 
 ```powershell
-python -c "import maya_scene_kit; print(maya_scene_kit.inspect_mb('tests/02/sphere.mb', max_depth=0)['scene_format'])"
+python -c "import maya_scene_kit; print('maya_scene_kit ok')"
 ```
 
-Maya から使用する実践例、ソースビルド、editable install、他詳細な解説は
-[docs/python_usage.md](docs/python_usage.md) を参照してください。
+Maya から使用する実践例と API 詳細は [docs/python_usage.md](docs/python_usage.md) を参照してください。
+ソースビルドや editable install は [docs/development.md](docs/development.md) を参照してください。
 
 #### Python の典型的な使い方
 
@@ -149,11 +160,10 @@ if report["disposition"] not in {"allow", "allow_with_notice"}:
 ```
 
 他の Python エントリポイントとして `inspect_mb`、`collect_paths`、`dump_requires`、
-`dump_scripts`、`preview_clean`、`clean`、`preview_replace`、`replace` があります。
+`dump_scripts`、`preview_clean`、`clean`、`preview_replace`、`replace`、`to_ascii` があります。
 
 ---
 
-CLI のコマンド概要、実行モード、現在のスコープ、`--node-info`
-オーバーレイや `plugin_node_info` 生成を含む
-より詳細なリファレンスについては、
-[docs/advanced_usage.md](docs/advanced_usage.md) を参照してください。
+CLI のコマンド概要、実行モード、現在のスコープ、runtime `--node-info`
+オーバーレイについては [docs/advanced_usage.md](docs/advanced_usage.md) を参照してください。
+スタジオ固有の Maya node 情報の注入・外挿については [docs/node_info_authoring.md](docs/node_info_authoring.md) を参照してください。

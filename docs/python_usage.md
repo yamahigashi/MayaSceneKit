@@ -1,65 +1,85 @@
 # Python Usage
 
-`maya-scene-kit` exposes Python bindings from the
-`crates/maya-scene-kit-python` adapter crate.
+`maya-scene-kit` exposes Python bindings for inspecting and auditing Maya scenes
+before another tool opens them.
 
-This document covers the source-build workflow that lives in this repository.
+This document is for people using the Python package. For source builds and
+repository development, see [Development](development.md).
 
-## Build A Wheel
+## Install
 
-The recommended flow uses `uv` to invoke `maturin` directly:
+Download a release wheel from GitHub Releases and install it with `pip`:
 
 ```powershell
-uv run --with maturin maturin build --manifest-path crates/maya-scene-kit-python/Cargo.toml
+$wheel = Get-ChildItem .\maya_scene_kit-*.whl | Select-Object -First 1
+python -m pip install $wheel.FullName
 ```
 
-Built wheels are written to `target\wheels\`.
-On Windows the filename will end in `win_amd64.whl`.
-
-Install a built wheel:
+If you use `uv`, the equivalent install command is:
 
 ```powershell
-uv pip install --system .\target\wheels\maya_scene_kit-0.1.0-*.whl
+uv pip install --system .\maya_scene_kit-*.whl
 ```
 
-Quick smoke test:
+## Use From An Extracted Wheel Without Installation
+
+If you cannot install into the target Python environment, use the wheel as a ZIP
+archive and point Python at the extracted package directory instead. Choose a
+wheel that matches the target OS and CPU architecture.
 
 ```powershell
-python -c "import maya_scene_kit; print(maya_scene_kit.inspect_mb('tests/02/sphere.mb', max_depth=0)['scene_format'])"
+$wheel = Get-ChildItem .\maya_scene_kit-*.whl | Select-Object -First 1
+New-Item -ItemType Directory -Force C:\tools\maya_scene_kit_pkg
+python -m zipfile -e $wheel.FullName C:\tools\maya_scene_kit_pkg
+$env:PYTHONPATH = "C:\tools\maya_scene_kit_pkg;$env:PYTHONPATH"
 ```
 
-## Editable Local Environment
+For embedded Python hosts, add the extracted wheel directory before importing:
 
-If you want an editable local environment instead of a wheel build:
+```python
+import sys
+
+sys.path.insert(0, r"C:\tools\maya_scene_kit_pkg")
+
+import maya_scene_kit
+```
+
+The directory added to `PYTHONPATH` or `sys.path` must be the directory that
+contains the extracted `maya_scene_kit` package directory.
+
+Quick import check:
 
 ```powershell
-uv venv
-.venv\Scripts\Activate.ps1
-uv pip install maturin
-maturin develop --manifest-path crates/maya-scene-kit-python/Cargo.toml
+python -c "import maya_scene_kit; print('maya_scene_kit ok')"
 ```
 
 ## Exported API
 
 The package currently exports:
 
-- `audit`
-- `clean`
-- `collect_paths`
-- `dump_requires`
-- `dump_scripts`
-- `inspect_mb`
-- `preview_clean`
-- `preview_replace`
-- `replace`
-- `to_ascii`
+- `inspect_mb(path, max_depth=None, preview_bytes=24, max_bytes=None)`
+- `dump_scripts(path, max_bytes=None)`
+- `dump_requires(path, max_bytes=None)`
+- `collect_paths(path, kind="all", max_bytes=None)`
+- `audit(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None)`
+- `preview_clean(path, max_bytes=None)`
+- `clean(input_path, output_path, max_bytes=None)`
+- `preview_replace(path, rules, max_bytes=None)`
+- `replace(input_path, output_path, rules, max_bytes=None)`
+- `to_ascii(input_path, output_path, mode="best_effort", embed_metadata=False, node_info_paths=[], max_bytes=None)`
 - `MayaSceneKitError`
+
+`rules` is a list of literal audit markers. `node_info_paths` accepts additional
+YAML files using the same semantics as the CLI `--node-info` option. Python
+operation mode names use underscores, for example `best_effort`.
 
 ## Patterns
 
 ### Audit Before Open
 
-This is an operational pattern using the current API surface, not a dedicated callback API:
+This is an operational pattern using the current API surface, not a dedicated
+callback API. For tool code that owns the open/import flow, gate the open before
+calling into the host:
 
 ```python
 from maya_scene_kit import audit
@@ -73,6 +93,158 @@ if report["disposition"] not in {"allow", "allow_with_notice"}:
     raise RuntimeError(f"scene blocked: {report['disposition']}")
 
 # Continue with your own tool's open or import flow.
+```
+
+For Maya startup integration, register check callbacks and return `False` when
+the scene should not be opened or referenced. This example is intentionally
+standalone: adapt the UI text, override permissions, `node_info_paths`, and
+`max_bytes` for your studio policy.
+
+```python
+import logging
+
+from maya.api import OpenMaya as om
+from maya import cmds
+
+import maya_scene_kit
+from maya_scene_kit import MayaSceneKitError
+
+LOG = logging.getLogger(__name__)
+
+ALLOWED_DISPOSITIONS = {"allow", "allow_with_notice"}
+CALLBACK_IDS = []
+NODE_INFO_PATHS = []
+MAX_PREVIEW = 120
+MAX_BYTES = None
+MAX_DIALOG_ROWS = 8
+
+
+def _scene_path_from_callback(file_object):
+    if not file_object:
+        return ""
+    return om.MFileObject(file_object).resolvedFullName()
+
+
+def _is_allowed(report):
+    if report.get("blocked_on_uncertainty", False):
+        return False
+    return report.get("disposition") in ALLOWED_DISPOSITIONS
+
+
+def _report_rows(report):
+    rows = []
+    for scene_report in report.get("reports", []):
+        for field in ("findings", "review_signals"):
+            for item in scene_report.get(field, []):
+                code = item.get("code") or "unknown"
+                text = item.get("preview_override") or item.get("message") or ""
+                rows.append("[{}] {}".format(code, text).strip())
+                if len(rows) >= MAX_DIALOG_ROWS:
+                    return rows
+    return rows
+
+
+def _confirm_open_anyway(path, report):
+    rows = _report_rows(report)
+    summary = [
+        "maya-scene-kit blocked this scene.",
+        "",
+        "File: {}".format(path),
+        "Disposition: {}".format(report.get("disposition", "unknown")),
+        "Findings: {}".format(report.get("finding_count", 0)),
+        "Review signals: {}".format(report.get("review_signal_count", 0)),
+    ]
+    if report.get("blocked_on_uncertainty", False):
+        summary.append("Audit coverage was uncertain.")
+    if rows:
+        summary.extend(["", "Details:", *rows])
+
+    choice = cmds.confirmDialog(
+        title="Scene audit blocked open",
+        message="\n".join(summary),
+        button=["Cancel Open", "Open Anyway"],
+        defaultButton="Cancel Open",
+        cancelButton="Cancel Open",
+        dismissString="Cancel Open",
+        icon="warning",
+    )
+    if choice != "Open Anyway":
+        return False
+
+    second_choice = cmds.confirmDialog(
+        title="Open scene anyway?",
+        message="Open this scene despite the audit result?\n\n{}".format(path),
+        button=["Cancel Open", "Open Anyway"],
+        defaultButton="Cancel Open",
+        cancelButton="Cancel Open",
+        dismissString="Cancel Open",
+        icon="warning",
+    )
+    return second_choice == "Open Anyway"
+
+
+def _show_audit_error(path, error):
+    cmds.confirmDialog(
+        title="Scene audit failed",
+        message=(
+            "maya-scene-kit could not audit this scene, so the open was blocked.\n\n"
+            "File: {}\n\n{}"
+        ).format(path, error),
+        button=["Cancel Open"],
+        defaultButton="Cancel Open",
+        cancelButton="Cancel Open",
+        dismissString="Cancel Open",
+        icon="critical",
+    )
+
+
+def _audit_scene_before_open(file_object, client_data):
+    path = _scene_path_from_callback(file_object)
+    if not path:
+        return True
+
+    try:
+        report = maya_scene_kit.audit(
+            path,
+            max_preview=MAX_PREVIEW,
+            node_info_paths=NODE_INFO_PATHS,
+            max_bytes=MAX_BYTES,
+        )
+    except MayaSceneKitError as error:
+        LOG.exception("maya-scene-kit audit failed for %s", path)
+        _show_audit_error(path, error)
+        return False
+
+    if _is_allowed(report):
+        return True
+
+    LOG.warning(
+        "maya-scene-kit blocked %s with disposition=%s",
+        path,
+        report.get("disposition", "unknown"),
+    )
+    return _confirm_open_anyway(path, report)
+
+
+def install_scene_audit_callbacks():
+    if CALLBACK_IDS:
+        return
+
+    for message in (
+        om.MSceneMessage.kBeforeOpenCheck,
+        om.MSceneMessage.kBeforeReferenceCheck,
+        om.MSceneMessage.kBeforeLoadReferenceCheck,
+    ):
+        callback_id = om.MSceneMessage.addCheckFileCallback(
+            message,
+            _audit_scene_before_open,
+        )
+        CALLBACK_IDS.append(callback_id)
+
+
+def remove_scene_audit_callbacks():
+    while CALLBACK_IDS:
+        om.MMessage.removeCallback(CALLBACK_IDS.pop())
 ```
 
 Useful audit report fields include:
@@ -135,16 +307,21 @@ The binding raises `MayaSceneKitError`.
 The exception carries the Rust-side message, and common error categories include:
 
 - `unsupported_scene_format`
+- `message`
 - `config`
 - `ascii_syntax`
+- `unsupported_ascii_feature`
 - `encode_invariant`
 - `atomic_write`
 - `invalid_utf8`
 - `rejected_by_mode`
 - `io`
+- `mel_parse_budget_exceeded`
+- `mb_parse_budget_exceeded`
 - `parse`
 
 ## Related Docs
 
 - [README](../README.md)
 - [Advanced usage](advanced_usage.md)
+- [Development](development.md)

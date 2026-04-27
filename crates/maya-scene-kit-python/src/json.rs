@@ -73,27 +73,66 @@ pub(crate) fn audit_report(report: &AuditReport) -> Value {
 }
 
 pub(crate) fn audit_graph_report(report: &AuditGraphReport) -> Value {
+    let root_report = report
+        .roots
+        .first()
+        .and_then(|root| root.report_index)
+        .and_then(|index| report.reports.get(index));
+    let blocked_on_uncertainty = !report.traversal_issues.is_empty()
+        || report
+            .reports
+            .iter()
+            .any(|scene_report| scene_report.blocked_on_uncertainty);
+    let surface_count = report
+        .reports
+        .iter()
+        .map(|scene_report| scene_report.surface_count)
+        .sum::<usize>();
+    let coverage_issues = report
+        .reports
+        .iter()
+        .flat_map(|scene_report| scene_report.coverage_issues.iter())
+        .collect::<Vec<_>>();
+    let notices = report
+        .reports
+        .iter()
+        .flat_map(|scene_report| scene_report.notices.iter().map(audit_notice))
+        .collect::<Vec<_>>();
+    let review_signals = report
+        .reports
+        .iter()
+        .flat_map(|scene_report| scene_report.review_signals.iter().map(audit_review_signal))
+        .collect::<Vec<_>>();
+    let findings = report
+        .reports
+        .iter()
+        .flat_map(|scene_report| scene_report.findings.iter().map(audit_finding))
+        .collect::<Vec<_>>();
+
     json!({
         "scene_path": report.roots.first().map(|root| root.path.clone()),
-        "profile": report.reports.first().map(|scene_report| scene_report.profile.as_str()),
+        "profile": root_report.map(|scene_report| scene_report.profile.as_str()),
+        "validation_state": root_report.map(|scene_report| &scene_report.validation_state),
+        "coverage_state": root_report.map(|scene_report| scene_report.coverage_state.as_str()),
+        "coverage_issues": coverage_issues,
+        "blocked_on_uncertainty": blocked_on_uncertainty,
         "disposition": report.disposition.as_str(),
         "root_count": report.roots.len(),
         "scene_count": report.reports.len(),
         "edge_count": report.edges.len(),
         "traversal_issue_count": report.traversal_issues.len(),
+        "surface_count": surface_count,
         "finding_count": report.finding_count(),
         "review_signal_count": report.review_signal_count(),
         "notice_count": report.notice_count(),
+        "notices": notices,
+        "review_signals": review_signals,
+        "findings": findings,
         "roots": &report.roots,
         "edges": &report.edges,
         "traversal_issues": &report.traversal_issues,
         "reports": report.reports.iter().map(audit_report).collect::<Vec<_>>(),
-        "root_report": report
-            .roots
-            .first()
-            .and_then(|root| root.report_index)
-            .and_then(|index| report.reports.get(index))
-            .map(audit_report),
+        "root_report": root_report.map(audit_report),
     })
 }
 
