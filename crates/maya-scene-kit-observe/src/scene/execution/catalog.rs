@@ -5,7 +5,8 @@ use rustpython_parser::{Parse, ast};
 use sha2::{Digest, Sha256};
 
 use super::{
-    MelSurfaceFacts, ObservedExecutionCatalog, ObservedExecutionSurface, dependency,
+    MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind, MelSurfaceFacts,
+    ObservedExecutionCatalog, ObservedExecutionSurface, dependency,
     effect_registry::{
         classify_mel_command, classify_mel_command_with_semantics, classify_python_call_target,
         effect_rank,
@@ -16,8 +17,8 @@ use crate::scene::{
     DependencyFact, EffectCertainty, ExecutionCoverageIssue, ExecutionCoverageIssueDetail,
     ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage,
     ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass,
-    ExecutionUnitSummary, SceneDigestSet, SceneFormat, SceneToolError, StaticExecutionReason,
-    UnknownSemanticDetail, UnknownSemanticFact,
+    ExecutionSurfaceKind, ExecutionUnitSummary, SceneDigestSet, SceneFormat, SceneToolError,
+    StaticExecutionReason, UnknownSemanticDetail, UnknownSemanticFact,
     source::{ObservationBundle, ObservationData},
 };
 
@@ -224,6 +225,7 @@ pub(crate) fn build_scene_digests(
 }
 
 fn summarize_mel_surface(
+    origin: &ExecutionOrigin,
     mel: Option<&MelSurfaceFacts>,
     text: &str,
 ) -> (
@@ -274,31 +276,47 @@ fn summarize_mel_surface(
         mel.calls.len()
     };
     let mut reasons = Vec::with_capacity(reason_capacity + usize::from(text.trim().is_empty()));
+    let expression_python_bridge = is_expression_node_attr_surface(origin);
+    let mut consumed_sink_args = vec![false; mel.sink_arg_facts.len()];
 
     if !mel.normalized_commands.is_empty() {
         for command in &mel.normalized_commands {
             let name = command.schema_name.as_ref();
-            let (call_effect, call_semantic_class, call_certainty, reason) =
-                classify_mel_command_with_semantics(mel.source_text.as_ref(), command, name)
-                    .map(|rule| {
-                        (
-                            rule.effect,
-                            rule.semantic_class,
-                            rule.certainty,
-                            rule.reason(name),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            ExecutionEffectClass::Unknown,
-                            ExecutionSemanticClass::UnknownWrite,
-                            EffectCertainty::Uncertain,
-                            ExecutionReason::Named {
-                                template: ExecutionReasonTemplate::UnclassifiedMelCommandDetected,
-                                value: name.to_string(),
-                            },
-                        )
-                    });
+            let expression_bridge_summary = if name.eq_ignore_ascii_case("python") {
+                expression_literal_python_bridge_summary(
+                    expression_python_bridge,
+                    mel,
+                    &mut consumed_sink_args,
+                    command.span_start,
+                    command.span_end,
+                )
+            } else {
+                None
+            };
+            let (call_effect, call_semantic_class, call_certainty, mut call_reasons) =
+                expression_bridge_summary.unwrap_or_else(|| {
+                    classify_mel_command_with_semantics(mel.source_text.as_ref(), command, name)
+                        .map(|rule| {
+                            (
+                                rule.effect,
+                                rule.semantic_class,
+                                rule.certainty,
+                                vec![rule.reason(name)],
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                ExecutionEffectClass::Unknown,
+                                ExecutionSemanticClass::UnknownWrite,
+                                EffectCertainty::Uncertain,
+                                vec![ExecutionReason::Named {
+                                    template:
+                                        ExecutionReasonTemplate::UnclassifiedMelCommandDetected,
+                                    value: name.to_string(),
+                                }],
+                            )
+                        })
+                });
 
             if effect_rank(call_effect) > effect_rank(effect)
                 || (call_effect == effect
@@ -310,32 +328,46 @@ fn summarize_mel_surface(
             if call_certainty == EffectCertainty::Uncertain {
                 certainty = EffectCertainty::Uncertain;
             }
-            reasons.push(reason);
+            reasons.append(&mut call_reasons);
         }
     } else {
         for call in &mel.calls {
             let name = call.name.as_ref();
-            let (call_effect, call_semantic_class, call_certainty, reason) =
-                classify_mel_command(name)
-                    .map(|rule| {
-                        (
-                            rule.effect,
-                            rule.semantic_class,
-                            rule.certainty,
-                            rule.reason(name),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            ExecutionEffectClass::Unknown,
-                            ExecutionSemanticClass::UnknownWrite,
-                            EffectCertainty::Uncertain,
-                            ExecutionReason::Named {
-                                template: ExecutionReasonTemplate::UnclassifiedMelCommandDetected,
-                                value: name.to_string(),
-                            },
-                        )
-                    });
+            let expression_bridge_summary = if name.eq_ignore_ascii_case("python") {
+                expression_literal_python_bridge_summary(
+                    expression_python_bridge,
+                    mel,
+                    &mut consumed_sink_args,
+                    call.span_start,
+                    call.span_end,
+                )
+            } else {
+                None
+            };
+            let (call_effect, call_semantic_class, call_certainty, mut call_reasons) =
+                expression_bridge_summary.unwrap_or_else(|| {
+                    classify_mel_command(name)
+                        .map(|rule| {
+                            (
+                                rule.effect,
+                                rule.semantic_class,
+                                rule.certainty,
+                                vec![rule.reason(name)],
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                ExecutionEffectClass::Unknown,
+                                ExecutionSemanticClass::UnknownWrite,
+                                EffectCertainty::Uncertain,
+                                vec![ExecutionReason::Named {
+                                    template:
+                                        ExecutionReasonTemplate::UnclassifiedMelCommandDetected,
+                                    value: name.to_string(),
+                                }],
+                            )
+                        })
+                });
 
             if effect_rank(call_effect) > effect_rank(effect)
                 || (call_effect == effect
@@ -347,7 +379,7 @@ fn summarize_mel_surface(
             if call_certainty == EffectCertainty::Uncertain {
                 certainty = EffectCertainty::Uncertain;
             }
-            reasons.push(reason);
+            reasons.append(&mut call_reasons);
         }
     }
 
@@ -358,6 +390,61 @@ fn summarize_mel_surface(
     }
 
     (effect, semantic_class, certainty, reasons)
+}
+
+fn expression_literal_python_bridge_summary(
+    expression_python_bridge: bool,
+    mel: &MelSurfaceFacts,
+    consumed_sink_args: &mut [bool],
+    command_start: usize,
+    command_end: usize,
+) -> Option<(
+    ExecutionEffectClass,
+    ExecutionSemanticClass,
+    EffectCertainty,
+    Vec<ExecutionReason>,
+)> {
+    if !expression_python_bridge {
+        return None;
+    }
+    let (index, fact) =
+        literal_python_sink_arg_in_command(mel, consumed_sink_args, command_start, command_end)?;
+    consumed_sink_args[index] = true;
+    let (effect, semantic_class, certainty, reasons) =
+        summarize_python_surface(fact.rendered_text.as_deref().unwrap_or_default());
+    Some((effect, semantic_class, certainty, reasons))
+}
+
+fn literal_python_sink_arg_in_command<'a>(
+    mel: &'a MelSurfaceFacts,
+    consumed_sink_args: &[bool],
+    command_start: usize,
+    command_end: usize,
+) -> Option<(usize, &'a MelSinkArgFact)> {
+    mel.sink_arg_facts.iter().enumerate().find(|(index, fact)| {
+        !consumed_sink_args[*index]
+            && fact.sink_kind == MelSinkArgKind::Python
+            && fact.resolved_kind == MelResolvedStringKind::Literal
+            && fact.rendered_text.is_some()
+            && is_direct_literal_sink_arg(mel.source_text.as_ref(), fact)
+            && fact.span.start >= command_start
+            && fact.span.end <= command_end
+    })
+}
+
+fn is_direct_literal_sink_arg(source_text: &str, fact: &MelSinkArgFact) -> bool {
+    source_text
+        .get(fact.span.start..fact.span.end)
+        .map(str::trim_start)
+        .is_some_and(|text| text.starts_with('"') || text.starts_with('\''))
+}
+
+fn is_expression_node_attr_surface(origin: &ExecutionOrigin) -> bool {
+    origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+        && matches!(
+            origin.source_kind.as_deref(),
+            Some("expression" | "internalExpression")
+        )
 }
 
 fn summarize_python_surface(
@@ -482,7 +569,7 @@ fn summarize_execution_unit(
 
     let (effect, semantic_class, certainty, reasons) = match origin.lang {
         ExecutionLanguage::Python => summarize_python_surface(text),
-        ExecutionLanguage::Mel => summarize_mel_surface(mel, text),
+        ExecutionLanguage::Mel => summarize_mel_surface(origin, mel, text),
         ExecutionLanguage::Unknown => (
             ExecutionEffectClass::Unknown,
             ExecutionSemanticClass::UnknownWrite,

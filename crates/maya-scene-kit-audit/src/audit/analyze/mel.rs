@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use maya_scene_kit_observe::scene::execution::{MelResolvedStringKind, MelSinkArgKind};
+use maya_scene_kit_observe::scene::execution::{
+    MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind,
+};
 
 use super::{
     AnalysisSurface, SurfaceAnalysis,
@@ -13,6 +15,7 @@ use super::{
 };
 use crate::scene::{
     AuditEvidence, AuditEvidenceKey, AuditFinding, AuditSeverity, AuditSinkKind, ExecutionLanguage,
+    ExecutionSurfaceKind,
     execution::{MelSurfaceCall, MelSurfaceFacts},
 };
 
@@ -256,17 +259,21 @@ where
         .map(super::builders::snippet)
         .filter(|preview| !preview.is_empty());
 
-    let findings = vec![build_finding(
-        surface_index,
-        surface,
-        &format!("mel_{}", sink_name.to_ascii_lowercase()),
-        severity_for_trigger(severity, surface.origin.trigger),
-        sink,
-        None,
-        message,
-        evidence,
-        preview_override,
-    )];
+    let findings = if bridge_python && is_expression_literal_python_bridge(surface, fact) {
+        Vec::new()
+    } else {
+        vec![build_finding(
+            surface_index,
+            surface,
+            &format!("mel_{}", sink_name.to_ascii_lowercase()),
+            severity_for_trigger(severity, surface.origin.trigger),
+            sink,
+            None,
+            message,
+            evidence,
+            preview_override,
+        )]
+    };
 
     if bridge_python && fact.resolved_kind == MelResolvedStringKind::Literal {
         if let Some(body) = fact.rendered_text.as_deref() {
@@ -284,6 +291,23 @@ where
     }
 
     findings
+}
+
+fn is_expression_literal_python_bridge(surface: &AnalysisSurface, fact: &MelSinkArgFact) -> bool {
+    fact.resolved_kind == MelResolvedStringKind::Literal
+        && is_direct_literal_sink_arg(surface.text.as_ref(), fact)
+        && surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+        && matches!(
+            surface.origin.source_kind.as_deref(),
+            Some("expression" | "internalExpression")
+        )
+}
+
+fn is_direct_literal_sink_arg(source_text: &str, fact: &MelSinkArgFact) -> bool {
+    source_text
+        .get(fact.span.start..fact.span.end)
+        .map(str::trim_start)
+        .is_some_and(|text| text.starts_with('"') || text.starts_with('\''))
 }
 
 #[cfg(test)]
