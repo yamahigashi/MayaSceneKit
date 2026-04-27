@@ -90,9 +90,11 @@ pub(crate) fn build_observed_execution_core(
         let mel = match surface.origin.lang {
             ExecutionLanguage::Python => None,
             ExecutionLanguage::Mel | ExecutionLanguage::Unknown if should_model => {
+                let syntax = mel_surface_syntax_for_origin(&surface.origin);
                 Some(mel_surface::collect_cached_mel_surface_facts(
                     &mut mel_surface_facts_cache,
                     &surface.text,
+                    syntax,
                     observation.mel_parse_budget(),
                 ))
             }
@@ -149,6 +151,13 @@ pub(crate) fn build_observed_execution_core(
         coverage_state,
         coverage_issues: coverage.coverage_issues,
     })
+}
+
+fn mel_surface_syntax_for_origin(origin: &ExecutionOrigin) -> mel_surface::MelSurfaceSyntax {
+    match origin.source_kind.as_deref() {
+        Some("expression" | "internalExpression") => mel_surface::MelSurfaceSyntax::Expression,
+        _ => mel_surface::MelSurfaceSyntax::Mel,
+    }
 }
 
 pub(crate) fn materialize_observed_execution_catalog(

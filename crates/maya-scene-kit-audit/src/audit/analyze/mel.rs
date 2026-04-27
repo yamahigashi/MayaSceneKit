@@ -31,26 +31,6 @@ pub(super) fn analyze_mel_surface_impl(
         .unwrap_or_default();
 
     if let Some(mel) = &surface.mel {
-        if !mel.diagnostics.is_empty() {
-            analysis.findings.push(build_finding(
-                surface_index,
-                surface,
-                "mel_parse_diagnostics",
-                severity_for_trigger(AuditSeverity::High, surface.origin.trigger),
-                AuditSinkKind::None,
-                None,
-                "MEL parse diagnostics present; audit blocked on unresolved MEL semantics",
-                mel.diagnostics
-                    .iter()
-                    .take(3)
-                    .map(|diagnostic| AuditEvidence::FreeText {
-                        value: diagnostic.message.to_string(),
-                    })
-                    .collect(),
-                None,
-            ));
-        }
-
         let callback_analysis = analyze_callback_flags(
             surface_index,
             surface,

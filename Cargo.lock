@@ -3665,9 +3665,9 @@ dependencies = [
 
 [[package]]
 name = "maya-mel"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39f53083a6b2705b62b6f38d3e2146beb215bb0ae880bfbf4d9f5f9dab67f8be"
+checksum = "1633d57d52af954e968c45c6ef56fde66efdd5e32567816ab41a4103a25a8826"
 dependencies = [
  "encoding_rs",
  "serde",

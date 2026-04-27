@@ -2,6 +2,12 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use maya_scene_kit_formats::mel::{self, MelParseBudget};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MelSurfaceSyntax {
+    Mel,
+    Expression,
+}
+
 #[derive(Debug, Clone)]
 pub struct MelSurfaceFacts {
     pub source_text: Arc<str>,
@@ -21,7 +27,20 @@ pub fn collect_mel_surface_facts_with_budget(
     source: &str,
     budget: &MelParseBudget,
 ) -> MelSurfaceFacts {
-    map_mel_surface_facts(mel::collect_call_facts_with_budget(source, budget))
+    collect_mel_surface_facts_with_syntax_and_budget(source, MelSurfaceSyntax::Mel, budget)
+}
+
+pub(crate) fn collect_mel_surface_facts_with_syntax_and_budget(
+    source: &str,
+    syntax: MelSurfaceSyntax,
+    budget: &MelParseBudget,
+) -> MelSurfaceFacts {
+    map_mel_surface_facts(match syntax {
+        MelSurfaceSyntax::Mel => mel::collect_call_facts_with_budget(source, budget),
+        MelSurfaceSyntax::Expression => {
+            mel::collect_expression_call_facts_with_budget(source, budget)
+        }
+    })
 }
 
 pub fn collect_mel_surface_facts_shared(source: Arc<str>) -> MelSurfaceFacts {
@@ -32,23 +51,39 @@ pub fn collect_mel_surface_facts_shared_with_budget(
     source: Arc<str>,
     budget: &MelParseBudget,
 ) -> MelSurfaceFacts {
-    map_mel_surface_facts(mel::collect_call_facts_shared_with_budget(source, budget))
+    collect_mel_surface_facts_shared_with_syntax_and_budget(source, MelSurfaceSyntax::Mel, budget)
+}
+
+pub(crate) fn collect_mel_surface_facts_shared_with_syntax_and_budget(
+    source: Arc<str>,
+    syntax: MelSurfaceSyntax,
+    budget: &MelParseBudget,
+) -> MelSurfaceFacts {
+    map_mel_surface_facts(match syntax {
+        MelSurfaceSyntax::Mel => mel::collect_call_facts_shared_with_budget(source, budget),
+        MelSurfaceSyntax::Expression => {
+            mel::collect_expression_call_facts_shared_with_budget(source, budget)
+        }
+    })
 }
 
 pub(crate) fn collect_cached_mel_surface_facts(
-    cache: &mut HashMap<Arc<str>, Arc<MelSurfaceFacts>>,
+    cache: &mut HashMap<(Arc<str>, MelSurfaceSyntax), Arc<MelSurfaceFacts>>,
     source: &Arc<str>,
+    syntax: MelSurfaceSyntax,
     budget: &MelParseBudget,
 ) -> Arc<MelSurfaceFacts> {
-    if let Some(facts) = cache.get(source.as_ref()) {
+    let key = (Arc::clone(source), syntax);
+    if let Some(facts) = cache.get(&key) {
         return Arc::clone(facts);
     }
 
-    let facts = Arc::new(collect_mel_surface_facts_shared_with_budget(
+    let facts = Arc::new(collect_mel_surface_facts_shared_with_syntax_and_budget(
         Arc::clone(source),
+        syntax,
         budget,
     ));
-    cache.insert(Arc::clone(source), Arc::clone(&facts));
+    cache.insert(key, Arc::clone(&facts));
     facts
 }
 

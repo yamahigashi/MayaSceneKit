@@ -68752,6 +68752,12 @@ nodes:
     attrs: {}
   "expression":
     typeid: 0x44455850
+    execution:
+      profiles:
+        - kind: attr_callbacks
+          default_language: mel
+          default_trigger: time_changed
+          attrs: ["expression", "internalExpression"]
     attrs:
       "a":
         unit: none
