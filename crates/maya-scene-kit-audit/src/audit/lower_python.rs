@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::OnceLock};
+use std::collections::HashMap;
 
-use regex::Regex;
+use maya_scene_kit_observe::scene::execution::normalize_python_compat_source;
 use rustpython_parser::{Parse, ast};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,7 +261,11 @@ impl SignalVisitor {
                     self.visit_expr(expr);
                 }
                 self.visit_expr(&stmt.value);
-                let alias_kind = call_kind(&stmt.value, self.current_aliases());
+                let alias_kind = call_kind(
+                    &stmt.value,
+                    self.current_aliases(),
+                    self.current_module_aliases(),
+                );
                 let module_alias = imported_module_name(&stmt.value, self.current_module_aliases());
                 let capability_alias = imported_capability_name(
                     &stmt.value,
@@ -287,7 +291,8 @@ impl SignalVisitor {
                 self.visit_expr(&stmt.annotation);
                 if let Some(expr) = &stmt.value {
                     self.visit_expr(expr);
-                    let alias_kind = call_kind(expr, self.current_aliases());
+                    let alias_kind =
+                        call_kind(expr, self.current_aliases(), self.current_module_aliases());
                     let module_alias = imported_module_name(expr, self.current_module_aliases());
                     let capability_alias = imported_capability_name(
                         expr,
@@ -463,7 +468,11 @@ impl SignalVisitor {
     }
 
     fn visit_call(&mut self, call: &ast::ExprCall) {
-        if let Some(kind) = call_kind(&call.func, self.current_aliases()) {
+        if let Some(kind) = call_kind(
+            &call.func,
+            self.current_aliases(),
+            self.current_module_aliases(),
+        ) {
             self.signals.push(PythonSignal::Call {
                 kind,
                 first_arg: call
@@ -669,18 +678,21 @@ impl SignalVisitor {
 fn call_kind(
     func: &ast::Expr,
     aliases: Option<&HashMap<String, PythonCallKind>>,
+    module_aliases: Option<&HashMap<String, String>>,
 ) -> Option<PythonCallKind> {
-    let name = match func {
-        ast::Expr::Name(name) => {
-            return direct_call_kind(name.id.as_str())
-                .or_else(|| aliases.and_then(|scope| scope.get(name.id.as_str()).copied()));
+    match func {
+        ast::Expr::Name(name) => direct_call_kind(name.id.as_str())
+            .or_else(|| aliases.and_then(|scope| scope.get(name.id.as_str()).copied())),
+        ast::Expr::Attribute(attr) => {
+            let module = module_name_for_expr(&attr.value, module_aliases)?;
+            qualified_call_kind(&module, attr.attr.as_str())
         }
-        ast::Expr::Attribute(attr) => attr.attr.as_str(),
-        ast::Expr::Call(call) => indirect_call_name(call)?,
-        ast::Expr::Subscript(subscript) => subscript_call_name(subscript)?,
-        _ => return None,
-    };
-    direct_call_kind(name)
+        ast::Expr::Call(call) => indirect_call_name(call).and_then(direct_call_kind),
+        ast::Expr::Subscript(subscript) => {
+            subscript_call_name(subscript).and_then(direct_call_kind)
+        }
+        _ => None,
+    }
 }
 
 fn direct_call_kind(name: &str) -> Option<PythonCallKind> {
@@ -689,6 +701,17 @@ fn direct_call_kind(name: &str) -> Option<PythonCallKind> {
         "eval" => Some(PythonCallKind::Eval),
         "compile" => Some(PythonCallKind::Compile),
         "__import__" | "import_module" => Some(PythonCallKind::Import),
+        _ => None,
+    }
+}
+
+fn qualified_call_kind(module: &str, member: &str) -> Option<PythonCallKind> {
+    match (module, member) {
+        ("builtins", "exec") => Some(PythonCallKind::Exec),
+        ("builtins", "eval") => Some(PythonCallKind::Eval),
+        ("builtins", "compile") => Some(PythonCallKind::Compile),
+        ("builtins", "__import__") => Some(PythonCallKind::Import),
+        ("importlib", "import_module") => Some(PythonCallKind::Import),
         _ => None,
     }
 }
@@ -744,7 +767,7 @@ fn imported_module_name(
             module_aliases.and_then(|scope| scope.get(name.id.as_str()).cloned())
         }
         ast::Expr::Call(call) => {
-            let kind = call_kind(&call.func, None)?;
+            let kind = call_kind(&call.func, None, module_aliases)?;
             if kind != PythonCallKind::Import {
                 return None;
             }
@@ -770,9 +793,12 @@ fn module_name_for_expr(
     module_aliases: Option<&HashMap<String, String>>,
 ) -> Option<String> {
     match expr {
-        ast::Expr::Name(name) => {
-            module_aliases.and_then(|scope| scope.get(name.id.as_str()).cloned())
-        }
+        ast::Expr::Name(name) => module_aliases
+            .and_then(|scope| scope.get(name.id.as_str()).cloned())
+            .or_else(|| match name.id.as_str() {
+                "builtins" | "importlib" => Some(name.id.to_string()),
+                _ => None,
+            }),
         ast::Expr::Call(_) => imported_module_name(expr, module_aliases),
         ast::Expr::Attribute(attr) => module_name_for_expr(&attr.value, module_aliases),
         _ => None,
@@ -1027,190 +1053,6 @@ fn push_marker(target: &mut Vec<String>, marker: &str) {
     }
 }
 
-fn normalize_python_compat_source(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    for line in source.split_inclusive('\n') {
-        let (content, newline) = line
-            .strip_suffix('\n')
-            .map(|content| (content, "\n"))
-            .unwrap_or((line, ""));
-        out.push_str(&normalize_python_compat_line(content));
-        out.push_str(newline);
-    }
-    out
-}
-
-fn normalize_python_compat_line(line: &str) -> String {
-    let (code, comment) = split_code_and_comment(line);
-    let indent_len = code.len() - code.trim_start_matches([' ', '\t']).len();
-    let indent = &code[..indent_len];
-    let trimmed = &code[indent_len..];
-
-    if trimmed == "print" {
-        return format!("{indent}print(){comment}");
-    }
-    if let Some(rest) = trimmed.strip_prefix("print ")
-        && !rest.starts_with('(')
-        && !rest.starts_with(">>")
-    {
-        return format!("{indent}print({rest}){comment}");
-    }
-    if let Some(rest) = trimmed.strip_prefix("exec ")
-        && !rest.starts_with('(')
-    {
-        return format!(
-            "{indent}exec({}){comment}",
-            normalize_python2_exec_args(rest)
-        );
-    }
-    if let Some(normalized) = normalize_python2_except_clause(trimmed) {
-        return format!("{indent}{normalized}{comment}");
-    }
-    if let Some(rest) = trimmed.strip_prefix("raise ")
-        && let Some(normalized) = normalize_python2_raise(rest)
-    {
-        return format!("{indent}{normalized}{comment}");
-    }
-
-    line.to_string()
-}
-
-fn split_code_and_comment(line: &str) -> (&str, &str) {
-    let mut quote = None;
-    let mut escape = false;
-    for (idx, ch) in line.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match quote {
-            Some(active) => {
-                if ch == '\\' {
-                    escape = true;
-                } else if ch == active {
-                    quote = None;
-                }
-            }
-            None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '#' => return (&line[..idx], &line[idx..]),
-                _ => {}
-            },
-        }
-    }
-    (line, "")
-}
-
-fn normalize_python2_except_clause(trimmed: &str) -> Option<String> {
-    static EXCEPT_RE: OnceLock<Regex> = OnceLock::new();
-    let captures = EXCEPT_RE
-        .get_or_init(|| {
-            Regex::new(
-                r"^except\s+([A-Za-z_][A-Za-z0-9_\.]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$",
-            )
-            .expect("valid except regex")
-        })
-        .captures(trimmed)?;
-    Some(format!(
-        "except {} as {}:{}",
-        captures.get(1)?.as_str(),
-        captures.get(2)?.as_str(),
-        captures.get(3)?.as_str()
-    ))
-}
-
-fn normalize_python2_raise(rest: &str) -> Option<String> {
-    let parts = split_top_level_commas(rest);
-    if parts.len() < 2 || parts[0].trim_start().starts_with('(') {
-        return None;
-    }
-    Some(format!("raise {}({})", parts[0].trim(), parts[1].trim()))
-}
-
-fn normalize_python2_exec_args(rest: &str) -> String {
-    if let Some(idx) = find_top_level_keyword(rest, " in ") {
-        let body = rest[..idx].trim();
-        let scopes = split_top_level_commas(rest[idx + 4..].trim());
-        match scopes.as_slice() {
-            [globals] => format!("{body}, {}", globals.trim()),
-            [globals, locals, ..] => {
-                format!("{body}, {}, {}", globals.trim(), locals.trim())
-            }
-            _ => body.to_string(),
-        }
-    } else {
-        rest.trim().to_string()
-    }
-}
-
-fn split_top_level_commas(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut quote = None;
-    let mut escape = false;
-    let mut depth = 0usize;
-
-    for (idx, ch) in text.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match quote {
-            Some(active) => {
-                if ch == '\\' {
-                    escape = true;
-                } else if ch == active {
-                    quote = None;
-                }
-            }
-            None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                ',' if depth == 0 => {
-                    out.push(text[start..idx].trim());
-                    start = idx + 1;
-                }
-                _ => {}
-            },
-        }
-    }
-
-    out.push(text[start..].trim());
-    out
-}
-
-fn find_top_level_keyword(text: &str, needle: &str) -> Option<usize> {
-    let mut quote = None;
-    let mut escape = false;
-    let mut depth = 0usize;
-
-    for (idx, ch) in text.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match quote {
-            Some(active) => {
-                if ch == '\\' {
-                    escape = true;
-                } else if ch == active {
-                    quote = None;
-                }
-            }
-            None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                _ if depth == 0 && text[idx..].starts_with(needle) => return Some(idx),
-                _ => {}
-            },
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::{PythonBodyArgKind, PythonCallKind, PythonSignal, collect_python_signals};
@@ -1283,6 +1125,19 @@ mod tests {
             "import builtins\nrunner = builtins.eval\nrunner('1 + 1')",
             PythonCallKind::Eval,
         ));
+    }
+
+    #[test]
+    fn collect_python_signals_does_not_treat_maya_mel_eval_as_builtin_eval() {
+        assert!(!has_call(
+            "import maya.mel as mm\nmm.eval('setProject \"asset/example\";')",
+            PythonCallKind::Eval,
+        ));
+    }
+
+    #[test]
+    fn collect_python_signals_does_not_treat_unknown_member_eval_as_builtin_eval() {
+        assert!(!has_call("runner.eval('sample')", PythonCallKind::Eval,));
     }
 
     #[test]
