@@ -1,7 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, collections::VecDeque, sync::Arc};
 
 use maya_scene_kit_formats::mel::mel_parse_budget_limit_from_message;
-use rustpython_parser::{Parse, ast};
+use rustpython_parser::ast;
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -11,7 +11,12 @@ use super::{
         classify_mel_command, classify_mel_command_with_semantics, classify_python_call_target,
         effect_rank,
     },
-    mel_surface, surfaces,
+    mel_surface,
+    python_source::{
+        collect_static_maya_mel_eval_payloads, is_maya_mel_eval_call, parse_python_compat_suite,
+        static_string_expr,
+    },
+    surfaces,
 };
 use crate::scene::{
     DependencyFact, EffectCertainty, ExecutionCoverageIssue, ExecutionCoverageIssueDetail,
@@ -86,7 +91,8 @@ pub(crate) fn build_observed_execution_core(
     let mut observed = Vec::with_capacity(surface_capacity);
     let mut unit_summaries = Vec::with_capacity(surface_capacity);
     let mut unknown_semantics = Vec::with_capacity(surface_capacity);
-    for surface in coverage.surfaces {
+    let mut pending_surfaces = VecDeque::from(coverage.surfaces);
+    while let Some(surface) = pending_surfaces.pop_front() {
         let should_model = should_model_as_execution_unit(&surface.origin);
         let mel = match surface.origin.lang {
             ExecutionLanguage::Python => None,
@@ -131,6 +137,18 @@ pub(crate) fn build_observed_execution_core(
                 });
             }
             unit_summaries.push(summary);
+        }
+
+        if surface.origin.lang == ExecutionLanguage::Python {
+            for payload in collect_static_maya_mel_eval_payloads(&surface.text) {
+                let mut origin = surface.origin.clone();
+                origin.lang = ExecutionLanguage::Mel;
+                origin.source_kind = Some("python->maya.mel.eval literal bridge".to_string());
+                pending_surfaces.push_back(surfaces::ExecutionSurfaceRecord {
+                    text: Arc::from(payload),
+                    origin,
+                });
+            }
         }
 
         observed.push(ObservedExecutionSurfaceCore {
@@ -455,7 +473,7 @@ fn summarize_python_surface(
     EffectCertainty,
     Vec<ExecutionReason>,
 ) {
-    let Ok(program) = ast::Suite::parse(text, "<observe>") else {
+    let Some(program) = parse_python_compat_suite(text) else {
         return (
             ExecutionEffectClass::Unknown,
             ExecutionSemanticClass::UnknownWrite,
@@ -633,6 +651,8 @@ fn should_model_as_execution_unit(origin: &ExecutionOrigin) -> bool {
 }
 
 struct PythonEffectVisitor {
+    module_aliases: HashMap<String, String>,
+    string_values: HashMap<String, Option<String>>,
     effect: ExecutionEffectClass,
     semantic_class: ExecutionSemanticClass,
     certainty: EffectCertainty,
@@ -643,6 +663,8 @@ struct PythonEffectVisitor {
 impl Default for PythonEffectVisitor {
     fn default() -> Self {
         Self {
+            module_aliases: HashMap::new(),
+            string_values: HashMap::new(),
             effect: ExecutionEffectClass::PureComputation,
             semantic_class: ExecutionSemanticClass::General,
             certainty: EffectCertainty::Proven,
@@ -664,6 +686,21 @@ impl PythonEffectVisitor {
         match stmt {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
+                    let local_name = alias
+                        .asname
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| {
+                            alias
+                                .name
+                                .as_str()
+                                .split('.')
+                                .next()
+                                .unwrap_or(alias.name.as_str())
+                                .to_string()
+                        });
+                    self.module_aliases
+                        .insert(local_name, alias.name.as_str().to_string());
                     self.raise(
                         ExecutionEffectClass::ExternalDependency,
                         ExecutionSemanticClass::DependencyWrite,
@@ -677,6 +714,15 @@ impl PythonEffectVisitor {
             }
             ast::Stmt::ImportFrom(import) => {
                 let module = import.module.as_deref().unwrap_or("<relative>");
+                for alias in &import.names {
+                    let local_name = alias
+                        .asname
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| alias.name.to_string());
+                    self.module_aliases
+                        .insert(local_name, format!("{module}.{}", alias.name));
+                }
                 self.raise(
                     ExecutionEffectClass::ExternalDependency,
                     ExecutionSemanticClass::DependencyWrite,
@@ -693,12 +739,14 @@ impl PythonEffectVisitor {
             ast::Stmt::For(stmt) => {
                 self.visit_expr(&stmt.target);
                 self.visit_expr(&stmt.iter);
+                self.clear_string_target(&stmt.target);
                 self.visit_suite(&stmt.body);
                 self.visit_suite(&stmt.orelse);
             }
             ast::Stmt::AsyncFor(stmt) => {
                 self.visit_expr(&stmt.target);
                 self.visit_expr(&stmt.iter);
+                self.clear_string_target(&stmt.target);
                 self.visit_suite(&stmt.body);
                 self.visit_suite(&stmt.orelse);
             }
@@ -717,6 +765,7 @@ impl PythonEffectVisitor {
                     self.visit_expr(&item.context_expr);
                     if let Some(vars) = &item.optional_vars {
                         self.visit_expr(vars);
+                        self.clear_string_target(vars);
                     }
                 }
                 self.visit_suite(&stmt.body);
@@ -726,6 +775,7 @@ impl PythonEffectVisitor {
                     self.visit_expr(&item.context_expr);
                     if let Some(vars) = &item.optional_vars {
                         self.visit_expr(vars);
+                        self.clear_string_target(vars);
                     }
                 }
                 self.visit_suite(&stmt.body);
@@ -773,16 +823,27 @@ impl PythonEffectVisitor {
                     self.visit_expr(target);
                 }
                 self.visit_expr(&stmt.value);
+                let string_value = static_string_expr(&stmt.value, &self.string_values);
+                for target in &stmt.targets {
+                    self.record_string_target(target, string_value.clone());
+                }
             }
             ast::Stmt::AnnAssign(stmt) => {
                 self.visit_expr(&stmt.target);
                 if let Some(expr) = &stmt.value {
                     self.visit_expr(expr);
+                    self.record_string_target(
+                        &stmt.target,
+                        static_string_expr(expr, &self.string_values),
+                    );
+                } else {
+                    self.clear_string_target(&stmt.target);
                 }
             }
             ast::Stmt::AugAssign(stmt) => {
                 self.visit_expr(&stmt.target);
                 self.visit_expr(&stmt.value);
+                self.clear_string_target(&stmt.target);
             }
             ast::Stmt::Expr(stmt) => self.visit_expr(&stmt.value),
             ast::Stmt::Assert(stmt) => {
@@ -794,6 +855,7 @@ impl PythonEffectVisitor {
             ast::Stmt::Delete(stmt) => {
                 for expr in &stmt.targets {
                     self.visit_expr(expr);
+                    self.clear_string_target(expr);
                 }
             }
             ast::Stmt::Raise(stmt) => {
@@ -819,6 +881,40 @@ impl PythonEffectVisitor {
     fn visit_expr(&mut self, expr: &ast::Expr) {
         match expr {
             ast::Expr::Call(call) => {
+                if is_maya_mel_eval_call(&call.func, &self.module_aliases) {
+                    if call.args.is_empty() {
+                        self.raise(
+                            ExecutionEffectClass::Unknown,
+                            ExecutionSemanticClass::UnknownWrite,
+                            EffectCertainty::Uncertain,
+                            ExecutionReason::Static {
+                                value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
+                            },
+                        );
+                    } else if call
+                        .args
+                        .first()
+                        .and_then(|arg| static_string_expr(arg, &self.string_values))
+                        .is_none()
+                    {
+                        self.raise(
+                            ExecutionEffectClass::Unknown,
+                            ExecutionSemanticClass::UnknownWrite,
+                            EffectCertainty::Uncertain,
+                            ExecutionReason::Static {
+                                value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
+                            },
+                        );
+                    }
+                    self.visit_expr(&call.func);
+                    for arg in &call.args {
+                        self.visit_expr(arg);
+                    }
+                    for keyword in &call.keywords {
+                        self.visit_expr(&keyword.value);
+                    }
+                    return;
+                }
                 let name = call_target_name(&call.func);
                 match name {
                     Some(name) => {
@@ -963,6 +1059,46 @@ impl PythonEffectVisitor {
         self.reasons.push(reason);
     }
 
+    fn record_string_target(&mut self, target: &ast::Expr, value: Option<String>) {
+        match target {
+            ast::Expr::Name(name) => {
+                self.string_values.insert(name.id.to_string(), value);
+            }
+            ast::Expr::Tuple(expr) => {
+                for elt in &expr.elts {
+                    self.clear_string_target(elt);
+                }
+            }
+            ast::Expr::List(expr) => {
+                for elt in &expr.elts {
+                    self.clear_string_target(elt);
+                }
+            }
+            ast::Expr::Starred(expr) => self.clear_string_target(&expr.value),
+            _ => {}
+        }
+    }
+
+    fn clear_string_target(&mut self, target: &ast::Expr) {
+        match target {
+            ast::Expr::Name(name) => {
+                self.string_values.remove(name.id.as_str());
+            }
+            ast::Expr::Tuple(expr) => {
+                for elt in &expr.elts {
+                    self.clear_string_target(elt);
+                }
+            }
+            ast::Expr::List(expr) => {
+                for elt in &expr.elts {
+                    self.clear_string_target(elt);
+                }
+            }
+            ast::Expr::Starred(expr) => self.clear_string_target(&expr.value),
+            _ => {}
+        }
+    }
+
     fn finish(
         mut self,
     ) -> (
@@ -1023,4 +1159,44 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_python_surface;
+    use crate::scene::{EffectCertainty, ExecutionEffectClass};
+
+    #[test]
+    fn python_summary_uses_compat_normalization_for_python2_print() {
+        let (_effect, _semantic_class, certainty, reasons) =
+            summarize_python_surface("print u'Example message'\n");
+
+        assert_eq!(certainty, EffectCertainty::Proven);
+        assert!(reasons.iter().all(|reason| {
+            !format!("{reason:?}").contains("PythonParseFailurePreventsProvenEffectSummary")
+        }));
+    }
+
+    #[test]
+    fn python_summary_does_not_treat_static_maya_mel_eval_as_unknown_python_call() {
+        let (effect, _semantic_class, certainty, reasons) = summarize_python_surface(
+            "import maya.mel as mm\ncmd = 'set' + 'Project \"asset/example\";'\nmm.eval(cmd)\n",
+        );
+
+        assert_eq!(effect, ExecutionEffectClass::ExternalDependency);
+        assert_eq!(certainty, EffectCertainty::Proven);
+        assert!(
+            reasons.iter().all(|reason| {
+                !format!("{reason:?}").contains("UnclassifiedPythonCallDetected")
+            })
+        );
+    }
+
+    #[test]
+    fn python_summary_keeps_dynamic_maya_mel_eval_uncertain() {
+        let (_effect, _semantic_class, certainty, _reasons) =
+            summarize_python_surface("import maya.mel as mm\nmm.eval(build_command())\n");
+
+        assert_eq!(certainty, EffectCertainty::Uncertain);
+    }
 }

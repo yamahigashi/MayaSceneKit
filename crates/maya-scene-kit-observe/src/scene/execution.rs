@@ -2,6 +2,7 @@ pub(crate) mod catalog;
 pub(crate) mod dependency;
 mod effect_registry;
 mod mel_surface;
+mod python_source;
 pub(crate) mod surfaces;
 
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub use self::{
         MelSurfaceValidationDiagnostic, collect_mel_surface_facts,
         collect_mel_surface_facts_shared,
     },
+    python_source::normalize_python_compat_source,
     surfaces::ExecutionSurface,
 };
 use crate::scene::{

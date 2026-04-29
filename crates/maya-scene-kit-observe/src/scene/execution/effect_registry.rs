@@ -125,7 +125,7 @@ pub(crate) fn classify_mel_command(name: &str) -> Option<EffectRule> {
             ReasonKind::MelExternalDependencyCommand,
         )),
         "setAttr" | "addAttr" | "connectAttr" | "disconnectAttr" | "createNode" | "delete"
-        | "rename" | "parent" | "playbackOptions" | "currentUnit" | "optionVar" => {
+        | "rename" | "parent" | "playbackOptions" | "currentUnit" | "optionVar" | "setProject" => {
             Some(default_mutation_rule(name))
         }
         "warning" | "error" | "confirmDialog" | "headsUpMessage" => Some(EffectRule::new(
@@ -220,7 +220,9 @@ pub(crate) fn classify_mel_command_with_semantics(
         return Some(base);
     }
     let semantic_class = match name {
-        "playbackOptions" | "currentUnit" => ExecutionSemanticClass::OperationalConfigWrite,
+        "playbackOptions" | "currentUnit" | "setProject" => {
+            ExecutionSemanticClass::OperationalConfigWrite
+        }
         "createNode" | "delete" | "rename" | "parent" => ExecutionSemanticClass::SceneDataWrite,
         "setAttr" | "addAttr" | "connectAttr" | "disconnectAttr" => {
             classify_mutation_target(source_text, command)
@@ -276,7 +278,9 @@ pub(crate) fn effect_rank(effect: ExecutionEffectClass) -> u8 {
 
 fn default_mutation_rule(name: &str) -> EffectRule {
     let semantic_class = match name {
-        "playbackOptions" | "currentUnit" => ExecutionSemanticClass::OperationalConfigWrite,
+        "playbackOptions" | "currentUnit" | "setProject" => {
+            ExecutionSemanticClass::OperationalConfigWrite
+        }
         "createNode" | "delete" | "rename" | "parent" => ExecutionSemanticClass::SceneDataWrite,
         _ => ExecutionSemanticClass::UnknownWrite,
     };
@@ -480,6 +484,13 @@ mod tests {
 
         let source = classify_mel_command("source").expect("source rule");
         assert_eq!(source.effect, ExecutionEffectClass::ExternalDependency);
+
+        let set_project = classify_mel_command("setProject").expect("setProject rule");
+        assert_eq!(set_project.effect, ExecutionEffectClass::SceneMutation);
+        assert_eq!(
+            set_project.semantic_class,
+            ExecutionSemanticClass::OperationalConfigWrite
+        );
     }
 
     #[test]
