@@ -16,7 +16,8 @@ use maya_scene_kit_observe::scene::{
     core::ValidationState,
     evidence::{
         DependencyFactKind, DependencyRiskClass, ExecutionCoverageIssueDetail,
-        ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage, ExecutionSurfaceKind,
+        ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass,
+        ExecutionLanguage, ExecutionSurfaceKind,
     },
     paths::PathKind,
 };
@@ -73,16 +74,20 @@ fn write_reference_scene(path: &std::path::Path, reference_path: &str, reference
     );
 }
 
-fn build_mb_chunk(tag: &str, payload: &[u8]) -> Vec<u8> {
+fn build_mb_chunk_with_alignment(tag: &str, payload: &[u8], sibling_alignment: usize) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(tag.as_bytes());
     out.extend_from_slice(&0u32.to_be_bytes());
     out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
     out.extend_from_slice(payload);
-    while (out.len() - 16) % 8 != 0 {
+    while (out.len() - 16) % sibling_alignment != 0 {
         out.push(0);
     }
     out
+}
+
+fn build_mb_chunk(tag: &str, payload: &[u8]) -> Vec<u8> {
+    build_mb_chunk_with_alignment(tag, payload, 8)
 }
 
 fn build_mb_form(form: &str, children: &[Vec<u8>]) -> Vec<u8> {
@@ -90,7 +95,7 @@ fn build_mb_form(form: &str, children: &[Vec<u8>]) -> Vec<u8> {
     for child in children {
         payload.extend_from_slice(child);
     }
-    build_mb_chunk("FOR8", &payload)
+    build_mb_chunk_with_alignment("FOR8", &payload, 4)
 }
 
 fn build_mb_root(children: &[Vec<u8>]) -> Vec<u8> {
@@ -701,6 +706,44 @@ fn audit_mb_fref_fbx_source_metadata_is_not_raw_execution_surface() {
         "unexpected surface diagnostics coverage issue: {:?}",
         report.coverage_issues
     );
+}
+
+#[test]
+fn audit_mb_raw_marker_payload_is_coverage_uncertainty_not_unknown_language_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("unknown_raw_marker.mb");
+    std::fs::write(
+        &source,
+        build_mb_root(&[build_mb_form(
+            "UNKN",
+            &[build_mb_chunk(
+                "DATA",
+                b"source \"asset/example/startup.mel\"",
+            )],
+        )]),
+    )
+    .expect("write mb fixture");
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "unknown_execution_language"),
+        "unexpected unknown language finding: {:?}",
+        report.findings
+    );
+    assert!(report.coverage_issues.iter().any(|issue| {
+        issue.kind == ExecutionCoverageIssueKind::UnknownRawMbPayload
+            && matches!(
+                &issue.detail,
+                ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker }
+                    if marker == "source"
+            )
+    }));
+    assert_eq!(report.coverage_state, ExecutionCoverageState::Incomplete);
+    assert!(report.blocked_on_uncertainty);
 }
 
 #[test]

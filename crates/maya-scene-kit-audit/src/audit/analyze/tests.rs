@@ -3,7 +3,9 @@ use std::sync::Arc;
 use maya_scene_kit_observe::scene::execution::collect_mel_surface_facts;
 
 use super::{
-    AnalysisSurface, analyze_mel_surface, mel::find_mel_call, text_scan::scan_mel_sink_word_hits,
+    AnalysisSurface, analyze_mel_surface,
+    mel::{find_mel_call, mel_sink_line_preview},
+    text_scan::scan_mel_sink_word_hits,
 };
 use crate::scene::{
     AuditEvidence, AuditEvidenceKey, AuditSinkKind, AuditSurfaceDerivation, ExecutionLanguage,
@@ -363,4 +365,86 @@ fn mel_sink_finding_uses_rendered_body_as_preview_override() {
             } if value == "ExampleScriptNode"
         )
     }));
+}
+
+#[test]
+fn dynamic_mel_sink_finding_uses_sink_span_preview_override() {
+    let source = concat!(
+        "float $ExampleFrame = frame;\n",
+        "string\t$ExampleBody = getenv(\"EXAMPLE_ENV\");\r\n",
+        "eval($ExampleBody);"
+    );
+    let surface = AnalysisSurface {
+        text: Arc::from(source),
+        preview: "float $ExampleFrame = frame".to_string(),
+        origin: ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger: ExecutionTrigger::FileOpen,
+            surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+            node_name: Some("ExampleExpression".to_string()),
+            attr_name: Some(".ixp".to_string()),
+            source_range: None,
+            source_kind: Some("internalExpression".to_string()),
+            chunk_form: Some("DEXP".to_string()),
+            chunk_tag: Some("STR ".to_string()),
+            chunk_node_offset: Some(0x40),
+            ..ExecutionOrigin::without_chunk_address()
+        },
+        derivation: AuditSurfaceDerivation::Observed,
+        mel: Some(Arc::new(collect_mel_surface_facts(source))),
+    };
+
+    let analysis = analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new());
+    let finding = analysis
+        .findings
+        .iter()
+        .find(|finding| finding.code.as_str() == "mel_eval")
+        .expect("mel eval finding");
+    let preview = finding
+        .preview_override
+        .as_deref()
+        .expect("preview override");
+
+    assert!(preview.contains("eval($ExampleBody)"));
+    assert!(preview.contains('\n'));
+    assert!(preview.contains("string    $ExampleBody"));
+    assert!(!preview.contains('\r'));
+}
+
+#[test]
+fn dynamic_mel_sink_preview_is_limited_to_sink_line_context() {
+    let mut source = String::new();
+    for index in 0..35 {
+        source.push_str(&format!("string $ExampleBefore{index:02} = \"sample\";\n"));
+    }
+    source.push_str("string $ExampleBody = getenv(\"EXAMPLE_ENV\");\n");
+    let sink_position = source.len();
+    source.push_str("eval($ExampleBody);\n");
+    for index in 0..15 {
+        source.push_str(&format!("string $ExampleAfter{index:02} = \"sample\";\n"));
+    }
+
+    let preview = mel_sink_line_preview(&source, sink_position);
+
+    assert!(preview.starts_with("[... omitted before ...] string $ExampleBefore06"));
+    assert!(!preview.contains("ExampleBefore05"));
+    assert!(preview.contains("ExampleBefore06"));
+    assert!(preview.contains("eval($ExampleBody)"));
+    assert!(preview.contains("ExampleAfter09"));
+    assert!(!preview.contains("ExampleAfter10"));
+    assert!(preview.ends_with(" [... omitted after ...]"));
+    assert!(preview.lines().count() <= 41);
+}
+
+#[test]
+fn dynamic_mel_sink_preview_truncates_long_lines_on_char_boundary() {
+    let mut source = String::from("eval($ExampleBody); ");
+    source.push_str(&"ExampleValue".repeat(1300));
+    source.push('界');
+
+    let preview = mel_sink_line_preview(&source, 0);
+
+    assert!(preview.len() <= 12 * 1024);
+    assert!(preview.is_char_boundary(preview.len()));
+    assert!(preview.ends_with(" [... omitted after ...]"));
 }

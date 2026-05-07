@@ -19,6 +19,12 @@ use crate::scene::{
     execution::{MelSurfaceCall, MelSurfaceFacts},
 };
 
+const MEL_SINK_PREVIEW_LINES_BEFORE: usize = 30;
+const MEL_SINK_PREVIEW_LINES_AFTER: usize = 10;
+const MEL_SINK_PREVIEW_MAX_BYTES: usize = 12 * 1024;
+const MEL_SINK_PREVIEW_PREFIX_OMISSION: &str = "[... omitted before ...] ";
+const MEL_SINK_PREVIEW_SUFFIX_OMISSION: &str = " [... omitted after ...]";
+
 pub(super) fn analyze_mel_surface_impl(
     surface_index: usize,
     surface: &AnalysisSurface,
@@ -253,11 +259,7 @@ where
         });
     }
 
-    let preview_override = fact
-        .rendered_text
-        .as_deref()
-        .map(super::builders::snippet)
-        .filter(|preview| !preview.is_empty());
+    let preview_override = mel_sink_preview_override(surface, fact);
 
     let findings = if bridge_python && is_expression_literal_python_bridge(surface, fact) {
         Vec::new()
@@ -301,6 +303,115 @@ fn is_expression_literal_python_bridge(surface: &AnalysisSurface, fact: &MelSink
             surface.origin.source_kind.as_deref(),
             Some("expression" | "internalExpression")
         )
+}
+
+fn mel_sink_preview_override(surface: &AnalysisSurface, fact: &MelSinkArgFact) -> Option<String> {
+    if fact.resolved_kind == MelResolvedStringKind::Literal {
+        return fact
+            .rendered_text
+            .as_deref()
+            .map(super::builders::snippet)
+            .filter(|preview| !preview.is_empty());
+    }
+
+    let start = fact
+        .command_name
+        .as_deref()
+        .and_then(|command_name| {
+            let search_end = clamp_char_boundary(surface.text.as_ref(), fact.span.start);
+            surface.text[..search_end].rfind(command_name)
+        })
+        .unwrap_or(fact.span.start);
+    let preview = mel_sink_line_preview(surface.text.as_ref(), start);
+    (!preview.is_empty()).then_some(preview)
+}
+
+fn clamp_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+pub(super) fn mel_sink_line_preview(text: &str, sink_position: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let sink_position = clamp_char_boundary(text, sink_position);
+    let sink_line_start = line_start_at_or_before(text, sink_position);
+    let (window_start, omitted_before) =
+        line_start_before(text, sink_line_start, MEL_SINK_PREVIEW_LINES_BEFORE);
+    let (window_end, omitted_after) =
+        line_end_after(text, sink_line_start, MEL_SINK_PREVIEW_LINES_AFTER);
+
+    let mut preview = String::new();
+    if omitted_before {
+        preview.push_str(MEL_SINK_PREVIEW_PREFIX_OMISSION);
+    }
+    preview.push_str(&normalize_mel_sink_preview_text(
+        &text[window_start..window_end],
+    ));
+    if omitted_after {
+        while preview.ends_with('\n') {
+            preview.pop();
+        }
+        preview.push_str(MEL_SINK_PREVIEW_SUFFIX_OMISSION);
+    }
+    truncate_mel_sink_preview(preview)
+}
+
+fn line_start_at_or_before(text: &str, position: usize) -> usize {
+    text[..position].rfind('\n').map_or(0, |index| index + 1)
+}
+
+fn line_start_before(text: &str, mut line_start: usize, lines_before: usize) -> (usize, bool) {
+    for _ in 0..lines_before {
+        if line_start == 0 {
+            return (0, false);
+        }
+        line_start = text[..line_start - 1]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+    }
+    (line_start, line_start > 0)
+}
+
+fn line_end_after(text: &str, line_start: usize, lines_after: usize) -> (usize, bool) {
+    let mut end = line_end_inclusive(text, line_start);
+    for _ in 0..lines_after {
+        if end >= text.len() {
+            return (text.len(), false);
+        }
+        end = line_end_inclusive(text, end);
+    }
+    (end, end < text.len())
+}
+
+fn line_end_inclusive(text: &str, line_start: usize) -> usize {
+    text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |offset| line_start + offset + 1)
+}
+
+fn normalize_mel_sink_preview_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ")
+}
+
+fn truncate_mel_sink_preview(mut preview: String) -> String {
+    if preview.len() <= MEL_SINK_PREVIEW_MAX_BYTES {
+        return preview;
+    }
+
+    let marker = MEL_SINK_PREVIEW_SUFFIX_OMISSION;
+    let limit = MEL_SINK_PREVIEW_MAX_BYTES.saturating_sub(marker.len());
+    let truncate_at = clamp_char_boundary(&preview, limit);
+    preview.truncate(truncate_at);
+    preview.push_str(marker);
+    preview
 }
 
 fn is_direct_literal_sink_arg(source_text: &str, fact: &MelSinkArgFact) -> bool {
