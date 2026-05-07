@@ -39,7 +39,9 @@ use maya_scene_kit_observe::scene::{
         ExecutionLanguage, ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind,
         ExecutionTrigger,
     },
-    paths::{PathKind, ScenePathEntry, ScenePathValueStyle, ScenePathsReport},
+    paths::{
+        PathKind, ScenePathEntry, ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport,
+    },
 };
 use tempfile::tempdir;
 
@@ -2018,6 +2020,40 @@ fn missing_path_count_for_row_counts_only_missing_entries() {
     row.refresh_path_resolution_cache();
 
     assert_eq!(missing_path_count_for_row(&row), Some(1));
+}
+
+#[test]
+fn path_resolution_cache_uses_scene_folder_fallback_after_workspace_miss() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let scene_dir = workspace.join("scenes");
+    fs::create_dir_all(scene_dir.join("textures")).expect("mkdir scene textures");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let scene = scene_dir.join("scene.ma");
+    fs::write(scene_dir.join("textures/existing.tx"), "tx").expect("existing tx");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/existing.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.refresh_scene_workspace_root();
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+    row.refresh_path_resolution_cache();
+
+    assert_eq!(missing_path_count_for_row(&row), Some(0));
+    assert_eq!(row.path_resolution_cache.len(), 1);
+    assert_eq!(
+        row.path_resolution_cache
+            .get(&0)
+            .map(|entry| entry.resolution.status),
+        Some(ScenePathResolutionStatus::Exists)
+    );
 }
 
 #[test]

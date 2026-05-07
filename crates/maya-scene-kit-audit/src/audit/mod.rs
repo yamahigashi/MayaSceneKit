@@ -11,7 +11,7 @@ use std::{
 };
 
 use maya_scene_kit_observe::scene::{
-    SceneFileIdentity, SceneResourceResolver, detect_scene_format,
+    SceneFileIdentity, ScenePathResolutionContext, SceneResourceResolver, detect_scene_format,
     paths::{PathKind, ScenePathResolutionStatus},
 };
 
@@ -600,9 +600,12 @@ impl<'a> ReferenceAuditRun<'a> {
         source_depth: usize,
         next_ancestors: &[String],
     ) {
+        let workspace_root = self.resolver.find_scene_workspace_root(source_path);
+        let resolution_context =
+            ScenePathResolutionContext::for_scene(source_path, workspace_root.as_ref());
         let resolution = self
             .resolver
-            .resolve_reference_scene_path_value(raw_target, source_path);
+            .resolve_scene_path_value(raw_target, &resolution_context);
         let mut edge = AuditReferenceEdge {
             source_identity: source_identity.key.clone(),
             source_path: source_path.to_path_buf(),

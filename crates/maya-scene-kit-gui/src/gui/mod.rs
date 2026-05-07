@@ -46,7 +46,7 @@ use maya_scene_kit_edit::scene::{
 };
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot,
-    SceneResourceResolver, collect_scene_paths_with_options,
+    ScenePathResolutionContext, SceneResourceResolver, collect_scene_paths_with_options,
     core::{SceneFormat, ValidationState},
     dump::{SceneDumpReport, SceneDumpRequireEntry, SceneDumpRequireKind},
     evidence::{ExecutionOrigin, ExecutionSurfaceKind},
@@ -55,7 +55,6 @@ use maya_scene_kit_observe::scene::{
         PathKind, ScenePathResolution, ScenePathResolutionStatus, ScenePathValueStyle,
         ScenePathsReport,
     },
-    resolve_scene_path_value, resolve_scene_path_values_batch,
 };
 use serde::Deserialize;
 
@@ -1104,7 +1103,10 @@ impl SceneRow {
             return;
         };
 
-        let workspace_root = self.scene_workspace_root.as_deref();
+        let context = ScenePathResolutionContext::for_scene(
+            &self.path,
+            self.scene_workspace_root.as_ref(),
+        );
         let effective_values = report
             .entries
             .iter()
@@ -1119,11 +1121,12 @@ impl SceneRow {
                 )
             })
             .collect::<Vec<_>>();
-        let resolutions = resolve_scene_path_values_batch(
+        let mut resolver = SceneResourceResolver::new();
+        let resolutions = resolver.resolve_scene_path_values(
             effective_values
                 .iter()
                 .map(|(_, effective_value)| effective_value.as_str()),
-            workspace_root,
+            &context,
         );
         self.path_resolution_cache = effective_values
             .into_iter()
@@ -1203,10 +1206,9 @@ impl SceneRow {
     ) -> Option<ScenePathResolution> {
         let report = self.display_paths_report()?;
         report.entries.get(entry_index)?;
-        Some(resolve_scene_path_value(
-            effective_value,
-            self.scene_workspace_root.as_deref(),
-        ))
+        let context =
+            ScenePathResolutionContext::for_scene(&self.path, self.scene_workspace_root.as_ref());
+        Some(SceneResourceResolver::new().resolve_scene_path_value(effective_value, &context))
     }
 
     fn dirty(&self) -> bool {

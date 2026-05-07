@@ -1,6 +1,10 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::reference_semantics::{
+    ScenePathAttrKind, classify_scene_path_attr, looks_like_qualified_scene_file_path,
+};
+
 static CREATE_SCRIPT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\bcreateNode\s+script\b").unwrap());
 
@@ -196,15 +200,14 @@ pub(crate) fn command_has_terminating_semicolon(command: &str) -> bool {
 }
 
 pub(crate) fn is_reference_attr(attr: &str) -> bool {
-    attr == ".fn" || attr.starts_with(".fn[") || attr == ".f"
+    matches!(
+        classify_scene_path_attr(attr),
+        Some(ScenePathAttrKind::ReferencePath)
+    )
 }
 
 pub(crate) fn looks_like_scene_path(s: &str) -> bool {
-    if !(s.contains('/') || s.contains('\\')) {
-        return false;
-    }
-    let lower = s.to_ascii_lowercase();
-    lower.ends_with(".ma") || lower.ends_with(".mb")
+    looks_like_qualified_scene_file_path(s)
 }
 
 pub(crate) fn parse_setattr_string_line(line: &str) -> Option<(String, String)> {

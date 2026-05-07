@@ -55,6 +55,24 @@ fn resolve_scene_path_candidate(
     (style, resolved_path)
 }
 
+fn source_relative_path_candidate(
+    raw_value: &str,
+    style: ScenePathValueStyle,
+    source_scene_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let source_scene_dir = source_scene_dir?;
+    match style {
+        ScenePathValueStyle::PlainRelative => {
+            let trimmed = raw_value.trim_start_matches('/');
+            (!trimmed.is_empty()).then(|| source_scene_dir.join(trimmed))
+        }
+        ScenePathValueStyle::DoubleSlashWorkspaceRelative => {
+            workspace_relative_suffix(raw_value).map(|suffix| source_scene_dir.join(suffix))
+        }
+        ScenePathValueStyle::Absolute | ScenePathValueStyle::UncAbsolute => None,
+    }
+}
+
 fn lexical_probe_key(path: &Path) -> String {
     lexical_normalize_path_string(&path.to_string_lossy())
 }
@@ -154,6 +172,39 @@ pub struct SceneFileIdentity {
     pub canonical: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScenePathResolutionContext {
+    pub workspace_root: Option<PathBuf>,
+    pub source_scene_path: Option<PathBuf>,
+}
+
+impl ScenePathResolutionContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_workspace_root(workspace_root: Option<impl AsRef<Path>>) -> Self {
+        Self {
+            workspace_root: workspace_root.map(|path| path.as_ref().to_path_buf()),
+            source_scene_path: None,
+        }
+    }
+
+    pub fn for_scene(
+        source_scene_path: impl AsRef<Path>,
+        workspace_root: Option<impl AsRef<Path>>,
+    ) -> Self {
+        Self {
+            workspace_root: workspace_root.map(|path| path.as_ref().to_path_buf()),
+            source_scene_path: Some(source_scene_path.as_ref().to_path_buf()),
+        }
+    }
+
+    fn source_scene_dir(&self) -> Option<&Path> {
+        self.source_scene_path.as_deref()?.parent()
+    }
+}
+
 pub struct SceneResourceResolver {
     workspace_roots: BTreeMap<String, Option<PathBuf>>,
     file_exists: BTreeMap<String, bool>,
@@ -186,61 +237,39 @@ impl SceneResourceResolver {
     pub fn resolve_scene_path_value(
         &mut self,
         raw_value: &str,
-        workspace_root: Option<&Path>,
+        context: &ScenePathResolutionContext,
     ) -> ScenePathResolution {
-        let (style, resolved_path) = resolve_scene_path_candidate(raw_value, workspace_root);
-        self.resolution_from_candidate(style, resolved_path)
+        let (style, workspace_path) =
+            resolve_scene_path_candidate(raw_value, context.workspace_root.as_deref());
+        let workspace_resolution = self.resolution_from_candidate(style, workspace_path);
+        if workspace_resolution.status == ScenePathResolutionStatus::Exists {
+            return workspace_resolution;
+        }
+
+        let Some(source_path) =
+            source_relative_path_candidate(raw_value, style, context.source_scene_dir())
+        else {
+            return workspace_resolution;
+        };
+        let source_resolution = self.resolution_from_candidate(style, Some(source_path));
+        if source_resolution.status == ScenePathResolutionStatus::Exists
+            || workspace_resolution.status == ScenePathResolutionStatus::Unresolved
+        {
+            source_resolution
+        } else {
+            workspace_resolution
+        }
     }
 
     pub fn resolve_scene_path_values<'a>(
         &mut self,
         raw_values: impl IntoIterator<Item = &'a str>,
-        workspace_root: Option<&Path>,
+        context: &ScenePathResolutionContext,
     ) -> Vec<ScenePathResolution> {
         raw_values
             .into_iter()
-            .map(|raw_value| self.resolve_scene_path_value(raw_value, workspace_root))
+            .map(|raw_value| self.resolve_scene_path_value(raw_value, context))
             .collect()
-    }
-
-    pub fn resolve_reference_scene_path_value(
-        &mut self,
-        raw_value: &str,
-        source_scene_path: impl AsRef<Path>,
-    ) -> ScenePathResolution {
-        let source_scene_path = source_scene_path.as_ref();
-        let workspace_root = self.find_scene_workspace_root(source_scene_path);
-        let workspace_resolution =
-            self.resolve_scene_path_value(raw_value, workspace_root.as_deref());
-        if workspace_resolution.status == ScenePathResolutionStatus::Exists {
-            return workspace_resolution;
-        }
-
-        let Some(source_parent) = source_scene_path.parent() else {
-            return workspace_resolution;
-        };
-        let style = classify_scene_path_value_style(raw_value);
-        let fallback_path = match style {
-            ScenePathValueStyle::PlainRelative => {
-                let trimmed = raw_value.trim_start_matches('/');
-                (!trimmed.is_empty()).then(|| source_parent.join(trimmed))
-            }
-            ScenePathValueStyle::DoubleSlashWorkspaceRelative => {
-                workspace_relative_suffix(raw_value).map(|suffix| source_parent.join(suffix))
-            }
-            ScenePathValueStyle::Absolute | ScenePathValueStyle::UncAbsolute => None,
-        };
-        let Some(fallback_path) = fallback_path else {
-            return workspace_resolution;
-        };
-        let fallback_resolution = self.resolution_from_candidate(style, Some(fallback_path));
-        if fallback_resolution.status == ScenePathResolutionStatus::Exists
-            || workspace_resolution.status == ScenePathResolutionStatus::Unresolved
-        {
-            fallback_resolution
-        } else {
-            workspace_resolution
-        }
     }
 
     pub fn scene_file_identity(&mut self, path: impl AsRef<Path>) -> SceneFileIdentity {
@@ -338,28 +367,18 @@ pub fn find_scene_workspace_root(scene_path: impl AsRef<Path>) -> Option<PathBuf
     SceneResourceResolver::new().find_scene_workspace_root(scene_path)
 }
 
-pub fn resolve_scene_path_value(
-    raw_value: &str,
-    workspace_root: Option<&Path>,
-) -> ScenePathResolution {
-    SceneResourceResolver::new().resolve_scene_path_value(raw_value, workspace_root)
-}
-
-pub fn resolve_scene_path_values_batch<'a>(
-    raw_values: impl IntoIterator<Item = &'a str>,
-    workspace_root: Option<&Path>,
-) -> Vec<ScenePathResolution> {
-    SceneResourceResolver::new().resolve_scene_path_values(raw_values, workspace_root)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs, path::PathBuf};
+    use std::{
+        cell::Cell,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use super::{
-        SceneResourceResolver, find_scene_workspace_root, lexical_normalize_path_string,
-        resolve_scene_path_candidate, resolve_scene_path_candidates_with_probe,
-        resolve_scene_path_value, resolve_scene_path_values_batch,
+        ScenePathResolutionContext, SceneResourceResolver, find_scene_workspace_root,
+        lexical_normalize_path_string, resolve_scene_path_candidate,
+        resolve_scene_path_candidates_with_probe,
     };
     use crate::scene::paths::{ScenePathResolutionStatus, ScenePathValueStyle};
 
@@ -378,8 +397,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scene_path_value_marks_relative_without_workspace_unresolved() {
-        let resolution = resolve_scene_path_value("textures/albedo.png", None);
+    fn resolve_scene_path_value_marks_relative_without_context_unresolved() {
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::new();
+        let resolution = resolver.resolve_scene_path_value("textures/albedo.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::PlainRelative);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Unresolved);
@@ -394,7 +415,9 @@ mod tests {
         let target = workspace.join("textures/albedo.png");
         fs::write(&target, "png").expect("write texture");
 
-        let resolution = resolve_scene_path_value("textures/albedo.png", Some(&workspace));
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let resolution = resolver.resolve_scene_path_value("textures/albedo.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::PlainRelative);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
@@ -407,8 +430,13 @@ mod tests {
         let absolute = dir.path().join("absolute.png");
         fs::write(&absolute, "png").expect("write absolute");
 
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::for_scene(
+            dir.path().join("scenes/scene.ma"),
+            Some(dir.path()),
+        );
         let resolution =
-            resolve_scene_path_value(absolute.to_string_lossy().as_ref(), Some(dir.path()));
+            resolver.resolve_scene_path_value(absolute.to_string_lossy().as_ref(), &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::Absolute);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
@@ -423,8 +451,10 @@ mod tests {
         let target = workspace.join("sourceimages/albedo.png");
         fs::write(&target, "png").expect("write texture");
 
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
         let resolution =
-            resolve_scene_path_value("C:/project//sourceimages/albedo.png", Some(&workspace));
+            resolver.resolve_scene_path_value("C:/project//sourceimages/albedo.png", &context);
 
         assert_eq!(
             resolution.style,
@@ -436,7 +466,9 @@ mod tests {
 
     #[test]
     fn resolve_scene_path_value_preserves_unc_paths() {
-        let resolution = resolve_scene_path_value("//server/share/albedo.png", None);
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::new();
+        let resolution = resolver.resolve_scene_path_value("//server/share/albedo.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::UncAbsolute);
         assert_eq!(
@@ -452,7 +484,9 @@ mod tests {
         let workspace = dir.path().join("project");
         fs::create_dir_all(&workspace).expect("create workspace");
 
-        let resolution = resolve_scene_path_value("textures/missing.png", Some(&workspace));
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let resolution = resolver.resolve_scene_path_value("textures/missing.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::PlainRelative);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Missing);
@@ -463,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scene_path_values_batch_matches_repeated_single_resolution() {
+    fn resolve_scene_path_values_matches_repeated_single_resolution() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let workspace = dir.path().join("project");
         fs::create_dir_all(workspace.join("textures")).expect("mkdir textures");
@@ -475,17 +509,19 @@ mod tests {
             "C:/project//textures/existing.tx",
             "//server/share/missing.tx",
         ];
-        let batch = resolve_scene_path_values_batch(values, Some(&workspace));
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let batch = resolver.resolve_scene_path_values(values, &context);
         let singles = values
             .into_iter()
-            .map(|value| resolve_scene_path_value(value, Some(&workspace)))
+            .map(|value| resolver.resolve_scene_path_value(value, &context))
             .collect::<Vec<_>>();
 
         assert_eq!(batch, singles);
     }
 
     #[test]
-    fn resolver_context_matches_free_function_resolution() {
+    fn resolver_repeated_resolution_matches_batch_resolution() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let workspace = dir.path().join("project");
         fs::create_dir_all(workspace.join("scenes")).expect("mkdir scenes");
@@ -493,14 +529,19 @@ mod tests {
         fs::write(&target, "// scene").expect("write scene");
 
         let mut resolver = SceneResourceResolver::new();
-        let via_resolver = resolver.resolve_scene_path_value("scenes/child.ma", Some(&workspace));
-        let via_free_function = resolve_scene_path_value("scenes/child.ma", Some(&workspace));
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let via_resolver = resolver.resolve_scene_path_value("scenes/child.ma", &context);
+        let via_batch = resolver
+            .resolve_scene_path_values(["scenes/child.ma"], &context)
+            .into_iter()
+            .next()
+            .expect("resolution");
 
-        assert_eq!(via_resolver, via_free_function);
+        assert_eq!(via_resolver, via_batch);
     }
 
     #[test]
-    fn resolver_reference_resolution_uses_source_parent_fallback() {
+    fn resolver_context_uses_source_parent_fallback_without_workspace() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let source_dir = dir.path().join("shots");
         fs::create_dir_all(&source_dir).expect("mkdir shots");
@@ -510,10 +551,97 @@ mod tests {
         fs::write(&child, "// child").expect("write child");
 
         let mut resolver = SceneResourceResolver::new();
-        let resolution = resolver.resolve_reference_scene_path_value("child.ma", &source);
+        let context = ScenePathResolutionContext::for_scene(&source, None::<&Path>);
+        let resolution = resolver.resolve_scene_path_value("child.ma", &context);
 
         assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
         assert_eq!(resolution.resolved_path, Some(child));
+    }
+
+    #[test]
+    fn resolver_context_prefers_existing_workspace_path_over_source_parent() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let workspace = dir.path().join("project");
+        let source_dir = dir.path().join("shots");
+        fs::create_dir_all(workspace.join("assets")).expect("mkdir workspace assets");
+        fs::create_dir_all(source_dir.join("assets")).expect("mkdir source assets");
+        let source = source_dir.join("scene.ma");
+        let workspace_target = workspace.join("assets/texture.tx");
+        let source_target = source_dir.join("assets/texture.tx");
+        fs::write(&source, "// scene").expect("write scene");
+        fs::write(&workspace_target, "workspace").expect("write workspace target");
+        fs::write(&source_target, "source").expect("write source target");
+
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::for_scene(&source, Some(&workspace));
+        let resolution = resolver.resolve_scene_path_value("assets/texture.tx", &context);
+
+        assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
+        assert_eq!(resolution.resolved_path, Some(workspace_target));
+    }
+
+    #[test]
+    fn resolver_context_uses_source_parent_when_workspace_candidate_is_missing() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let workspace = dir.path().join("project");
+        let source_dir = dir.path().join("shots");
+        fs::create_dir_all(&workspace).expect("mkdir workspace");
+        fs::create_dir_all(source_dir.join("assets")).expect("mkdir source assets");
+        let source = source_dir.join("scene.ma");
+        let source_target = source_dir.join("assets/texture.tx");
+        fs::write(&source, "// scene").expect("write scene");
+        fs::write(&source_target, "source").expect("write source target");
+
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::for_scene(&source, Some(&workspace));
+        let resolution = resolver.resolve_scene_path_value("assets/texture.tx", &context);
+
+        assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
+        assert_eq!(resolution.resolved_path, Some(source_target));
+    }
+
+    #[test]
+    fn resolver_context_reports_source_parent_missing_when_no_workspace_exists() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source_dir = dir.path().join("shots");
+        fs::create_dir_all(&source_dir).expect("mkdir source");
+        let source = source_dir.join("scene.ma");
+        fs::write(&source, "// scene").expect("write scene");
+
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::for_scene(&source, None::<&Path>);
+        let resolution = resolver.resolve_scene_path_value("assets/missing.tx", &context);
+
+        assert_eq!(resolution.status, ScenePathResolutionStatus::Missing);
+        assert_eq!(
+            resolution.resolved_path,
+            Some(source_dir.join("assets/missing.tx"))
+        );
+    }
+
+    #[test]
+    fn resolver_context_uses_source_parent_for_double_slash_fallback() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let workspace = dir.path().join("project");
+        let source_dir = dir.path().join("shots");
+        fs::create_dir_all(&workspace).expect("mkdir workspace");
+        fs::create_dir_all(source_dir.join("sourceimages")).expect("mkdir sourceimages");
+        let source = source_dir.join("scene.ma");
+        let source_target = source_dir.join("sourceimages/albedo.png");
+        fs::write(&source, "// scene").expect("write scene");
+        fs::write(&source_target, "png").expect("write source target");
+
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::for_scene(&source, Some(&workspace));
+        let resolution =
+            resolver.resolve_scene_path_value("C:/project//sourceimages/albedo.png", &context);
+
+        assert_eq!(
+            resolution.style,
+            ScenePathValueStyle::DoubleSlashWorkspaceRelative
+        );
+        assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
+        assert_eq!(resolution.resolved_path, Some(source_target));
     }
 
     #[test]
@@ -525,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scene_path_values_batch_deduplicates_probe_targets() {
+    fn resolve_scene_path_values_deduplicates_probe_targets() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let workspace = dir.path().join("project");
         fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
@@ -552,20 +680,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scene_path_values_batch_preserves_maya_double_slash_parent_segments() {
+    fn resolve_scene_path_values_preserves_maya_double_slash_parent_segments() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let workspace = dir.path().join("project");
         fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
         let target = workspace.join("sourceimages/body.tx");
         fs::write(&target, "tx").expect("write target");
 
-        let resolution = resolve_scene_path_values_batch(
-            ["V:/show/project//assets/../sourceimages/body.tx"],
-            Some(&workspace),
-        )
-        .into_iter()
-        .next()
-        .expect("batch result");
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let resolution = resolver
+            .resolve_scene_path_values(
+                ["V:/show/project//assets/../sourceimages/body.tx"],
+                &context,
+            )
+            .into_iter()
+            .next()
+            .expect("batch result");
 
         assert_eq!(
             resolution.style,
