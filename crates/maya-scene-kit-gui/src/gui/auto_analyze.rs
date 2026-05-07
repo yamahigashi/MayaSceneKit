@@ -31,13 +31,14 @@ fn resolve_path_resolution_refresh_input(
     let scene_workspace_root = input
         .scene_workspace_root
         .or_else(|| resolver.find_scene_workspace_root(&input.scene_path));
-    let workspace_root = scene_workspace_root.as_deref();
+    let context =
+        ScenePathResolutionContext::for_scene(&input.scene_path, scene_workspace_root.as_ref());
     let resolutions = resolver.resolve_scene_path_values(
         input
             .effective_values
             .iter()
             .map(|(_, effective_value)| effective_value.as_str()),
-        workspace_root,
+        &context,
     );
     let path_resolution_cache = input
         .effective_values

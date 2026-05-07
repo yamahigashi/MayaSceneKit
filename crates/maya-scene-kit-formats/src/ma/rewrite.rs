@@ -18,7 +18,9 @@ use crate::{
         paths::extract_raw_scene_paths_from_ma,
         text::escape_ma_string,
     },
-    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
+    reference_semantics::{
+        ScenePathAttrKind, classify_scene_path_attr, looks_like_scene_file_path,
+    },
     replace_rules::CompiledPathReplaceRules,
 };
 
@@ -464,6 +466,7 @@ fn rewrite_ma_file_command_paths(
     let mut out = String::new();
     let mut cursor = 0usize;
     let mut total = 0usize;
+    let command_path_range = last_quoted_literal_range(command);
 
     while cursor < command.len() {
         let Some(next_quote_rel) = command[cursor..].find('"') else {
@@ -481,7 +484,9 @@ fn rewrite_ma_file_command_paths(
 
         let literal_slice = &command[quote_start..next];
         let value = unescape_ma_string_literal(&raw_literal);
-        if looks_like_scene_path(&value) {
+        let is_command_path = command_path_range == Some((quote_start, next));
+        if looks_like_scene_path(&value) || (is_command_path && looks_like_scene_file_path(&value))
+        {
             let (new_value, count) = compiled_rules.apply(&value);
             if count > 0 {
                 total += count;
@@ -576,7 +581,7 @@ fn is_file_texture_attr(attr: &str) -> bool {
 }
 
 fn extract_reference_entry_from_raw_file_command(command: &str) -> Option<ScenePathEntry> {
-    let path = last_quoted_literal(command).filter(|value| looks_like_scene_path(value))?;
+    let path = last_quoted_literal(command).filter(|value| looks_like_scene_file_path(value))?;
     let node_name = parse_file_command_flag_value(command, "-rfn")
         .unwrap_or_else(|| "<fileCmdRef>".to_string());
 
@@ -587,6 +592,23 @@ fn extract_reference_entry_from_raw_file_command(command: &str) -> Option<SceneP
         value: path,
         meta: None,
     })
+}
+
+fn last_quoted_literal_range(command: &str) -> Option<(usize, usize)> {
+    let mut cursor = 0usize;
+    let mut last_range = None;
+    while cursor < command.len() {
+        let Some(next_quote_rel) = command[cursor..].find('"') else {
+            break;
+        };
+        let quote_start = cursor + next_quote_rel;
+        let (literal, next) = parse_ma_quoted_literal(command, quote_start);
+        if literal.is_some() {
+            last_range = Some((quote_start, next));
+        }
+        cursor = next;
+    }
+    last_range
 }
 
 fn last_quoted_literal(command: &str) -> Option<String> {
@@ -623,21 +645,7 @@ fn parse_file_command_flag_value(command: &str, flag: &str) -> Option<String> {
 }
 
 fn rewrite_last_quoted_literal(command: &str, new_value: &str) -> (String, bool) {
-    let mut cursor = 0usize;
-    let mut last_range = None;
-    while cursor < command.len() {
-        let Some(next_quote_rel) = command[cursor..].find('"') else {
-            break;
-        };
-        let quote_start = cursor + next_quote_rel;
-        let (literal, next) = parse_ma_quoted_literal(command, quote_start);
-        if literal.is_some() {
-            last_range = Some((quote_start, next));
-        }
-        cursor = next;
-    }
-
-    let Some((start, end)) = last_range else {
+    let Some((start, end)) = last_quoted_literal_range(command) else {
         return (command.to_string(), false);
     };
 
@@ -703,6 +711,44 @@ createNode file -n "file1";
     }
 
     #[test]
+    fn replace_scene_paths_rewrites_basename_file_command_path_only() {
+        let input = br#"//Maya ASCII 2026 scene
+file -r -ns "Example" -rfn "ExampleRN" -op "VERS|2026|" -typ "mayaAscii" "ExampleScene.ma";
+"#;
+        let rules = vec![PathReplaceRule {
+            from: "ExampleScene.ma".to_string(),
+            to: "SampleScene.ma".to_string(),
+            mode: PathReplaceMode::Literal,
+        }];
+        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let text = String::from_utf8_lossy(&rewritten);
+        assert_eq!(count, 1);
+        assert!(text.contains("-ns \"Example\""));
+        assert!(text.contains("-rfn \"ExampleRN\""));
+        assert!(text.contains("-op \"VERS|2026|\""));
+        assert!(text.contains("-typ \"mayaAscii\""));
+        assert!(text.contains("\"SampleScene.ma\""));
+    }
+
+    #[test]
+    fn replace_scene_paths_does_not_treat_file_command_flags_as_basename_paths() {
+        let input = br#"//Maya ASCII 2026 scene
+file -r -ns "Example.ma" -rfn "ExampleRN.ma" -op "VERS|2026|" -typ "mayaAscii" "asset/example/ExampleScene.ma";
+"#;
+        let rules = vec![PathReplaceRule {
+            from: "Example".to_string(),
+            to: "Sample".to_string(),
+            mode: PathReplaceMode::Literal,
+        }];
+        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let text = String::from_utf8_lossy(&rewritten);
+        assert_eq!(count, 1);
+        assert!(text.contains("-ns \"Example.ma\""));
+        assert!(text.contains("-rfn \"ExampleRN.ma\""));
+        assert!(text.contains("\"asset/example/SampleScene.ma\""));
+    }
+
+    #[test]
     fn command_terminator_ignores_semicolon_inside_quotes() {
         let command = "file -r -op \"VERS;2026\" \n    -typ \"mayaBinary\" \"rig/charA.mb\"";
         assert!(!command_has_terminating_semicolon(command));
@@ -743,6 +789,22 @@ createNode file -n "file1";
         assert_eq!(count, 1);
         assert!(text.contains("\"shared/asset.mb\""));
         assert!(text.contains("setAttr \".ftn\" -type \"string\" \"textures/hero_diffuse.png\";"));
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_rewrites_indexed_reference_attr() {
+        let input = br#"createNode reference -n "ExampleRN";
+    setAttr ".fn[0]" -type "string" "asset/example/ExampleScene.ma";
+"#;
+        let (rewritten, count) = replace_raw_scene_paths_in_ma_by_index(
+            input,
+            &[(0, "asset/example/SampleScene.ma".into())],
+        );
+        let text = String::from_utf8_lossy(&rewritten);
+        assert_eq!(count, 1);
+        assert!(
+            text.contains("setAttr \".fn[0]\" -type \"string\" \"asset/example/SampleScene.ma\";")
+        );
     }
 
     #[test]

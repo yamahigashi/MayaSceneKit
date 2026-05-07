@@ -31,8 +31,8 @@ use crate::{
             tokenize_command,
         },
         lexer::{
-            extract_script_node_name_from_create, is_reference_attr, looks_like_scene_path,
-            parse_ma_quoted_literal, parse_setattr_string_command, parse_setattr_string_value,
+            extract_script_node_name_from_create, is_reference_attr, parse_ma_quoted_literal,
+            parse_setattr_string_command, parse_setattr_string_value,
             parse_setattr_string_value_tail, unescape_ma_string_literal,
         },
         raw_dump::{
@@ -45,7 +45,9 @@ use crate::{
         MelAuditTopLevelItemFact, MelAuditTopLevelOtherFact, MelAuditTopLevelProcFact,
         MelDiagnosticStage, MelParseBudget, MelParseDiagnostic, MelSourceEncoding, MelSpan,
     },
-    reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
+    reference_semantics::{
+        ScenePathAttrKind, classify_scene_path_attr, looks_like_scene_file_path,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -512,7 +514,7 @@ fn extract_reference_entry_from_selective_file_command(
     let path = file
         .path_range
         .map(|range| decode_range_value(source, range))
-        .filter(|value| looks_like_scene_path(value))?;
+        .filter(|value| looks_like_scene_file_path(value))?;
     let node_name = parse_file_command_flag_value(command, "-rfn")
         .unwrap_or_else(|| "<fileCmdRef>".to_string());
 
@@ -1514,6 +1516,57 @@ mod tests {
                 .message
                 .contains("file -rfn selective extraction relies on heuristic flag parsing and requires conservative audit coverage")
         }));
+    }
+
+    #[test]
+    fn selective_sections_collect_basename_file_command_reference_path() {
+        let input = "file -r -rfn \"ExampleRN\" -typ \"mayaAscii\" \"ExampleScene.ma\";\n";
+
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+
+        assert_eq!(sections.scene_paths.len(), 1);
+        assert_eq!(sections.scene_paths[0].node_type, "reference");
+        assert_eq!(sections.scene_paths[0].node_name, "ExampleRN");
+        assert_eq!(sections.scene_paths[0].attr, ".fn");
+        assert_eq!(sections.scene_paths[0].value, "ExampleScene.ma");
+    }
+
+    #[test]
+    fn selective_sections_collect_indexed_reference_file_name_attrs() {
+        let input = concat!(
+            "createNode reference -n \"ExampleRN\";\n",
+            "    setAttr \".fn[0]\" -type \"string\" \"asset/example/ExampleScene.ma\";\n",
+        );
+
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+
+        assert_eq!(sections.scene_paths.len(), 1);
+        assert_eq!(sections.scene_paths[0].node_type, "reference");
+        assert_eq!(sections.scene_paths[0].node_name, "ExampleRN");
+        assert_eq!(sections.scene_paths[0].attr, ".fn[0]");
+        assert_eq!(
+            sections.scene_paths[0].value,
+            "asset/example/ExampleScene.ma"
+        );
+    }
+
+    #[test]
+    fn selective_sections_collect_file_command_and_indexed_reference_paths() {
+        let input = concat!(
+            "file -r -rfn \"ExampleRN\" -typ \"mayaAscii\" \"ExampleScene.ma\";\n",
+            "createNode reference -n \"NestedExampleRN\";\n",
+            "    setAttr \".fn[0]\" -type \"string\" \"asset/example/NestedExampleScene.ma\";\n",
+        );
+
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+
+        assert_eq!(sections.scene_paths.len(), 2);
+        assert_eq!(sections.scene_paths[0].value, "ExampleScene.ma");
+        assert_eq!(sections.scene_paths[1].attr, ".fn[0]");
+        assert_eq!(
+            sections.scene_paths[1].value,
+            "asset/example/NestedExampleScene.ma"
+        );
     }
 
     #[test]

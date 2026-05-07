@@ -34,7 +34,13 @@ impl GuiShell {
         let Some(value) = self.current_path_value(&self.rows[row_index], entry_index) else {
             return ScenePathValueStyle::PlainRelative;
         };
-        resolve_scene_path_value(&value, self.rows[row_index].scene_workspace_root.as_deref()).style
+        let context = ScenePathResolutionContext::for_scene(
+            &self.rows[row_index].path,
+            self.rows[row_index].scene_workspace_root.as_ref(),
+        );
+        SceneResourceResolver::new()
+            .resolve_scene_path_value(&value, &context)
+            .style
     }
 
     fn apply_selected_path_edit_file(

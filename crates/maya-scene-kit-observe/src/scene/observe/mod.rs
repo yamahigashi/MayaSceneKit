@@ -14,13 +14,13 @@ mod tests {
             DependencyFactDetail, DependencyFactKind, DependencyRiskClass, EffectCertainty,
             ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionCoverageState,
             ExecutionEffectClass, ExecutionSemanticClass, ExecutionSurfaceKind, LoadOptions,
-            Loader, MelParseBudget, MelParseBudgetLimit, SceneToolError, ValidationState,
-            collect_scene_dump, collect_scene_paths,
+            Loader, MelParseBudget, MelParseBudgetLimit, ScenePathResolutionContext,
+            SceneResourceResolver, SceneToolError, ValidationState, collect_scene_dump,
+            collect_scene_paths,
             core::SceneFormat,
             dump::SceneDumpRequireKind,
             find_scene_workspace_root,
             paths::{PathKind, ScenePathResolutionStatus, ScenePathValueStyle},
-            resolve_scene_path_value,
             source::{
                 loader::{MbParseBudgetMode, materialize_adaptive_mb_parse_budget},
                 ma as observe_ma, mb,
@@ -1385,8 +1385,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scene_path_value_marks_relative_without_workspace_unresolved() {
-        let resolution = resolve_scene_path_value("textures/albedo.png", None);
+    fn resolve_scene_path_value_marks_relative_without_context_unresolved() {
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::new();
+        let resolution = resolver.resolve_scene_path_value("textures/albedo.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::PlainRelative);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Unresolved);
@@ -1401,7 +1403,9 @@ mod tests {
         let target = workspace.join("textures/albedo.png");
         fs::write(&target, "png").expect("write texture");
 
-        let resolution = resolve_scene_path_value("textures/albedo.png", Some(&workspace));
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let resolution = resolver.resolve_scene_path_value("textures/albedo.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::PlainRelative);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
@@ -1414,8 +1418,10 @@ mod tests {
         let absolute = dir.path().join("absolute.png");
         fs::write(&absolute, "png").expect("write absolute");
 
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(dir.path()));
         let resolution =
-            resolve_scene_path_value(absolute.to_string_lossy().as_ref(), Some(dir.path()));
+            resolver.resolve_scene_path_value(absolute.to_string_lossy().as_ref(), &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::Absolute);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Exists);
@@ -1430,8 +1436,10 @@ mod tests {
         let target = workspace.join("sourceimages/albedo.png");
         fs::write(&target, "png").expect("write texture");
 
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
         let resolution =
-            resolve_scene_path_value("C:/project//sourceimages/albedo.png", Some(&workspace));
+            resolver.resolve_scene_path_value("C:/project//sourceimages/albedo.png", &context);
 
         assert_eq!(
             resolution.style,
@@ -1443,7 +1451,9 @@ mod tests {
 
     #[test]
     fn resolve_scene_path_value_preserves_unc_paths() {
-        let resolution = resolve_scene_path_value("//server/share/albedo.png", None);
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::new();
+        let resolution = resolver.resolve_scene_path_value("//server/share/albedo.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::UncAbsolute);
         assert_eq!(
@@ -1459,7 +1469,9 @@ mod tests {
         let workspace = dir.path().join("project");
         fs::create_dir_all(&workspace).expect("create workspace");
 
-        let resolution = resolve_scene_path_value("textures/missing.png", Some(&workspace));
+        let mut resolver = SceneResourceResolver::new();
+        let context = ScenePathResolutionContext::from_workspace_root(Some(&workspace));
+        let resolution = resolver.resolve_scene_path_value("textures/missing.png", &context);
 
         assert_eq!(resolution.style, ScenePathValueStyle::PlainRelative);
         assert_eq!(resolution.status, ScenePathResolutionStatus::Missing);
