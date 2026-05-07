@@ -449,6 +449,9 @@ pub(in crate::cli) fn render_coverage_issue_detail(
         ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } => {
             format!("surface MEL diagnostics present: {diagnostic}")
         }
+        ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker } => {
+            format!("undecoded MB payload contains audit marker `{marker}`")
+        }
         ExecutionCoverageIssueDetail::UnsupportedProcDefinition { is_global } => {
             if *is_global {
                 "top-level global proc definition is not modeled as an execution unit".to_string()

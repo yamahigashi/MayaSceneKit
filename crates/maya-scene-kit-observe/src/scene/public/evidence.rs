@@ -198,6 +198,8 @@ pub enum ExecutionCoverageIssueKind {
     TopLevelDiagnostics,
     /// A specific surface reported MEL diagnostics.
     SurfaceDiagnostics,
+    /// An undecoded Maya Binary payload contained an audit marker but was not modeled as code.
+    UnknownRawMbPayload,
     /// Coverage for this input format is intentionally conservative.
     UnsupportedCoverage,
 }
@@ -207,6 +209,7 @@ impl ExecutionCoverageIssueKind {
         match self {
             Self::TopLevelDiagnostics => "top_level_diagnostics",
             Self::SurfaceDiagnostics => "surface_diagnostics",
+            Self::UnknownRawMbPayload => "unknown_raw_mb_payload",
             Self::UnsupportedCoverage => "unsupported_coverage",
         }
     }
@@ -226,6 +229,7 @@ pub struct ExecutionCoverageIssue {
 pub enum ExecutionCoverageIssueDetail {
     TopLevelDiagnostics { diagnostic: String },
     SurfaceDiagnostics { diagnostic: String },
+    UnknownRawMbPayload { marker: String },
     UnsupportedProcDefinition { is_global: bool },
     UnsupportedTopLevelStatement,
 }

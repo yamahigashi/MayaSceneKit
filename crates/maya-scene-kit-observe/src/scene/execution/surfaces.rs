@@ -12,10 +12,12 @@ use crate::{
         ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind, ExecutionTrigger,
         SceneToolError,
         decode::attr::decode_attr_payload,
-        recover::collect_raw_chunk_records_with_budget,
+        ir::{DecodedEvent, SchemaDecodeAttemptResult},
+        recover::{collect_decoded_chunk_records, collect_raw_chunk_records_with_budget},
         schema::node_semantics::{
             ExecutionDecoder, NodeExecutionProfileKind, NodeExecutionSemantics,
         },
+        schema::{SchemaRegistry, locator::SchemaPaths},
     },
 };
 
@@ -88,13 +90,15 @@ pub(crate) fn collect_execution_coverage_from_ma_parts(
 pub(crate) fn collect_execution_coverage_from_mb(
     mb: &crate::mb::MayaBinaryFile,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
+    let registry = Arc::new(SchemaRegistry::new(SchemaPaths::from_defaults()));
     let semantics = crate::scene::schema::node_semantics::node_execution_semantics_with_registry(
-        crate::scene::schema::default_schema_registry(),
+        registry.as_ref(),
     )
     .map_err(SceneToolError::Config)?;
     collect_execution_coverage_from_mb_with_budget(
         mb,
         &MbParseBudget::default(),
+        registry,
         semantics.as_ref(),
     )
 }
@@ -102,9 +106,10 @@ pub(crate) fn collect_execution_coverage_from_mb(
 pub(crate) fn collect_execution_coverage_from_mb_with_budget(
     mb: &crate::mb::MayaBinaryFile,
     budget: &MbParseBudget,
+    registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    collect_mb_coverage(mb, budget, execution_semantics)
+    collect_mb_coverage(mb, budget, registry, execution_semantics)
 }
 
 fn collect_ma_coverage(
@@ -482,50 +487,43 @@ fn classify_top_level_other(source_text: &str) -> Option<&'static str> {
 fn collect_mb_coverage(
     mb: &crate::mb::MayaBinaryFile,
     budget: &MbParseBudget,
+    registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    let mut surfaces = collect_mb_native_script_surfaces(mb, execution_semantics);
     let raw_chunks = collect_raw_chunk_records_with_budget(mb, budget)?;
-    let canonical_bodies = surfaces
-        .iter()
-        .filter_map(|surface| {
-            (surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody)
-                .then_some((surface.origin.chunk_node_offset, surface.text.clone()))
-        })
-        .collect::<HashSet<_>>();
-    let mut seen_raw = HashSet::new();
-    for raw in raw_chunks {
+    let decoded_chunks = collect_decoded_chunk_records(&raw_chunks, mb.data.as_ref(), registry);
+    let surfaces = collect_mb_native_script_surfaces(mb, execution_semantics);
+    let mut coverage_issues = Vec::new();
+
+    for (raw, decoded) in raw_chunks.iter().zip(decoded_chunks.iter()) {
+        if decoded.quality != SchemaDecodeAttemptResult::Failed {
+            continue;
+        }
+        if !decoded
+            .events
+            .iter()
+            .all(|event| matches!(event, DecodedEvent::Unknown(_)))
+        {
+            continue;
+        }
         let payload = raw.payload(mb.data.as_ref());
         if !raw_chunk_tag_may_contain_execution_text(raw.chunk_ref.tag.as_str(), payload.len()) {
             continue;
         }
-        if !payload_may_contain_audit_marker(payload) {
+        let Some(marker) = first_payload_audit_marker(payload) else {
             continue;
-        }
+        };
         let Some(text) = decode_raw_chunk_text(raw.chunk_ref.tag.as_str(), payload) else {
             continue;
         };
         if !contains_any_audit_marker(&text) {
             continue;
         }
-        if canonical_bodies.contains(&(
-            Some(raw.chunk_ref.node_offset),
-            Arc::<str>::from(text.as_str()),
-        )) {
-            continue;
-        }
-        let key = (
-            raw.chunk_ref.form.clone(),
-            raw.chunk_ref.tag.clone(),
-            raw.chunk_ref.node_offset,
-            text.clone(),
-        );
-        if !seen_raw.insert(key) {
-            continue;
-        }
-        surfaces.push(ExecutionSurfaceRecord {
-            text: Arc::<str>::from(text),
-            origin: ExecutionOrigin {
+
+        coverage_issues.push(ExecutionCoverageIssueRecord {
+            kind: ExecutionCoverageIssueKind::UnknownRawMbPayload,
+            detail: ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker },
+            origin: Some(ExecutionOrigin {
                 lang: ExecutionLanguage::Unknown,
                 trigger: ExecutionTrigger::FileOpen,
                 surface_kind: ExecutionSurfaceKind::RawChunkText,
@@ -541,13 +539,14 @@ fn collect_mb_coverage(
                 chunk_payload_size: Some(raw.payload_span.len()),
                 chunk_child_alignment: raw.chunk_ref.child_alignment,
                 chunk_child_header_size: raw.chunk_ref.child_header_size,
-            },
+            }),
+            preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
         });
     }
 
     Ok(ExecutionCoverageCollection {
         surfaces,
-        coverage_issues: Vec::new(),
+        coverage_issues,
     })
 }
 
@@ -604,6 +603,14 @@ fn collect_mb_native_script_surfaces(
         let mut node_name = format!("<{}@0x{:X}>", form_type, child.offset);
         if let Some(selected_node_name) = &selected_node_name {
             node_name = selected_node_name.clone();
+        } else if let Some(decoded_node_name) =
+            crate::mb::paths::extract_mb_form_node_name_with_layout(
+                payload,
+                child_alignment,
+                child_header_size,
+            )
+        {
+            node_name = decoded_node_name;
         }
         let mut script_type = None;
         let mut source_type = None;
@@ -611,15 +618,6 @@ fn collect_mb_native_script_surfaces(
 
         for chunk in parsed.chunks {
             if chunk.tag == "CREA" {
-                if form_type == "SCRP" {
-                    if let Some(name) = crate::mb::paths::extract_mb_script_node_name_with_layout(
-                        payload,
-                        child_alignment,
-                        child_header_size,
-                    ) {
-                        node_name = name;
-                    }
-                }
                 continue;
             }
 
@@ -854,15 +852,20 @@ fn raw_chunk_tag_may_contain_execution_text(tag: &str, payload_len: usize) -> bo
     }
 }
 
-fn payload_may_contain_audit_marker(payload: &[u8]) -> bool {
-    contains_ascii_case_insensitive(payload, b"python")
-        || contains_ascii_case_insensitive(payload, b"exec")
-        || contains_ascii_case_insensitive(payload, b"chr")
-        || contains_ascii_case_insensitive(payload, b"eval")
-        || contains_ascii_case_insensitive(payload, b"scriptjob")
-        || contains_ascii_case_insensitive(payload, b"commandport")
-        || contains_ascii_case_insensitive(payload, b"loadplugin")
-        || contains_ascii_case_insensitive(payload, b"source")
+fn first_payload_audit_marker(payload: &[u8]) -> Option<String> {
+    [
+        "python",
+        "exec",
+        "chr",
+        "eval",
+        "scriptjob",
+        "commandport",
+        "loadplugin",
+        "source",
+    ]
+    .into_iter()
+    .find(|marker| contains_ascii_case_insensitive(payload, marker.as_bytes()))
+    .map(str::to_string)
 }
 
 fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
@@ -990,7 +993,7 @@ mod tests {
     use super::{
         MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES, collect_execution_coverage_from_ma_parts,
         collect_execution_coverage_from_mb, contains_any_audit_marker, decode_raw_chunk_text,
-        payload_may_contain_audit_marker, raw_chunk_tag_may_contain_execution_text,
+        first_payload_audit_marker, raw_chunk_tag_may_contain_execution_text,
     };
     use crate::scene::{
         ExecutionSurfaceKind,
@@ -999,6 +1002,47 @@ mod tests {
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn build_mb_chunk_with_alignment(
+        tag: &str,
+        payload: &[u8],
+        sibling_alignment: usize,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(tag.as_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        out.extend_from_slice(payload);
+        while (out.len() - 16) % sibling_alignment != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn build_mb_chunk(tag: &str, payload: &[u8]) -> Vec<u8> {
+        build_mb_chunk_with_alignment(tag, payload, 8)
+    }
+
+    fn build_mb_form(form: &str, children: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = form.as_bytes().to_vec();
+        for child in children {
+            payload.extend_from_slice(child);
+        }
+        build_mb_chunk_with_alignment("FOR8", &payload, 4)
+    }
+
+    fn build_mb_root(children: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = b"Maya".to_vec();
+        for child in children {
+            payload.extend_from_slice(child);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"FOR8");
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        out.extend_from_slice(&payload);
+        out
     }
 
     #[test]
@@ -1027,6 +1071,86 @@ mod tests {
                 && surface.text.as_ref() == r#"global proc string hello() { return "ok"; }"#
         }));
         assert!(!coverage.coverage_issues.is_empty());
+    }
+
+    #[test]
+    fn mb_expression_surface_uses_crea_node_name() {
+        let crea = build_mb_chunk("CREA", b"ExampleExpression\0");
+        let mut ixp_payload = b"ixp\0\0".to_vec();
+        ixp_payload.extend_from_slice(b"eval($ExampleBody);");
+        let ixp = build_mb_chunk("STR ", &ixp_payload);
+        let bytes = build_mb_root(&[build_mb_form("DEXP", &[crea, ixp])]);
+        let mb = crate::mb::parse_bytes(bytes).expect("parse synthetic mb");
+        let coverage = collect_execution_coverage_from_mb(&mb).expect("coverage");
+        let surface = coverage
+            .surfaces
+            .iter()
+            .find(|surface| {
+                surface.origin.surface_kind == ExecutionSurfaceKind::NodeAttrCallback
+                    && surface.origin.attr_name.as_deref() == Some(".ixp")
+            })
+            .expect("expression surface");
+
+        assert_eq!(
+            surface.origin.node_name.as_deref(),
+            Some("ExampleExpression")
+        );
+        assert_eq!(
+            surface.origin.source_kind.as_deref(),
+            Some("internalExpression")
+        );
+        assert_eq!(surface.origin.chunk_form.as_deref(), Some("DEXP"));
+        assert_eq!(surface.text.as_ref(), "eval($ExampleBody);");
+    }
+
+    #[test]
+    fn mb_known_non_execution_chunks_do_not_become_raw_execution_surfaces() {
+        let cwfl = build_mb_chunk("CWFL", b"\0ExampleSource.out\0ExampleTarget.in\0");
+        let crea = build_mb_chunk("CREA", b"ExampleSourceNode\0");
+        let bytes = build_mb_root(&[
+            build_mb_form("CONS", &[cwfl]),
+            build_mb_form("PCTA", &[crea]),
+        ]);
+        let mb = crate::mb::parse_bytes(bytes).expect("parse synthetic mb");
+        let coverage = collect_execution_coverage_from_mb(&mb).expect("coverage");
+
+        assert!(
+            coverage.surfaces.iter().all(|surface| {
+                surface.origin.surface_kind != ExecutionSurfaceKind::RawChunkText
+            })
+        );
+        assert!(
+            coverage.coverage_issues.is_empty(),
+            "known decoded non-execution chunks should not produce coverage issues: {:?}",
+            coverage.coverage_issues
+        );
+    }
+
+    #[test]
+    fn mb_undecoded_marker_payload_becomes_coverage_issue_not_surface() {
+        let payload = b"source \"asset/example/startup.mel\"";
+        let bytes = build_mb_root(&[build_mb_form("UNKN", &[build_mb_chunk("DATA", payload)])]);
+        let mb = crate::mb::parse_bytes(bytes).expect("parse synthetic mb");
+        let coverage = collect_execution_coverage_from_mb(&mb).expect("coverage");
+
+        assert!(
+            coverage.surfaces.iter().all(|surface| {
+                surface.origin.surface_kind != ExecutionSurfaceKind::RawChunkText
+            })
+        );
+        assert!(coverage.coverage_issues.iter().any(|issue| {
+            issue.kind == crate::scene::evidence::ExecutionCoverageIssueKind::UnknownRawMbPayload
+                && matches!(
+                    &issue.detail,
+                    crate::scene::evidence::ExecutionCoverageIssueDetail::UnknownRawMbPayload {
+                        marker
+                    } if marker == "source"
+                )
+                && issue
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.chunk_form.as_deref() == Some("UNKN"))
+        }));
     }
 
     #[test]
@@ -1126,12 +1250,21 @@ mod tests {
 
     #[test]
     fn raw_payload_prefilter_detects_ascii_audit_markers() {
-        assert!(payload_may_contain_audit_marker(b"\0Python\0"));
-        assert!(payload_may_contain_audit_marker(b"Exec"));
-        assert!(payload_may_contain_audit_marker(b"evalDeferred"));
-        assert!(payload_may_contain_audit_marker(b"commandPort"));
-        assert!(!payload_may_contain_audit_marker(b"socket_blinn1SG"));
-        assert!(!payload_may_contain_audit_marker(b"SampleReferenceNode"));
+        assert_eq!(
+            first_payload_audit_marker(b"\0Python\0").as_deref(),
+            Some("python")
+        );
+        assert_eq!(first_payload_audit_marker(b"Exec").as_deref(), Some("exec"));
+        assert_eq!(
+            first_payload_audit_marker(b"evalDeferred").as_deref(),
+            Some("eval")
+        );
+        assert_eq!(
+            first_payload_audit_marker(b"commandPort").as_deref(),
+            Some("commandport")
+        );
+        assert!(first_payload_audit_marker(b"socket_blinn1SG").is_none());
+        assert!(first_payload_audit_marker(b"SampleReferenceNode").is_none());
     }
 
     #[test]
@@ -1162,7 +1295,7 @@ mod tests {
         let mut payload = b"ExampleOptions\0 ".to_vec();
         payload.extend_from_slice(b"Viewer_Script_D3D=1;TextureType=Default (Match Source Image);");
 
-        assert!(payload_may_contain_audit_marker(&payload));
+        assert!(first_payload_audit_marker(&payload).is_some());
         assert!(raw_chunk_tag_may_contain_execution_text(
             "STR ",
             payload.len()

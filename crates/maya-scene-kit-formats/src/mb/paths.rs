@@ -374,7 +374,17 @@ pub fn extract_mb_script_node_name_with_layout(
     if payload.len() < 4 || &payload[..4] != b"SCRP" {
         return None;
     }
+    extract_mb_form_node_name_with_layout(payload, child_alignment, child_header_size)
+}
 
+pub fn extract_mb_form_node_name_with_layout(
+    payload: &[u8],
+    child_alignment: Option<usize>,
+    child_header_size: Option<usize>,
+) -> Option<String> {
+    if payload.len() < 4 {
+        return None;
+    }
     let parsed = parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
     for chunk in parsed.chunks {
         if chunk.tag == "CREA" {
@@ -842,8 +852,8 @@ mod tests {
     use super::{
         collect_rtft_owner_traces_from_mb, decode_reference_from_frdi_chunk,
         decode_reference_from_fref_chunk, decode_string_attr_from_rtft_chunk,
-        extract_file_entries_from_rtft_payload, parse_fref_record,
-        remove_root_forms_from_mb_by_locator,
+        extract_file_entries_from_rtft_payload, extract_mb_form_node_name_with_layout,
+        parse_fref_record, remove_root_forms_from_mb_by_locator,
     };
     use crate::mb::{
         parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk,
@@ -1083,6 +1093,25 @@ mod tests {
         assert_eq!(entries[0].node_name, "psdTex1");
         assert_eq!(entries[0].attr, ".fileTextureName");
         assert_eq!(entries[0].value, "sourceimages/layered.psd");
+    }
+
+    #[test]
+    fn extract_mb_form_node_name_reads_crea_from_non_script_form() {
+        let crea = encode_chunk(
+            "CREA",
+            0,
+            b"ExampleExpression\0",
+            8,
+            SectionHeaderFormat::EightByte,
+        )
+        .expect("crea chunk");
+        let mut payload = b"DEXP".to_vec();
+        payload.extend_from_slice(&crea);
+
+        assert_eq!(
+            extract_mb_form_node_name_with_layout(&payload, Some(8), Some(16)).as_deref(),
+            Some("ExampleExpression")
+        );
     }
 
     #[test]
