@@ -40,17 +40,12 @@ pub(crate) enum MbParseBudgetMode {
     Exact,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MbIntegrityMode {
-    Eager,
-    DeferredForExecution,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum MaCaptureMode {
-    #[default]
-    Base,
+pub(crate) enum SceneReadIntent {
+    Light,
     Execution,
+    #[default]
+    Semantic,
 }
 
 pub(crate) fn materialize_adaptive_mb_parse_budget(
@@ -78,8 +73,7 @@ pub(crate) struct SourceInput<'a> {
     validation_state: Option<ValidationState>,
     bytes: Option<Vec<u8>>,
     retain_ma_bytes: bool,
-    ma_capture_mode: MaCaptureMode,
-    mb_integrity_mode: MbIntegrityMode,
+    intent: SceneReadIntent,
 }
 
 impl<'a> SourceInput<'a> {
@@ -90,8 +84,7 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: true,
-            ma_capture_mode: MaCaptureMode::Base,
-            mb_integrity_mode: MbIntegrityMode::Eager,
+            intent: SceneReadIntent::Semantic,
         }
     }
 
@@ -102,8 +95,7 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: false,
-            ma_capture_mode: MaCaptureMode::Execution,
-            mb_integrity_mode: MbIntegrityMode::DeferredForExecution,
+            intent: SceneReadIntent::Execution,
         }
     }
 
@@ -114,8 +106,18 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: true,
-            ma_capture_mode: MaCaptureMode::Execution,
-            mb_integrity_mode: MbIntegrityMode::Eager,
+            intent: SceneReadIntent::Execution,
+        }
+    }
+
+    pub(crate) fn from_audit_path(path: &'a Path) -> Self {
+        Self {
+            path,
+            scene_format: None,
+            validation_state: None,
+            bytes: None,
+            retain_ma_bytes: true,
+            intent: SceneReadIntent::Execution,
         }
     }
 
@@ -126,8 +128,7 @@ impl<'a> SourceInput<'a> {
             validation_state: None,
             bytes: None,
             retain_ma_bytes: false,
-            ma_capture_mode: MaCaptureMode::Base,
-            mb_integrity_mode: MbIntegrityMode::Eager,
+            intent: SceneReadIntent::Light,
         }
     }
 
@@ -143,8 +144,7 @@ impl<'a> SourceInput<'a> {
             validation_state: Some(validation_state),
             bytes: Some(bytes),
             retain_ma_bytes: true,
-            ma_capture_mode: MaCaptureMode::Base,
-            mb_integrity_mode: MbIntegrityMode::Eager,
+            intent: SceneReadIntent::Semantic,
         }
     }
 
@@ -160,8 +160,7 @@ impl<'a> SourceInput<'a> {
             validation_state: Some(validation_state),
             bytes: Some(bytes),
             retain_ma_bytes: true,
-            ma_capture_mode: MaCaptureMode::Execution,
-            mb_integrity_mode: MbIntegrityMode::Eager,
+            intent: SceneReadIntent::Execution,
         }
     }
 
@@ -177,8 +176,7 @@ impl<'a> SourceInput<'a> {
             validation_state: Some(validation_state),
             bytes: Some(bytes),
             retain_ma_bytes: true,
-            ma_capture_mode: MaCaptureMode::Execution,
-            mb_integrity_mode: MbIntegrityMode::DeferredForExecution,
+            intent: SceneReadIntent::Execution,
         }
     }
 }
@@ -310,11 +308,14 @@ impl Loader {
             None => ops::detect_scene_format(input.path)?,
         };
         let schema_context = match scene_format {
-            SceneFormat::Ma if input.ma_capture_mode == MaCaptureMode::Execution => {
+            SceneFormat::Ma if input.intent == SceneReadIntent::Execution => {
                 Some(self.schema_context()?)
             }
             SceneFormat::Ma => None,
-            SceneFormat::Mb => Some(self.schema_context()?),
+            SceneFormat::Mb if input.intent != SceneReadIntent::Light => {
+                Some(self.schema_context()?)
+            }
+            SceneFormat::Mb => None,
             SceneFormat::Unknown => None,
         };
         ObservationBundle::load(input, scene_format, &self.options, schema_context)
@@ -350,6 +351,13 @@ impl Loader {
         path: impl AsRef<Path>,
     ) -> Result<ObservationBundle, SceneToolError> {
         self.observe(SourceInput::from_analysis_path(path.as_ref()))
+    }
+
+    pub fn observe_audit_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ObservationBundle, SceneToolError> {
+        self.observe(SourceInput::from_audit_path(path.as_ref()))
     }
 
     pub(crate) fn observe_path_without_retained_ma_bytes(
@@ -490,7 +498,7 @@ impl ObservationBundle {
                     Some(bytes) => bytes,
                     None => fs::read(path)?,
                 };
-                let sections = if input.ma_capture_mode == MaCaptureMode::Execution {
+                let sections = if input.intent == SceneReadIntent::Execution {
                     let execution_semantics = schema_context
                         .expect("ma execution observation requires schema context")
                         .node_execution_semantics()?;
@@ -527,8 +535,8 @@ impl ObservationBundle {
                     source_path: path.to_path_buf(),
                     load_options: options.clone(),
                     schema_context: schema_context.map(Arc::clone),
-                    selective_sections_include_execution_attrs: input.ma_capture_mode
-                        == MaCaptureMode::Execution,
+                    selective_sections_include_execution_attrs: input.intent
+                        == SceneReadIntent::Execution,
                     bytes: retained_bytes,
                     selective_sections,
                     execution_sections: OnceLock::new(),
@@ -557,8 +565,6 @@ impl ObservationBundle {
                 })
             }
             SceneFormat::Mb => {
-                let schema_context =
-                    schema_context.expect("mb observation requires schema context");
                 let budget = match input.bytes.as_ref() {
                     Some(bytes) => options.materialize_mb_parse_budget_for_bytes(bytes.len()),
                     None => options.materialize_mb_parse_budget_for_path(path)?,
@@ -567,16 +573,18 @@ impl ObservationBundle {
                     Some(bytes) => MbReadSession::load_raw_bytes(
                         path,
                         bytes,
-                        Arc::clone(schema_context),
+                        schema_context.map(Arc::clone),
                         &budget,
                     )?,
-                    None => MbReadSession::load_raw(path, Arc::clone(schema_context), &budget)?,
+                    None => MbReadSession::load_raw(path, schema_context.map(Arc::clone), &budget)?,
                 };
                 let validation_state = match input.validation_state {
                     Some(validation_state) => validation_state,
-                    None => match input.mb_integrity_mode {
-                        MbIntegrityMode::Eager => session.integrity()?.validation_state,
-                        MbIntegrityMode::DeferredForExecution => ValidationState::Partial,
+                    None => match input.intent {
+                        SceneReadIntent::Semantic => session.integrity()?.validation_state,
+                        SceneReadIntent::Light | SceneReadIntent::Execution => {
+                            ValidationState::Partial
+                        }
                     },
                 };
                 Ok(Self {

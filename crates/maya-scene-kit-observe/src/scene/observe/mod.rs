@@ -869,7 +869,7 @@ mod tests {
         let paths = observation.scene_paths(PathKind::All).expect("scene paths");
 
         let _ = paths;
-        assert!(observation.cached_mb_scene_facts_ptr().is_some());
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
         assert!(observation.cached_mb_build_ptr().is_none());
     }
 
@@ -886,7 +886,27 @@ mod tests {
         let entries = observation.script_node_entries().expect("script entries");
 
         assert!(!entries.is_empty());
-        assert!(observation.cached_mb_scene_facts_ptr().is_some());
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
+        assert!(observation.cached_mb_build_ptr().is_none());
+    }
+
+    #[test]
+    fn mb_analysis_observation_does_not_force_full_build() {
+        let source = repo_root().join("tests/02/sphere.mb");
+        let observation = Loader::new(LoadOptions::default())
+            .observe_analysis_path(&source)
+            .expect("analysis observation");
+
+        assert_eq!(observation.validation_state(), ValidationState::Partial);
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
+        assert!(observation.cached_mb_build_ptr().is_none());
+
+        let catalog = observation
+            .observed_execution_catalog(64)
+            .expect("execution catalog");
+
+        assert!(!catalog.surfaces.is_empty());
+        assert!(observation.cached_mb_scene_facts_ptr().is_none());
         assert!(observation.cached_mb_build_ptr().is_none());
     }
 
@@ -1197,55 +1217,6 @@ mod tests {
             .find(|entry| entry.node_name == "keepTex")
             .expect("keepTex entry");
         let keep_meta = keep_entry.meta.as_ref().expect("keepTex meta");
-        assert_eq!(keep_meta.trace_form.as_deref(), Some("RTFT"));
-        assert!(keep_meta.trace_node_offset.is_some());
-    }
-
-    #[test]
-    fn collect_mb_scene_paths_falls_back_to_root_owner_trace_without_raw_file_entries() {
-        let source = repo_root().join("tests/fixtures/mb/owner_delete/file_owner_delete.mb");
-        let options = LoadOptions::default();
-        let schema_context =
-            crate::scene::schema::SchemaContext::from_inputs_cached(&options.schema_inputs())
-                .expect("schema context");
-        let session = crate::scene::mb_read_session::MbReadSession::load_raw(
-            &source,
-            schema_context,
-            &options
-                .materialize_mb_parse_budget_for_path(&source)
-                .expect("materialized budget"),
-        )
-        .expect("load session");
-        let build = session.build().expect("build scene");
-        let raw_entries =
-            maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&session.mb)
-                .into_iter()
-                .filter(|entry| entry.node_type != "file")
-                .collect::<Vec<_>>();
-
-        let entries = mb::collect_mb_scene_paths(
-            &session.mb,
-            &build.scene.nodes,
-            &build.scene.reference_files,
-            &raw_entries,
-            &build.artifacts.raw_chunks,
-            build.artifacts.raw_source.as_ref(),
-        );
-        let delete_entry = entries
-            .iter()
-            .find(|entry| entry.node_name == "deleteTex")
-            .expect("deleteTex entry");
-        let delete_meta = delete_entry.meta.as_ref().expect("deleteTex meta");
-        assert_eq!(delete_meta.origin, "rtft-fallback");
-        assert_eq!(delete_meta.trace_form.as_deref(), Some("RTFT"));
-        assert!(delete_meta.trace_node_offset.is_some());
-
-        let keep_entry = entries
-            .iter()
-            .find(|entry| entry.node_name == "keepTex")
-            .expect("keepTex entry");
-        let keep_meta = keep_entry.meta.as_ref().expect("keepTex meta");
-        assert_eq!(keep_meta.origin, "rtft-fallback");
         assert_eq!(keep_meta.trace_form.as_deref(), Some("RTFT"));
         assert!(keep_meta.trace_node_offset.is_some());
     }

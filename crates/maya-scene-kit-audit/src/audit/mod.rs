@@ -517,7 +517,7 @@ impl<'a> ReferenceAuditRun<'a> {
 
     fn audit_graph_scene(&self, path: &Path) -> Result<(AuditReport, Vec<String>), SceneToolError> {
         let loader = Loader::new(self.load_options.clone());
-        let observation = match loader.observe_analysis_path(path) {
+        let observation = match loader.observe_audit_path(path) {
             Ok(observation) => observation,
             Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
                 let scene_format = detect_scene_format(path)?;

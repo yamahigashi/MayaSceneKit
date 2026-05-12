@@ -2,7 +2,6 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,18 +13,10 @@ use zstd::stream::{decode_all, encode_all};
 use crate::scene::{
     LoadOptions, ObservationBundle, SceneDigestSet, SceneToolError,
     dump::SceneDumpReport,
-    execution::{
-        ExecutionSurface, MelCodeLikeValueFact, MelResolvedStringKind, MelSinkArgFact,
-        MelSinkArgKind, MelStringAssemblyMarker, MelSurfaceCall, MelSurfaceCallSurfaceKind,
-        MelSurfaceCommandMode, MelSurfaceDiagnostic, MelSurfaceDiagnosticStage, MelSurfaceFacts,
-        MelSurfaceNormalizedArg, MelSurfaceNormalizedCommand, MelSurfaceNormalizedFlag,
-        MelSurfaceNormalizedItem, MelSurfaceValidationDiagnostic, ObservedExecutionCatalog,
-        ObservedExecutionSurface,
-    },
     paths::{PathKind, ScenePathsReport},
 };
 
-const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 1;
+const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 2;
 const DB_FILE: &str = "cache.sqlite3";
 const OBSERVE_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const OBSERVE_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -38,7 +29,6 @@ pub struct ObserveCacheIdentity {
     pub cache_schema_version: u32,
     pub scene_sha256: String,
     pub load_options_fingerprint: String,
-    pub max_preview: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,176 +45,6 @@ pub struct ObservedSceneSnapshot {
     pub digests: SceneDigestSet,
     pub paths_report: ScenePathsReport,
     pub dump_report: SceneDumpReport,
-    pub execution_catalog: ObservedExecutionCatalogSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservedExecutionCatalogSnapshot {
-    pub surfaces: Vec<ObservedExecutionSurfaceSnapshot>,
-    pub unit_summaries: Vec<crate::scene::ExecutionUnitSummary>,
-    pub dependency_facts: Vec<crate::scene::DependencyFact>,
-    pub unknown_semantics: Vec<crate::scene::UnknownSemanticFact>,
-    pub digests: SceneDigestSet,
-    pub coverage_state: crate::scene::ExecutionCoverageState,
-    pub coverage_issues: Vec<crate::scene::ExecutionCoverageIssue>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObservedExecutionSurfaceSnapshot {
-    pub surface: ExecutionSurfaceSnapshot,
-    pub mel: Option<MelSurfaceFactsSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionSurfaceSnapshot {
-    pub text: String,
-    pub origin: crate::scene::ExecutionOrigin,
-    pub preview: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceFactsSnapshot {
-    pub source_text: String,
-    pub diagnostics: Vec<MelSurfaceDiagnosticSnapshot>,
-    pub validation_diagnostics: Vec<MelSurfaceValidationDiagnosticSnapshot>,
-    pub calls: Vec<MelSurfaceCallSnapshot>,
-    pub normalized_commands: Vec<MelSurfaceNormalizedCommandSnapshot>,
-    #[serde(default)]
-    pub sink_arg_facts: Vec<MelSinkArgFactSnapshot>,
-    #[serde(default)]
-    pub code_like_value_facts: Vec<MelCodeLikeValueFactSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceDiagnosticSnapshot {
-    pub stage: MelSurfaceDiagnosticStageSnapshot,
-    pub message: String,
-    pub span_start: usize,
-    pub span_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceValidationDiagnosticSnapshot {
-    pub head: Option<String>,
-    pub message: String,
-    pub span_start: usize,
-    pub span_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceCallSnapshot {
-    pub name: String,
-    pub surface_kind: MelSurfaceCallSurfaceKindSnapshot,
-    pub captured: bool,
-    pub literal_first_arg: Option<String>,
-    pub dynamic: bool,
-    pub span_start: usize,
-    pub span_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceNormalizedArgSnapshot {
-    pub text_span: maya_scene_kit_formats::mel::MelSpan,
-    pub literal: Option<String>,
-    pub dynamic: bool,
-    pub span_start: usize,
-    pub span_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceNormalizedFlagSnapshot {
-    pub source_span: maya_scene_kit_formats::mel::MelSpan,
-    pub canonical_name: Option<String>,
-    pub value_shapes: Vec<maya_scene_kit_formats::mel::MelValueShape>,
-    pub args: Vec<MelSurfaceNormalizedArgSnapshot>,
-    pub span_start: usize,
-    pub span_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MelSurfaceNormalizedItemSnapshot {
-    Flag(MelSurfaceNormalizedFlagSnapshot),
-    Positional(MelSurfaceNormalizedArgSnapshot),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSurfaceNormalizedCommandSnapshot {
-    pub schema_name: String,
-    pub mode: MelSurfaceCommandModeSnapshot,
-    pub items: Vec<MelSurfaceNormalizedItemSnapshot>,
-    pub span_start: usize,
-    pub span_end: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelSinkArgFactSnapshot {
-    pub sink_kind: MelSinkArgKindSnapshot,
-    pub resolved_kind: MelResolvedStringKindSnapshot,
-    pub span: maya_scene_kit_formats::mel::MelSpan,
-    pub command_name: Option<String>,
-    pub flag_name: Option<String>,
-    pub rendered_text: Option<String>,
-    pub markers: Vec<MelStringAssemblyMarkerSnapshot>,
-    pub code_like: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MelCodeLikeValueFactSnapshot {
-    pub resolved_kind: MelResolvedStringKindSnapshot,
-    pub span: maya_scene_kit_formats::mel::MelSpan,
-    pub rendered_text: String,
-    pub markers: Vec<MelStringAssemblyMarkerSnapshot>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MelSurfaceDiagnosticStageSnapshot {
-    Decode,
-    Lex,
-    Parse,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MelSurfaceCallSurfaceKindSnapshot {
-    Function,
-    ShellLike,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MelSurfaceCommandModeSnapshot {
-    Create,
-    Edit,
-    Query,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MelSinkArgKindSnapshot {
-    Python,
-    Eval,
-    EvalDeferred,
-    CallbackFlag,
-    ScriptJobPayload,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MelResolvedStringKindSnapshot {
-    Literal,
-    ProcReference,
-    AssembledLiteral,
-    Dynamic,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MelStringAssemblyMarkerSnapshot {
-    Concat,
-    VariableReference,
 }
 
 #[derive(Debug, Clone)]
@@ -268,23 +88,18 @@ pub struct ObserveCacheMaintenanceStats {
 }
 
 impl ObserveCacheIdentity {
-    pub fn new(
-        scene_sha256: impl Into<String>,
-        load_options: &LoadOptions,
-        max_preview: usize,
-    ) -> Self {
+    pub fn new(scene_sha256: impl Into<String>, load_options: &LoadOptions) -> Self {
         Self {
             cache_schema_version: OBSERVE_CACHE_SCHEMA_VERSION,
             scene_sha256: scene_sha256.into(),
             load_options_fingerprint: fingerprint_debug(load_options),
-            max_preview,
         }
     }
 
     fn blob_name(&self) -> String {
         format!(
-            "{}-{}-{}.{}",
-            self.scene_sha256, self.load_options_fingerprint, self.max_preview, BLOB_FILE_EXTENSION
+            "{}-{}.{}",
+            self.scene_sha256, self.load_options_fingerprint, BLOB_FILE_EXTENSION
         )
     }
 }
@@ -293,7 +108,6 @@ impl ObservedSceneSnapshot {
     pub fn from_observation(
         observation: &ObservationBundle,
         load_options: &LoadOptions,
-        max_preview: usize,
     ) -> Result<Self, SceneToolError> {
         let file_state =
             file_state_for_path(observation.scene_path()).map_err(SceneToolError::Io)?;
@@ -305,11 +119,7 @@ impl ObservedSceneSnapshot {
             entries: observation.scene_paths(PathKind::All)?,
         };
         let dump_report = observation.scene_dump_report()?;
-        let execution_catalog = ObservedExecutionCatalogSnapshot::from_catalog(
-            observation.observed_execution_catalog(max_preview)?,
-        );
-        let identity =
-            ObserveCacheIdentity::new(digests.scene_sha256.clone(), load_options, max_preview);
+        let identity = ObserveCacheIdentity::new(digests.scene_sha256.clone(), load_options);
 
         Ok(Self {
             identity,
@@ -317,506 +127,7 @@ impl ObservedSceneSnapshot {
             digests,
             paths_report,
             dump_report,
-            execution_catalog,
         })
-    }
-}
-
-impl ObservedExecutionCatalogSnapshot {
-    pub fn from_catalog(catalog: ObservedExecutionCatalog) -> Self {
-        Self {
-            surfaces: catalog
-                .surfaces
-                .into_iter()
-                .map(ObservedExecutionSurfaceSnapshot::from_surface)
-                .collect(),
-            unit_summaries: catalog.unit_summaries,
-            dependency_facts: catalog.dependency_facts,
-            unknown_semantics: catalog.unknown_semantics,
-            digests: catalog.digests,
-            coverage_state: catalog.coverage_state,
-            coverage_issues: catalog.coverage_issues,
-        }
-    }
-
-    pub fn into_catalog(self) -> ObservedExecutionCatalog {
-        ObservedExecutionCatalog {
-            surfaces: self
-                .surfaces
-                .into_iter()
-                .map(ObservedExecutionSurfaceSnapshot::into_surface)
-                .collect(),
-            unit_summaries: self.unit_summaries,
-            dependency_facts: self.dependency_facts,
-            unknown_semantics: self.unknown_semantics,
-            digests: self.digests,
-            coverage_state: self.coverage_state,
-            coverage_issues: self.coverage_issues,
-        }
-    }
-}
-
-impl ObservedExecutionSurfaceSnapshot {
-    fn from_surface(surface: ObservedExecutionSurface) -> Self {
-        Self {
-            surface: ExecutionSurfaceSnapshot::from_surface(surface.surface),
-            mel: surface
-                .mel
-                .map(|facts| MelSurfaceFactsSnapshot::from_facts(facts.as_ref())),
-        }
-    }
-
-    fn into_surface(self) -> ObservedExecutionSurface {
-        ObservedExecutionSurface {
-            surface: self.surface.into_surface(),
-            mel: self.mel.map(|facts| Arc::new(facts.into_facts())),
-        }
-    }
-}
-
-impl ExecutionSurfaceSnapshot {
-    fn from_surface(surface: ExecutionSurface) -> Self {
-        Self {
-            text: surface.text.to_string(),
-            origin: surface.origin,
-            preview: surface.preview,
-        }
-    }
-
-    fn into_surface(self) -> ExecutionSurface {
-        ExecutionSurface {
-            text: Arc::<str>::from(self.text),
-            origin: self.origin,
-            preview: self.preview,
-        }
-    }
-}
-
-impl MelSurfaceFactsSnapshot {
-    fn from_facts(facts: &MelSurfaceFacts) -> Self {
-        Self {
-            source_text: facts.source_text.to_string(),
-            diagnostics: facts
-                .diagnostics
-                .iter()
-                .cloned()
-                .map(MelSurfaceDiagnosticSnapshot::from_diagnostic)
-                .collect(),
-            validation_diagnostics: facts
-                .validation_diagnostics
-                .iter()
-                .cloned()
-                .map(MelSurfaceValidationDiagnosticSnapshot::from_diagnostic)
-                .collect(),
-            calls: facts
-                .calls
-                .iter()
-                .cloned()
-                .map(MelSurfaceCallSnapshot::from_call)
-                .collect(),
-            normalized_commands: facts
-                .normalized_commands
-                .iter()
-                .cloned()
-                .map(MelSurfaceNormalizedCommandSnapshot::from_command)
-                .collect(),
-            sink_arg_facts: facts
-                .sink_arg_facts
-                .iter()
-                .cloned()
-                .map(MelSinkArgFactSnapshot::from_fact)
-                .collect(),
-            code_like_value_facts: facts
-                .code_like_value_facts
-                .iter()
-                .cloned()
-                .map(MelCodeLikeValueFactSnapshot::from_fact)
-                .collect(),
-        }
-    }
-
-    fn into_facts(self) -> MelSurfaceFacts {
-        MelSurfaceFacts {
-            source_text: Arc::<str>::from(self.source_text),
-            diagnostics: self
-                .diagnostics
-                .into_iter()
-                .map(MelSurfaceDiagnosticSnapshot::into_diagnostic)
-                .collect(),
-            validation_diagnostics: self
-                .validation_diagnostics
-                .into_iter()
-                .map(MelSurfaceValidationDiagnosticSnapshot::into_diagnostic)
-                .collect(),
-            calls: self
-                .calls
-                .into_iter()
-                .map(MelSurfaceCallSnapshot::into_call)
-                .collect(),
-            normalized_commands: self
-                .normalized_commands
-                .into_iter()
-                .map(MelSurfaceNormalizedCommandSnapshot::into_command)
-                .collect(),
-            sink_arg_facts: self
-                .sink_arg_facts
-                .into_iter()
-                .map(MelSinkArgFactSnapshot::into_fact)
-                .collect(),
-            code_like_value_facts: self
-                .code_like_value_facts
-                .into_iter()
-                .map(MelCodeLikeValueFactSnapshot::into_fact)
-                .collect(),
-        }
-    }
-}
-
-impl MelSurfaceDiagnosticSnapshot {
-    fn from_diagnostic(diagnostic: MelSurfaceDiagnostic) -> Self {
-        Self {
-            stage: MelSurfaceDiagnosticStageSnapshot::from_stage(diagnostic.stage),
-            message: diagnostic.message.into_owned(),
-            span_start: diagnostic.span_start,
-            span_end: diagnostic.span_end,
-        }
-    }
-
-    fn into_diagnostic(self) -> MelSurfaceDiagnostic {
-        MelSurfaceDiagnostic {
-            stage: self.stage.into_stage(),
-            message: self.message.into(),
-            span_start: self.span_start,
-            span_end: self.span_end,
-        }
-    }
-}
-
-impl MelSurfaceValidationDiagnosticSnapshot {
-    fn from_diagnostic(diagnostic: MelSurfaceValidationDiagnostic) -> Self {
-        Self {
-            head: diagnostic.head.map(|value| value.to_string()),
-            message: diagnostic.message.into_owned(),
-            span_start: diagnostic.span_start,
-            span_end: diagnostic.span_end,
-        }
-    }
-
-    fn into_diagnostic(self) -> MelSurfaceValidationDiagnostic {
-        MelSurfaceValidationDiagnostic {
-            head: self.head.map(Arc::<str>::from),
-            message: self.message.into(),
-            span_start: self.span_start,
-            span_end: self.span_end,
-        }
-    }
-}
-
-impl MelSurfaceCallSnapshot {
-    fn from_call(call: MelSurfaceCall) -> Self {
-        Self {
-            name: call.name.to_string(),
-            surface_kind: MelSurfaceCallSurfaceKindSnapshot::from_kind(call.surface_kind),
-            captured: call.captured,
-            literal_first_arg: call.literal_first_arg.map(|value| value.to_string()),
-            dynamic: call.dynamic,
-            span_start: call.span_start,
-            span_end: call.span_end,
-        }
-    }
-
-    fn into_call(self) -> MelSurfaceCall {
-        MelSurfaceCall {
-            name: Arc::<str>::from(self.name),
-            surface_kind: self.surface_kind.into_kind(),
-            captured: self.captured,
-            literal_first_arg: self.literal_first_arg.map(Arc::<str>::from),
-            dynamic: self.dynamic,
-            span_start: self.span_start,
-            span_end: self.span_end,
-        }
-    }
-}
-
-impl MelSurfaceNormalizedArgSnapshot {
-    fn from_arg(arg: MelSurfaceNormalizedArg) -> Self {
-        Self {
-            text_span: arg.text_span,
-            literal: arg.literal.map(|value| value.to_string()),
-            dynamic: arg.dynamic,
-            span_start: arg.span_start,
-            span_end: arg.span_end,
-        }
-    }
-
-    fn into_arg(self) -> MelSurfaceNormalizedArg {
-        MelSurfaceNormalizedArg {
-            text_span: self.text_span,
-            literal: self.literal.map(Arc::<str>::from),
-            dynamic: self.dynamic,
-            span_start: self.span_start,
-            span_end: self.span_end,
-        }
-    }
-}
-
-impl MelSurfaceNormalizedFlagSnapshot {
-    fn from_flag(flag: MelSurfaceNormalizedFlag) -> Self {
-        Self {
-            source_span: flag.source_span,
-            canonical_name: flag.canonical_name.map(|value| value.to_string()),
-            value_shapes: flag.value_shapes,
-            args: flag
-                .args
-                .into_iter()
-                .map(MelSurfaceNormalizedArgSnapshot::from_arg)
-                .collect(),
-            span_start: flag.span_start,
-            span_end: flag.span_end,
-        }
-    }
-
-    fn into_flag(self) -> MelSurfaceNormalizedFlag {
-        MelSurfaceNormalizedFlag {
-            source_span: self.source_span,
-            canonical_name: self.canonical_name.map(Arc::<str>::from),
-            value_shapes: self.value_shapes,
-            args: self
-                .args
-                .into_iter()
-                .map(MelSurfaceNormalizedArgSnapshot::into_arg)
-                .collect(),
-            span_start: self.span_start,
-            span_end: self.span_end,
-        }
-    }
-}
-
-impl MelSurfaceNormalizedCommandSnapshot {
-    fn from_command(command: MelSurfaceNormalizedCommand) -> Self {
-        Self {
-            schema_name: command.schema_name.to_string(),
-            mode: MelSurfaceCommandModeSnapshot::from_mode(command.mode),
-            items: command
-                .items
-                .into_iter()
-                .map(MelSurfaceNormalizedItemSnapshot::from_item)
-                .collect(),
-            span_start: command.span_start,
-            span_end: command.span_end,
-        }
-    }
-
-    fn into_command(self) -> MelSurfaceNormalizedCommand {
-        MelSurfaceNormalizedCommand {
-            schema_name: Arc::<str>::from(self.schema_name),
-            mode: self.mode.into_mode(),
-            items: self
-                .items
-                .into_iter()
-                .map(MelSurfaceNormalizedItemSnapshot::into_item)
-                .collect(),
-            span_start: self.span_start,
-            span_end: self.span_end,
-        }
-    }
-}
-
-impl MelSurfaceNormalizedItemSnapshot {
-    fn from_item(item: MelSurfaceNormalizedItem) -> Self {
-        match item {
-            MelSurfaceNormalizedItem::Flag(flag) => {
-                Self::Flag(MelSurfaceNormalizedFlagSnapshot::from_flag(flag))
-            }
-            MelSurfaceNormalizedItem::Positional(arg) => {
-                Self::Positional(MelSurfaceNormalizedArgSnapshot::from_arg(arg))
-            }
-        }
-    }
-
-    fn into_item(self) -> MelSurfaceNormalizedItem {
-        match self {
-            Self::Flag(flag) => MelSurfaceNormalizedItem::Flag(flag.into_flag()),
-            Self::Positional(arg) => MelSurfaceNormalizedItem::Positional(arg.into_arg()),
-        }
-    }
-}
-
-impl MelSinkArgFactSnapshot {
-    fn from_fact(fact: MelSinkArgFact) -> Self {
-        Self {
-            sink_kind: MelSinkArgKindSnapshot::from_kind(fact.sink_kind),
-            resolved_kind: MelResolvedStringKindSnapshot::from_kind(fact.resolved_kind),
-            span: fact.span,
-            command_name: fact.command_name.map(|value| value.to_string()),
-            flag_name: fact.flag_name.map(|value| value.to_string()),
-            rendered_text: fact.rendered_text.map(|value| value.to_string()),
-            markers: fact
-                .markers
-                .into_iter()
-                .map(MelStringAssemblyMarkerSnapshot::from_marker)
-                .collect(),
-            code_like: fact.code_like,
-        }
-    }
-
-    fn into_fact(self) -> MelSinkArgFact {
-        MelSinkArgFact {
-            sink_kind: self.sink_kind.into_kind(),
-            resolved_kind: self.resolved_kind.into_kind(),
-            span: self.span,
-            command_name: self.command_name.map(Arc::<str>::from),
-            flag_name: self.flag_name.map(Arc::<str>::from),
-            rendered_text: self.rendered_text.map(Arc::<str>::from),
-            markers: self
-                .markers
-                .into_iter()
-                .map(MelStringAssemblyMarkerSnapshot::into_marker)
-                .collect(),
-            code_like: self.code_like,
-        }
-    }
-}
-
-impl MelCodeLikeValueFactSnapshot {
-    fn from_fact(fact: MelCodeLikeValueFact) -> Self {
-        Self {
-            resolved_kind: MelResolvedStringKindSnapshot::from_kind(fact.resolved_kind),
-            span: fact.span,
-            rendered_text: fact.rendered_text.to_string(),
-            markers: fact
-                .markers
-                .into_iter()
-                .map(MelStringAssemblyMarkerSnapshot::from_marker)
-                .collect(),
-        }
-    }
-
-    fn into_fact(self) -> MelCodeLikeValueFact {
-        MelCodeLikeValueFact {
-            resolved_kind: self.resolved_kind.into_kind(),
-            span: self.span,
-            rendered_text: Arc::<str>::from(self.rendered_text),
-            markers: self
-                .markers
-                .into_iter()
-                .map(MelStringAssemblyMarkerSnapshot::into_marker)
-                .collect(),
-        }
-    }
-}
-
-impl MelSurfaceDiagnosticStageSnapshot {
-    fn from_stage(stage: MelSurfaceDiagnosticStage) -> Self {
-        match stage {
-            MelSurfaceDiagnosticStage::Decode => Self::Decode,
-            MelSurfaceDiagnosticStage::Lex => Self::Lex,
-            MelSurfaceDiagnosticStage::Parse => Self::Parse,
-        }
-    }
-
-    fn into_stage(self) -> MelSurfaceDiagnosticStage {
-        match self {
-            Self::Decode => MelSurfaceDiagnosticStage::Decode,
-            Self::Lex => MelSurfaceDiagnosticStage::Lex,
-            Self::Parse => MelSurfaceDiagnosticStage::Parse,
-        }
-    }
-}
-
-impl MelSurfaceCallSurfaceKindSnapshot {
-    fn from_kind(kind: MelSurfaceCallSurfaceKind) -> Self {
-        match kind {
-            MelSurfaceCallSurfaceKind::Function => Self::Function,
-            MelSurfaceCallSurfaceKind::ShellLike => Self::ShellLike,
-        }
-    }
-
-    fn into_kind(self) -> MelSurfaceCallSurfaceKind {
-        match self {
-            Self::Function => MelSurfaceCallSurfaceKind::Function,
-            Self::ShellLike => MelSurfaceCallSurfaceKind::ShellLike,
-        }
-    }
-}
-
-impl MelSurfaceCommandModeSnapshot {
-    fn from_mode(mode: MelSurfaceCommandMode) -> Self {
-        match mode {
-            MelSurfaceCommandMode::Create => Self::Create,
-            MelSurfaceCommandMode::Edit => Self::Edit,
-            MelSurfaceCommandMode::Query => Self::Query,
-            MelSurfaceCommandMode::Unknown => Self::Unknown,
-        }
-    }
-
-    fn into_mode(self) -> MelSurfaceCommandMode {
-        match self {
-            Self::Create => MelSurfaceCommandMode::Create,
-            Self::Edit => MelSurfaceCommandMode::Edit,
-            Self::Query => MelSurfaceCommandMode::Query,
-            Self::Unknown => MelSurfaceCommandMode::Unknown,
-        }
-    }
-}
-
-impl MelSinkArgKindSnapshot {
-    fn from_kind(kind: MelSinkArgKind) -> Self {
-        match kind {
-            MelSinkArgKind::Python => Self::Python,
-            MelSinkArgKind::Eval => Self::Eval,
-            MelSinkArgKind::EvalDeferred => Self::EvalDeferred,
-            MelSinkArgKind::CallbackFlag => Self::CallbackFlag,
-            MelSinkArgKind::ScriptJobPayload => Self::ScriptJobPayload,
-        }
-    }
-
-    fn into_kind(self) -> MelSinkArgKind {
-        match self {
-            Self::Python => MelSinkArgKind::Python,
-            Self::Eval => MelSinkArgKind::Eval,
-            Self::EvalDeferred => MelSinkArgKind::EvalDeferred,
-            Self::CallbackFlag => MelSinkArgKind::CallbackFlag,
-            Self::ScriptJobPayload => MelSinkArgKind::ScriptJobPayload,
-        }
-    }
-}
-
-impl MelResolvedStringKindSnapshot {
-    fn from_kind(kind: MelResolvedStringKind) -> Self {
-        match kind {
-            MelResolvedStringKind::Literal => Self::Literal,
-            MelResolvedStringKind::ProcReference => Self::ProcReference,
-            MelResolvedStringKind::AssembledLiteral => Self::AssembledLiteral,
-            MelResolvedStringKind::Dynamic => Self::Dynamic,
-            MelResolvedStringKind::Unknown => Self::Unknown,
-        }
-    }
-
-    fn into_kind(self) -> MelResolvedStringKind {
-        match self {
-            Self::Literal => MelResolvedStringKind::Literal,
-            Self::ProcReference => MelResolvedStringKind::ProcReference,
-            Self::AssembledLiteral => MelResolvedStringKind::AssembledLiteral,
-            Self::Dynamic => MelResolvedStringKind::Dynamic,
-            Self::Unknown => MelResolvedStringKind::Unknown,
-        }
-    }
-}
-
-impl MelStringAssemblyMarkerSnapshot {
-    fn from_marker(marker: MelStringAssemblyMarker) -> Self {
-        match marker {
-            MelStringAssemblyMarker::Concat => Self::Concat,
-            MelStringAssemblyMarker::VariableReference => Self::VariableReference,
-        }
-    }
-
-    fn into_marker(self) -> MelStringAssemblyMarker {
-        match self {
-            Self::Concat => MelStringAssemblyMarker::Concat,
-            Self::VariableReference => MelStringAssemblyMarker::VariableReference,
-        }
     }
 }
 
@@ -834,7 +145,6 @@ impl ObserveCacheStore {
         &self,
         paths: &[PathBuf],
         load_options: &LoadOptions,
-        max_preview: usize,
     ) -> io::Result<Vec<io::Result<Option<ObserveCacheHit>>>> {
         let conn = self.open_connection()?;
         let now_unix_secs = unix_timestamp_secs(SystemTime::now());
@@ -846,7 +156,6 @@ impl ObserveCacheStore {
                     &conn,
                     path,
                     &load_options_fingerprint,
-                    max_preview,
                     now_unix_secs,
                 )
             })
@@ -857,16 +166,11 @@ impl ObserveCacheStore {
         &self,
         path: &Path,
         load_options: &LoadOptions,
-        max_preview: usize,
     ) -> io::Result<Option<ObserveCacheHit>> {
         let conn = self.open_connection()?;
         let load_options_fingerprint = fingerprint_debug(load_options);
-        let Some(record) = self.load_index_record_by_path_if_fresh(
-            &conn,
-            path,
-            &load_options_fingerprint,
-            max_preview,
-        )?
+        let Some(record) =
+            self.load_index_record_by_path_if_fresh(&conn, path, &load_options_fingerprint)?
         else {
             return Ok(None);
         };
@@ -878,10 +182,9 @@ impl ObserveCacheStore {
         &self,
         path: &Path,
         load_options: &LoadOptions,
-        max_preview: usize,
     ) -> io::Result<Option<ObservedSceneSnapshot>> {
         Ok(self
-            .load_by_path_if_fresh_with_access(path, load_options, max_preview)?
+            .load_by_path_if_fresh_with_access(path, load_options)?
             .map(|hit| hit.snapshot))
     }
 
@@ -889,7 +192,6 @@ impl ObserveCacheStore {
         &self,
         path: &Path,
         load_options: &LoadOptions,
-        max_preview: usize,
     ) -> io::Result<Option<ObserveCacheHit>> {
         let file_state = file_state_for_path(path)?;
         let conn = self.open_connection()?;
@@ -899,7 +201,6 @@ impl ObserveCacheStore {
             path,
             &file_state,
             &load_options_fingerprint,
-            max_preview,
             unix_timestamp_secs(SystemTime::now()),
         ) {
             if let Some(hit) = self.hit_from_record(path, file_state.clone(), record)? {
@@ -907,7 +208,7 @@ impl ObserveCacheStore {
             }
         }
 
-        let identity = ObserveCacheIdentity::new(file_sha256(path)?, load_options, max_preview);
+        let identity = ObserveCacheIdentity::new(file_sha256(path)?, load_options);
         if !self.identity_has_live_reference(&conn, &identity) {
             return Ok(None);
         }
@@ -928,10 +229,9 @@ impl ObserveCacheStore {
         &self,
         path: &Path,
         load_options: &LoadOptions,
-        max_preview: usize,
     ) -> io::Result<Option<ObservedSceneSnapshot>> {
         Ok(self
-            .load_by_path_with_hash_fallback_with_access(path, load_options, max_preview)?
+            .load_by_path_with_hash_fallback_with_access(path, load_options)?
             .map(|hit| hit.snapshot))
     }
 
@@ -968,19 +268,17 @@ impl ObserveCacheStore {
                     cache_schema_version,
                     scene_sha256,
                     load_options_fingerprint,
-                    max_preview,
                     last_accessed_unix_secs,
                     blob_relative_path,
                     blob_codec,
                     blob_compressed_size
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(normalized_path) DO UPDATE SET
                     size=excluded.size,
                     modified_unix_nanos=excluded.modified_unix_nanos,
                     cache_schema_version=excluded.cache_schema_version,
                     scene_sha256=excluded.scene_sha256,
                     load_options_fingerprint=excluded.load_options_fingerprint,
-                    max_preview=excluded.max_preview,
                     last_accessed_unix_secs=excluded.last_accessed_unix_secs,
                     blob_relative_path=excluded.blob_relative_path,
                     blob_codec=excluded.blob_codec,
@@ -995,7 +293,6 @@ impl ObserveCacheStore {
                 i64::from(snapshot.identity.cache_schema_version),
                 &snapshot.identity.scene_sha256,
                 &snapshot.identity.load_options_fingerprint,
-                usize_to_sql(snapshot.identity.max_preview)?,
                 u64_to_sql(now_unix_secs)?,
                 blob.relative_path.to_string_lossy().to_string(),
                 BLOB_CODEC_ZSTD,
@@ -1094,7 +391,7 @@ impl ObserveCacheStore {
         let mut stmt = conn
             .prepare(
                 "SELECT normalized_path, size, modified_unix_nanos, cache_schema_version,
-                        scene_sha256, load_options_fingerprint, max_preview, last_accessed_unix_secs,
+                        scene_sha256, load_options_fingerprint, last_accessed_unix_secs,
                         blob_relative_path, blob_compressed_size
                  FROM path_index",
             )
@@ -1108,10 +405,9 @@ impl ObserveCacheStore {
                     row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .map_err(sqlite_io_error)?;
@@ -1124,7 +420,6 @@ impl ObserveCacheStore {
                 cache_schema_version,
                 scene_sha256,
                 load_options_fingerprint,
-                max_preview,
                 last_accessed_unix_secs,
                 blob_relative_path,
                 blob_compressed_size,
@@ -1139,7 +434,6 @@ impl ObserveCacheStore {
                     cache_schema_version: i64_to_u32(cache_schema_version)?,
                     scene_sha256,
                     load_options_fingerprint,
-                    max_preview: i64_to_usize(max_preview)?,
                 },
                 last_accessed_unix_secs: opt_i64_to_u64(last_accessed_unix_secs)?,
                 blob: ObserveBlobRef {
@@ -1157,7 +451,6 @@ impl ObserveCacheStore {
         conn: &Connection,
         path: &Path,
         load_options_fingerprint: &str,
-        max_preview: usize,
     ) -> io::Result<Option<ObserveCacheIndexRecord>> {
         let file_state = file_state_for_path(path)?;
         Ok(self.find_fresh_record_by_path(
@@ -1165,7 +458,6 @@ impl ObserveCacheStore {
             path,
             &file_state,
             load_options_fingerprint,
-            max_preview,
             unix_timestamp_secs(SystemTime::now()),
         ))
     }
@@ -1176,14 +468,13 @@ impl ObserveCacheStore {
         path: &Path,
         file_state: &ObserveFileState,
         load_options_fingerprint: &str,
-        max_preview: usize,
         now_unix_secs: u64,
     ) -> Option<ObserveCacheIndexRecord> {
         let key = normalized_path_key(path);
         let row = conn
             .query_row(
                 "SELECT size, modified_unix_nanos, cache_schema_version, scene_sha256,
-                        load_options_fingerprint, max_preview, last_accessed_unix_secs,
+                        load_options_fingerprint, last_accessed_unix_secs,
                         blob_relative_path, blob_compressed_size
                  FROM path_index
                  WHERE normalized_path = ?1",
@@ -1195,10 +486,9 @@ impl ObserveCacheStore {
                         row.get::<_, i64>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, Option<i64>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, i64>(8)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
@@ -1212,7 +502,6 @@ impl ObserveCacheStore {
                 cache_schema_version,
                 scene_sha256,
                 load_options_fingerprint_row,
-                max_preview_row,
                 last_accessed_unix_secs,
                 blob_relative_path,
                 blob_compressed_size,
@@ -1227,7 +516,6 @@ impl ObserveCacheStore {
                         cache_schema_version: i64_to_u32(cache_schema_version).ok()?,
                         scene_sha256,
                         load_options_fingerprint: load_options_fingerprint_row,
-                        max_preview: i64_to_usize(max_preview_row).ok()?,
                     },
                     last_accessed_unix_secs: opt_i64_to_u64(last_accessed_unix_secs).ok()?,
                     blob: ObserveBlobRef {
@@ -1245,7 +533,6 @@ impl ObserveCacheStore {
             ) && record.file_state.size == file_state.size
                 && record.file_state.modified_unix_nanos == file_state.modified_unix_nanos
                 && record.identity.load_options_fingerprint == load_options_fingerprint
-                && record.identity.max_preview == max_preview
         })
     }
 
@@ -1254,7 +541,6 @@ impl ObserveCacheStore {
         conn: &Connection,
         path: &Path,
         load_options_fingerprint: &str,
-        max_preview: usize,
         now_unix_secs: u64,
     ) -> io::Result<Option<ObserveCacheHit>> {
         let file_state = match file_state_for_path(path) {
@@ -1267,7 +553,6 @@ impl ObserveCacheStore {
             path,
             &file_state,
             load_options_fingerprint,
-            max_preview,
             now_unix_secs,
         ) else {
             return Ok(None);
@@ -1306,13 +591,11 @@ impl ObserveCacheStore {
                 SELECT 1 FROM path_index
                 WHERE scene_sha256 = ?1
                   AND load_options_fingerprint = ?2
-                  AND max_preview = ?3
-                  AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs >= ?4)
+                  AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs >= ?3)
             )",
             params![
                 &identity.scene_sha256,
                 &identity.load_options_fingerprint,
-                usize_to_sql(identity.max_preview).unwrap_or(0),
                 u64_to_sql(now_unix_secs.saturating_sub(OBSERVE_CACHE_TTL.as_secs())).unwrap_or(0)
             ],
             |row| row.get::<_, i64>(0),
@@ -1330,26 +613,20 @@ impl ObserveCacheStore {
             .query_row(
                 "SELECT '' as normalized_path, 0 as size, NULL as modified_unix_nanos,
                         cache_schema_version, scene_sha256, load_options_fingerprint,
-                        max_preview, last_accessed_unix_secs, blob_relative_path, blob_compressed_size
+                        last_accessed_unix_secs, blob_relative_path, blob_compressed_size
                  FROM path_index
                  WHERE scene_sha256 = ?1
                    AND load_options_fingerprint = ?2
-                   AND max_preview = ?3
                  LIMIT 1",
-                params![
-                    &identity.scene_sha256,
-                    &identity.load_options_fingerprint,
-                    usize_to_sql(identity.max_preview)?
-                ],
+                params![&identity.scene_sha256, &identity.load_options_fingerprint,],
                 |row| {
                     Ok((
                         row.get::<_, i64>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, Option<i64>>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, i64>(9)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(8)?,
                     ))
                 },
             )
@@ -1359,7 +636,6 @@ impl ObserveCacheStore {
             cache_schema_version,
             scene_sha256,
             load_options_fingerprint,
-            max_preview,
             last_accessed_unix_secs,
             blob_relative_path,
             blob_compressed_size,
@@ -1377,7 +653,6 @@ impl ObserveCacheStore {
                 cache_schema_version: i64_to_u32(cache_schema_version)?,
                 scene_sha256,
                 load_options_fingerprint,
-                max_preview: i64_to_usize(max_preview)?,
             },
             last_accessed_unix_secs: opt_i64_to_u64(last_accessed_unix_secs)?,
             blob: ObserveBlobRef {
@@ -1393,6 +668,7 @@ impl ObserveCacheStore {
         let conn = Connection::open(self.db_path()).map_err(sqlite_io_error)?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(sqlite_io_error)?;
+        self.drop_incompatible_schema(&conn)?;
         conn.execute_batch(
             "PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA journal_mode = WAL;
@@ -1403,18 +679,32 @@ impl ObserveCacheStore {
                  cache_schema_version INTEGER NOT NULL,
                  scene_sha256 TEXT NOT NULL,
                  load_options_fingerprint TEXT NOT NULL,
-                 max_preview INTEGER NOT NULL,
                  last_accessed_unix_secs INTEGER NULL,
                  blob_relative_path TEXT NOT NULL,
                  blob_codec TEXT NOT NULL,
                  blob_compressed_size INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS path_index_identity_idx
-                 ON path_index(scene_sha256, load_options_fingerprint, max_preview);
+                 ON path_index(scene_sha256, load_options_fingerprint);
              CREATE INDEX IF NOT EXISTS path_index_last_accessed_idx ON path_index(last_accessed_unix_secs);",
         )
         .map_err(sqlite_io_error)?;
         Ok(conn)
+    }
+
+    fn drop_incompatible_schema(&self, conn: &Connection) -> io::Result<()> {
+        let has_legacy_max_preview = conn
+            .prepare("PRAGMA table_info(path_index)")
+            .map_err(sqlite_io_error)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(sqlite_io_error)?
+            .filter_map(Result::ok)
+            .any(|name| name == "max_preview");
+        if has_legacy_max_preview {
+            conn.execute_batch("DROP TABLE IF EXISTS path_index;")
+                .map_err(sqlite_io_error)?;
+        }
+        Ok(())
     }
 
     fn touch_many_if_stale_with_connection(
@@ -1699,11 +989,6 @@ fn u64_to_sql(value: u64) -> io::Result<i64> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "u64 overflow for sqlite"))
 }
 
-fn usize_to_sql(value: usize) -> io::Result<i64> {
-    i64::try_from(value)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "usize overflow for sqlite"))
-}
-
 fn opt_u128_to_sql(value: Option<u128>) -> io::Result<Option<i64>> {
     value
         .map(|value| {
@@ -1720,11 +1005,6 @@ fn i64_to_u64(value: i64) -> io::Result<u64> {
 
 fn i64_to_u32(value: i64) -> io::Result<u32> {
     u32::try_from(value)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid sqlite integer"))
-}
-
-fn i64_to_usize(value: i64) -> io::Result<usize> {
-    usize::try_from(value)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid sqlite integer"))
 }
 
@@ -1782,13 +1062,13 @@ mod tests {
             .observe_path(&source)
             .expect("observe source");
         let snapshot =
-            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default(), 64)
+            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default())
                 .expect("snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
         store.save(&snapshot).expect("save snapshot");
 
         let loaded = store
-            .load_by_path_with_hash_fallback(&source, &LoadOptions::default(), 64)
+            .load_by_path_with_hash_fallback(&source, &LoadOptions::default())
             .expect("load by original path")
             .expect("snapshot by path");
         assert_eq!(loaded.identity.scene_sha256, snapshot.identity.scene_sha256);
@@ -1796,13 +1076,13 @@ mod tests {
         let renamed = dir.path().join("RenamedExample.ma");
         fs::rename(&source, &renamed).expect("rename scene");
         let loaded = store
-            .load_by_path_with_hash_fallback(&renamed, &LoadOptions::default(), 64)
+            .load_by_path_with_hash_fallback(&renamed, &LoadOptions::default())
             .expect("load by renamed path")
             .expect("snapshot by hash fallback");
         assert_eq!(loaded.identity.scene_sha256, snapshot.identity.scene_sha256);
 
         let startup_loaded = store
-            .load_by_path_if_fresh(&renamed, &LoadOptions::default(), 64)
+            .load_by_path_if_fresh(&renamed, &LoadOptions::default())
             .expect("load startup path");
         assert!(startup_loaded.is_none());
     }
@@ -1821,18 +1101,12 @@ mod tests {
         let second_observation = Loader::new(LoadOptions::default())
             .observe_path(&second)
             .expect("observe second");
-        let first_snapshot = ObservedSceneSnapshot::from_observation(
-            &first_observation,
-            &LoadOptions::default(),
-            64,
-        )
-        .expect("first snapshot");
-        let second_snapshot = ObservedSceneSnapshot::from_observation(
-            &second_observation,
-            &LoadOptions::default(),
-            64,
-        )
-        .expect("second snapshot");
+        let first_snapshot =
+            ObservedSceneSnapshot::from_observation(&first_observation, &LoadOptions::default())
+                .expect("first snapshot");
+        let second_snapshot =
+            ObservedSceneSnapshot::from_observation(&second_observation, &LoadOptions::default())
+                .expect("second snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
 
         store
@@ -1840,11 +1114,11 @@ mod tests {
             .expect("save batch");
 
         let loaded_first = store
-            .load_by_path_if_fresh(&first, &LoadOptions::default(), 64)
+            .load_by_path_if_fresh(&first, &LoadOptions::default())
             .expect("load first")
             .expect("first snapshot");
         let loaded_second = store
-            .load_by_path_if_fresh(&second, &LoadOptions::default(), 64)
+            .load_by_path_if_fresh(&second, &LoadOptions::default())
             .expect("load second")
             .expect("second snapshot");
         assert_eq!(
@@ -1873,18 +1147,12 @@ mod tests {
         let second_observation = Loader::new(LoadOptions::default())
             .observe_path(&second)
             .expect("observe second");
-        let first_snapshot = ObservedSceneSnapshot::from_observation(
-            &first_observation,
-            &LoadOptions::default(),
-            64,
-        )
-        .expect("first snapshot");
-        let second_snapshot = ObservedSceneSnapshot::from_observation(
-            &second_observation,
-            &LoadOptions::default(),
-            64,
-        )
-        .expect("second snapshot");
+        let first_snapshot =
+            ObservedSceneSnapshot::from_observation(&first_observation, &LoadOptions::default())
+                .expect("first snapshot");
+        let second_snapshot =
+            ObservedSceneSnapshot::from_observation(&second_observation, &LoadOptions::default())
+                .expect("second snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
 
         store
@@ -1896,7 +1164,6 @@ mod tests {
             .load_many_by_path_if_fresh_with_access(
                 &[missing.clone(), first.clone(), second.clone()],
                 &LoadOptions::default(),
-                64,
             )
             .expect("batch lookup");
 
@@ -1926,7 +1193,7 @@ mod tests {
         );
 
         let single = store
-            .load_by_path_if_fresh_with_access(&first, &LoadOptions::default(), 64)
+            .load_by_path_if_fresh_with_access(&first, &LoadOptions::default())
             .expect("single lookup")
             .expect("single hit");
         assert_eq!(
@@ -1952,7 +1219,7 @@ mod tests {
             .observe_path(&source)
             .expect("observe source");
         let snapshot =
-            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default(), 64)
+            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default())
                 .expect("snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
         store.save(&snapshot).expect("save snapshot");
@@ -1983,7 +1250,7 @@ mod tests {
             .observe_path(&source)
             .expect("observe source");
         let snapshot =
-            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default(), 64)
+            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default())
                 .expect("snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
         store.save(&snapshot).expect("save snapshot");
@@ -2001,7 +1268,7 @@ mod tests {
 
         assert!(
             store
-                .load_by_path_if_fresh(&source, &LoadOptions::default(), 64)
+                .load_by_path_if_fresh(&source, &LoadOptions::default())
                 .expect("load after missing blob")
                 .is_none()
         );
@@ -2024,7 +1291,7 @@ mod tests {
             .observe_path(&source)
             .expect("observe source");
         let snapshot =
-            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default(), 64)
+            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default())
                 .expect("snapshot");
         let store = ObserveCacheStore::new(dir.path().join("observe-cache"));
         store.save(&snapshot).expect("save snapshot");

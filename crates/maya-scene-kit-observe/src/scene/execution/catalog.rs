@@ -78,9 +78,9 @@ pub(crate) fn build_observed_execution_core(
             surfaces::collect_execution_coverage_from_mb_with_budget(
                 &session.mb,
                 session.budget(),
-                session.schema_context().registry(),
+                session.schema_context()?.registry(),
                 session
-                    .schema_context()
+                    .schema_context()?
                     .node_execution_semantics()?
                     .as_ref(),
             )

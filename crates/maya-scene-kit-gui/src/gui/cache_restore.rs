@@ -36,7 +36,7 @@ pub(super) fn hydrate_cached_analysis_batch(
     let audit_store = AuditCacheStore::new(audit_cache_root);
     let paths = rows.iter().map(|row| row.path.clone()).collect::<Vec<_>>();
     let observe_hits = observe_store
-        .load_many_by_path_if_fresh_with_access(&paths, &load_options, 64)
+        .load_many_by_path_if_fresh_with_access(&paths, &load_options)
         .unwrap_or_else(|_| (0..rows.len()).map(|_| Ok(None)).collect());
     let audit_hits = audit_store
         .load_many_by_path_if_fresh_with_access(&paths, audit_options, &plan_fingerprint)

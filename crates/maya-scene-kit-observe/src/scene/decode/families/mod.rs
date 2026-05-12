@@ -10,7 +10,7 @@ mod slct;
 pub(crate) use self::{
     attr::AttrFamilyDecoder,
     cons::ConsFamilyDecoder,
-    crea::{CreaFamilyDecoder, ScriptFamilyDecoder, decode_crea_payload},
+    crea::{CreaFamilyDecoder, ScriptFamilyDecoder},
     mesh::MeshPayloadDecoder,
     refe::RefeFamilyDecoder,
     reference::ReferenceFamilyDecoder,

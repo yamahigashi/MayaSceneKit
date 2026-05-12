@@ -53,7 +53,7 @@ pub struct MbRtftOwnerTrace {
     pub trace_child_header_size: Option<usize>,
 }
 
-pub(crate) fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> Vec<String> {
+pub fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> Vec<String> {
     let mut names = Vec::new();
     for child in &root.children {
         if child.form_type.as_deref() != Some("SCRP") {
@@ -74,7 +74,7 @@ pub(crate) fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> Vec<Stri
     names
 }
 
-pub(crate) fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, String)> {
+pub fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 

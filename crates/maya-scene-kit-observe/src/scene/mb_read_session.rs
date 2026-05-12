@@ -17,7 +17,7 @@ use crate::{
             collect_raw_chunk_records_with_budget, recover_nodes, recover_reference_files,
         },
         schema::SchemaContext,
-        source::mb,
+        source::mb::{self, RawMbSelectiveSections},
     },
 };
 
@@ -34,13 +34,14 @@ pub(crate) struct MbSceneFacts {
 
 pub(crate) struct MbReadSession {
     pub(crate) mb: crate::mb::MayaBinaryFile,
-    schema_context: Arc<SchemaContext>,
+    schema_context: Option<Arc<SchemaContext>>,
     budget: MbParseBudget,
     decoded: OnceLock<Result<Arc<MbDecodedArtifacts>, MayaBinaryParseError>>,
     scene_facts: OnceLock<Result<Arc<MbSceneFacts>, MayaBinaryParseError>>,
     build: OnceLock<Result<Arc<SceneBuildOutput>, MayaBinaryParseError>>,
     integrity: OnceLock<Result<SceneIntegritySummary, MayaBinaryParseError>>,
     scene_paths: OnceLock<Result<Arc<[ScenePathEntry]>, MayaBinaryParseError>>,
+    selective_sections: OnceLock<Arc<RawMbSelectiveSections>>,
     requires: OnceLock<Arc<[String]>>,
     require_entries: OnceLock<Arc<[SceneDumpRequireEntry]>>,
 }
@@ -48,7 +49,7 @@ pub(crate) struct MbReadSession {
 impl MbReadSession {
     pub(crate) fn load_raw(
         path: &std::path::Path,
-        schema_context: Arc<SchemaContext>,
+        schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
         let mb = parse_file_with_budget(path, budget)?;
@@ -58,7 +59,7 @@ impl MbReadSession {
     pub(crate) fn load_raw_bytes(
         path: &std::path::Path,
         bytes: Vec<u8>,
-        schema_context: Arc<SchemaContext>,
+        schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
         let mut mb = parse_bytes_with_budget(bytes, budget)?;
@@ -68,7 +69,7 @@ impl MbReadSession {
 
     fn from_mb(
         mb: crate::mb::MayaBinaryFile,
-        schema_context: Arc<SchemaContext>,
+        schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
         Ok(Self {
@@ -80,6 +81,7 @@ impl MbReadSession {
             build: OnceLock::new(),
             integrity: OnceLock::new(),
             scene_paths: OnceLock::new(),
+            selective_sections: OnceLock::new(),
             requires: OnceLock::new(),
             require_entries: OnceLock::new(),
         })
@@ -98,7 +100,7 @@ impl MbReadSession {
             decoded.decoded_chunks.clone(),
             scene_facts.nodes.clone(),
             scene_facts.reference_files.clone(),
-            self.schema_context.registry(),
+            self.schema_context()?.registry(),
             TypeIdResolverStatus::Provided,
         )));
         let _ = self.build.set(build);
@@ -136,34 +138,25 @@ impl MbReadSession {
             return map_cached_arc_slice_parse_result(result);
         }
 
-        let scene_facts = self.scene_facts()?;
-        let decoded = self.decoded()?;
-        let raw_entries =
-            maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&self.mb);
-        let entries = mb::collect_mb_scene_paths(
-            &self.mb,
-            &scene_facts.nodes,
-            &scene_facts.reference_files,
-            &raw_entries,
-            &decoded.raw_chunks,
-            self.mb.data.as_ref(),
-        );
+        let entries = self.selective_sections().scene_paths.clone();
         let _ = self.scene_paths.set(Ok(Arc::from(entries)));
         map_cached_arc_slice_parse_result(
             self.scene_paths.get().expect("mb scene paths initialized"),
         )
     }
 
+    pub(crate) fn script_entries(&self) -> &[crate::scene::scripts::ScriptNodeEntry] {
+        self.selective_sections().script_entries.as_slice()
+    }
+
     pub(crate) fn budget(&self) -> &MbParseBudget {
         &self.budget
     }
 
-    pub(crate) fn schema_context(&self) -> &SchemaContext {
-        self.schema_context.as_ref()
-    }
-
-    pub(crate) fn scene_nodes(&self) -> Result<&[RecoveredNode], SceneToolError> {
-        Ok(self.scene_facts()?.nodes.as_slice())
+    pub(crate) fn schema_context(&self) -> Result<&SchemaContext, SceneToolError> {
+        self.schema_context.as_deref().ok_or_else(|| {
+            SceneToolError::Config("MB semantic read requires schema context".to_string())
+        })
     }
 
     fn decoded(&self) -> Result<&Arc<MbDecodedArtifacts>, SceneToolError> {
@@ -175,7 +168,7 @@ impl MbReadSession {
         let decoded_chunks = collect_decoded_chunk_records(
             &raw_chunks,
             self.mb.data.as_ref(),
-            self.schema_context.registry(),
+            self.schema_context()?.registry(),
         );
         let decode_qualities = collect_decode_quality_records(&decoded_chunks);
         let decoded = Ok(Arc::new(MbDecodedArtifacts {
@@ -200,12 +193,18 @@ impl MbReadSession {
         let scene_facts = Ok(Arc::new(MbSceneFacts {
             nodes: recover_nodes(
                 &decoded.decoded_chunks,
-                Some(self.schema_context.typeid_resolver()),
+                Some(self.schema_context()?.typeid_resolver()),
             ),
             reference_files: recover_reference_files(&decoded.decoded_chunks),
         }));
         let _ = self.scene_facts.set(scene_facts);
         map_cached_parse_result(self.scene_facts.get().expect("mb scene facts initialized"))
+    }
+
+    fn selective_sections(&self) -> &RawMbSelectiveSections {
+        self.selective_sections
+            .get_or_init(|| Arc::new(mb::collect_raw_mb_selective_sections(&self.mb)))
+            .as_ref()
     }
 
     #[cfg(test)]

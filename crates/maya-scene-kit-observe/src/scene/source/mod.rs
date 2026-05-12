@@ -26,7 +26,7 @@ pub fn check_script_nodes_with_options(
     path: impl AsRef<Path>,
     options: &LoadOptions,
 ) -> Result<ScriptNodeReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path(path)?;
+    let observation = Loader::new(options.clone()).observe_path_without_retained_ma_bytes(path)?;
     let entries = observation.script_node_entries()?;
     Ok(ScriptNodeReport {
         scene_path: observation.scene_path().to_path_buf(),
@@ -46,7 +46,7 @@ pub fn collect_script_node_entries_with_options(
     path: impl AsRef<Path>,
     options: &LoadOptions,
 ) -> Result<ScriptNodeEntriesReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path(path)?;
+    let observation = Loader::new(options.clone()).observe_path_without_retained_ma_bytes(path)?;
     Ok(ScriptNodeEntriesReport {
         scene_path: observation.scene_path().to_path_buf(),
         scene_format: observation.scene_format(),

@@ -64,7 +64,7 @@ pub fn recover_mb_scene(
 
     let schema_context = SchemaContext::from_inputs_cached(&options.schema_inputs())?;
     let budget = options.materialize_mb_parse_budget_for_path(path)?;
-    let session = MbReadSession::load_raw(path, Arc::clone(&schema_context), &budget)?;
+    let session = MbReadSession::load_raw(path, Some(Arc::clone(&schema_context)), &budget)?;
     let build = session.build()?;
 
     Ok(MbRecoveryBundle {

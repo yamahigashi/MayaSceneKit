@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
 };
 
@@ -11,10 +11,23 @@ use maya_scene_kit_formats::mb::{
 use crate::{
     reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
     scene::{
-        decode::families::decode_crea_payload,
         paths::{PathKind, ScenePathEntry, ScenePathMeta},
+        scripts::ScriptNodeEntry,
     },
 };
+
+#[derive(Debug, Clone)]
+pub(crate) struct RawMbSelectiveSections {
+    pub(crate) scene_paths: Vec<ScenePathEntry>,
+    pub(crate) script_entries: Vec<ScriptNodeEntry>,
+}
+
+pub(crate) fn collect_raw_mb_selective_sections(mb: &MayaBinaryFile) -> RawMbSelectiveSections {
+    RawMbSelectiveSections {
+        scene_paths: collect_raw_mb_scene_paths(mb),
+        script_entries: collect_raw_mb_script_entries(mb),
+    }
+}
 
 pub(crate) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKind {
     if entry.node_type == "reference" {
@@ -24,134 +37,82 @@ pub(crate) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKin
     }
 }
 
-pub(crate) fn collect_mb_scene_paths(
-    mb: &MayaBinaryFile,
-    nodes: &[crate::scene::ir::RecoveredNode],
-    reference_files: &[crate::scene::ir::ReferenceFileOp],
-    raw_entries: &[MbScenePathEntry],
-    raw_chunks: &[crate::scene::ir::RawChunkRecord],
-    raw_source: &[u8],
-) -> Vec<ScenePathEntry> {
+pub(crate) fn collect_raw_mb_scene_paths(mb: &MayaBinaryFile) -> Vec<ScenePathEntry> {
+    let raw_entries = maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(mb);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut raw_file_meta = build_raw_mb_file_meta_index(raw_entries);
-    let fallback_file_meta = build_mb_file_owner_trace_index(mb, raw_chunks, raw_source);
-    let nodes_by_name = nodes
-        .iter()
-        .map(|node| (node.name.as_str(), node))
-        .collect::<HashMap<_, _>>();
-    let mut consumed_node_values = HashSet::<(String, String)>::new();
-
-    for reference in reference_files {
-        push_unique_scene_path_entry(
-            &mut out,
-            &mut seen,
-            ScenePathEntry {
-                node_type: "reference".to_string(),
-                node_name: reference.reference_node.to_string(),
-                attr: ".fn".to_string(),
-                value: reference.path.clone(),
-                meta: Some(ScenePathMeta {
-                    origin: "canonical-reference-file".to_string(),
-                    short_name: Some(reference.namespace.to_string()),
-                    reference_node: Some(reference.reference_node.to_string()),
-                    format_hint: Some(reference.file_type.to_string()),
-                    reference_options: reference.options.clone(),
-                    color_space: None,
-                    raw_fields: vec![],
-                    trace_form: reference.trace.as_ref().map(|trace| trace.form.clone()),
-                    trace_tag: reference.trace.as_ref().map(|trace| trace.tag.clone()),
-                    trace_node_offset: reference.trace.as_ref().map(|trace| trace.node_offset),
-                    trace_child_alignment: reference
-                        .trace
-                        .as_ref()
-                        .and_then(|trace| trace.child_alignment),
-                    trace_child_header_size: reference
-                        .trace
-                        .as_ref()
-                        .and_then(|trace| trace.child_header_size),
-                }),
-            },
-        );
-    }
+    let mut raw_file_meta = build_raw_mb_file_meta_index(&raw_entries);
+    let owner_trace_meta = build_mb_file_owner_trace_index_from_root(mb);
 
     for entry in raw_entries {
-        if !matches!(
-            classify_scene_path_attr(&entry.attr),
-            Some(ScenePathAttrKind::FileTexturePath)
-        ) {
-            continue;
-        }
-        let node_type = nodes_by_name
-            .get(entry.node_name.as_str())
-            .map(|node| node.node_type.to_string())
-            .unwrap_or_else(|| entry.node_type.clone());
-        consumed_node_values.insert((entry.node_name.clone(), entry.value.clone()));
-        push_unique_scene_path_entry(
-            &mut out,
-            &mut seen,
-            ScenePathEntry {
-                node_type,
-                node_name: entry.node_name.clone(),
-                attr: entry.attr.clone(),
-                value: entry.value.clone(),
-                meta: take_raw_mb_file_meta(&mut raw_file_meta, &entry.node_name, &entry.value)
-                    .map(|meta| {
-                        merge_mb_file_meta_with_owner_trace(
-                            meta,
-                            fallback_file_meta.get(&entry.node_name),
-                        )
-                    })
-                    .or_else(|| fallback_file_meta.get(&entry.node_name).cloned()),
-            },
-        );
-    }
-
-    for node in nodes {
-        for attr in &node.attrs {
-            let crate::scene::ir::RecoveredAttrOp::SetAttr(op) = attr else {
-                continue;
-            };
-            let crate::scene::ir::SetAttrValue::String(value) = &op.value else {
-                continue;
-            };
-            if !matches!(
-                classify_scene_path_attr(&op.attr_name_or_path),
-                Some(ScenePathAttrKind::FileTexturePath)
-            ) {
-                continue;
+        let kind = canonical_raw_mb_scene_path_kind(&entry);
+        match kind {
+            PathKind::Reference => {
+                let meta = entry.meta.as_ref().map(map_mb_scene_path_meta_ref);
+                push_unique_scene_path_entry(
+                    &mut out,
+                    &mut seen,
+                    ScenePathEntry {
+                        node_type: "reference".to_string(),
+                        node_name: entry.node_name,
+                        attr: entry.attr,
+                        value: entry.value,
+                        meta,
+                    },
+                );
             }
-            if consumed_node_values.contains(&(node.name.clone(), value.clone())) {
-                continue;
-            }
-            push_unique_scene_path_entry(
-                &mut out,
-                &mut seen,
-                ScenePathEntry {
-                    node_type: node.node_type.to_string(),
-                    node_name: node.name.clone(),
-                    attr: op.attr_name_or_path.clone(),
-                    value: value.clone(),
-                    meta: take_raw_mb_file_meta(&mut raw_file_meta, &node.name, value)
+            PathKind::File => {
+                if !matches!(
+                    classify_scene_path_attr(&entry.attr),
+                    Some(ScenePathAttrKind::FileTexturePath)
+                ) {
+                    continue;
+                }
+                let meta =
+                    take_raw_mb_file_meta(&mut raw_file_meta, &entry.node_name, &entry.value)
                         .map(|meta| {
                             merge_mb_file_meta_with_owner_trace(
                                 meta,
-                                fallback_file_meta.get(&node.name),
+                                owner_trace_meta.get(&entry.node_name),
                             )
                         })
-                        .or_else(|| fallback_file_meta.get(&node.name).cloned()),
-                },
-            );
+                        .or_else(|| owner_trace_meta.get(&entry.node_name).cloned());
+                push_unique_scene_path_entry(
+                    &mut out,
+                    &mut seen,
+                    ScenePathEntry {
+                        node_type: entry.node_type,
+                        node_name: entry.node_name,
+                        attr: entry.attr,
+                        value: entry.value,
+                        meta,
+                    },
+                );
+            }
+            PathKind::All => unreachable!("raw MB scene path kind is canonicalized"),
         }
     }
 
     out
 }
 
-fn build_mb_file_owner_trace_index(
+fn canonical_raw_mb_scene_path_kind(entry: &MbScenePathEntry) -> PathKind {
+    if entry.node_type == "reference" {
+        PathKind::Reference
+    } else {
+        PathKind::File
+    }
+}
+
+pub(crate) fn collect_raw_mb_script_entries(mb: &MayaBinaryFile) -> Vec<ScriptNodeEntry> {
+    maya_scene_kit_formats::mb::extract_raw_script_entries_from_mb(mb)
+        .into_iter()
+        .map(|(name, body)| ScriptNodeEntry { name, body })
+        .collect()
+}
+
+fn build_mb_file_owner_trace_index_from_root(
     mb: &MayaBinaryFile,
-    raw_chunks: &[crate::scene::ir::RawChunkRecord],
-    raw_source: &[u8],
 ) -> BTreeMap<String, ScenePathMeta> {
     let mut index = BTreeMap::new();
 
@@ -159,73 +120,6 @@ fn build_mb_file_owner_trace_index(
         index
             .entry(trace.node_name.clone())
             .or_insert_with(|| map_mb_owner_trace_meta_ref(&trace));
-    }
-
-    for (node_name, meta) in build_mb_file_owner_trace_index_from_raw_chunks(raw_chunks, raw_source)
-    {
-        index
-            .entry(node_name)
-            .and_modify(|existing| {
-                *existing = merge_mb_file_meta_with_owner_trace(existing.clone(), Some(&meta));
-            })
-            .or_insert(meta);
-    }
-
-    index
-}
-
-fn build_mb_file_owner_trace_index_from_raw_chunks(
-    raw_chunks: &[crate::scene::ir::RawChunkRecord],
-    raw_source: &[u8],
-) -> BTreeMap<String, ScenePathMeta> {
-    let mut grouped = BTreeMap::<usize, ScenePathMeta>::new();
-    let mut names = BTreeMap::<usize, String>::new();
-
-    for raw in raw_chunks {
-        let payload = raw.payload(raw_source);
-        if raw.chunk_ref.form != "RTFT" {
-            continue;
-        }
-        let meta = grouped
-            .entry(raw.chunk_ref.node_offset)
-            .or_insert_with(|| ScenePathMeta {
-                origin: "rtft-fallback".to_string(),
-                short_name: None,
-                reference_node: None,
-                format_hint: None,
-                reference_options: None,
-                color_space: None,
-                raw_fields: Vec::new(),
-                trace_form: Some(raw.chunk_ref.form.clone()),
-                trace_tag: None,
-                trace_node_offset: Some(raw.chunk_ref.node_offset),
-                trace_child_alignment: raw.chunk_ref.child_alignment,
-                trace_child_header_size: raw.chunk_ref.child_header_size,
-            });
-        if meta.trace_tag.is_none()
-            && matches!(
-                decode_rtft_attr_name(payload)
-                    .as_deref()
-                    .and_then(classify_scene_path_attr),
-                Some(ScenePathAttrKind::FileTexturePath)
-            )
-        {
-            meta.trace_tag = Some(raw.chunk_ref.tag.clone());
-        }
-        if let Some(node_name) = (raw.chunk_ref.tag == "CREA")
-            .then(|| decode_crea_name(payload))
-            .flatten()
-        {
-            names.entry(raw.chunk_ref.node_offset).or_insert(node_name);
-        }
-    }
-
-    let mut index = BTreeMap::new();
-    for (node_offset, node_name) in names {
-        if let Some(mut meta) = grouped.remove(&node_offset) {
-            meta.short_name = Some(node_name.clone());
-            index.insert(node_name, meta);
-        }
     }
 
     index
@@ -341,15 +235,6 @@ fn push_unique_scene_path_entry(
     }
 }
 
-fn decode_rtft_attr_name(payload: &[u8]) -> Option<String> {
-    let attr_end = payload.iter().position(|b| *b == 0)?;
-    Some(String::from_utf8_lossy(&payload[..attr_end]).to_string())
-}
-
-fn decode_crea_name(payload: &[u8]) -> Option<String> {
-    decode_crea_payload(payload).name
-}
-
 fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
     let mut hasher = DefaultHasher::new();
     entry.node_type.hash(&mut hasher);
@@ -361,23 +246,10 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf};
+    use std::collections::HashSet;
 
-    use maya_scene_kit_formats::mb::{
-        parse_file,
-        paths::{MbScenePathEntry, MbScenePathMeta},
-    };
-
-    use super::{decode_rtft_attr_name, push_unique_scene_path_entry};
-    use crate::scene::{
-        ir::{RecoveredAttrOp, RecoveredNode, SetAttrOp, SetAttrValue},
-        model::CreateNodeFlags,
-        paths::{ScenePathEntry, ScenePathMeta},
-    };
-
-    fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-    }
+    use super::push_unique_scene_path_entry;
+    use crate::scene::paths::{ScenePathEntry, ScenePathMeta};
 
     fn scene_path_entry(trace_tag: &str, trace_node_offset: usize) -> ScenePathEntry {
         ScenePathEntry {
@@ -403,18 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_rtft_attr_name_returns_bytes_before_first_nul() {
-        let payload = b"ftn\0asset/example/file.png\0ignored";
-        assert_eq!(decode_rtft_attr_name(payload).as_deref(), Some("ftn"));
-    }
-
-    #[test]
-    fn decode_rtft_attr_name_does_not_return_last_non_empty_chunk() {
-        let payload = b"ftn\0asset/example/file.png";
-        assert_eq!(decode_rtft_attr_name(payload).as_deref(), Some("ftn"));
-    }
-
-    #[test]
     fn push_unique_scene_path_entry_dedupes_trace_only_differences() {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -425,61 +285,5 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node_name, "ExampleFile");
         assert_eq!(out[0].value, "asset/example/file.png");
-    }
-
-    #[test]
-    fn collect_mb_scene_paths_preserves_non_file_owner_type_for_file_texture_name() {
-        let source = repo_root().join("tests/fixtures/mb/owner_delete/file_owner_delete.mb");
-        let parsed = parse_file(&source).expect("parse fixture");
-        let nodes = vec![RecoveredNode {
-            node_type: std::sync::Arc::<str>::from("psdFileTex"),
-            name: "psdTex1".to_string(),
-            parent: None,
-            uid: None,
-            attrs: vec![RecoveredAttrOp::SetAttr(SetAttrOp {
-                attr_name_or_path: ".fileTextureName".to_string(),
-                array_size: None,
-                channel_hint: None,
-                lock: None,
-                keyable: None,
-                value: SetAttrValue::String("sourceimages/layered.psd".to_string()),
-            })],
-            decode_notes: Vec::new(),
-            create_flags: CreateNodeFlags::default(),
-        }];
-        let raw_entries = vec![MbScenePathEntry {
-            node_type: "file".to_string(),
-            node_name: "psdTex1".to_string(),
-            attr: ".fileTextureName".to_string(),
-            value: "sourceimages/layered.psd".to_string(),
-            meta: Some(MbScenePathMeta {
-                origin: "rtft".to_string(),
-                short_name: Some("psdTex1".to_string()),
-                reference_node: None,
-                format_hint: None,
-                reference_options: None,
-                color_space: None,
-                raw_fields: vec!["fileTextureName=sourceimages/layered.psd".to_string()],
-                trace_form: Some("RTFT".to_string()),
-                trace_tag: Some("STR ".to_string()),
-                trace_node_offset: Some(0x40),
-                trace_child_alignment: Some(8),
-                trace_child_header_size: Some(16),
-            }),
-        }];
-
-        let entries = super::collect_mb_scene_paths(
-            &parsed,
-            &nodes,
-            &[],
-            &raw_entries,
-            &[],
-            parsed.data.as_ref(),
-        );
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].node_type, "psdFileTex");
-        assert_eq!(entries[0].attr, ".fileTextureName");
-        assert_eq!(entries[0].value, "sourceimages/layered.psd");
     }
 }
