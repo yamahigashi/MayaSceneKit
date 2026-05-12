@@ -12,6 +12,7 @@ mod surface;
 mod text_scan;
 
 pub(crate) use self::surface::AnalysisSurface;
+pub(crate) use self::text_scan::scan_hard_python_obfuscation_markers;
 use self::{
     mel::analyze_mel_surface_impl, python::analyze_python_surface_impl, surface::SurfaceAnalysis,
 };

@@ -32,6 +32,9 @@ pub(crate) enum PythonSignal {
         first_arg: PythonBodyArgKind,
     },
     Capability(PythonCapabilityKind),
+    HardMarker {
+        markers: Vec<String>,
+    },
     UnresolvedCallTarget {
         message: String,
     },
@@ -46,9 +49,14 @@ pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
         ast::Suite::parse(&normalized, "<audit>").ok()
     });
     let Some(program) = program else {
-        return vec![PythonSignal::ParseFailure {
+        let mut signals = vec![PythonSignal::ParseFailure {
             message: "python parse failure".to_string(),
         }];
+        let markers = crate::audit::analyze::scan_hard_python_obfuscation_markers(source);
+        if !markers.is_empty() {
+            signals.push(PythonSignal::HardMarker { markers });
+        }
+        return signals;
     };
     let mut visitor = SignalVisitor::default();
     visitor.alias_scopes.push(HashMap::new());
@@ -398,6 +406,7 @@ impl SignalVisitor {
                 }
             }
             ast::Expr::Call(expr) => {
+                self.record_hard_markers(hard_markers_for_call(expr));
                 self.visit_call(expr);
                 self.visit_expr(&expr.func);
                 for arg in &expr.args {
@@ -413,11 +422,20 @@ impl SignalVisitor {
                     self.visit_expr(value);
                 }
             }
+            ast::Expr::Attribute(expr) => {
+                self.record_hard_markers(hard_markers_for_attribute(expr));
+                self.visit_expr(&expr.value);
+            }
+            ast::Expr::Subscript(expr) => {
+                self.record_hard_markers(hard_markers_for_subscript(expr));
+                self.visit_expr(&expr.value);
+                self.visit_expr(&expr.slice);
+            }
+            ast::Expr::Name(name) => {
+                self.record_hard_markers(hard_markers_for_name(name.id.as_str()));
+            }
             ast::Expr::Constant(_)
-            | ast::Expr::Attribute(_)
-            | ast::Expr::Subscript(_)
             | ast::Expr::Starred(_)
-            | ast::Expr::Name(_)
             | ast::Expr::List(_)
             | ast::Expr::Tuple(_)
             | ast::Expr::Slice(_) => self.visit_child_exprs(expr),
@@ -495,6 +513,22 @@ impl SignalVisitor {
             self.signals.push(PythonSignal::UnresolvedCallTarget {
                 message: "python call target resolved through dynamic dispatch".to_string(),
             });
+        }
+    }
+
+    fn record_hard_markers(&mut self, markers: Vec<String>) {
+        if markers.is_empty() {
+            return;
+        }
+        let already_seen = self.signals.iter().any(|signal| {
+            matches!(
+                signal,
+                PythonSignal::HardMarker { markers: existing }
+                    if markers.iter().all(|marker| existing.contains(marker))
+            )
+        });
+        if !already_seen {
+            self.signals.push(PythonSignal::HardMarker { markers });
         }
     }
 
@@ -881,6 +915,98 @@ fn is_dynamic_dispatch_subscript(subscript: &ast::ExprSubscript) -> bool {
     }
 }
 
+fn hard_markers_for_call(call: &ast::ExprCall) -> Vec<String> {
+    let mut markers = Vec::new();
+    match call.func.as_ref() {
+        ast::Expr::Name(name) => match name.id.as_str() {
+            "chr" => push_marker(&mut markers, "chr("),
+            "hex" => push_marker(&mut markers, "hex"),
+            "globals" => push_marker(&mut markers, "globals("),
+            "locals" => push_marker(&mut markers, "locals("),
+            "vars" => push_marker(&mut markers, "vars("),
+            "getattr" => {
+                if call
+                    .args
+                    .first()
+                    .is_some_and(|arg| expr_names_builtins(arg))
+                {
+                    push_marker(&mut markers, "builtins");
+                }
+            }
+            _ => {}
+        },
+        ast::Expr::Attribute(attr) => {
+            match attr.attr.as_str() {
+                "decode" => push_marker(&mut markers, ".decode("),
+                "hex" | "fromhex" | "unhexlify" => push_marker(&mut markers, "hex"),
+                "b64decode" | "standard_b64decode" | "urlsafe_b64decode" => {
+                    push_marker(&mut markers, "base64")
+                }
+                "getattr" => {
+                    if call
+                        .args
+                        .first()
+                        .is_some_and(|arg| expr_names_builtins(arg))
+                    {
+                        push_marker(&mut markers, "builtins");
+                    }
+                }
+                _ => {}
+            }
+            if expr_names_builtins(&attr.value) {
+                push_marker(&mut markers, "builtins");
+            }
+        }
+        _ => {}
+    }
+    markers
+}
+
+fn hard_markers_for_attribute(attr: &ast::ExprAttribute) -> Vec<String> {
+    let mut markers = Vec::new();
+    match attr.attr.as_str() {
+        "__dict__" if expr_names_builtins(&attr.value) => push_marker(&mut markers, "builtins"),
+        "decode" => push_marker(&mut markers, ".decode("),
+        "hex" | "fromhex" | "unhexlify" => push_marker(&mut markers, "hex"),
+        "b64decode" | "standard_b64decode" | "urlsafe_b64decode" => {
+            push_marker(&mut markers, "base64")
+        }
+        _ => {}
+    }
+    if expr_names_builtins(&attr.value) {
+        push_marker(&mut markers, "builtins");
+    }
+    markers
+}
+
+fn hard_markers_for_subscript(subscript: &ast::ExprSubscript) -> Vec<String> {
+    let mut markers = Vec::new();
+    if expr_names_builtins(&subscript.value) {
+        push_marker(&mut markers, "builtins");
+    }
+    if matches!(subscript.value.as_ref(), ast::Expr::Call(call) if is_locals_like_dispatch(call)) {
+        push_marker(&mut markers, "dynamic dispatch");
+    }
+    markers
+}
+
+fn hard_markers_for_name(name: &str) -> Vec<String> {
+    let mut markers = Vec::new();
+    if name == "__builtins__" {
+        push_marker(&mut markers, "__builtins__");
+    }
+    markers
+}
+
+fn expr_names_builtins(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Name(name) => matches!(name.id.as_str(), "builtins" | "__builtins__"),
+        ast::Expr::Attribute(attr) => expr_names_builtins(&attr.value),
+        ast::Expr::Subscript(subscript) => expr_names_builtins(&subscript.value),
+        _ => false,
+    }
+}
+
 fn alias_local_name(name: &str, asname: Option<&ast::Identifier>) -> String {
     asname
         .map(|value| value.as_str().to_string())
@@ -1090,6 +1216,15 @@ mod tests {
             .any(|signal| matches!(signal, PythonSignal::ParseFailure { .. }))
     }
 
+    fn has_hard_marker(source: &str, expected: &str) -> bool {
+        collect_python_signals(source).iter().any(|signal| {
+            matches!(
+                signal,
+                PythonSignal::HardMarker { markers } if markers.iter().any(|marker| marker == expected)
+            )
+        })
+    }
+
     #[test]
     fn collect_python_signals_detects_attribute_exec_calls() {
         assert!(has_call("builtins.exec('print(1)')", PythonCallKind::Exec));
@@ -1184,5 +1319,71 @@ mod tests {
             "dLayer = 'layer'\ncmds.setAttr(dLayer + '.color', 13)",
             PythonCallKind::Exec,
         ));
+    }
+
+    #[test]
+    fn collect_python_signals_does_not_mark_join_without_sink_as_hard_marker() {
+        let signals =
+            collect_python_signals("target = '.'.join([node_name, 'attr_name'])\nuse(target)");
+
+        assert!(
+            signals
+                .iter()
+                .all(|signal| !matches!(signal, PythonSignal::HardMarker { .. }))
+        );
+        assert!(!has_assembled_call(
+            "target = '.'.join([node_name, 'attr_name'])\nuse(target)",
+            PythonCallKind::Exec,
+        ));
+    }
+
+    #[test]
+    fn collect_python_signals_marks_join_when_it_reaches_exec_body() {
+        assert!(has_assembled_call(
+            "code = ''.join(['pri', 'nt(1)'])\nexec(code)",
+            PythonCallKind::Exec,
+        ));
+    }
+
+    #[test]
+    fn collect_python_signals_marks_decode_base64_chr_and_builtins_as_hard_markers() {
+        assert!(has_hard_marker(
+            "value = bytes.fromhex(sample).decode()",
+            "hex"
+        ));
+        assert!(has_hard_marker(
+            "value = bytes.fromhex(sample).decode()",
+            ".decode("
+        ));
+        assert!(has_hard_marker(
+            "value = base64.b64decode(sample)",
+            "base64"
+        ));
+        assert!(has_hard_marker("value = chr(65)", "chr("));
+        assert!(has_hard_marker(
+            "value = __builtins__.__dict__[name]",
+            "__builtins__"
+        ));
+        assert!(has_hard_marker(
+            "value = globals()[name]",
+            "dynamic dispatch"
+        ));
+    }
+
+    #[test]
+    fn collect_python_signals_uses_hard_marker_text_fallback_after_parse_failure() {
+        let signals = collect_python_signals("if broken syntax:\n    value = data.decode(");
+
+        assert!(
+            signals
+                .iter()
+                .any(|signal| matches!(signal, PythonSignal::ParseFailure { .. }))
+        );
+        assert!(signals.iter().any(|signal| {
+            matches!(
+                signal,
+                PythonSignal::HardMarker { markers } if markers.iter().any(|marker| marker == ".decode(")
+            )
+        }));
     }
 }

@@ -19,23 +19,6 @@ pub(super) fn analyze_python_surface_impl(
     for signal in collect_python_signals(&surface.text) {
         match signal {
             PythonSignal::Call { kind, first_arg } => {
-                if let PythonBodyArgKind::Assembled { markers } = &first_arg {
-                    analysis.findings.push(build_finding(
-                        surface_index,
-                        surface,
-                        "python_body_assembly",
-                        severity_for_trigger(AuditSeverity::Critical, surface.origin.trigger),
-                        AuditSinkKind::None,
-                        None,
-                        "Python body-assembly / obfuscation markers detected",
-                        markers
-                            .iter()
-                            .cloned()
-                            .map(|value| AuditEvidence::FreeText { value })
-                            .collect::<Vec<_>>(),
-                        None,
-                    ));
-                }
                 let (sink, message) = match kind {
                     PythonCallKind::Exec => (AuditSinkKind::PyExec, "Python exec detected"),
                     PythonCallKind::Eval => (AuditSinkKind::PyEval, "Python eval detected"),
@@ -61,10 +44,19 @@ pub(super) fn analyze_python_surface_impl(
                         PythonBodyArgKind::Literal => vec![AuditEvidence::FreeText {
                             value: "fixed literal body".to_string(),
                         }],
-                        PythonBodyArgKind::Dynamic | PythonBodyArgKind::Assembled { .. } => {
-                            vec![AuditEvidence::FreeText {
+                        PythonBodyArgKind::Dynamic => vec![AuditEvidence::FreeText {
+                            value: "dynamic or assembled body".to_string(),
+                        }],
+                        PythonBodyArgKind::Assembled { markers } => {
+                            let mut evidence = vec![AuditEvidence::FreeText {
                                 value: "dynamic or assembled body".to_string(),
-                            }]
+                            }];
+                            evidence.extend(
+                                markers
+                                    .into_iter()
+                                    .map(|value| AuditEvidence::FreeText { value }),
+                            );
+                            evidence
                         }
                     }
                 };
@@ -77,6 +69,22 @@ pub(super) fn analyze_python_surface_impl(
                     None,
                     message,
                     evidence,
+                    None,
+                ));
+            }
+            PythonSignal::HardMarker { markers } => {
+                analysis.findings.push(build_finding(
+                    surface_index,
+                    surface,
+                    "python_body_assembly",
+                    severity_for_trigger(AuditSeverity::Critical, surface.origin.trigger),
+                    AuditSinkKind::None,
+                    None,
+                    "Python body-assembly / obfuscation markers detected",
+                    markers
+                        .into_iter()
+                        .map(|value| AuditEvidence::FreeText { value })
+                        .collect::<Vec<_>>(),
                     None,
                 ));
             }
@@ -133,24 +141,6 @@ pub(super) fn analyze_python_surface_impl(
                 ));
             }
         }
-    }
-
-    let obfuscation = super::text_scan::scan_strong_obfuscation_markers(&surface.text);
-    if !obfuscation.is_empty() {
-        analysis.findings.push(build_finding(
-            surface_index,
-            surface,
-            "python_body_assembly",
-            severity_for_trigger(AuditSeverity::Critical, surface.origin.trigger),
-            AuditSinkKind::None,
-            None,
-            "Python body-assembly / obfuscation markers detected",
-            obfuscation
-                .into_iter()
-                .map(|value| AuditEvidence::FreeText { value })
-                .collect::<Vec<_>>(),
-            None,
-        ));
     }
 
     analysis

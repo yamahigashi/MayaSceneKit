@@ -70,15 +70,19 @@ pub(super) fn scan_mel_sink_word_hits(text: &str) -> MelSinkWordHits {
     scan_mel_text(text).sink_word_hits
 }
 
-pub(super) fn scan_strong_obfuscation_markers(text: &str) -> Vec<String> {
+pub(crate) fn scan_hard_python_obfuscation_markers(text: &str) -> Vec<String> {
     let mut markers = Vec::new();
     let patterns = [
         ("base64", "base64"),
         ("hex", "hex"),
         ("chr(", "chr("),
         (".decode(", ".decode("),
-        ("join(", "join("),
         ("__import__", "__import__"),
+        ("builtins", "builtins"),
+        ("__builtins__", "__builtins__"),
+        ("globals(", "globals("),
+        ("locals(", "locals("),
+        ("vars(", "vars("),
     ];
 
     for (needle, label) in patterns {
