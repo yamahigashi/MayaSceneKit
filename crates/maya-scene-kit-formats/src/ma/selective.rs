@@ -826,6 +826,7 @@ impl LightItemSink for SelectiveScanSink {
                                     head: Arc::from(head),
                                     source_span: mel_span(span),
                                     span: mel_span(span),
+                                    schema_has_script_flag: command_schema_has_script_flag(head),
                                     file_command_callback: None,
                                 },
                             )));
@@ -841,6 +842,7 @@ impl LightItemSink for SelectiveScanSink {
                                 head: Arc::from(head),
                                 source_span: mel_span(span),
                                 span: mel_span(span),
+                                schema_has_script_flag: command_schema_has_script_flag(head),
                                 file_command_callback: None,
                             },
                         )));
@@ -953,6 +955,7 @@ impl SelectiveScanSink {
                                 head: Arc::from("file"),
                                 source_span: mel_span(file.span),
                                 span: mel_span(file.span),
+                                schema_has_script_flag: false,
                                 file_command_callback: Some(callback),
                             },
                         )));
@@ -1002,6 +1005,7 @@ impl SelectiveScanSink {
                                 head: Arc::from(head),
                                 source_span: mel_span(span),
                                 span: mel_span(span),
+                                schema_has_script_flag: command_schema_has_script_flag(head),
                                 file_command_callback: None,
                             },
                         )));
@@ -1501,6 +1505,20 @@ mod tests {
                 .message
                 .contains("file -command selective extraction relies on heuristic flag parsing and requires conservative audit coverage")
         }));
+    }
+
+    #[test]
+    fn selective_sections_mark_schema_script_flag_top_level_commands() {
+        let sections = extract_raw_selective_sections_from_ma(
+            b"nodeOutliner -e -selectCommand \"eval \\\"hello\\\"\" $examplePanel;\n",
+        );
+
+        assert!(matches!(
+            sections.audit_top_level.items.first(),
+            Some(crate::mel::MelAuditTopLevelItemFact::Command(command))
+                if command.head.as_ref() == "nodeOutliner"
+                    && command.schema_has_script_flag
+        ));
     }
 
     #[test]

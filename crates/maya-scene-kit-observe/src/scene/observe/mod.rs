@@ -19,6 +19,7 @@ mod tests {
             collect_scene_paths,
             core::SceneFormat,
             dump::SceneDumpRequireKind,
+            execution::MelSinkArgKind,
             find_scene_workspace_root,
             paths::{PathKind, ScenePathResolutionStatus, ScenePathValueStyle},
             source::{
@@ -449,6 +450,42 @@ mod tests {
             short_script.mel.as_ref().expect("short mel facts"),
             long_script.mel.as_ref().expect("long mel facts")
         ));
+    }
+
+    #[test]
+    fn observed_execution_catalog_models_schema_script_flag_top_level_commands() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let source = dir.path().join("top_level_callback.ma");
+        std::fs::write(
+            &source,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "nodeOutliner -e -selectCommand \"eval \\\"hello\\\"\" $examplePanel;\n",
+            ),
+        )
+        .expect("write fixture");
+
+        let observation = Loader::new(Default::default())
+            .observe_path(&source)
+            .expect("observation");
+        let catalog = observation
+            .observed_execution_catalog(80)
+            .expect("execution catalog");
+        let surface = catalog
+            .surfaces
+            .iter()
+            .find(|surface| {
+                surface.surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelCommand
+                    && surface.surface.origin.source_kind.as_deref() == Some("nodeOutliner")
+            })
+            .expect("top-level callback surface");
+        let mel = surface.mel.as_ref().expect("mel facts");
+
+        assert!(mel.sink_arg_facts.iter().any(|fact| {
+            fact.sink_kind == MelSinkArgKind::CallbackFlag
+                && fact.rendered_text.as_deref() == Some(r#"eval "hello""#)
+        }));
     }
 
     #[test]

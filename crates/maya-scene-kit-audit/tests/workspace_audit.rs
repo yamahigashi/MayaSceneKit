@@ -249,6 +249,17 @@ fn write_dynamic_model_editor_callback_scene(path: &std::path::Path) {
     );
 }
 
+fn write_top_level_schema_script_flag_callback_scene(path: &std::path::Path) {
+    write_scene(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "nodeOutliner -e -selectCommand \"eval \\\"hello\\\"\" $examplePanel;\n",
+        ),
+    );
+}
+
 fn write_assembled_code_like_without_sink_scene(path: &std::path::Path) {
     write_scene(
         path,
@@ -813,6 +824,35 @@ fn audit_dynamic_callback_payload_still_denies_via_callback_finding() {
             .findings
             .iter()
             .any(|finding| finding_code_str(finding) == "mel_callback_flag")
+    );
+}
+
+#[test]
+fn audit_top_level_schema_script_flag_callback_denies_via_derived_eval_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("top_level_schema_callback.ma");
+    write_top_level_schema_script_flag_callback_scene(&source);
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report
+            .review_signals
+            .iter()
+            .any(|review| review.code.as_str() == "mel_callback_body")
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.sink == AuditSinkKind::MelEval)
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "mel_callback_flag")
     );
 }
 
