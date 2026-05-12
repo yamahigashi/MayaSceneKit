@@ -174,8 +174,7 @@ fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
     let observation = Loader::new(load_options.clone())
         .observe_path(&scene_path)
         .expect("observe sample scene");
-    ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
-        .expect("sample snapshot")
+    ObservedSceneSnapshot::from_observation(&observation, &load_options).expect("sample snapshot")
 }
 
 fn sample_audited_snapshot(path_name: &str) -> AuditedSceneSnapshot {
@@ -249,7 +248,7 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
     let observation = Loader::new(load_options.clone())
         .observe_path(&scene_path)
         .expect("observe scene");
-    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
         .expect("observe snapshot");
 
     let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
@@ -322,7 +321,7 @@ fn hydrate_cached_analysis_batch_keeps_row_alignment_for_hits_and_misses() {
     let observation = Loader::new(load_options.clone())
         .observe_path(&cached_path)
         .expect("observe scene");
-    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
         .expect("observe snapshot");
 
     let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
@@ -4471,6 +4470,30 @@ fn analyze_row_with_options_returns_blocked_report_for_mb_budget_exceed() {
 }
 
 #[test]
+fn analyze_row_with_options_returns_mb_reports_without_semantic_validation() {
+    let scene = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/02/sphere.mb");
+
+    let result = analyze_row_with_options(
+        &scene,
+        AuditModePreference::StrictDefault,
+        &LoadOptions::default(),
+    )
+    .expect("analyze");
+
+    let RowJobResult::Analyze(result) = result else {
+        panic!("expected analyze result");
+    };
+    assert_eq!(
+        result.audit_report.validation_state,
+        ValidationState::Partial
+    );
+    assert!(result.paths_report.is_some());
+    assert!(result.dump_report.is_some());
+    assert!(result.observe_snapshot.is_some());
+    assert!(result.audit_snapshot.is_some());
+}
+
+#[test]
 fn analyze_row_with_options_keeps_paths_and_audit_after_cp932_prefix_line() {
     let dir = tempdir().expect("tmpdir");
     let scene = dir.path().join("cp932-prefix.ma");
@@ -5145,7 +5168,7 @@ fn analyze_result_invalidates_path_resolution_state_for_async_refresh(cx: &mut T
     let observation = Loader::new(load_options.clone())
         .observe_path(&scene)
         .expect("observe scene");
-    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
         .expect("observe snapshot");
 
     visual_cx.update(|window, app| {
@@ -5179,7 +5202,7 @@ fn path_table_model_uses_cached_only_resolution_for_passive_render() {
     let observation = Loader::new(load_options.clone())
         .observe_path(&scene)
         .expect("observe scene");
-    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options, 64)
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
         .expect("observe snapshot");
 
     let mut row = test_row(1, &scene);

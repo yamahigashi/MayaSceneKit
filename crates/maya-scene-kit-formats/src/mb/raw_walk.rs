@@ -21,6 +21,23 @@ pub fn walk_group_chunks_with_layout(
     out
 }
 
+pub fn visit_group_chunks_with_layout(
+    data: &[u8],
+    child_alignment: Option<usize>,
+    child_header_size: Option<usize>,
+    visitor: impl FnMut(SectionChunk),
+) {
+    visit_group_chunks_with_layout_iterative(
+        data,
+        child_alignment,
+        child_header_size,
+        None,
+        None,
+        visitor,
+    )
+    .expect("unbudgeted raw walk should not fail");
+}
+
 pub fn walk_group_chunks_with_layout_with_budget(
     data: &[u8],
     child_alignment: Option<usize>,
@@ -39,6 +56,25 @@ pub fn walk_group_chunks_with_layout_with_budget(
         &mut out,
     )?;
     Ok(out)
+}
+
+pub fn visit_group_chunks_with_layout_with_budget(
+    data: &[u8],
+    child_alignment: Option<usize>,
+    child_header_size: Option<usize>,
+    starting_depth: usize,
+    budget: &MbParseBudget,
+    visitor: impl FnMut(SectionChunk),
+) -> Result<(), MayaBinaryParseError> {
+    let mut state = WalkBudgetState::new(budget);
+    visit_group_chunks_with_layout_iterative(
+        data,
+        child_alignment,
+        child_header_size,
+        Some(starting_depth),
+        Some(&mut state),
+        visitor,
+    )
 }
 
 pub(crate) fn parse_section_chunks_with_layout_hints(
@@ -95,8 +131,26 @@ fn walk_group_chunks_with_layout_iterative(
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
     starting_depth: Option<usize>,
-    mut state: Option<&mut WalkBudgetState<'_>>,
+    state: Option<&mut WalkBudgetState<'_>>,
     out: &mut Vec<SectionChunk>,
+) -> Result<(), MayaBinaryParseError> {
+    visit_group_chunks_with_layout_iterative(
+        data,
+        child_alignment,
+        child_header_size,
+        starting_depth,
+        state,
+        |chunk| out.push(chunk),
+    )
+}
+
+fn visit_group_chunks_with_layout_iterative(
+    data: &[u8],
+    child_alignment: Option<usize>,
+    child_header_size: Option<usize>,
+    starting_depth: Option<usize>,
+    mut state: Option<&mut WalkBudgetState<'_>>,
+    mut visitor: impl FnMut(SectionChunk),
 ) -> Result<(), MayaBinaryParseError> {
     let initial_depth = starting_depth.unwrap_or_default();
     if let Some(budget_state) = state.as_ref()
@@ -205,7 +259,7 @@ fn walk_group_chunks_with_layout_iterative(
             });
             continue;
         }
-        out.push(chunk);
+        visitor(chunk);
     }
 
     Ok(())

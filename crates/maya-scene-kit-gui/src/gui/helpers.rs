@@ -1790,7 +1790,7 @@ fn analyze_observation_result(
     load_options: &LoadOptions,
     elapsed: Duration,
 ) -> Result<AnalyzeRowResult, String> {
-    let observe_snapshot = ObservedSceneSnapshot::from_observation(observation, load_options, 64)
+    let observe_snapshot = ObservedSceneSnapshot::from_observation(observation, load_options)
         .map_err(|err| err.to_string())?;
     let dump_report = observation
         .scene_dump_report()

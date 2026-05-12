@@ -6,14 +6,17 @@ use maya_scene_kit_formats::{
 };
 
 use crate::{
-    mb::{MbParseBudget, parse_section_chunks_with_hints, resolve_section_layout_hints},
+    mb::{
+        MbParseBudget, parse_section_chunks_with_hints, resolve_section_layout_hints,
+        visit_group_chunks_with_layout_with_budget,
+    },
     scene::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
         ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind, ExecutionTrigger,
         SceneToolError,
         decode::attr::decode_attr_payload,
-        ir::{DecodedEvent, SchemaDecodeAttemptResult},
-        recover::{collect_decoded_chunk_records, collect_raw_chunk_records_with_budget},
+        decode::dispatcher::DecoderDispatcher,
+        ir::{ChunkRef, DecodedEvent, RawChunkRecord, SchemaDecodeAttemptResult},
         schema::node_semantics::{
             ExecutionDecoder, NodeExecutionProfileKind, NodeExecutionSemantics,
         },
@@ -490,58 +493,108 @@ fn collect_mb_coverage(
     registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    let raw_chunks = collect_raw_chunk_records_with_budget(mb, budget)?;
-    let decoded_chunks = collect_decoded_chunk_records(&raw_chunks, mb.data.as_ref(), registry);
     let surfaces = collect_mb_native_script_surfaces(mb, execution_semantics);
     let mut coverage_issues = Vec::new();
+    let dispatcher = DecoderDispatcher::new(registry);
 
-    for (raw, decoded) in raw_chunks.iter().zip(decoded_chunks.iter()) {
-        if decoded.quality != SchemaDecodeAttemptResult::Failed {
-            continue;
-        }
-        if !decoded
-            .events
-            .iter()
-            .all(|event| matches!(event, DecodedEvent::Unknown(_)))
-        {
-            continue;
-        }
-        let payload = raw.payload(mb.data.as_ref());
-        if !raw_chunk_tag_may_contain_execution_text(raw.chunk_ref.tag.as_str(), payload.len()) {
-            continue;
-        }
-        let Some(marker) = first_payload_audit_marker(payload) else {
-            continue;
+    for child in &mb.root.children {
+        let form = child.form_type.clone().unwrap_or_default();
+        let (child_alignment, child_header_size) = resolve_section_layout_hints(
+            &child.tag,
+            child.form_type.as_deref(),
+            child.child_alignment,
+            child.child_header_size,
+        );
+        let payload = &mb.data[child.payload_offset..child.payload_end];
+        let inner_data = if payload.len() >= 4 {
+            &payload[4..]
+        } else {
+            &[]
         };
-        let Some(text) = decode_raw_chunk_text(raw.chunk_ref.tag.as_str(), payload) else {
-            continue;
-        };
-        if !contains_any_audit_marker(&text) {
-            continue;
-        }
 
-        coverage_issues.push(ExecutionCoverageIssueRecord {
-            kind: ExecutionCoverageIssueKind::UnknownRawMbPayload,
-            detail: ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker },
-            origin: Some(ExecutionOrigin {
-                lang: ExecutionLanguage::Unknown,
-                trigger: ExecutionTrigger::FileOpen,
-                surface_kind: ExecutionSurfaceKind::RawChunkText,
-                node_name: None,
-                attr_name: None,
-                source_range: None,
-                source_kind: Some(format!("{}:{}", raw.chunk_ref.form, raw.chunk_ref.tag)),
-                chunk_form: Some(raw.chunk_ref.form.clone()),
-                chunk_tag: Some(raw.chunk_ref.tag.clone()),
-                chunk_node_offset: Some(raw.chunk_ref.node_offset),
-                chunk_aux: raw.chunk_ref.chunk_aux,
-                chunk_payload_offset: Some(raw.payload_span.start),
-                chunk_payload_size: Some(raw.payload_span.len()),
-                chunk_child_alignment: raw.chunk_ref.child_alignment,
-                chunk_child_header_size: raw.chunk_ref.child_header_size,
-            }),
-            preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
-        });
+        visit_group_chunks_with_layout_with_budget(
+            inner_data,
+            child_alignment,
+            child_header_size,
+            2,
+            budget,
+            |chunk| {
+                if !raw_chunk_tag_may_contain_execution_text(
+                    chunk.tag.as_str(),
+                    chunk.payload_span.len(),
+                ) {
+                    return;
+                }
+                let chunk_payload = chunk.payload(inner_data);
+                let Some(marker) = first_payload_audit_marker(chunk_payload) else {
+                    return;
+                };
+                let Some(text) = decode_raw_chunk_text(chunk.tag.as_str(), chunk_payload) else {
+                    return;
+                };
+                if !contains_any_audit_marker(&text) {
+                    return;
+                }
+
+                let raw = RawChunkRecord {
+                    chunk_ref: ChunkRef {
+                        form: form.clone(),
+                        tag: chunk.tag,
+                        node_offset: child.offset,
+                        parent_tag: Some(child.tag.clone()),
+                        chunk_aux: Some(chunk.aux),
+                        child_alignment,
+                        child_header_size,
+                        payload_size: chunk.payload_span.len(),
+                    },
+                    payload_span: chunk.payload_span.offset(child.payload_offset + 4),
+                };
+                let decoded = dispatcher.decode_with_quality(
+                    &raw.chunk_ref.form,
+                    &raw.chunk_ref.tag,
+                    raw.payload(mb.data.as_ref()),
+                    raw.chunk_ref.node_offset,
+                    raw.chunk_ref.chunk_aux,
+                    raw.chunk_ref.child_alignment,
+                    raw.chunk_ref.child_header_size,
+                    Some(raw.chunk_ref.form.as_str()),
+                    raw.chunk_ref.parent_tag.as_deref(),
+                );
+                if decoded.quality != SchemaDecodeAttemptResult::Failed {
+                    return;
+                }
+                if !decoded
+                    .events
+                    .iter()
+                    .all(|event| matches!(event, DecodedEvent::Unknown(_)))
+                {
+                    return;
+                }
+
+                coverage_issues.push(ExecutionCoverageIssueRecord {
+                    kind: ExecutionCoverageIssueKind::UnknownRawMbPayload,
+                    detail: ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker },
+                    origin: Some(ExecutionOrigin {
+                        lang: ExecutionLanguage::Unknown,
+                        trigger: ExecutionTrigger::FileOpen,
+                        surface_kind: ExecutionSurfaceKind::RawChunkText,
+                        node_name: None,
+                        attr_name: None,
+                        source_range: None,
+                        source_kind: Some(format!("{}:{}", raw.chunk_ref.form, raw.chunk_ref.tag)),
+                        chunk_form: Some(raw.chunk_ref.form.clone()),
+                        chunk_tag: Some(raw.chunk_ref.tag.clone()),
+                        chunk_node_offset: Some(raw.chunk_ref.node_offset),
+                        chunk_aux: raw.chunk_ref.chunk_aux,
+                        chunk_payload_offset: Some(raw.payload_span.start),
+                        chunk_payload_size: Some(raw.payload_span.len()),
+                        chunk_child_alignment: raw.chunk_ref.child_alignment,
+                        chunk_child_header_size: raw.chunk_ref.child_header_size,
+                    }),
+                    preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
+                });
+            },
+        )?;
     }
 
     Ok(ExecutionCoverageCollection {
@@ -572,34 +625,35 @@ fn collect_mb_native_script_surfaces(
             continue;
         }
 
-        let parsed =
-            parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
-        let selected_node_name = if form_type == "SLCT" {
-            parsed.chunks.iter().find_map(|chunk| {
-                if chunk.tag != "SLCT" {
-                    return None;
-                }
-                let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
-                let trimmed = text.trim_matches(char::from(0)).trim();
-                (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
-            })
-        } else {
-            None
-        };
-        let Some(node_type) = form_typeid(form_type)
-            .and_then(|typeid| execution_semantics.node_type_for_typeid(typeid))
-            .or_else(|| {
-                selected_node_name
-                    .as_deref()
-                    .and_then(mb_default_selected_node_type)
-            })
-        else {
+        let mut selected_node_name = None;
+        let mut node_type = form_typeid(form_type)
+            .and_then(|typeid| execution_semantics.node_type_for_typeid(typeid));
+        if form_type == "SLCT" {
+            let selected =
+                parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size)
+                    .chunks
+                    .iter()
+                    .find_map(|chunk| {
+                        if chunk.tag != "SLCT" {
+                            return None;
+                        }
+                        let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
+                        let trimmed = text.trim_matches(char::from(0)).trim();
+                        (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
+                    });
+            node_type =
+                node_type.or_else(|| selected.as_deref().and_then(mb_default_selected_node_type));
+            selected_node_name = selected;
+        }
+        let Some(node_type) = node_type else {
             continue;
         };
         let profiles = execution_semantics.profiles_for_node(node_type);
         if profiles.is_empty() {
             continue;
         }
+        let parsed =
+            parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
         let mut node_name = format!("<{}@0x{:X}>", form_type, child.offset);
         if let Some(selected_node_name) = &selected_node_name {
             node_name = selected_node_name.clone();

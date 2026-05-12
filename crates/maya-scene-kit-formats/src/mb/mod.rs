@@ -21,14 +21,18 @@ pub use self::{
     },
     paths::{
         collect_rtft_owner_traces_from_mb, decode_best_effort_script_text,
-        remove_raw_script_nodes_from_mb, remove_root_forms_from_mb_by_locator,
+        extract_raw_script_entries_from_mb, remove_raw_script_nodes_from_mb,
+        remove_root_forms_from_mb_by_locator, scan_raw_script_nodes_in_mb,
     },
-    raw_walk::{walk_group_chunks_with_layout, walk_group_chunks_with_layout_with_budget},
+    raw_walk::{
+        visit_group_chunks_with_layout, visit_group_chunks_with_layout_with_budget,
+        walk_group_chunks_with_layout, walk_group_chunks_with_layout_with_budget,
+    },
     rewrite::{MbPathReplaceRule, replace_scene_paths_in_mb, replace_scene_paths_in_mb_cow},
-    section::parse_section_chunks_with_hints,
+    section::{SectionChunk, parse_section_chunks_with_hints},
 };
 pub(crate) use self::{
     layout::is_group_chunk_tag,
     rewrite::encode_root_chunk,
-    section::{ParsedSection, SectionChunk, parse_section_chunks_full_with_hints},
+    section::{ParsedSection, parse_section_chunks_full_with_hints},
 };

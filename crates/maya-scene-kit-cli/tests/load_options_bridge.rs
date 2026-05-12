@@ -51,7 +51,7 @@ fn build_mb_root(children: &[Vec<u8>]) -> Vec<u8> {
 }
 
 #[test]
-fn dump_cli_respects_node_info_overlay_for_mb_reads() {
+fn dump_cli_uses_raw_mb_read_and_ignores_node_info_overlay() {
     let source = repo_root().join("tests/02/sphere.mb");
     let dir = tempdir().expect("tmpdir");
     let bad_node_info = write_bad_node_info(dir.path());
@@ -64,13 +64,11 @@ fn dump_cli_respects_node_info_overlay_for_mb_reads() {
         .output()
         .expect("run dump cli");
 
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert!(stderr.contains("config error"));
+    assert_eq!(output.status.code(), Some(0));
 }
 
 #[test]
-fn paths_cli_respects_node_info_overlay_for_mb_reads() {
+fn paths_cli_uses_raw_mb_read_and_ignores_node_info_overlay() {
     let source = repo_root().join("tests/02/sphere.mb");
     let dir = tempdir().expect("tmpdir");
     let bad_node_info = write_bad_node_info(dir.path());
@@ -83,9 +81,7 @@ fn paths_cli_respects_node_info_overlay_for_mb_reads() {
         .output()
         .expect("run paths cli");
 
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert!(stderr.contains("config error"));
+    assert_eq!(output.status.code(), Some(0));
 }
 
 #[test]
@@ -108,7 +104,7 @@ fn audit_cli_respects_node_info_overlay_for_mb_reads() {
 }
 
 #[test]
-fn replace_cli_respects_node_info_overlay_for_mb_reads() {
+fn replace_cli_uses_raw_mb_read_and_ignores_node_info_overlay() {
     let source = repo_root().join("tests/02/sphere.mb");
     let dir = tempdir().expect("tmpdir");
     let bad_node_info = write_bad_node_info(dir.path());
@@ -126,9 +122,8 @@ fn replace_cli_respects_node_info_overlay_for_mb_reads() {
         .output()
         .expect("run replace cli");
 
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert!(stderr.contains("config error"));
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output_scene.exists());
 }
 
 #[test]

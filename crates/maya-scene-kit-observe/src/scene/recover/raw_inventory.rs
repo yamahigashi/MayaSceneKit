@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use crate::{
     mb::{
-        MayaBinaryFile, MayaBinaryParseError, MbParseBudget, resolve_section_layout_hints,
-        walk_group_chunks_with_layout, walk_group_chunks_with_layout_with_budget,
+        MayaBinaryFile, MayaBinaryParseError, MbParseBudget, SectionChunk,
+        resolve_section_layout_hints, visit_group_chunks_with_layout,
+        visit_group_chunks_with_layout_with_budget,
     },
     scene::{
         decode::dispatcher::DecoderDispatcher,
@@ -44,17 +45,7 @@ fn collect_raw_chunk_records_inner(
         } else {
             &[]
         };
-        let chunks = match budget {
-            Some(budget) => walk_group_chunks_with_layout_with_budget(
-                inner_data,
-                child_alignment,
-                child_header_size,
-                2,
-                budget,
-            )?,
-            None => walk_group_chunks_with_layout(inner_data, child_alignment, child_header_size),
-        };
-        for chunk in chunks {
+        let mut push_raw_chunk = |chunk: SectionChunk| {
             raw_chunks.push(RawChunkRecord {
                 chunk_ref: ChunkRef {
                     form: form.clone(),
@@ -68,6 +59,22 @@ fn collect_raw_chunk_records_inner(
                 },
                 payload_span: chunk.payload_span.offset(child.payload_offset + 4),
             });
+        };
+        match budget {
+            Some(budget) => visit_group_chunks_with_layout_with_budget(
+                inner_data,
+                child_alignment,
+                child_header_size,
+                2,
+                budget,
+                &mut push_raw_chunk,
+            )?,
+            None => visit_group_chunks_with_layout(
+                inner_data,
+                child_alignment,
+                child_header_size,
+                &mut push_raw_chunk,
+            ),
         }
     }
 
