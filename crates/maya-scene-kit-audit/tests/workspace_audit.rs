@@ -1216,6 +1216,98 @@ fn audit_python2_print_with_non_sink_concat_avoids_body_assembly_false_positive(
 }
 
 #[test]
+fn audit_python_join_without_execution_sink_does_not_emit_body_assembly_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_join_attr_path.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"script_a\";\n",
+            "\tsetAttr \".b\" -type \"string\" \"",
+            "import maya.cmds as cmds\\n",
+            "node_name = 'node_a'\\n",
+            "attr_name = '.'.join([node_name, 'sample_attr'])\\n",
+            "cmds.setAttr(attr_name, 'sample_value', type='string')",
+            "\";\n",
+            "\tsetAttr \".st\" 1;\n",
+            "\tsetAttr \".stp\" 1;\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "python_body_assembly")
+    );
+    assert_ne!(report.disposition, AuditDisposition::DenyMalicious);
+}
+
+#[test]
+fn audit_python_join_reaching_exec_keeps_sink_finding_with_marker_evidence() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_join_exec.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"script_a\";\n",
+            "\tsetAttr \".b\" -type \"string\" \"",
+            "code = ''.join(['pri', 'nt(1)'])\\n",
+            "exec(code)",
+            "\";\n",
+            "\tsetAttr \".st\" 1;\n",
+            "\tsetAttr \".stp\" 1;\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(report.findings.iter().any(|finding| {
+        finding.sink == AuditSinkKind::PyExec
+            && finding
+                .evidence
+                .iter()
+                .any(|evidence| format!("{evidence:?}").contains("join("))
+    }));
+}
+
+#[test]
+fn audit_python_hard_marker_without_sink_emits_body_assembly_finding() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_hard_marker.ma");
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode script -n \"script_a\";\n",
+            "\tsetAttr \".b\" -type \"string\" \"",
+            "sample = bytes.fromhex('7072696e74283129').decode()",
+            "\";\n",
+            "\tsetAttr \".st\" 1;\n",
+            "\tsetAttr \".stp\" 1;\n",
+        ),
+    );
+
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding_code_str(finding) == "python_body_assembly")
+    );
+}
+
+#[test]
 fn audit_source_command_emits_review_dependency_fact() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let source = dir.path().join("source_dep.ma");
