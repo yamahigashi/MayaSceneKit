@@ -59,6 +59,7 @@ impl PreviewWindowSpec {
 pub(crate) struct ExecutionSurfaceRecord {
     pub(crate) text: Arc<str>,
     pub(crate) origin: ExecutionOrigin,
+    pub(crate) requires_mel_modeling: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +163,7 @@ fn collect_ma_coverage(
                                 start: command.source_span.start,
                                 end: command.source_span.end,
                             }),
+                            command.schema_has_script_flag,
                         );
                     }
                     MaTopLevelAuditClass::FileDependencyOnly => {}
@@ -185,6 +187,7 @@ fn collect_ma_coverage(
                             chunk_node_offset: None,
                             ..ExecutionOrigin::without_chunk_address()
                         },
+                        requires_mel_modeling: true,
                     });
                 }
             }
@@ -214,6 +217,7 @@ fn collect_ma_coverage(
                         start: proc_def.source_span.start,
                         end: proc_def.source_span.end,
                     }),
+                    false,
                 );
             }
             MelAuditTopLevelItemFact::Other(other) => {
@@ -228,6 +232,7 @@ fn collect_ma_coverage(
                             start: other.source_span.start,
                             end: other.source_span.end,
                         }),
+                        false,
                     );
                 } else {
                     coverage_issues.push(ExecutionCoverageIssueRecord {
@@ -253,6 +258,7 @@ fn collect_ma_coverage(
                             start: other.source_span.start,
                             end: other.source_span.end,
                         }),
+                        false,
                     );
                 }
             }
@@ -305,6 +311,7 @@ fn collect_ma_script_node_surfaces(
                 chunk_node_offset: None,
                 ..ExecutionOrigin::without_chunk_address()
             },
+            requires_mel_modeling: true,
         });
     }
 
@@ -380,6 +387,7 @@ fn collect_ma_profile_node_attr_surfaces(
                             chunk_node_offset: None,
                             ..ExecutionOrigin::without_chunk_address()
                         },
+                        requires_mel_modeling: true,
                     });
                 }
                 NodeExecutionProfileKind::AttrCallbacks(profile)
@@ -412,6 +420,7 @@ fn collect_ma_profile_node_attr_surfaces(
                             chunk_node_offset: None,
                             ..ExecutionOrigin::without_chunk_address()
                         },
+                        requires_mel_modeling: true,
                     });
                 }
                 _ => {}
@@ -740,6 +749,7 @@ fn collect_mb_native_script_surfaces(
                                 chunk_node_offset: Some(child.offset),
                                 ..ExecutionOrigin::without_chunk_address()
                             },
+                            requires_mel_modeling: true,
                         });
                     }
                 }
@@ -779,6 +789,7 @@ fn collect_mb_native_script_surfaces(
                                 chunk_node_offset: Some(child.offset),
                                 ..ExecutionOrigin::without_chunk_address()
                             },
+                            requires_mel_modeling: true,
                         });
                     }
                 }
@@ -819,6 +830,7 @@ fn push_command_surface(
     trigger: ExecutionTrigger,
     source_kind: Option<String>,
     source_range: Option<ExecutionSourceRange>,
+    requires_mel_modeling: bool,
 ) {
     surfaces.push(ExecutionSurfaceRecord {
         text: Arc::<str>::from(command),
@@ -835,6 +847,7 @@ fn push_command_surface(
             chunk_node_offset: None,
             ..ExecutionOrigin::without_chunk_address()
         },
+        requires_mel_modeling,
     });
 }
 

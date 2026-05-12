@@ -56,6 +56,7 @@ pub(super) fn analyze_mel_surface_impl(
             surface_index,
             surface,
             mel,
+            mel_sink_calls.python,
             MelSinkArgKind::Python,
             "python",
             AuditSinkKind::MelPython,
@@ -76,6 +77,7 @@ pub(super) fn analyze_mel_surface_impl(
             surface_index,
             surface,
             mel,
+            mel_sink_calls.eval_deferred,
             MelSinkArgKind::EvalDeferred,
             "evalDeferred",
             AuditSinkKind::MelEvalDeferred,
@@ -96,6 +98,7 @@ pub(super) fn analyze_mel_surface_impl(
             surface_index,
             surface,
             mel,
+            mel_sink_calls.eval,
             MelSinkArgKind::Eval,
             "eval",
             AuditSinkKind::MelEval,
@@ -211,6 +214,7 @@ fn analyze_mel_sink<F>(
     surface_index: usize,
     surface: &AnalysisSurface,
     mel: &MelSurfaceFacts,
+    parser_call: Option<&MelSurfaceCall>,
     sink_kind: MelSinkArgKind,
     sink_name: &str,
     sink: AuditSinkKind,
@@ -226,7 +230,16 @@ where
         .iter()
         .find(|fact| fact.sink_kind == sink_kind)
     else {
-        return Vec::new();
+        return analyze_mel_parser_sink(
+            surface_index,
+            surface,
+            parser_call,
+            sink_name,
+            sink,
+            policy,
+            bridge_python,
+            derived_surfaces,
+        );
     };
 
     let (severity, message) = policy(fact.resolved_kind);
@@ -279,6 +292,79 @@ where
 
     if bridge_python && fact.resolved_kind == MelResolvedStringKind::Literal {
         if let Some(body) = fact.rendered_text.as_deref() {
+            let mut bridged_origin = surface.origin.clone();
+            bridged_origin.lang = ExecutionLanguage::Python;
+            bridged_origin.source_kind = Some("mel->python literal bridge".to_string());
+            derived_surfaces.push(AnalysisSurface {
+                preview: preview_window(body, 0, body.len().min(24), surface.preview.len().max(16)),
+                text: Arc::from(body),
+                origin: bridged_origin,
+                derivation: crate::scene::AuditSurfaceDerivation::MelPythonLiteralBridge,
+                mel: None,
+            });
+        }
+    }
+
+    findings
+}
+
+fn analyze_mel_parser_sink<F>(
+    surface_index: usize,
+    surface: &AnalysisSurface,
+    parser_call: Option<&MelSurfaceCall>,
+    sink_name: &str,
+    sink: AuditSinkKind,
+    policy: F,
+    bridge_python: bool,
+    derived_surfaces: &mut Vec<AnalysisSurface>,
+) -> Vec<AuditFinding>
+where
+    F: Fn(MelResolvedStringKind) -> (AuditSeverity, &'static str),
+{
+    let Some(call) = parser_call else {
+        return Vec::new();
+    };
+    let resolved_kind = if call.literal_first_arg.is_some() {
+        MelResolvedStringKind::Literal
+    } else if call.dynamic {
+        MelResolvedStringKind::Dynamic
+    } else {
+        MelResolvedStringKind::Unknown
+    };
+    let (severity, message) = policy(resolved_kind);
+    let mut evidence = Vec::new();
+    if let Some(body) = call.literal_first_arg.as_deref() {
+        evidence.push(AuditEvidence::FreeText {
+            value: "fixed literal body".to_string(),
+        });
+        evidence.push(AuditEvidence::FreeText {
+            value: super::builders::snippet(body),
+        });
+    } else {
+        evidence.push(AuditEvidence::FreeText {
+            value: "dynamic or assembled body".to_string(),
+        });
+    }
+    let preview_override = call
+        .literal_first_arg
+        .as_deref()
+        .map(super::builders::snippet)
+        .filter(|preview| !preview.is_empty());
+
+    let findings = vec![build_finding(
+        surface_index,
+        surface,
+        &format!("mel_{}", sink_name.to_ascii_lowercase()),
+        severity_for_trigger(severity, surface.origin.trigger),
+        sink,
+        None,
+        message,
+        evidence,
+        preview_override,
+    )];
+
+    if bridge_python && resolved_kind == MelResolvedStringKind::Literal {
+        if let Some(body) = call.literal_first_arg.as_deref() {
             let mut bridged_origin = surface.origin.clone();
             bridged_origin.lang = ExecutionLanguage::Python;
             bridged_origin.source_kind = Some("mel->python literal bridge".to_string());
@@ -455,6 +541,9 @@ fn ensure_sink_word_hits<'a>(
 
 #[derive(Debug, Clone, Copy, Default)]
 struct MelSinkCalls<'a> {
+    python: Option<&'a MelSurfaceCall>,
+    eval_deferred: Option<&'a MelSurfaceCall>,
+    eval: Option<&'a MelSurfaceCall>,
     command_port: Option<&'a MelSurfaceCall>,
     exec: Option<&'a MelSurfaceCall>,
 }
@@ -463,15 +552,33 @@ impl<'a> MelSinkCalls<'a> {
     fn from_facts(facts: &'a MelSurfaceFacts) -> Self {
         let mut calls = Self::default();
         for call in &facts.calls {
+            if calls.python.is_none() && call.name.eq_ignore_ascii_case("python") {
+                calls.python = Some(call);
+            }
+            if calls.eval_deferred.is_none() && call.name.eq_ignore_ascii_case("evalDeferred") {
+                calls.eval_deferred = Some(call);
+            }
+            if calls.eval.is_none() && call.name.eq_ignore_ascii_case("eval") {
+                calls.eval = Some(call);
+            }
             if calls.command_port.is_none() && call.name.eq_ignore_ascii_case("commandPort") {
                 calls.command_port = Some(call);
-            } else if calls.exec.is_none() && call.name.eq_ignore_ascii_case("exec") {
+            }
+            if calls.exec.is_none() && call.name.eq_ignore_ascii_case("exec") {
                 calls.exec = Some(call);
             }
-            if calls.command_port.is_some() && calls.exec.is_some() {
+            if calls.is_complete() {
                 break;
             }
         }
         calls
+    }
+
+    fn is_complete(self) -> bool {
+        self.python.is_some()
+            && self.eval_deferred.is_some()
+            && self.eval.is_some()
+            && self.command_port.is_some()
+            && self.exec.is_some()
     }
 }

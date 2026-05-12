@@ -780,6 +780,7 @@ pub struct MelAuditTopLevelCommandFact {
     pub head: Arc<str>,
     pub source_span: MelSpan,
     pub span: MelSpan,
+    pub schema_has_script_flag: bool,
     pub file_command_callback: Option<String>,
 }
 

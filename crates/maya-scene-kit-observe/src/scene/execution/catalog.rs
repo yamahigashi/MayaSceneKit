@@ -94,7 +94,8 @@ pub(crate) fn build_observed_execution_core(
     let mut unknown_semantics = Vec::with_capacity(surface_capacity);
     let mut pending_surfaces = VecDeque::from(coverage.surfaces);
     while let Some(surface) = pending_surfaces.pop_front() {
-        let should_model = should_model_as_execution_unit(&surface.origin);
+        let should_model =
+            surface.requires_mel_modeling || should_model_as_execution_unit(&surface.origin);
         let mel = match surface.origin.lang {
             ExecutionLanguage::Python => None,
             ExecutionLanguage::Mel | ExecutionLanguage::Unknown if should_model => {
@@ -148,6 +149,7 @@ pub(crate) fn build_observed_execution_core(
                 pending_surfaces.push_back(surfaces::ExecutionSurfaceRecord {
                     text: Arc::from(payload),
                     origin,
+                    requires_mel_modeling: true,
                 });
             }
         }
