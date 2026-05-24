@@ -4,7 +4,7 @@ use std::{borrow::Cow, collections::HashMap};
 // binary layout details without becoming the canonical semantic inspection path.
 use crate::mb::{
     Chunk, parse_section_chunks_full_with_hints,
-    paths::extract_raw_scene_paths_from_mb_parts,
+    paths::{extract_raw_scene_path_records_from_mb_parts, extract_raw_scene_paths_from_mb_parts},
     resolve_section_layout_hints,
     rewrite::{
         chunk_header_format_from_chunk, encode_chunk, encode_root_chunk,
@@ -161,6 +161,12 @@ pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
 
         if form == "RTFT" {
             if let Some((rewritten, count)) = rewrite_rtft_child_by_targets(child, data, &targets) {
+                payload_parts.extend_from_slice(&rewritten);
+                total += count;
+                continue;
+            }
+        } else if form == "FRDI" {
+            if let Some((rewritten, count)) = rewrite_frdi_child_by_targets(child, data, &targets) {
                 payload_parts.extend_from_slice(&rewritten);
                 total += count;
                 continue;
@@ -471,7 +477,7 @@ fn rewrite_rtft_child_by_targets(
                 Some(ScenePathAttrKind::FileTexturePath)
             ) {
                 let value = decode_raw_string_value_preserving_whitespace_lossy(&value_raw);
-                let key = ("rtft".to_string(), child.offset, value.clone());
+                let key = TargetKey::new("rtft", child.offset, chunk.chunk_start, value.clone());
                 let Some(after_value) = targets.get(&key) else {
                     continue;
                 };
@@ -495,6 +501,75 @@ fn rewrite_rtft_child_by_targets(
     let new_inner = rebuild_section_with_payload_rewrites(inner, &parsed, &rewritten_payloads);
     let mut new_payload = Vec::new();
     new_payload.extend_from_slice(b"RTFT");
+    new_payload.extend_from_slice(&new_inner);
+    let encoded_child = encode_chunk(
+        child.tag.as_str(),
+        child.aux,
+        &new_payload,
+        4,
+        chunk_header_format_from_chunk(child),
+    )?;
+    Some((encoded_child, total))
+}
+
+fn rewrite_frdi_child_by_targets(
+    child: &Chunk,
+    data: &[u8],
+    targets: &HashMap<TargetKey, String>,
+) -> Option<(Vec<u8>, usize)> {
+    let payload = &data[child.payload_offset..child.payload_end];
+    if payload.len() < 4 {
+        return None;
+    }
+    let inner = &payload[4..];
+    let (child_alignment, child_header_size) = resolve_section_layout_hints(
+        &child.tag,
+        child.form_type.as_deref(),
+        child.child_alignment,
+        child.child_header_size,
+    );
+    let parsed = parse_section_chunks_full_with_hints(inner, child_alignment, child_header_size);
+    if parsed.chunks.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    let mut total = 0usize;
+    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
+
+    for (idx, chunk) in parsed.chunks.iter().enumerate() {
+        let chunk_payload = chunk.payload(inner);
+        if chunk.tag != "FRDI" {
+            continue;
+        }
+        let Some(before_value) = path_field_from_frdi_payload(chunk_payload) else {
+            continue;
+        };
+        let key = TargetKey::new(
+            "frdi",
+            child.offset,
+            chunk.chunk_start,
+            before_value.clone(),
+        );
+        let Some(after_value) = targets.get(&key) else {
+            continue;
+        };
+        let (rewritten, count) =
+            replace_path_field_in_frdi_payload_exact(chunk_payload, &before_value, after_value);
+        if count > 0 && rewritten != chunk_payload {
+            rewritten_payloads.push((idx, rewritten));
+            total += count;
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let new_inner = rebuild_section_with_payload_rewrites(inner, &parsed, &rewritten_payloads);
+    let mut new_payload = Vec::new();
+    new_payload.extend_from_slice(b"FRDI");
     new_payload.extend_from_slice(&new_inner);
     let encoded_child = encode_chunk(
         child.tag.as_str(),
@@ -539,7 +614,12 @@ fn rewrite_fref_child_by_targets(
         let Some(before_value) = first_path_field_from_nul_payload(chunk_payload) else {
             continue;
         };
-        let key = ("fref".to_string(), child.offset, before_value.clone());
+        let key = TargetKey::new(
+            "fref",
+            child.offset,
+            chunk.chunk_start,
+            before_value.clone(),
+        );
         let Some(after_value) = targets.get(&key) else {
             continue;
         };
@@ -682,24 +762,7 @@ fn replace_path_field_in_frdi_payload_with_rules(
         return (payload.to_vec(), 0);
     }
 
-    let mut path_index = None;
-    let mut stripped_text = "";
-    for (idx, raw) in parts.iter().enumerate() {
-        let Some(text) = std::str::from_utf8(raw).ok() else {
-            continue;
-        };
-        let stripped = text.trim_start_matches(|c: char| c.is_control()).trim();
-        let lower = stripped.to_ascii_lowercase();
-        if (lower.contains(".mb") || lower.contains(".ma"))
-            && (stripped.contains('/') || stripped.contains('\\'))
-        {
-            path_index = Some(idx);
-            stripped_text = stripped;
-            break;
-        }
-    }
-
-    let Some(idx) = path_index else {
+    let Some((idx, stripped_text)) = frdi_path_field_index(&parts) else {
         return (payload.to_vec(), 0);
     };
 
@@ -728,6 +791,67 @@ fn replace_path_field_in_frdi_payload_with_rules(
         }
     }
     (out, count)
+}
+
+fn replace_path_field_in_frdi_payload_exact(
+    payload: &[u8],
+    expected: &str,
+    replacement: &str,
+) -> (Vec<u8>, usize) {
+    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+    if parts.is_empty() {
+        return (payload.to_vec(), 0);
+    }
+
+    let Some((idx, stripped_text)) = frdi_path_field_index(&parts) else {
+        return (payload.to_vec(), 0);
+    };
+    if stripped_text != expected {
+        return (payload.to_vec(), 0);
+    }
+
+    let raw = parts[idx];
+    let prefix_len = raw
+        .iter()
+        .take_while(|byte| (**byte as char).is_control())
+        .count();
+    let mut replaced = raw[..prefix_len].to_vec();
+    replaced.extend_from_slice(replacement.as_bytes());
+
+    let mut out = Vec::new();
+    for i in 0..parts.len() {
+        if i == idx {
+            out.extend_from_slice(&replaced);
+        } else {
+            out.extend_from_slice(parts[i]);
+        }
+        if i + 1 < parts.len() {
+            out.push(0);
+        }
+    }
+    (out, 1)
+}
+
+fn path_field_from_frdi_payload(payload: &[u8]) -> Option<String> {
+    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
+    let (_, path) = frdi_path_field_index(&parts)?;
+    Some(path.to_string())
+}
+
+fn frdi_path_field_index<'a>(parts: &'a [&'a [u8]]) -> Option<(usize, &'a str)> {
+    for (idx, raw) in parts.iter().enumerate() {
+        let Some(text) = std::str::from_utf8(raw).ok() else {
+            continue;
+        };
+        let stripped = text.trim_start_matches(|c: char| c.is_control()).trim();
+        let lower = stripped.to_ascii_lowercase();
+        if (lower.contains(".mb") || lower.contains(".ma") || lower.contains(".fbx"))
+            && (stripped.contains('/') || stripped.contains('\\'))
+        {
+            return Some((idx, stripped));
+        }
+    }
+    None
 }
 
 fn replace_text_payload_preserving_nul_suffix(payload: &[u8], replacement: &str) -> Vec<u8> {
@@ -766,7 +890,29 @@ fn normalize_mb_rules(rules: &[MbPathReplaceRule]) -> Vec<PathReplaceRule> {
         .collect()
 }
 
-type TargetKey = (String, usize, String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TargetKey {
+    origin: String,
+    outer_offset: usize,
+    inner_chunk_start: usize,
+    value: String,
+}
+
+impl TargetKey {
+    fn new(
+        origin: impl Into<String>,
+        outer_offset: usize,
+        inner_chunk_start: usize,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            origin: origin.into(),
+            outer_offset,
+            inner_chunk_start,
+            value: value.into(),
+        }
+    }
+}
 
 fn replacement_targets_for_mb(
     data: &[u8],
@@ -774,25 +920,78 @@ fn replacement_targets_for_mb(
     replacements: &[(usize, String)],
 ) -> HashMap<TargetKey, String> {
     let entries = extract_raw_scene_paths_from_mb_parts(data, root);
+    let physical_entries = extract_raw_scene_path_records_from_mb_parts(data, root);
     let mut out = HashMap::new();
 
     for (index, after_value) in replacements {
         let Some(entry) = entries.get(*index) else {
             continue;
         };
-        let Some(meta) = entry.meta.as_ref() else {
-            continue;
-        };
-        let Some(offset) = meta.trace_node_offset else {
-            continue;
-        };
-        out.insert(
-            (meta.origin.clone(), offset, entry.value.clone()),
-            after_value.clone(),
-        );
+        if entry.node_type == "reference" {
+            let mut matched_physical_record = false;
+            for physical_entry in &physical_entries {
+                if physical_entry.node_type != "reference"
+                    || physical_entry.value != entry.value
+                    || !same_reference_identity(entry, physical_entry)
+                {
+                    continue;
+                }
+                if insert_replacement_target(&mut out, physical_entry, after_value) {
+                    matched_physical_record = true;
+                }
+            }
+            if matched_physical_record {
+                continue;
+            }
+        }
+        insert_replacement_target(&mut out, entry, after_value);
     }
 
     out
+}
+
+fn same_reference_identity(
+    a: &crate::mb::paths::MbScenePathEntry,
+    b: &crate::mb::paths::MbScenePathEntry,
+) -> bool {
+    let a_ref = a
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.reference_node.as_deref());
+    let b_ref = b
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.reference_node.as_deref());
+    match (a_ref, b_ref) {
+        (Some(a_ref), Some(b_ref)) => a_ref == b_ref,
+        _ => a.node_name == b.node_name,
+    }
+}
+
+fn insert_replacement_target(
+    out: &mut HashMap<TargetKey, String>,
+    entry: &crate::mb::paths::MbScenePathEntry,
+    after_value: &str,
+) -> bool {
+    let Some(meta) = entry.meta.as_ref() else {
+        return false;
+    };
+    let Some(offset) = meta.trace_node_offset else {
+        return false;
+    };
+    let Some(chunk_start) = meta.trace_child_chunk_start else {
+        return false;
+    };
+    out.insert(
+        TargetKey::new(
+            meta.origin.clone(),
+            offset,
+            chunk_start,
+            entry.value.clone(),
+        ),
+        after_value.to_string(),
+    );
+    true
 }
 
 trait IntoOwnedBytes {
@@ -814,8 +1013,9 @@ mod tests {
     use super::{
         super::chunk_encode::append_chunk_header, MbPathReplaceRule,
         replace_first_path_field_in_nul_payload, replace_path_field_in_frdi_payload,
-        replace_scene_paths_in_mb, replace_scene_paths_in_mb_cow,
-        replace_text_payload_preserving_nul_suffix, rewrite_rtft_child,
+        replace_scene_paths_in_mb, replace_scene_paths_in_mb_by_index,
+        replace_scene_paths_in_mb_cow, replace_text_payload_preserving_nul_suffix,
+        rewrite_rtft_child,
     };
     use crate::{
         mb::{
@@ -831,23 +1031,72 @@ mod tests {
         inner_chunk_payload: &[u8],
         inner_tail: &[u8],
     ) -> Vec<u8> {
-        let mut inner = encode_chunk(
-            inner_chunk_tag,
-            0,
-            inner_chunk_payload,
-            8,
-            SectionHeaderFormat::EightByte,
-        )
-        .expect("inner chunk");
+        build_mb_with_forms(&[(form, inner_chunk_tag, inner_chunk_payload, inner_tail)])
+    }
+
+    fn build_mb_with_form_payloads(
+        form: &str,
+        inner_chunk_tag: &str,
+        inner_chunk_payloads: &[&[u8]],
+        inner_tail: &[u8],
+    ) -> Vec<u8> {
+        let mut inner = Vec::new();
+        for inner_chunk_payload in inner_chunk_payloads {
+            inner.extend_from_slice(
+                &encode_chunk(
+                    inner_chunk_tag,
+                    0,
+                    inner_chunk_payload,
+                    8,
+                    SectionHeaderFormat::EightByte,
+                )
+                .expect("inner chunk"),
+            );
+        }
         inner.extend_from_slice(inner_tail);
 
         let mut child_payload = form.as_bytes().to_vec();
         child_payload.extend_from_slice(&inner);
-        let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
+        let child = encode_chunk("FOR8", 0, &child_payload, 4, SectionHeaderFormat::EightByte)
             .expect("child chunk");
 
         let mut root_payload = b"Maya".to_vec();
         root_payload.extend_from_slice(&child);
+        let mut root = Vec::new();
+        append_chunk_header(
+            &mut root,
+            "FOR8",
+            0,
+            root_payload.len(),
+            SectionHeaderFormat::EightByte,
+        )
+        .expect("root chunk");
+        root.extend_from_slice(&root_payload);
+        root
+    }
+
+    fn build_mb_with_forms(forms: &[(&str, &str, &[u8], &[u8])]) -> Vec<u8> {
+        let mut children = Vec::new();
+        for (form, inner_chunk_tag, inner_chunk_payload, inner_tail) in forms {
+            let mut inner = encode_chunk(
+                inner_chunk_tag,
+                0,
+                inner_chunk_payload,
+                8,
+                SectionHeaderFormat::EightByte,
+            )
+            .expect("inner chunk");
+            inner.extend_from_slice(inner_tail);
+
+            let mut child_payload = form.as_bytes().to_vec();
+            child_payload.extend_from_slice(&inner);
+            let child = encode_chunk("FOR8", 0, &child_payload, 4, SectionHeaderFormat::EightByte)
+                .expect("child chunk");
+            children.extend_from_slice(&child);
+        }
+
+        let mut root_payload = b"Maya".to_vec();
+        root_payload.extend_from_slice(&children);
         let mut root = Vec::new();
         append_chunk_header(
             &mut root,
@@ -1059,6 +1308,328 @@ mod tests {
         assert_eq!(fields[0], b"\x01new/char.mb");
         assert_eq!(fields[1], b"charA");
         assert_eq!(fields[2], b"\x01");
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_rewrites_frdi_reference_path() {
+        let mb = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01\x04\0\x02asset/example/old_scene.mb\0Example\0\x01\0ExampleRN\0VERS|2026|\0mayaBinary\0",
+            b"\xEE\xEF",
+        );
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        let output = dir.path().join("dst.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, &parsed.root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "asset/example/old_scene.mb");
+
+        let (rewritten, count) = replace_scene_paths_in_mb_by_index(
+            &mb,
+            &parsed.root,
+            &[(0, "asset/example/new_scene.mb".to_string())],
+        );
+        assert_eq!(count, 1);
+        std::fs::write(&output, &rewritten).expect("write");
+
+        let parsed_rewritten = parse_file(&output).expect("parse");
+        let child = &parsed_rewritten.root.children[0];
+        let payload = &parsed_rewritten.data[child.payload_offset..child.payload_end];
+        let (child_alignment, child_header_size) = crate::mb::resolve_section_layout_hints(
+            &child.tag,
+            child.form_type.as_deref(),
+            child.child_alignment,
+            child.child_header_size,
+        );
+        let parsed_section =
+            parse_section_chunks_full_with_hints(&payload[4..], child_alignment, child_header_size);
+        assert_eq!(parsed_section.tail(&payload[4..]), &[0xEE, 0xEF]);
+        let frdi_chunk = parsed_section
+            .chunks
+            .iter()
+            .find(|chunk| chunk.tag == "FRDI")
+            .expect("frdi chunk");
+        let fields: Vec<&[u8]> = frdi_chunk
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(fields[1], b"\x02asset/example/new_scene.mb");
+        assert_eq!(fields[2], b"Example");
+        assert_eq!(fields[4], b"ExampleRN");
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_rewrites_matching_fref_and_frdi_reference_records() {
+        let mb = build_mb_with_forms(&[
+            (
+                "FREF",
+                "FREF",
+                b"asset/example/old_scene.mb\0Example\0ExampleRN\0mayaBinary\0",
+                b"",
+            ),
+            (
+                "FRDI",
+                "FRDI",
+                b"\x01\x04\0\x02asset/example/old_scene.mb\0Example\0\x01\0ExampleRN\0VERS|2026|\0mayaBinary\0",
+                b"",
+            ),
+        ]);
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        let output = dir.path().join("dst.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        assert_eq!(parsed.root.children.len(), 2);
+        assert_eq!(parsed.root.children[0].form_type.as_deref(), Some("FREF"));
+        assert_eq!(parsed.root.children[1].form_type.as_deref(), Some("FRDI"));
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, &parsed.root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "asset/example/old_scene.mb");
+        let targets = super::replacement_targets_for_mb(
+            &mb,
+            &parsed.root,
+            &[(0, "asset/example/new_scene.mb".to_string())],
+        );
+        assert_eq!(targets.len(), 2);
+
+        let (rewritten, count) = replace_scene_paths_in_mb_by_index(
+            &mb,
+            &parsed.root,
+            &[(0, "asset/example/new_scene.mb".to_string())],
+        );
+        assert_eq!(count, 2);
+        std::fs::write(&output, &rewritten).expect("write");
+
+        let parsed_rewritten = parse_file(&output).expect("parse");
+        let fref_child = &parsed_rewritten.root.children[0];
+        let fref_payload =
+            &parsed_rewritten.data[fref_child.payload_offset..fref_child.payload_end];
+        let fref_section =
+            parse_section_chunks_full_with_hints(&fref_payload[4..], Some(8), Some(16));
+        let fref_chunk = fref_section
+            .chunks
+            .iter()
+            .find(|chunk| chunk.tag == "FREF")
+            .expect("fref chunk");
+        let fref_fields: Vec<&[u8]> = fref_chunk
+            .payload(&fref_payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(fref_fields[0], b"asset/example/new_scene.mb");
+
+        let frdi_child = &parsed_rewritten.root.children[1];
+        let frdi_payload =
+            &parsed_rewritten.data[frdi_child.payload_offset..frdi_child.payload_end];
+        let frdi_section =
+            parse_section_chunks_full_with_hints(&frdi_payload[4..], Some(8), Some(16));
+        let frdi_chunk = frdi_section
+            .chunks
+            .iter()
+            .find(|chunk| chunk.tag == "FRDI")
+            .expect("frdi chunk");
+        let frdi_fields: Vec<&[u8]> = frdi_chunk
+            .payload(&frdi_payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(frdi_fields[1], b"\x02asset/example/new_scene.mb");
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_keeps_same_path_different_fref_record_unchanged() {
+        let mb = build_mb_with_form_payloads(
+            "FREF",
+            "FREF",
+            &[
+                b"asset/example/shared_scene.mb\0ExampleA\0ExampleARN\0mayaBinary\0",
+                b"asset/example/shared_scene.mb\0ExampleB\0ExampleBRN\0mayaBinary\0",
+            ],
+            b"",
+        );
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        let output = dir.path().join("dst.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, &parsed.root);
+        assert_eq!(entries.len(), 2);
+
+        let (rewritten, count) = replace_scene_paths_in_mb_by_index(
+            &mb,
+            &parsed.root,
+            &[(0, "asset/example/first_scene.mb".to_string())],
+        );
+        assert_eq!(count, 1);
+        std::fs::write(&output, &rewritten).expect("write");
+
+        let parsed_rewritten = parse_file(&output).expect("parse");
+        let child = &parsed_rewritten.root.children[0];
+        let payload = &parsed_rewritten.data[child.payload_offset..child.payload_end];
+        let section = parse_section_chunks_full_with_hints(&payload[4..], Some(8), Some(16));
+        let fref_chunks: Vec<_> = section
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.tag == "FREF")
+            .collect();
+        assert_eq!(fref_chunks.len(), 2);
+        let first_fields: Vec<&[u8]> = fref_chunks[0]
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        let second_fields: Vec<&[u8]> = fref_chunks[1]
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(first_fields[0], b"asset/example/first_scene.mb");
+        assert_eq!(first_fields[2], b"ExampleARN");
+        assert_eq!(second_fields[0], b"asset/example/shared_scene.mb");
+        assert_eq!(second_fields[2], b"ExampleBRN");
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_keeps_same_path_different_frdi_record_unchanged() {
+        let mb = build_mb_with_form_payloads(
+            "FRDI",
+            "FRDI",
+            &[
+                b"\x01\x04\0\x02asset/example/shared_scene.mb\0ExampleA\0\x01\0ExampleARN\0VERS|2026|\0mayaBinary\0",
+                b"\x01\x04\0\x02asset/example/shared_scene.mb\0ExampleB\0\x01\0ExampleBRN\0VERS|2026|\0mayaBinary\0",
+            ],
+            b"",
+        );
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        let output = dir.path().join("dst.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, &parsed.root);
+        assert_eq!(entries.len(), 2);
+
+        let (rewritten, count) = replace_scene_paths_in_mb_by_index(
+            &mb,
+            &parsed.root,
+            &[(0, "asset/example/first_scene.mb".to_string())],
+        );
+        assert_eq!(count, 1);
+        std::fs::write(&output, &rewritten).expect("write");
+
+        let parsed_rewritten = parse_file(&output).expect("parse");
+        let child = &parsed_rewritten.root.children[0];
+        let payload = &parsed_rewritten.data[child.payload_offset..child.payload_end];
+        let section = parse_section_chunks_full_with_hints(&payload[4..], Some(8), Some(16));
+        let frdi_chunks: Vec<_> = section
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.tag == "FRDI")
+            .collect();
+        assert_eq!(frdi_chunks.len(), 2);
+        let first_fields: Vec<&[u8]> = frdi_chunks[0]
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        let second_fields: Vec<&[u8]> = frdi_chunks[1]
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(first_fields[1], b"\x02asset/example/first_scene.mb");
+        assert_eq!(first_fields[4], b"ExampleARN");
+        assert_eq!(second_fields[1], b"\x02asset/example/shared_scene.mb");
+        assert_eq!(second_fields[4], b"ExampleBRN");
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_can_apply_distinct_same_path_replacements() {
+        let mb = build_mb_with_form_payloads(
+            "FREF",
+            "FREF",
+            &[
+                b"asset/example/shared_scene.mb\0ExampleA\0ExampleARN\0mayaBinary\0",
+                b"asset/example/shared_scene.mb\0ExampleB\0ExampleBRN\0mayaBinary\0",
+            ],
+            b"",
+        );
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        let output = dir.path().join("dst.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, &parsed.root);
+        assert_eq!(entries.len(), 2);
+
+        let (rewritten, count) = replace_scene_paths_in_mb_by_index(
+            &mb,
+            &parsed.root,
+            &[
+                (0, "asset/example/first_scene.mb".to_string()),
+                (1, "asset/example/second_scene.mb".to_string()),
+            ],
+        );
+        assert_eq!(count, 2);
+        std::fs::write(&output, &rewritten).expect("write");
+
+        let parsed_rewritten = parse_file(&output).expect("parse");
+        let child = &parsed_rewritten.root.children[0];
+        let payload = &parsed_rewritten.data[child.payload_offset..child.payload_end];
+        let section = parse_section_chunks_full_with_hints(&payload[4..], Some(8), Some(16));
+        let fref_chunks: Vec<_> = section
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.tag == "FREF")
+            .collect();
+        assert_eq!(fref_chunks.len(), 2);
+        let first_fields: Vec<&[u8]> = fref_chunks[0]
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        let second_fields: Vec<&[u8]> = fref_chunks[1]
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(first_fields[0], b"asset/example/first_scene.mb");
+        assert_eq!(second_fields[0], b"asset/example/second_scene.mb");
+    }
+
+    #[test]
+    fn replace_scene_paths_by_index_rewrites_frdi_fbx_reference_path() {
+        let mb = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01\x04\0\x02asset/example/ExampleAsset.fbx\0Example\0\x01\0ExampleRN\0VERS|2026|\0FBX\0",
+            b"",
+        );
+        let dir = tempdir().expect("tmp");
+        let input = dir.path().join("src.mb");
+        let output = dir.path().join("dst.mb");
+        std::fs::write(&input, &mb).expect("write");
+        let parsed = parse_file(&input).expect("parse");
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, &parsed.root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "asset/example/ExampleAsset.fbx");
+
+        let (rewritten, count) = replace_scene_paths_in_mb_by_index(
+            &mb,
+            &parsed.root,
+            &[(0, "asset/example/UpdatedAsset.fbx".to_string())],
+        );
+        assert_eq!(count, 1);
+        std::fs::write(&output, &rewritten).expect("write");
+
+        let parsed_rewritten = parse_file(&output).expect("parse");
+        let child = &parsed_rewritten.root.children[0];
+        let payload = &parsed_rewritten.data[child.payload_offset..child.payload_end];
+        let section = parse_section_chunks_full_with_hints(&payload[4..], Some(8), Some(16));
+        let frdi_chunk = section
+            .chunks
+            .iter()
+            .find(|chunk| chunk.tag == "FRDI")
+            .expect("frdi chunk");
+        let fields: Vec<&[u8]> = frdi_chunk
+            .payload(&payload[4..])
+            .split(|b| *b == 0)
+            .collect();
+        assert_eq!(fields[1], b"\x02asset/example/UpdatedAsset.fbx");
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub struct MbScenePathMeta {
     pub trace_form: Option<String>,
     pub trace_tag: Option<String>,
     pub trace_node_offset: Option<usize>,
+    pub trace_child_chunk_start: Option<usize>,
     pub trace_child_alignment: Option<usize>,
     pub trace_child_header_size: Option<usize>,
 }
@@ -221,8 +222,24 @@ pub(crate) fn extract_raw_scene_paths_from_mb_parts(
     data: &[u8],
     root: &Chunk,
 ) -> Vec<MbScenePathEntry> {
+    let records = extract_raw_scene_path_records_from_mb_parts(data, root);
     let mut out = Vec::new();
     let mut seen = HashMap::<u64, Vec<usize>>::new();
+
+    for e in records {
+        if push_unique_scene_path_entry(&out, &mut seen, &e) {
+            out.push(e);
+        }
+    }
+
+    out
+}
+
+pub(crate) fn extract_raw_scene_path_records_from_mb_parts(
+    data: &[u8],
+    root: &Chunk,
+) -> Vec<MbScenePathEntry> {
+    let mut out = Vec::new();
 
     for child in &root.children {
         let (child_alignment, child_header_size) = resolve_section_layout_hints(
@@ -241,9 +258,7 @@ pub(crate) fn extract_raw_scene_paths_from_mb_parts(
                 child_alignment,
                 child_header_size,
             ) {
-                if push_unique_scene_path_entry(&out, &mut seen, &e) {
-                    out.push(e);
-                }
+                out.push(e);
             }
             continue;
         }
@@ -254,9 +269,7 @@ pub(crate) fn extract_raw_scene_paths_from_mb_parts(
                 child_alignment,
                 child_header_size,
             ) {
-                if push_unique_scene_path_entry(&out, &mut seen, &e) {
-                    out.push(e);
-                }
+                out.push(e);
             }
             continue;
         }
@@ -268,9 +281,7 @@ pub(crate) fn extract_raw_scene_paths_from_mb_parts(
                 child_header_size,
                 Some(child.tag.as_str()),
             ) {
-                if push_unique_scene_path_entry(&out, &mut seen, &e) {
-                    out.push(e);
-                }
+                out.push(e);
             }
             continue;
         }
@@ -458,7 +469,7 @@ fn extract_file_entries_from_rtft_payload(
 
     let mut node_name = format!("<RTFT@0x{offset:X}>");
     let mut color_space: Option<String> = None;
-    let mut paths: Vec<String> = Vec::new();
+    let mut paths: Vec<(String, usize)> = Vec::new();
     let mut attrs: Vec<String> = Vec::new();
 
     for chunk in &parsed.chunks {
@@ -476,7 +487,9 @@ fn extract_file_entries_from_rtft_payload(
         };
 
         match classify_scene_path_attr(&attr_name) {
-            Some(ScenePathAttrKind::FileTexturePath) => paths.push(value.clone()),
+            Some(ScenePathAttrKind::FileTexturePath) => {
+                paths.push((value.clone(), chunk.chunk_start));
+            }
             Some(ScenePathAttrKind::FileTextureColorSpace) => color_space = Some(value.clone()),
             _ => {}
         }
@@ -485,7 +498,7 @@ fn extract_file_entries_from_rtft_payload(
 
     paths
         .into_iter()
-        .map(|path| MbScenePathEntry {
+        .map(|(path, chunk_start)| MbScenePathEntry {
             node_type: "file".to_string(),
             node_name: node_name.clone(),
             attr: file_texture_attr_name_from_fields(&attrs).unwrap_or_else(|| ".ftn".to_string()),
@@ -501,6 +514,7 @@ fn extract_file_entries_from_rtft_payload(
                 trace_form: Some("RTFT".to_string()),
                 trace_tag: Some("STR ".to_string()),
                 trace_node_offset: Some(offset),
+                trace_child_chunk_start: Some(chunk_start),
                 trace_child_alignment: child_alignment,
                 trace_child_header_size: child_header_size,
             }),
@@ -543,6 +557,7 @@ fn extract_reference_entries_from_fref_payload(
         if let Some(entry) = decode_reference_from_fref_chunk(
             chunk.payload(inner),
             offset,
+            chunk.chunk_start,
             child_alignment,
             child_header_size,
         ) {
@@ -572,6 +587,7 @@ fn extract_reference_entries_from_frdi_payload(
         if let Some(entry) = decode_reference_from_frdi_chunk(
             chunk.payload(inner),
             offset,
+            chunk.chunk_start,
             child_alignment,
             child_header_size,
         ) {
@@ -584,6 +600,7 @@ fn extract_reference_entries_from_frdi_payload(
 fn decode_reference_from_fref_chunk(
     payload: &[u8],
     offset: usize,
+    chunk_start: usize,
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
 ) -> Option<MbScenePathEntry> {
@@ -604,6 +621,7 @@ fn decode_reference_from_fref_chunk(
             trace_form: Some("FREF".to_string()),
             trace_tag: Some("FREF".to_string()),
             trace_node_offset: Some(offset),
+            trace_child_chunk_start: Some(chunk_start),
             trace_child_alignment: child_alignment,
             trace_child_header_size: child_header_size,
         }),
@@ -613,6 +631,7 @@ fn decode_reference_from_fref_chunk(
 fn decode_reference_from_frdi_chunk(
     payload: &[u8],
     offset: usize,
+    chunk_start: usize,
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
 ) -> Option<MbScenePathEntry> {
@@ -633,6 +652,7 @@ fn decode_reference_from_frdi_chunk(
             trace_form: Some("FRDI".to_string()),
             trace_tag: Some("FRDI".to_string()),
             trace_node_offset: Some(offset),
+            trace_child_chunk_start: Some(chunk_start),
             trace_child_alignment: child_alignment,
             trace_child_header_size: child_header_size,
         }),
@@ -937,8 +957,8 @@ mod tests {
     #[test]
     fn decode_reference_from_frdi_chunk_parses_control_prefixed_fields() {
         let payload = b"\x01\x04\0\x02scenes/TestScene_0000.mb\0Model\0\x01\0Example:ModelRN\0VERS|2020|\0mayaBinary\0";
-        let entry =
-            decode_reference_from_frdi_chunk(payload, 0x4321, Some(8), Some(16)).expect("entry");
+        let entry = decode_reference_from_frdi_chunk(payload, 0x4321, 0x20, Some(8), Some(16))
+            .expect("entry");
         assert_eq!(entry.node_type, "reference");
         assert_eq!(entry.node_name, "Example:ModelRN");
         assert_eq!(entry.attr, ".fn");
@@ -952,13 +972,14 @@ mod tests {
         assert_eq!(meta.trace_form.as_deref(), Some("FRDI"));
         assert_eq!(meta.trace_tag.as_deref(), Some("FRDI"));
         assert_eq!(meta.trace_node_offset, Some(0x4321));
+        assert_eq!(meta.trace_child_chunk_start, Some(0x20));
     }
 
     #[test]
     fn decode_reference_from_frdi_chunk_accepts_fbx_dependency_path() {
         let payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|\0FBX export\0";
-        let entry =
-            decode_reference_from_frdi_chunk(payload, 0x7A8, Some(8), Some(16)).expect("entry");
+        let entry = decode_reference_from_frdi_chunk(payload, 0x7A8, 0x30, Some(8), Some(16))
+            .expect("entry");
 
         assert_eq!(entry.value, "assets/example/ExampleAsset.fbx");
         assert_eq!(entry.node_name, "Import_00_Example:SourceRN");
@@ -966,17 +987,19 @@ mod tests {
         assert_eq!(meta.short_name.as_deref(), Some("Source"));
         assert_eq!(meta.reference_options.as_deref(), Some("VERS|2020|"));
         assert_eq!(meta.trace_node_offset, Some(0x7A8));
+        assert_eq!(meta.trace_child_chunk_start, Some(0x30));
     }
 
     #[test]
     fn decode_reference_from_fref_chunk_sets_trace_meta() {
         let payload = b"rig/charA_v001.mb\0charA\0charARN\0mayaBinary\0";
-        let entry =
-            decode_reference_from_fref_chunk(payload, 0x1234, Some(8), Some(16)).expect("entry");
+        let entry = decode_reference_from_fref_chunk(payload, 0x1234, 0x40, Some(8), Some(16))
+            .expect("entry");
         let meta = entry.meta.expect("meta");
         assert_eq!(meta.trace_form.as_deref(), Some("FREF"));
         assert_eq!(meta.trace_tag.as_deref(), Some("FREF"));
         assert_eq!(meta.trace_node_offset, Some(0x1234));
+        assert_eq!(meta.trace_child_chunk_start, Some(0x40));
         assert_eq!(meta.trace_child_alignment, Some(8));
         assert_eq!(meta.trace_child_header_size, Some(16));
     }

@@ -321,6 +321,7 @@ mod tests {
                 trace_form: Some("FREF".to_string()),
                 trace_tag: Some("FREF".to_string()),
                 trace_node_offset: Some(0x1234),
+                trace_child_chunk_start: Some(0),
                 trace_child_alignment: Some(8),
                 trace_child_header_size: Some(16),
             }),
