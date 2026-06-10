@@ -48,7 +48,7 @@ pub use maya_scene_kit_observe::scene::paths::{
 pub use maya_scene_kit_observe::scene::scripts::ScriptNodeEntry;
 #[allow(unused_imports)]
 pub use maya_scene_kit_observe::scene::{
-    LoadOptions, Loader, MbParseBudget, ObservationBundle, check_script_nodes_with_options,
+    LoadOptions, Loader, MbParseBudget, check_script_nodes_with_options,
     collect_scene_dump_with_options, collect_scene_paths, collect_scene_paths_with_options,
 };
 
@@ -67,14 +67,6 @@ pub fn render_script_dump_with_options(
 }
 
 #[cfg(test)]
-pub(crate) fn render_script_dump_from_observation(
-    observation: &ObservationBundle,
-) -> Result<String, SceneToolError> {
-    let report = observation.scene_dump_report()?;
-    Ok(build_script_dump_text(&report))
-}
-
-#[cfg(test)]
 pub fn render_requires_dump(path: impl AsRef<Path>) -> Result<String, SceneToolError> {
     render_requires_dump_with_options(path, &LoadOptions::default())
 }
@@ -85,14 +77,6 @@ pub fn render_requires_dump_with_options(
     options: &LoadOptions,
 ) -> Result<String, SceneToolError> {
     let report = collect_scene_dump_with_options(path, options)?;
-    Ok(build_requires_dump_text(&report))
-}
-
-#[cfg(test)]
-pub(crate) fn render_requires_dump_from_observation(
-    observation: &ObservationBundle,
-) -> Result<String, SceneToolError> {
-    let report = observation.scene_dump_report()?;
     Ok(build_requires_dump_text(&report))
 }
 

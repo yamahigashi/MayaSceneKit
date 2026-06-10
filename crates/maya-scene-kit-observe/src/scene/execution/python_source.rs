@@ -551,10 +551,10 @@ pub(crate) fn static_string_expr(
     string_values: &std::collections::HashMap<String, Option<String>>,
 ) -> Option<String> {
     match expr {
-        ast::Expr::Constant(ast::ExprConstant { value, .. }) => match value {
-            ast::Constant::Str(value) => Some(value.to_string()),
-            _ => None,
-        },
+        ast::Expr::Constant(ast::ExprConstant {
+            value: ast::Constant::Str(value),
+            ..
+        }) => Some(value.to_string()),
         ast::Expr::Name(name) => string_values.get(name.id.as_str()).cloned().flatten(),
         ast::Expr::BinOp(expr) => {
             let left = static_string_expr(&expr.left, string_values)?;
