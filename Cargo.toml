@@ -9,6 +9,7 @@ members = [
     "crates/maya-scene-kit-python",
     "crates/maya-scene-kit-gui",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.2.4"

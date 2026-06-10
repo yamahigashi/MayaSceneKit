@@ -5,6 +5,11 @@ __pycache__/
 .python-version
 release/
 target/
+fuzz/artifacts/
+fuzz/corpus/*/*
+!fuzz/corpus/*/basic.ma
+!fuzz/corpus/*/basic.mel
+!fuzz/corpus/*/minimal.mb
 tmp/
 tools/__pycache__/
 uv.lock
