@@ -113,6 +113,7 @@ impl SignalVisitor {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
                     self.record_capability_module(alias.name.as_str());
+                    self.record_hard_markers(hard_markers_for_imported_module(alias.name.as_str()));
                     self.record_module_import_alias(
                         alias_local_name(alias.name.as_str(), alias.asname.as_ref()),
                         alias.name.as_str(),
@@ -122,7 +123,12 @@ impl SignalVisitor {
             ast::Stmt::ImportFrom(import) => {
                 if let Some(module) = &import.module {
                     self.record_capability_module(module.as_str());
+                    self.record_hard_markers(hard_markers_for_imported_module(module.as_str()));
                     for alias in &import.names {
+                        self.record_hard_markers(hard_markers_for_imported_name(
+                            module.as_str(),
+                            alias.name.as_str(),
+                        ));
                         self.record_import_from_alias(
                             module.as_str(),
                             alias.name.as_str(),
@@ -1060,6 +1066,31 @@ fn hard_markers_for_name(name: &str) -> Vec<String> {
     markers
 }
 
+fn hard_markers_for_imported_module(module: &str) -> Vec<String> {
+    let top = module.split('.').next().unwrap_or(module);
+    let mut markers = Vec::new();
+    match top {
+        "base64" => push_marker(&mut markers, "base64"),
+        "binascii" => push_marker(&mut markers, "hex"),
+        "builtins" => push_marker(&mut markers, "builtins"),
+        _ => {}
+    }
+    markers
+}
+
+fn hard_markers_for_imported_name(module: &str, name: &str) -> Vec<String> {
+    let mut markers = hard_markers_for_imported_module(module);
+    match (module, name) {
+        ("base64", "b64decode" | "standard_b64decode" | "urlsafe_b64decode") => {
+            push_marker(&mut markers, "base64")
+        }
+        ("binascii", "unhexlify") => push_marker(&mut markers, "hex"),
+        ("builtins", "getattr") => push_marker(&mut markers, "builtins"),
+        _ => {}
+    }
+    markers
+}
+
 fn expr_names_builtins(expr: &ast::Expr) -> bool {
     match expr {
         ast::Expr::Name(name) => matches!(name.id.as_str(), "builtins" | "__builtins__"),
@@ -1409,6 +1440,7 @@ mod tests {
 
     #[test]
     fn collect_python_signals_marks_decode_base64_chr_and_builtins_as_hard_markers() {
+        assert!(has_hard_marker("import base64", "base64"));
         assert!(has_hard_marker(
             "value = bytes.fromhex(sample).decode()",
             "hex"

@@ -280,7 +280,9 @@ fn audit_observation_source_with_digests(
         ValidationState::Invalid
             | ValidationState::Unsupported
             | ValidationState::CopiedUnvalidated
-    ) || coverage_state != ExecutionCoverageState::Complete
+    ) || (options.profile == AuditProfile::HardenedUntrusted
+        && validation_state == ValidationState::Partial)
+        || coverage_state != ExecutionCoverageState::Complete
         || !coverage_issues.is_empty()
         || !unknown_semantics.is_empty()
         || over_budget;
