@@ -137,7 +137,10 @@ pub enum AuditFindingCode {
     PythonBodyAssembly,
     PythonCompile,
     PythonCtypes,
+    PythonAutorunPersistenceMarker,
     PythonEval,
+    PythonFileOpen,
+    PythonFileWrite,
     PythonImport,
     PythonParseFailure,
     PythonSubprocess,
@@ -164,7 +167,10 @@ impl AuditFindingCode {
             Self::PythonBodyAssembly => "python_body_assembly",
             Self::PythonCompile => "python_pycompile",
             Self::PythonCtypes => "python_ctypes",
+            Self::PythonAutorunPersistenceMarker => "python_autorun_persistence_marker",
             Self::PythonEval => "python_pyeval",
+            Self::PythonFileOpen => "python_file_open",
+            Self::PythonFileWrite => "python_file_write",
             Self::PythonImport => "python_pyimport",
             Self::PythonParseFailure => "python_parse_failure",
             Self::PythonSubprocess => "python_subprocess",
@@ -263,7 +269,10 @@ pub enum StaticAuditFindingDetail {
     PythonCompileDetected,
     PythonEvalDetected,
     PythonExecDetected,
+    PythonFileOpenDetected,
+    PythonFileWriteDetected,
     PythonParseFailed,
+    PythonAutorunPersistenceMarkerDetected,
     ScriptBearingMelCallbackFlagDetected,
     ScriptJobHookDetected,
     SubprocessCapabilityDetected,
@@ -307,8 +316,13 @@ impl StaticAuditFindingDetail {
             Self::PythonCompileDetected => "Python compile detected",
             Self::PythonEvalDetected => "Python eval detected",
             Self::PythonExecDetected => "Python exec detected",
+            Self::PythonFileOpenDetected => "Python file open capability detected",
+            Self::PythonFileWriteDetected => "Python file write capability detected",
             Self::PythonParseFailed => {
                 "Python parse failed; audit blocked on unresolved Python semantics"
+            }
+            Self::PythonAutorunPersistenceMarkerDetected => {
+                "Python autorun persistence marker detected"
             }
             Self::ScriptBearingMelCallbackFlagDetected => {
                 "script-bearing MEL callback flag detected"
@@ -686,6 +700,12 @@ pub enum AuditSinkKind {
     PySocket,
     /// Python ctypes surface.
     PyCtypes,
+    /// Python file open surface.
+    PyFileOpen,
+    /// Python file write surface.
+    PyFileWrite,
+    /// Python autorun persistence marker.
+    PyAutorunPersistence,
 }
 
 impl AuditSinkKind {
@@ -709,6 +729,9 @@ impl AuditSinkKind {
             Self::PySubprocess => "py_subprocess",
             Self::PySocket => "py_socket",
             Self::PyCtypes => "py_ctypes",
+            Self::PyFileOpen => "py_file_open",
+            Self::PyFileWrite => "py_file_write",
+            Self::PyAutorunPersistence => "py_autorun_persistence",
         }
     }
 }

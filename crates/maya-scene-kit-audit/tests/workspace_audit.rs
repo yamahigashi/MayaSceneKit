@@ -51,6 +51,32 @@ fn write_scene(path: &std::path::Path, text: &str) {
     std::fs::write(path, text).expect("write fixture");
 }
 
+fn escape_ma_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
+fn write_python_script_node_scene(path: &std::path::Path, node_name: &str, body: &str) {
+    write_scene(
+        path,
+        &format!(
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "createNode script -n \"{}\";\n",
+                "    setAttr \".st\" 1;\n",
+                "    setAttr \".stp\" 1;\n",
+                "    setAttr \".b\" -type \"string\" \"{}\";\n",
+            ),
+            node_name,
+            escape_ma_string(body),
+        ),
+    );
+}
+
 fn write_basic_scene(path: &std::path::Path) {
     write_scene(
         path,
@@ -451,6 +477,135 @@ fn audit_top_level_eval_is_block() {
             .findings
             .iter()
             .any(|finding| finding.sink == AuditSinkKind::MelEval)
+    );
+}
+
+#[test]
+fn audit_python_file_open_is_block() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_file_open.ma");
+    write_python_script_node_scene(
+        &source,
+        "ExampleFileOpenScript",
+        "handle = open('asset/example/file.txt')",
+    );
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding_code_str(finding) == "python_file_open"
+                && finding.sink == AuditSinkKind::PyFileOpen
+                && finding.severity == AuditSeverity::Critical
+        }),
+        "missing Python file-open finding: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn audit_python_file_write_is_block_without_path_context() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_file_write.ma");
+    write_python_script_node_scene(
+        &source,
+        "ExampleFileWriteScript",
+        "handle.writelines(['Sample'])",
+    );
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding_code_str(finding) == "python_file_write"
+                && finding.sink == AuditSinkKind::PyFileWrite
+                && finding.severity == AuditSeverity::Critical
+        }),
+        "missing Python file-write finding: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn audit_python_autorun_persistence_marker_is_recorded_as_block() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_autorun_marker.ma");
+    write_python_script_node_scene(
+        &source,
+        "ExampleAutorunMarkerScript",
+        "setup_path = 'scripts/userSetup.py'",
+    );
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding_code_str(finding) == "python_autorun_persistence_marker"
+                && finding.sink == AuditSinkKind::PyAutorunPersistence
+                && finding.severity == AuditSeverity::Critical
+        }),
+        "missing Python autorun persistence marker finding: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn audit_python_file_persistence_shape_is_blocked_without_eval() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("python_file_persistence_shape.ma");
+    write_scene(
+        &source,
+        &format!(
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "createNode script -n \"ExampleSetupScript\";\n",
+                "    setAttr \".st\" 1;\n",
+                "    setAttr \".stp\" 1;\n",
+                "    setAttr \".b\" -type \"string\" \"{}\";\n",
+                "createNode script -n \"ExamplePayloadScript\";\n",
+                "    setAttr \".st\" 1;\n",
+                "    setAttr \".stp\" 1;\n",
+                "    setAttr \".b\" -type \"string\" \"{}\";\n",
+            ),
+            escape_ma_string(concat!(
+                "setup_path = cmds.internalVar(userAppDir=True) + 'scripts/userSetup.py'\n",
+                "lines = ['import maya.cmds as cmds\\n']\n",
+                "with open(setup_path, 'w') as handle:\n",
+                "\thandle.writelines(lines)"
+            )),
+            escape_ma_string(concat!(
+                "payload_path = cmds.internalVar(userAppDir=True) + '/scripts/SamplePayload.py'\n",
+                "if not os.path.exists(payload_path):\n",
+                "\twith open(payload_path, 'w') as handle:\n",
+                "\t\thandle.write('Sample')"
+            )),
+        ),
+    );
+    let report = audit_script_nodes(&source, &audit_plan()).expect("audit report");
+
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    for expected in [
+        "python_file_open",
+        "python_file_write",
+        "python_autorun_persistence_marker",
+    ] {
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding_code_str(finding) == expected),
+            "missing {expected} finding: {:?}",
+            report.findings
+        );
+    }
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding_code_str(finding) != "python_pyeval"),
+        "shape regression should not depend on eval: {:?}",
+        report.findings
     );
 }
 

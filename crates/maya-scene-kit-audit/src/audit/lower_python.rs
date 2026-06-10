@@ -16,6 +16,8 @@ pub(crate) enum PythonCapabilityKind {
     Subprocess,
     Socket,
     Ctypes,
+    FileOpen,
+    FileWrite,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,9 @@ pub(crate) enum PythonSignal {
         first_arg: PythonBodyArgKind,
     },
     Capability(PythonCapabilityKind),
+    AutorunPersistenceMarker {
+        marker: String,
+    },
     HardMarker {
         markers: Vec<String>,
     },
@@ -56,6 +61,7 @@ pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
         if !markers.is_empty() {
             signals.push(PythonSignal::HardMarker { markers });
         }
+        signals.extend(autorun_persistence_marker_signals(source));
         return signals;
     };
     let mut visitor = SignalVisitor::default();
@@ -64,6 +70,9 @@ pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
     visitor.capability_alias_scopes.push(HashMap::new());
     visitor.string_value_scopes.push(HashMap::new());
     visitor.visit_suite(&program);
+    visitor
+        .signals
+        .extend(autorun_persistence_marker_signals(source));
     visitor.signals
 }
 
@@ -505,6 +514,8 @@ impl SignalVisitor {
             self.current_capability_aliases(),
         ) {
             self.signals.push(PythonSignal::Capability(capability));
+        } else if let Some(capability) = file_write_capability_from_call(&call.func) {
+            self.signals.push(PythonSignal::Capability(capability));
         } else if is_maya_python_bridge_name(&call.func) {
             self.signals.push(PythonSignal::UnresolvedCallTarget {
                 message: "python call target named `python` is not a Python built-in".to_string(),
@@ -781,9 +792,8 @@ fn capability_from_call(
     capability_aliases: Option<&HashMap<String, PythonCapabilityKind>>,
 ) -> Option<PythonCapabilityKind> {
     match func {
-        ast::Expr::Name(name) => {
-            capability_aliases.and_then(|scope| scope.get(name.id.as_str()).copied())
-        }
+        ast::Expr::Name(name) => direct_capability(name.id.as_str())
+            .or_else(|| capability_aliases.and_then(|scope| scope.get(name.id.as_str()).copied())),
         ast::Expr::Attribute(attr) => {
             let module = module_name_for_expr(&attr.value, module_aliases)?;
             capability_for_module_member(&module, attr.attr.as_str())
@@ -841,7 +851,10 @@ fn module_name_for_expr(
 
 fn capability_for_imported_name(module: &str, name: &str) -> Option<PythonCapabilityKind> {
     match (module, name) {
+        ("builtins", "open") => Some(PythonCapabilityKind::FileOpen),
         ("os", "system" | "popen") => Some(PythonCapabilityKind::Subprocess),
+        ("os", "remove" | "unlink") => Some(PythonCapabilityKind::FileWrite),
+        ("shutil", "copy" | "copyfile" | "move") => Some(PythonCapabilityKind::FileWrite),
         ("subprocess", _) => Some(PythonCapabilityKind::Subprocess),
         ("socket", _) => Some(PythonCapabilityKind::Socket),
         ("ctypes", _) => Some(PythonCapabilityKind::Ctypes),
@@ -866,7 +879,56 @@ fn capability_for_module_member(module: &str, member: &str) -> Option<PythonCapa
         "socket" => Some(PythonCapabilityKind::Socket),
         "ctypes" => Some(PythonCapabilityKind::Ctypes),
         "os" if matches!(member, "system" | "popen") => Some(PythonCapabilityKind::Subprocess),
+        "builtins" if member == "open" => Some(PythonCapabilityKind::FileOpen),
+        "os" if matches!(member, "remove" | "unlink") => Some(PythonCapabilityKind::FileWrite),
+        "shutil" if matches!(member, "copy" | "copyfile" | "move") => {
+            Some(PythonCapabilityKind::FileWrite)
+        }
         _ => None,
+    }
+}
+
+fn direct_capability(name: &str) -> Option<PythonCapabilityKind> {
+    match name {
+        "open" => Some(PythonCapabilityKind::FileOpen),
+        _ => None,
+    }
+}
+
+fn file_write_capability_from_call(func: &ast::Expr) -> Option<PythonCapabilityKind> {
+    match func {
+        ast::Expr::Attribute(attr) if matches!(attr.attr.as_str(), "write" | "writelines") => {
+            Some(PythonCapabilityKind::FileWrite)
+        }
+        _ => None,
+    }
+}
+
+fn autorun_persistence_marker_signals(source: &str) -> Vec<PythonSignal> {
+    autorun_persistence_markers(source)
+        .into_iter()
+        .map(|marker| PythonSignal::AutorunPersistenceMarker { marker })
+        .collect()
+}
+
+fn autorun_persistence_markers(source: &str) -> Vec<String> {
+    let mut markers = Vec::new();
+    let lower = source.to_ascii_lowercase();
+    push_marker_if_contains(&mut markers, &lower, "userSetup.py", "usersetup.py");
+    push_marker_if_contains(&mut markers, &lower, "userSetup.mel", "usersetup.mel");
+    push_marker_if_contains(&mut markers, &lower, "/scripts/", "/scripts/");
+    push_marker_if_contains(&mut markers, &lower, "\\scripts\\", "\\scripts\\");
+    if (lower.contains("internalvar") || lower.contains("userappdir"))
+        && (lower.contains(".py") || lower.contains(".mel"))
+    {
+        push_marker(&mut markers, "maya user script file");
+    }
+    markers
+}
+
+fn push_marker_if_contains(markers: &mut Vec<String>, haystack: &str, label: &str, needle: &str) {
+    if haystack.contains(needle) {
+        push_marker(markers, label);
     }
 }
 

@@ -89,29 +89,53 @@ pub(super) fn analyze_python_surface_impl(
                 ));
             }
             PythonSignal::Capability(kind) => {
-                let (id, sink, message) = match kind {
+                let (id, sink, message, severity) = match kind {
                     PythonCapabilityKind::Subprocess => (
                         "python_subprocess",
                         AuditSinkKind::PySubprocess,
                         "subprocess capability detected",
+                        AuditSeverity::High,
                     ),
                     PythonCapabilityKind::Socket => (
                         "python_socket",
                         AuditSinkKind::PySocket,
                         "socket capability detected",
+                        AuditSeverity::High,
                     ),
                     PythonCapabilityKind::Ctypes => (
                         "python_ctypes",
                         AuditSinkKind::PyCtypes,
                         "ctypes / native library capability detected",
+                        AuditSeverity::High,
+                    ),
+                    PythonCapabilityKind::FileOpen => (
+                        "python_file_open",
+                        AuditSinkKind::PyFileOpen,
+                        "Python file open capability detected",
+                        AuditSeverity::Critical,
+                    ),
+                    PythonCapabilityKind::FileWrite => (
+                        "python_file_write",
+                        AuditSinkKind::PyFileWrite,
+                        "Python file write capability detected",
+                        AuditSeverity::Critical,
                     ),
                 };
-                analysis.findings.push(capability_finding(
+                let mut finding = capability_finding(surface_index, surface, id, sink, message);
+                finding.severity = severity_for_trigger(severity, surface.origin.trigger);
+                analysis.findings.push(finding);
+            }
+            PythonSignal::AutorunPersistenceMarker { marker } => {
+                analysis.findings.push(build_finding(
                     surface_index,
                     surface,
-                    id,
-                    sink,
-                    message,
+                    "python_autorun_persistence_marker",
+                    severity_for_trigger(AuditSeverity::Critical, surface.origin.trigger),
+                    AuditSinkKind::PyAutorunPersistence,
+                    None,
+                    "Python autorun persistence marker detected",
+                    vec![AuditEvidence::FreeText { value: marker }],
+                    None,
                 ));
             }
             PythonSignal::UnresolvedCallTarget { message } => {
