@@ -993,11 +993,7 @@ fn hard_markers_for_call(call: &ast::ExprCall) -> Vec<String> {
             "locals" => push_marker(&mut markers, "locals("),
             "vars" => push_marker(&mut markers, "vars("),
             "getattr" => {
-                if call
-                    .args
-                    .first()
-                    .is_some_and(|arg| expr_names_builtins(arg))
-                {
+                if call.args.first().is_some_and(expr_names_builtins) {
                     push_marker(&mut markers, "builtins");
                 }
             }
@@ -1011,11 +1007,7 @@ fn hard_markers_for_call(call: &ast::ExprCall) -> Vec<String> {
                     push_marker(&mut markers, "base64")
                 }
                 "getattr" => {
-                    if call
-                        .args
-                        .first()
-                        .is_some_and(|arg| expr_names_builtins(arg))
-                    {
+                    if call.args.first().is_some_and(expr_names_builtins) {
                         push_marker(&mut markers, "builtins");
                     }
                 }

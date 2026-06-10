@@ -888,20 +888,12 @@ impl PythonEffectVisitor {
         match expr {
             ast::Expr::Call(call) => {
                 if is_maya_mel_eval_call(&call.func, &self.module_aliases) {
-                    if call.args.is_empty() {
-                        self.raise(
-                            ExecutionEffectClass::Unknown,
-                            ExecutionSemanticClass::UnknownWrite,
-                            EffectCertainty::Uncertain,
-                            ExecutionReason::Static {
-                                value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
-                            },
-                        );
-                    } else if call
-                        .args
-                        .first()
-                        .and_then(|arg| static_string_expr(arg, &self.string_values))
-                        .is_none()
+                    if call.args.is_empty()
+                        || call
+                            .args
+                            .first()
+                            .and_then(|arg| static_string_expr(arg, &self.string_values))
+                            .is_none()
                     {
                         self.raise(
                             ExecutionEffectClass::Unknown,
