@@ -129,8 +129,11 @@ fn audit_finding_code(finding_id: &str) -> AuditFindingCode {
         "mel_scriptjob" => AuditFindingCode::MelScriptjob,
         "obfuscation_markers" => AuditFindingCode::ObfuscationMarkers,
         "python_body_assembly" => AuditFindingCode::PythonBodyAssembly,
+        "python_autorun_persistence_marker" => AuditFindingCode::PythonAutorunPersistenceMarker,
         "python_pycompile" => AuditFindingCode::PythonCompile,
         "python_ctypes" => AuditFindingCode::PythonCtypes,
+        "python_file_open" => AuditFindingCode::PythonFileOpen,
+        "python_file_write" => AuditFindingCode::PythonFileWrite,
         "python_pyeval" => AuditFindingCode::PythonEval,
         "python_pyexec" => AuditFindingCode::PythonExec,
         "python_pyimport" => AuditFindingCode::PythonImport,
@@ -182,8 +185,13 @@ fn audit_finding_detail(finding_id: &str, message: &str) -> AuditFindingDetail {
         }
         "mel_scriptjob" => Some(StaticAuditFindingDetail::ScriptJobHookDetected),
         "python_body_assembly" => Some(StaticAuditFindingDetail::PythonBodyAssemblyMarkersDetected),
+        "python_autorun_persistence_marker" => {
+            Some(StaticAuditFindingDetail::PythonAutorunPersistenceMarkerDetected)
+        }
         "python_pycompile" => Some(StaticAuditFindingDetail::PythonCompileDetected),
         "python_ctypes" => Some(StaticAuditFindingDetail::CtypesCapabilityDetected),
+        "python_file_open" => Some(StaticAuditFindingDetail::PythonFileOpenDetected),
+        "python_file_write" => Some(StaticAuditFindingDetail::PythonFileWriteDetected),
         "python_pyeval" => Some(StaticAuditFindingDetail::PythonEvalDetected),
         "python_pyexec" => Some(StaticAuditFindingDetail::PythonExecDetected),
         "python_parse_failure" => Some(StaticAuditFindingDetail::PythonParseFailed),
