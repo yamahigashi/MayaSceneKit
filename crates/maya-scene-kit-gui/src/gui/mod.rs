@@ -1103,10 +1103,8 @@ impl SceneRow {
             return;
         };
 
-        let context = ScenePathResolutionContext::for_scene(
-            &self.path,
-            self.scene_workspace_root.as_ref(),
-        );
+        let context =
+            ScenePathResolutionContext::for_scene(&self.path, self.scene_workspace_root.as_ref());
         let effective_values = report
             .entries
             .iter()
