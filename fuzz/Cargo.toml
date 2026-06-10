@@ -1,0 +1,41 @@
+[package]
+name = "maya-scene-kit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+maya-scene-kit-formats = { path = "../crates/maya-scene-kit-formats" }
+maya-scene-kit-observe = { path = "../crates/maya-scene-kit-observe" }
+
+[[bin]]
+name = "mb_parse"
+path = "fuzz_targets/mb_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ma_selective"
+path = "fuzz_targets/ma_selective.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mel_top_level"
+path = "fuzz_targets/mel_top_level.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "observe_execution_bytes"
+path = "fuzz_targets/observe_execution_bytes.rs"
+test = false
+doc = false
+bench = false

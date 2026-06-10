@@ -1,0 +1,2 @@
+python("print(\"Sample\")");
+source "asset/example/startup.mel";
