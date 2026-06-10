@@ -39,7 +39,9 @@ jobs:
       run: cargo build -p maya-scene-kit-gui --release --locked
     - name: Build Python wheel
       run: uv run --with maturin maturin build --release --features extension-module --manifest-path crates/maya-scene-kit-python/Cargo.toml
+    - name: Install nightly rustfmt
+      run: rustup toolchain install nightly --profile minimal --component rustfmt
     - name: Check formatting
-      run: cargo fmt --all --check
+      run: cargo +nightly fmt --all --check
     - name: Run clippy
       run: cargo clippy --workspace --all-targets --locked -- -D warnings

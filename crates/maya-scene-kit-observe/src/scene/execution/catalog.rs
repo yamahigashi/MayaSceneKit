@@ -1,4 +1,7 @@
-use std::{collections::HashMap, collections::VecDeque, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use maya_scene_kit_formats::mel::mel_parse_budget_limit_from_message;
 use rustpython_parser::ast;

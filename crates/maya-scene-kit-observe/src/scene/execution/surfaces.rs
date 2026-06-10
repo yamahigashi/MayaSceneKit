@@ -14,14 +14,16 @@ use crate::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
         ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind, ExecutionTrigger,
         SceneToolError,
-        decode::attr::decode_attr_payload,
-        decode::dispatcher::DecoderDispatcher,
+        decode::{attr::decode_attr_payload, dispatcher::DecoderDispatcher},
         ir::{ChunkRef, DecodedEvent, RawChunkRecord, SchemaDecodeAttemptResult},
-        schema::node_semantics::{
-            ExecutionDecoder, NodeExecutionProfile, NodeExecutionProfileKind,
-            NodeExecutionSemantics,
+        schema::{
+            SchemaRegistry,
+            locator::SchemaPaths,
+            node_semantics::{
+                ExecutionDecoder, NodeExecutionProfile, NodeExecutionProfileKind,
+                NodeExecutionSemantics,
+            },
         },
-        schema::{SchemaRegistry, locator::SchemaPaths},
     },
 };
 
