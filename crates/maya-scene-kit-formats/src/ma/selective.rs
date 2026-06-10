@@ -373,7 +373,7 @@ fn node_attr_selector_matches(
 ) -> bool {
     selectors.iter().any(|selector| {
         selector.attr == attr_path
-            && selector.node_type.eq_ignore_ascii_case(node_type)
+            && (selector.node_type.is_empty() || selector.node_type.eq_ignore_ascii_case(node_type))
             && selector
                 .node_name
                 .as_deref()

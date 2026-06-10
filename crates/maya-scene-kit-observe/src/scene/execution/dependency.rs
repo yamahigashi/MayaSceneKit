@@ -25,7 +25,7 @@ pub(super) fn collect_dependency_facts(
                     DependencyFactKind::Require,
                     require,
                     DependencyFactDetail::Require,
-                    DependencyRiskClass::Informational,
+                    classify_require_dependency_risk(require),
                 );
             }
 
@@ -66,7 +66,7 @@ pub(super) fn collect_dependency_facts(
                     DependencyFactKind::Require,
                     require,
                     DependencyFactDetail::Require,
-                    DependencyRiskClass::Informational,
+                    classify_require_dependency_risk(require),
                 );
             }
 
@@ -196,6 +196,18 @@ pub(crate) fn classify_dependency_risk(value: &str) -> DependencyRiskClass {
         return DependencyRiskClass::Review;
     }
     DependencyRiskClass::Informational
+}
+
+fn classify_require_dependency_risk(value: &str) -> DependencyRiskClass {
+    let trimmed = value.trim_start();
+    let Some(rest) = trimmed.strip_prefix("requires") else {
+        return DependencyRiskClass::Uncertain;
+    };
+    let rest = rest.trim_start();
+    if rest.starts_with("maya") {
+        return DependencyRiskClass::Informational;
+    }
+    DependencyRiskClass::Review
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

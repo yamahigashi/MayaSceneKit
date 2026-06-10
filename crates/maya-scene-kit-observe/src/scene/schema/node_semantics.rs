@@ -281,7 +281,7 @@ fn load_parsed_node_info_from_paths(
     let mut angular_attrs = HashMap::new();
     let mut profiles_by_node = HashMap::new();
     let mut profile_node_by_typeid = HashMap::new();
-    let mut ma_capture_attr_selectors = HashSet::new();
+    let mut ma_capture_attr_selectors = generic_ma_execution_attr_selectors();
     for (node_type, entry) in merged_nodes {
         if let Some(typeid) = entry.typeid {
             typeid_to_typename.insert(typeid, entry.display_name.clone());
@@ -354,6 +354,26 @@ fn ma_node_attr_selector(
         node_name: node_name.map(str::to_string),
         attr: format!(".{attr}"),
     }
+}
+
+fn generic_ma_execution_attr_selectors() -> HashSet<RawMaNodeAttrSelector> {
+    generic_execution_attr_names()
+        .iter()
+        .map(|attr| ma_node_attr_selector("", None, attr))
+        .collect()
+}
+
+pub(crate) fn generic_execution_attr_names() -> &'static [&'static str] {
+    &[
+        "preRenderMel",
+        "postRenderMel",
+        "preRenderLayerMel",
+        "postRenderLayerMel",
+        "preMel",
+        "postMel",
+        "preFurRenderMel",
+        "postFurRenderMel",
+    ]
 }
 
 fn parse_external_node_info(
