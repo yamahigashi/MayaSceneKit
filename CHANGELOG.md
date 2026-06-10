@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [v0.2.4] - 2026-04-27
+## [v0.2.4] - 2026-06-11
 
 This release tightens execution-surface detection across Maya ASCII and Maya
 Binary scenes. MEL audit behavior now uses sink-aware analysis instead of
@@ -25,6 +25,11 @@ evidence for review.
   node attributes, backed by `schemas/node_info.yaml`.
 - Added file-list Explorer actions in the GUI so users can open selected scene
   files or their containing folders directly from workspace tables.
+- Added Python audit findings for file open, file write, and Maya autorun
+  persistence markers such as `userSetup` script paths.
+- Added first-party fuzz targets for Maya Binary parsing, Maya ASCII selective
+  extraction, MEL top-level audit candidate parsing, and observe execution
+  extraction.
 
 ### Changed
 
@@ -46,6 +51,14 @@ evidence for review.
   the newer MEL parsing behavior.
 - Cached parsed schema node information so repeated observe/audit flows can
   reuse the same node semantics more efficiently.
+- Made Maya Binary execution coverage fail closed for unexplained text-like raw
+  payloads instead of relying only on marker words.
+- Extended execution-surface extraction to catch generic render MEL callback
+  attributes on unprofiled node types.
+- Made hardened audit treat partial Maya Binary validation as
+  disposition-relevant uncertainty.
+- Reclassified non-standard declarative `requires` entries as reviewable
+  dependency facts while keeping `requires maya` informational.
 
 ### Fixed
 
@@ -62,6 +75,8 @@ evidence for review.
   cases.
 - Fixed a dead review path where audit review signals were collected but could
   not influence the final disposition.
+- Fixed indexed Maya Binary reference rewrites for mirrored records.
+- Fixed workspace clippy failures under `-D warnings`.
 - Removed retired MEL text-scan code that was no longer part of the active
   audit model.
 
@@ -69,6 +84,13 @@ evidence for review.
 
 - Optimized Maya Binary audit execution scans by reusing loaded scene/source
   data and reducing redundant execution-surface extraction work.
+
+### Tooling
+
+- Updated CI formatting checks to use nightly rustfmt so the repository's
+  unstable rustfmt import-grouping settings are enforced.
+- Added cargo-fuzz harness scaffolding with sanitized public seed corpora and
+  ignore rules for generated corpus growth and fuzz artifacts.
 
 ### Documentation
 
