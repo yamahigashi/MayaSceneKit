@@ -95,6 +95,14 @@ if report["disposition"] not in {"allow", "allow_with_notice"}:
 # Continue with your own tool's open or import flow.
 ```
 
+`disposition` is one of `allow`, `allow_with_notice`, `review`,
+`deny_uncertain`, or `deny_malicious`. The binding uses the `strict_default`
+audit profile, so `deny_uncertain` is not emitted; uncertainty surfaces as
+`review` with `blocked_on_uncertainty` set. Gating on the allowed set above stays
+correct regardless of profile. For the full gate semantics and the limits of
+what `audit` inspects, see the
+[Audit Model](advanced_usage.md#audit-model).
+
 For Maya startup integration, register check callbacks and return `False` when
 the scene should not be opened or referenced. This example is intentionally
 standalone: adapt the UI text, override permissions, `node_info_paths`, and

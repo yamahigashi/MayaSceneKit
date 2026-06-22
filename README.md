@@ -26,8 +26,12 @@ It currently ships three practical entry points:
 - `clean` and `replace` currently run only in `forensic` mode in both the CLI and the GUI
 - They are intended for investigation and temporary remediation, and **do not guarantee a fully validated rewrite**
 - `audit` is conservative: incomplete coverage, unknown semantics, parse
-  budgets, or degraded validation can move a scene to review or deny depending
-  on the audit profile
+  budgets, or degraded validation can move a scene to review or deny
+- `audit` only inspects execution-capable nodes it has a profile for (built in:
+  `script`, `expression`, `renderGlobals`). Code carried by an unprofiled node
+  type — a third-party renderer settings node or a custom plugin node — is not
+  audited unless you supply its profile via `--node-info`. See the
+  [Audit Model](docs/advanced_usage.md#audit-model) for the full gate semantics.
 
 Related docs:
 
@@ -36,6 +40,7 @@ Related docs:
 - [Advanced usage](docs/advanced_usage.md)
 - [Development](docs/development.md)
 - [Supplying and extrapolating studio-specific Maya node knowledge](docs/node_info_authoring.md)
+- [Changelog](CHANGELOG.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Quick Starts
