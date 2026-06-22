@@ -39,6 +39,7 @@ use crate::{
             RawMaDumpSections, RawMaNodeAttrSelector, RawMaNodeAttrValue, RawMaRequireEntry,
             RawMaRequireKind, RawMaScriptEntry,
         },
+        rewrite::last_quoted_literal,
     },
     mel::{
         MelAuditSourceStore, MelAuditTopLevelCommandFact, MelAuditTopLevelFacts,
@@ -514,7 +515,13 @@ fn extract_reference_entry_from_selective_file_command(
     let path = file
         .path_range
         .map(|range| decode_range_value(source, range))
-        .filter(|value| looks_like_scene_file_path(value))?;
+        .filter(|value| looks_like_scene_file_path(value))
+        // Long -op payloads can push the final file path outside the light parser's
+        // prefix words. Keep the fast prefix path first and scan the already-decoded
+        // full command only for those truncated cases.
+        .or_else(|| {
+            last_quoted_literal(command).filter(|value| looks_like_scene_file_path(value))
+        })?;
     let node_name = parse_file_command_flag_value(command, "-rfn")
         .unwrap_or_else(|| "<fileCmdRef>".to_string());
 
@@ -1547,6 +1554,29 @@ mod tests {
         assert_eq!(sections.scene_paths[0].node_name, "ExampleRN");
         assert_eq!(sections.scene_paths[0].attr, ".fn");
         assert_eq!(sections.scene_paths[0].value, "ExampleScene.ma");
+    }
+
+    #[test]
+    fn selective_sections_collect_file_command_reference_path_after_long_options() {
+        let include_chain = (0..32)
+            .map(|index| format!("asset/example/Included_{index:02}.mb("))
+            .collect::<String>();
+        let input = format!(
+            concat!(
+                "file -r -ns \"Example\" -rfn \"ExampleRN\" ",
+                "-op \"VERS|2026|INCL|{include_chain}|LUNI|cm|\"\n",
+                "    -typ \"mayaBinary\" \"asset/example/ExampleRig.mb\";\n",
+            ),
+            include_chain = include_chain,
+        );
+
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+
+        assert_eq!(sections.scene_paths.len(), 1);
+        assert_eq!(sections.scene_paths[0].node_type, "reference");
+        assert_eq!(sections.scene_paths[0].node_name, "ExampleRN");
+        assert_eq!(sections.scene_paths[0].attr, ".fn");
+        assert_eq!(sections.scene_paths[0].value, "asset/example/ExampleRig.mb");
     }
 
     #[test]
