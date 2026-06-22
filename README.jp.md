@@ -27,7 +27,12 @@
 - `clean` と `replace` は、CLI / GUI ともに現在 `forensic` モードでのみ動作します
 - これらは調査や一時的な対処を目的とした機能であり、 **書き換え結果が安全かつ完全に検証済みであることを保証するものではありません**
 - `audit` は保守的に判定します。coverage 不足、unknown semantics、parse budget、
-  degraded validation がある場合、audit profile に応じて review または deny になります
+  degraded validation がある場合、review または deny になります
+- `audit` が検査するのは、実行プロファイルを持つノードのみです（組み込みは
+  `script`、`expression`、`renderGlobals`）。プロファイルの無いノード種別
+  （サードパーティレンダラの設定ノードやカスタムプラグインノードなど）が持つ
+  コードは、`--node-info` でプロファイルを与えない限り監査されません。ゲートの
+  詳細は [Audit Model](docs/advanced_usage.md#audit-model) を参照してください。
 
 関連ドキュメント:
 
@@ -36,6 +41,7 @@
 - [Advanced usage](docs/advanced_usage.md)
 - [Development](docs/development.md)
 - [スタジオ固有の Maya node 情報の注入・外挿](docs/node_info_authoring.md)
+- [Changelog](CHANGELOG.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## クイックスタート

@@ -27,6 +27,18 @@ Common options:
 - `dump`, `paths`, and `replace` use `--out` for single-file output and
   `--out-dir` for directory output
 
+Command-specific options worth knowing:
+
+- `audit --json` emits the full machine-readable report; `audit --summary-only`
+  prints a one-line summary per file; `audit --rule <marker>` (repeatable) adds
+  literal markers; `audit --max-preview <chars>` caps evidence preview length
+- `paths --json` and `paths --kind <file|reference|all>` control path output
+- `inspect --max-depth`, `--preview-bytes`, and `--at <offset>` scope the chunk dump
+- `to-ascii --issues-json`, `--write-unknown-blobs`, `--embed-metadata`, and
+  `--mode <strict|best-effort|forensic>` control conversion reporting
+
+Run `maya-scene-kit <command> --help` for the authoritative flag list.
+
 ## Execution Modes
 
 Commands that mutate or gate scenes run in one of three modes:
@@ -43,12 +55,57 @@ Public reports expose `validation_state` as one of:
 - `invalid`
 - `copied_unvalidated`
 
-`audit` is conservative by design:
+## Audit Model
 
-- `.ma` and `.mb` execution surfaces are collected through the observe layer
-- reference graph traversal is included, and traversal failures are reported separately
-- incomplete coverage, unknown semantics, degraded validation, or parse-budget exhaustion can make `blocked_on_uncertainty` true
-- review-only signals affect disposition under both built-in audit profiles
+`audit` does not run scene code. It collects execution surfaces from `.ma` and
+`.mb` scenes through the observe layer, classifies what each surface would do,
+and returns a single gate decision plus the evidence behind it. Reference graph
+traversal is included, and traversal failures are reported separately.
+
+### Disposition
+
+The top-level `disposition` is the gate decision. From least to most severe:
+
+| `disposition` | Meaning |
+| --- | --- |
+| `allow` | No execution surface was found. |
+| `allow_with_notice` | Execution surfaces exist but classify as benign, for example pure computation or diagnostic output. |
+| `review` | A human is needed: uncertain semantics, incomplete coverage, degraded validation, or a review-only signal. |
+| `deny_uncertain` | Uncertainty under the hardened profile (see below). Not produced by the default profile. |
+| `deny_malicious` | A finding proved a dynamic-evaluation, hook-registration, or script-bearing-write sink. |
+
+For a pre-open gate, treat only `allow` and `allow_with_notice` as passing.
+
+### What forces review or deny
+
+`blocked_on_uncertainty` becomes true — moving the scene to `review`, or to
+`deny_uncertain` under the hardened profile — when any of the following hold:
+
+- `coverage_state` is not `complete` (it is `incomplete` or `unsupported`)
+- coverage issues were recorded
+- a surface produced unknown semantics
+- `validation_state` is `invalid`, `unsupported`, or `copied_unvalidated`
+- an analysis budget was exceeded
+
+### Audit profiles
+
+Two profiles exist:
+
+- `strict_default`: uncertainty maps to `review`. **This is the only profile used
+  by the CLI and the Python binding.**
+- `hardened_untrusted`: uncertainty maps to `deny_uncertain`. It is used by
+  internal harnesses and is not currently selectable from the CLI or Python, so
+  `deny_uncertain` (and CLI exit code `11`) does not occur with the shipped tools.
+
+### Coverage depends on execution profiles
+
+Surface extraction is driven by curated `node_info.execution` profiles. The
+built-in bundle profiles only three node types: `script`, `expression`, and
+`renderGlobals`. A node type that executes code but is not profiled — for example
+a third-party renderer's settings node or a custom plugin node — is **not**
+extracted as an execution surface, and on its own will not move the scene to
+`review`. To audit those nodes, supply their execution profiles with
+`--node-info`. See [node_info authoring](node_info_authoring.md).
 
 ## Current Scope
 
@@ -150,8 +207,9 @@ For small payloads, inline hex is kept and no blob file is written.
 Exit codes:
 
 - `0`: allow or allow-with-notice
-- `10`: malicious findings triggered deny
-- `11`: uncertainty triggered deny
+- `10`: malicious findings triggered deny (`deny_malicious`)
+- `11`: uncertainty triggered deny (`deny_uncertain`; only under the hardened
+  profile, so the default CLI never emits it)
 - `20`: review
 - `1`: scene decode or processing error
 - `2`: CLI usage or I/O error
