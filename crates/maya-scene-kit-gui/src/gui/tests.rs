@@ -87,8 +87,14 @@ use super::{
 use crate::{
     default_analysis_cache_root,
     gui::{
-        GuiShell, cache_maintenance::CacheMaintenanceFlushResult,
-        cache_write::CacheWriteFlushResult, init_gui_app,
+        GuiShell,
+        cache_maintenance::CacheMaintenanceFlushResult,
+        cache_write::CacheWriteFlushResult,
+        init_gui_app,
+        plugins::{
+            PluginActionScope, PluginRegistry, build_audit_plugin_context,
+            build_file_plugin_context, run_plugin_action, spawn_plugin_action,
+        },
     },
     i18n::I18n,
     menu_bar::TopMenuBar,
@@ -5554,6 +5560,180 @@ fn build_file_operation_paths_falls_back_to_target_row_when_not_selected() {
     let paths = build_file_operation_paths(&[first_row, second_row], 2).expect("operation paths");
 
     assert_eq!(paths, vec![second]);
+}
+
+#[test]
+fn plugin_registry_loads_enabled_actions_for_matching_scope() {
+    let dir = tempdir().expect("tmpdir");
+    let plugins_dir = dir.path().join("plugins");
+    fs::create_dir(&plugins_dir).expect("create plugins dir");
+    fs::write(
+        plugins_dir.join("sample.json"),
+        r#"{
+  "actions": [
+    {
+      "id": "example.file",
+      "label": "Example File Action",
+      "scopes": ["file_list"],
+      "command": "example-command",
+      "args": ["--mode", "file"]
+    },
+    {
+      "id": "example.disabled",
+      "label": "Disabled Action",
+      "enabled": false,
+      "scopes": ["file_list"],
+      "command": "disabled-command"
+    },
+    {
+      "id": "example.detail",
+      "label": "Example Detail Action",
+      "scopes": ["detail"],
+      "command": "detail-command"
+    }
+  ]
+}"#,
+    )
+    .expect("write plugin manifest");
+
+    let registry = PluginRegistry::load_from_dir(&plugins_dir);
+
+    let file_actions = registry.actions_for_scope(PluginActionScope::FileList);
+    assert_eq!(file_actions.len(), 1);
+    assert_eq!(file_actions[0].id, "example.file");
+    assert_eq!(file_actions[0].args, vec!["--mode", "file"]);
+
+    let detail_actions = registry.actions_for_scope(PluginActionScope::Detail);
+    assert_eq!(detail_actions.len(), 1);
+    assert_eq!(detail_actions[0].id, "example.detail");
+}
+
+#[test]
+fn file_plugin_context_uses_selected_rows_when_clicked_row_is_selected() {
+    let dir = tempdir().expect("tmpdir");
+    let first = dir.path().join("ExampleA.ma");
+    let second = dir.path().join("ExampleB.ma");
+    fs::write(&first, "").expect("write first");
+    fs::write(&second, "").expect("write second");
+
+    let mut first_row = test_row(1, &first);
+    first_row.selected = true;
+    let mut second_row = test_row(2, &second);
+    second_row.selected = true;
+
+    let payload = build_file_plugin_context(&[first_row, second_row], 2).expect("plugin context");
+    let value = serde_json::to_value(&payload).expect("serialize payload");
+
+    assert_eq!(value["scope"], "file_list");
+    assert_eq!(value["selection_count"], 2);
+    assert_eq!(value["items"][0]["row_id"], 1);
+    assert_eq!(value["items"][1]["row_id"], 2);
+    assert_eq!(value["items"][0]["path"], first.display().to_string());
+    assert_eq!(value["items"][1]["path"], second.display().to_string());
+}
+
+#[test]
+fn audit_plugin_context_serializes_detail_rows() {
+    let first = test_audit_row(
+        1,
+        0,
+        "ExampleA.ma",
+        "Example finding",
+        &["Example evidence"],
+    );
+    let second = test_audit_row(
+        2,
+        0,
+        "ExampleB.ma",
+        "Another finding",
+        &["Another evidence"],
+    );
+    let display_rows = display_audit_rows(vec![first, second]);
+
+    let payload =
+        build_audit_plugin_context(&display_rows, &display_rows[0].key).expect("plugin context");
+    let value = serde_json::to_value(&payload).expect("serialize payload");
+
+    assert_eq!(value["scope"], "detail");
+    assert_eq!(value["selection_count"], 1);
+    assert_eq!(value["items"][0]["scene_name"], "ExampleA.ma");
+    assert_eq!(value["items"][0]["summary"], "Example finding");
+    assert_eq!(value["items"][0]["evidence"][0], "Example evidence");
+}
+
+#[test]
+#[cfg(unix)]
+fn run_plugin_action_writes_context_to_command_stdin() {
+    let dir = tempdir().expect("tmpdir");
+    let output = dir.path().join("plugin-output.json");
+    let action = PluginRegistry::action_for_test(
+        "example.capture",
+        "Capture Context",
+        PluginActionScope::FileList,
+        "sh",
+        vec![
+            "-c".to_string(),
+            "cat > \"$1\"".to_string(),
+            "sh".to_string(),
+            output.display().to_string(),
+        ],
+    );
+    let payload = serde_json::json!({
+        "scope": "file_list",
+        "selection_count": 1,
+        "items": [{"row_id": 1, "path": "asset/example/Example.ma"}]
+    });
+
+    run_plugin_action(&action, &payload).expect("run plugin action");
+
+    let captured = fs::read_to_string(&output).expect("read captured payload");
+    let captured: serde_json::Value = serde_json::from_str(&captured).expect("valid json");
+    assert_eq!(captured["scope"], "file_list");
+    assert_eq!(captured["items"][0]["path"], "asset/example/Example.ma");
+}
+
+#[test]
+#[cfg(unix)]
+fn spawn_plugin_action_does_not_wait_for_slow_stdin_reader() {
+    let dir = tempdir().expect("tmpdir");
+    let output = dir.path().join("plugin-byte-count.txt");
+    let action = PluginRegistry::action_for_test(
+        "example.slow-reader",
+        "Slow Reader",
+        PluginActionScope::FileList,
+        "sh",
+        vec![
+            "-c".to_string(),
+            "sleep 2; wc -c > \"$1\"".to_string(),
+            "sh".to_string(),
+            output.display().to_string(),
+        ],
+    );
+    let payload = serde_json::json!({
+        "scope": "file_list",
+        "selection_count": 1,
+        "items": [{
+            "row_id": 1,
+            "path": "asset/example/Example.ma",
+            "padding": "x".repeat(8 * 1024 * 1024)
+        }]
+    });
+
+    let started = Instant::now();
+    spawn_plugin_action(&action, &payload).expect("spawn plugin action");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "plugin launch should not wait for a slow stdin reader"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !output.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        output.exists(),
+        "plugin should eventually consume the payload"
+    );
 }
 
 #[test]

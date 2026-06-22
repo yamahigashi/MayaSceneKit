@@ -452,6 +452,30 @@ impl TableDelegate for FileTableDelegate {
                 });
             }
         }));
+        let plugin_actions = view
+            .read(cx)
+            .plugin_registry
+            .actions_for_scope(PluginActionScope::FileList);
+        let menu = if plugin_actions.is_empty() {
+            menu
+        } else {
+            let mut menu = menu.separator();
+            for action in plugin_actions {
+                menu = menu.item(PopupMenuItem::new(action.label.clone()).on_click({
+                    let view = view.clone();
+                    let action = action.clone();
+                    let row_id = row.id;
+                    move |_, _, cx| {
+                        let shell = view.read(cx);
+                        let Some(context) = build_file_plugin_context(&shell.rows, row_id) else {
+                            return;
+                        };
+                        let _ = spawn_plugin_action(&action, &context);
+                    }
+                }));
+            }
+            menu
+        };
         if !row.dirty {
             return menu;
         }

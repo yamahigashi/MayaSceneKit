@@ -58,8 +58,12 @@ use maya_scene_kit_observe::scene::{
 };
 use serde::Deserialize;
 
+use self::plugins::{
+    PluginActionScope, PluginRegistry, build_audit_plugin_context, build_file_plugin_context,
+    default_plugin_dir_from_state_path, spawn_plugin_action,
+};
 use crate::{
-    default_analysis_cache_root,
+    default_analysis_cache_root, default_state_path,
     i18n::I18n,
     menu_bar::TopMenuBar,
     model::{
@@ -221,6 +225,7 @@ struct GuiShell {
     path_resolution_filter: BTreeSet<PathResolutionBadge>,
     audit_severity_filter: BTreeSet<AuditSeverityFilter>,
     audit_detail_dialog: Option<AuditDetailDialogState>,
+    plugin_registry: PluginRegistry,
     status_message: Option<BannerMessage>,
     max_bytes_dialog: Option<MaxBytesDialogState>,
     ignore_folder_names_dialog: Option<IgnoreFolderNamesDialogState>,
@@ -1406,6 +1411,7 @@ mod menu;
 mod path;
 mod path_edit;
 mod persist_flush;
+mod plugins;
 mod render;
 mod replace_dialog;
 mod results;
