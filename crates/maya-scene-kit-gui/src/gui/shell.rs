@@ -11,6 +11,7 @@ impl GuiShell {
             cx,
             state,
             default_analysis_cache_root(),
+            Some(default_plugin_dir_from_state_path(&default_state_path())),
         )
     }
 
@@ -22,7 +23,7 @@ impl GuiShell {
         state: PersistedState,
         analysis_cache_root: PathBuf,
     ) -> Self {
-        Self::new_with_state_and_cache_root(menu_bar, window, cx, state, analysis_cache_root)
+        Self::new_with_state_and_cache_root(menu_bar, window, cx, state, analysis_cache_root, None)
     }
 
     fn new_with_state_and_cache_root(
@@ -31,6 +32,7 @@ impl GuiShell {
         cx: &mut Context<Self>,
         mut state: PersistedState,
         analysis_cache_root: PathBuf,
+        plugin_dir: Option<PathBuf>,
     ) -> Self {
         state.normalize_ignore_folder_settings();
         state.active_tab = ResultTab::Overview;
@@ -58,6 +60,10 @@ impl GuiShell {
         let mut next_row_id = 1u64;
         let observe_cache_root = analysis_cache_root.join("observe-v4");
         let audit_cache_root = analysis_cache_root.join("audit-v4");
+        let plugin_registry = plugin_dir
+            .as_ref()
+            .map(|dir| PluginRegistry::load_from_dir(dir))
+            .unwrap_or_default();
         let rows = load_rows_from_state(&state, &mut next_row_id);
         let row_id_to_index = rows
             .iter()
@@ -299,6 +305,7 @@ impl GuiShell {
             path_resolution_filter: default_path_resolution_filter(),
             audit_severity_filter: default_audit_severity_filter(),
             audit_detail_dialog: None,
+            plugin_registry,
             status_message: None,
             max_bytes_dialog: None,
             ignore_folder_names_dialog: None,

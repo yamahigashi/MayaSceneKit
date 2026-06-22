@@ -318,6 +318,28 @@ impl TableDelegate for AuditTableDelegate {
                 }
             }));
         }
+        let plugin_actions = view
+            .read(cx)
+            .plugin_registry
+            .actions_for_scope(PluginActionScope::Detail);
+        if !plugin_actions.is_empty() {
+            menu = menu.separator();
+            for action in plugin_actions {
+                menu = menu.item(PopupMenuItem::new(action.label.clone()).on_click({
+                    let view = view.clone();
+                    let action = action.clone();
+                    let row_key = row.key.clone();
+                    move |_, _, cx| {
+                        let shell = view.read(cx);
+                        let Some(context) = build_audit_plugin_context(&shell.audit_rows, &row_key)
+                        else {
+                            return;
+                        };
+                        let _ = spawn_plugin_action(&action, &context);
+                    }
+                }));
+            }
+        }
         menu
     }
 }
