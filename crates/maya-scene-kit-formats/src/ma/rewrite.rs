@@ -611,7 +611,7 @@ fn last_quoted_literal_range(command: &str) -> Option<(usize, usize)> {
     last_range
 }
 
-fn last_quoted_literal(command: &str) -> Option<String> {
+pub(crate) fn last_quoted_literal(command: &str) -> Option<String> {
     let mut cursor = 0usize;
     let mut last = None;
     while cursor < command.len() {
