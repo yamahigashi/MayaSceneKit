@@ -33,6 +33,53 @@ impl AuditOptions {
     }
 }
 
+/// Default recursion depth limit for reference-graph auditing.
+pub const DEFAULT_REFERENCE_GRAPH_MAX_DEPTH: usize = 64;
+/// Default total scene limit for reference-graph auditing.
+pub const DEFAULT_REFERENCE_GRAPH_MAX_SCENES: usize = 4096;
+
+/// Traversal controls for reference-graph auditing.
+///
+/// The default reproduces the recursive whole-graph walk bounded by the historical
+/// depth and scene safety limits. [`ReferenceGraphOptions::non_recursive`] audits
+/// only the supplied roots: outgoing reference edges are still recorded, but
+/// referenced scenes are not queued or loaded, and skipping them is treated as
+/// intentional rather than a traversal issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceGraphOptions {
+    /// When `false`, audit only the root scenes and do not descend into references.
+    pub recursive: bool,
+    /// Maximum reference depth to descend when `recursive` is `true`.
+    pub max_depth: usize,
+    /// Maximum number of unique scenes to visit when `recursive` is `true`.
+    pub max_scenes: usize,
+}
+
+impl Default for ReferenceGraphOptions {
+    fn default() -> Self {
+        Self {
+            recursive: true,
+            max_depth: DEFAULT_REFERENCE_GRAPH_MAX_DEPTH,
+            max_scenes: DEFAULT_REFERENCE_GRAPH_MAX_SCENES,
+        }
+    }
+}
+
+impl ReferenceGraphOptions {
+    /// Recursive whole-graph traversal with the default safety limits.
+    pub fn recursive_default() -> Self {
+        Self::default()
+    }
+
+    /// Audit only the root scenes without descending into referenced scenes.
+    pub fn non_recursive() -> Self {
+        Self {
+            recursive: false,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditProfile {
@@ -475,7 +522,7 @@ pub struct AuditReport {
     pub findings: Vec<AuditFinding>,
 }
 
-/// Aggregate report returned by recursive reference graph auditing.
+/// Aggregate report returned by reference graph auditing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditGraphReport {
     /// Root scenes supplied by the caller.

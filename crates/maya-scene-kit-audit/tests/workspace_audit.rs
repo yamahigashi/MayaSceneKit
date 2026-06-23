@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use maya_scene_kit_audit::{
     audit::{
         ScriptAuditPlan, audit_observation, audit_reference_graph_roots_with_options_and_digests,
-        audit_script_nodes, audit_script_nodes_with_options, build_script_audit_plan,
+        audit_reference_graph_roots_with_traversal_options_and_digests, audit_script_nodes,
+        audit_script_nodes_with_options, build_script_audit_plan,
     },
     scene::{
         AuditDisposition, AuditFinding, AuditNoticeCode, AuditOptions, AuditReport, AuditSeverity,
-        AuditSinkKind, AuditSurfaceDerivation, AuditTraversalIssueKind,
+        AuditSinkKind, AuditSurfaceDerivation, AuditTraversalIssueKind, ReferenceGraphOptions,
     },
 };
 use maya_scene_kit_observe::scene::{
@@ -1309,6 +1310,33 @@ fn reference_graph_multi_root_audits_shared_child_once_and_preserves_edges() {
         .map(|edge| edge.target_report_index.expect("child report index"))
         .collect::<Vec<_>>();
     assert_eq!(child_edge_indexes[0], child_edge_indexes[1]);
+}
+
+#[test]
+fn reference_graph_non_recursive_records_edges_without_auditing_children() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    write_scene(&dir.path().join("workspace.mel"), "// workspace\n");
+    let root = dir.path().join("root.ma");
+    let child = dir.path().join("child.ma");
+    write_reference_scene(&root, "child.ma", "childRn");
+    write_basic_scene(&child);
+
+    let graph = audit_reference_graph_roots_with_traversal_options_and_digests(
+        [&root],
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+        ReferenceGraphOptions::non_recursive(),
+        false,
+    );
+
+    assert_eq!(graph.roots.len(), 1);
+    assert_eq!(graph.reports.len(), 1);
+    assert_eq!(graph.edges.len(), 1);
+    assert!(graph.traversal_issues.is_empty());
+    assert_eq!(graph.edges[0].raw_target, "child.ma");
+    assert!(graph.edges[0].target_identity.is_some());
+    assert!(graph.edges[0].target_report_index.is_none());
 }
 
 #[test]

@@ -29,8 +29,9 @@ pub mod scene {
             AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile, AuditReferenceEdge,
             AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity,
             AuditSinkKind, AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue,
-            AuditTraversalIssueKind, ScriptAuditReport, StaticAuditFindingDetail,
-            StaticAuditReviewDetail,
+            AuditTraversalIssueKind, DEFAULT_REFERENCE_GRAPH_MAX_DEPTH,
+            DEFAULT_REFERENCE_GRAPH_MAX_SCENES, ReferenceGraphOptions, ScriptAuditReport,
+            StaticAuditFindingDetail, StaticAuditReviewDetail,
         },
     };
 

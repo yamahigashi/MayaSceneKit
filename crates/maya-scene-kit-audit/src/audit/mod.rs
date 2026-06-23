@@ -22,8 +22,9 @@ use crate::scene::{
     AuditReport, AuditSeverity, AuditSinkKind, AuditTraversalIssue, AuditTraversalIssueKind,
     DependencyFact, DependencyRiskClass, EffectCertainty, ExecutionCoverageState,
     ExecutionEffectClass, ExecutionLanguage, ExecutionObservationBundle, ExecutionSemanticClass,
-    ExecutionUnitSummary, LoadOptions, Loader, ObservationBundle, SceneDigestSet, SceneFormat,
-    SceneToolError, StaticAuditFindingDetail, ValidationState, execution::ObservedExecutionCatalog,
+    ExecutionUnitSummary, LoadOptions, Loader, ObservationBundle, ReferenceGraphOptions,
+    SceneDigestSet, SceneFormat, SceneToolError, StaticAuditFindingDetail, ValidationState,
+    execution::ObservedExecutionCatalog,
 };
 
 pub fn build_script_audit_plan(
@@ -389,9 +390,6 @@ pub fn audit_script_nodes(
     )
 }
 
-const DEFAULT_REFERENCE_GRAPH_MAX_DEPTH: usize = 64;
-const DEFAULT_REFERENCE_GRAPH_MAX_SCENES: usize = 4096;
-
 pub fn audit_reference_graph_roots_with_options_and_digests<I, P>(
     roots: I,
     plan: &ScriptAuditPlan,
@@ -403,13 +401,36 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    ReferenceAuditRun::new(plan, load_options, options, include_digests).run(roots)
+    audit_reference_graph_roots_with_traversal_options_and_digests(
+        roots,
+        plan,
+        load_options,
+        options,
+        ReferenceGraphOptions::recursive_default(),
+        include_digests,
+    )
+}
+
+pub fn audit_reference_graph_roots_with_traversal_options_and_digests<I, P>(
+    roots: I,
+    plan: &ScriptAuditPlan,
+    load_options: &LoadOptions,
+    options: AuditOptions,
+    graph_options: ReferenceGraphOptions,
+    include_digests: bool,
+) -> AuditGraphReport
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    ReferenceAuditRun::new(plan, load_options, options, graph_options, include_digests).run(roots)
 }
 
 struct ReferenceAuditRun<'a> {
     plan: &'a ScriptAuditPlan,
     load_options: &'a LoadOptions,
     options: AuditOptions,
+    graph_options: ReferenceGraphOptions,
     include_digests: bool,
     resolver: SceneResourceResolver,
     roots: Vec<AuditGraphRoot>,
@@ -436,12 +457,14 @@ impl<'a> ReferenceAuditRun<'a> {
         plan: &'a ScriptAuditPlan,
         load_options: &'a LoadOptions,
         options: AuditOptions,
+        graph_options: ReferenceGraphOptions,
         include_digests: bool,
     ) -> Self {
         Self {
             plan,
             load_options,
             options,
+            graph_options,
             include_digests,
             resolver: SceneResourceResolver::new(),
             roots: Vec::new(),
@@ -623,7 +646,12 @@ impl<'a> ReferenceAuditRun<'a> {
             (ScenePathResolutionStatus::Exists, Some(child_path)) => {
                 let child_identity = self.resolver.scene_file_identity(child_path);
                 edge.target_identity = Some(child_identity.key.clone());
-                if next_ancestors
+                if !self.graph_options.recursive {
+                    // Non-recursive audits intentionally stop at root-discovered
+                    // outgoing references. Keep the edge metadata for reporting,
+                    // but do not load, queue, or mark the skipped child as an
+                    // uncertainty issue.
+                } else if next_ancestors
                     .iter()
                     .any(|ancestor| ancestor == &child_identity.key)
                 {
@@ -634,7 +662,7 @@ impl<'a> ReferenceAuditRun<'a> {
                         raw_target: Some(raw_target.to_string()),
                         message: "reference cycle detected".to_string(),
                     }));
-                } else if source_depth + 1 > DEFAULT_REFERENCE_GRAPH_MAX_DEPTH {
+                } else if source_depth + 1 > self.graph_options.max_depth {
                     edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
                         kind: AuditTraversalIssueKind::DepthLimit,
                         scene_path: Some(child_path.to_path_buf()),
@@ -642,14 +670,13 @@ impl<'a> ReferenceAuditRun<'a> {
                         raw_target: Some(raw_target.to_string()),
                         message: format!(
                             "reference graph depth limit exceeded: {}",
-                            DEFAULT_REFERENCE_GRAPH_MAX_DEPTH
+                            self.graph_options.max_depth
                         ),
                     }));
                 } else if !self.visited.contains(&child_identity.key)
                     && !self.queued.contains(&child_identity.key)
                 {
-                    if self.visited.len() + self.queued.len() >= DEFAULT_REFERENCE_GRAPH_MAX_SCENES
-                    {
+                    if self.visited.len() + self.queued.len() >= self.graph_options.max_scenes {
                         edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
                             kind: AuditTraversalIssueKind::SceneLimit,
                             scene_path: Some(child_path.to_path_buf()),
@@ -657,7 +684,7 @@ impl<'a> ReferenceAuditRun<'a> {
                             raw_target: Some(raw_target.to_string()),
                             message: format!(
                                 "reference graph scene limit exceeded: {}",
-                                DEFAULT_REFERENCE_GRAPH_MAX_SCENES
+                                self.graph_options.max_scenes
                             ),
                         }));
                     } else {
