@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 use maya_scene_kit_audit::{
-    audit::{audit_reference_graph_roots_with_options_and_digests, build_script_audit_plan},
-    scene::AuditOptions,
+    audit::{
+        audit_reference_graph_roots_with_traversal_options_and_digests, build_script_audit_plan,
+    },
+    scene::{AuditOptions, ReferenceGraphOptions},
 };
 use maya_scene_kit_edit::scene::{
     MaterializeOptions, OperationMode, PathReplaceMode, PathReplaceRule,
@@ -119,15 +121,22 @@ pub(crate) fn audit_json(
     max_preview: usize,
     include_digests: bool,
     node_info_paths: &[String],
+    recursive: bool,
     max_bytes: Option<usize>,
 ) -> Result<Value, SceneToolError> {
     let load_options = load_options(node_info_paths, max_bytes)?;
     let plan = build_script_audit_plan(rules.to_vec(), max_preview)?;
-    let report = audit_reference_graph_roots_with_options_and_digests(
+    let graph_options = if recursive {
+        ReferenceGraphOptions::recursive_default()
+    } else {
+        ReferenceGraphOptions::non_recursive()
+    };
+    let report = audit_reference_graph_roots_with_traversal_options_and_digests(
         [PathBuf::from(path)],
         &plan,
         &load_options,
         AuditOptions::strict_default(),
+        graph_options,
         include_digests,
     );
     Ok(json_map::audit_graph_report(&report))
@@ -326,8 +335,16 @@ mod tests {
     #[test]
     fn audit_json_reports_disposition() {
         let source = repo_root().join("tests/02/sphere.mb");
-        let value =
-            audit_json(&source.display().to_string(), &[], 96, true, &[], None).expect("audit");
+        let value = audit_json(
+            &source.display().to_string(),
+            &[],
+            96,
+            true,
+            &[],
+            true,
+            None,
+        )
+        .expect("audit");
 
         assert!(value["disposition"].is_string());
         assert!(value["notices"].is_array());
@@ -335,10 +352,51 @@ mod tests {
     }
 
     #[test]
+    fn audit_json_can_skip_recursive_reference_auditing() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        std::fs::write(dir.path().join("workspace.mel"), "// workspace\n").expect("workspace");
+        let root = dir.path().join("root.ma");
+        let child = dir.path().join("child.ma");
+        std::fs::write(
+            &root,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "file -r -rfn \"childRN\" \"child.ma\";\n",
+                "createNode reference -n \"childRN\";\n",
+                "    setAttr \".fn\" -type \"string\" \"child.ma\";\n",
+            ),
+        )
+        .expect("root");
+        std::fs::write(
+            &child,
+            concat!("//Maya ASCII 2026 scene\n", "requires maya \"2026\";\n"),
+        )
+        .expect("child");
+
+        let value = audit_json(&root.display().to_string(), &[], 96, true, &[], false, None)
+            .expect("audit");
+
+        assert_eq!(value["scene_count"], 1);
+        assert_eq!(value["edge_count"], 1);
+        assert_eq!(value["traversal_issue_count"], 0);
+        assert_eq!(value["edges"][0]["raw_target"], "child.ma");
+        assert!(value["edges"][0]["target_report_index"].is_null());
+    }
+
+    #[test]
     fn audit_json_returns_blocked_report_for_budget_exceed() {
         let source = repo_root().join("tests/02/sphere.ma");
-        let value = audit_json(&source.display().to_string(), &[], 96, true, &[], Some(1))
-            .expect("budget blocked audit");
+        let value = audit_json(
+            &source.display().to_string(),
+            &[],
+            96,
+            true,
+            &[],
+            true,
+            Some(1),
+        )
+        .expect("budget blocked audit");
 
         assert_eq!(value["disposition"], "review");
         assert_eq!(value["blocked_on_uncertainty"], true);

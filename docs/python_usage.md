@@ -61,7 +61,7 @@ The package currently exports:
 - `dump_scripts(path, max_bytes=None)`
 - `dump_requires(path, max_bytes=None)`
 - `collect_paths(path, kind="all", max_bytes=None)`
-- `audit(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None)`
+- `audit(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None, recursive=True)`
 - `preview_clean(path, max_bytes=None)`
 - `clean(input_path, output_path, max_bytes=None)`
 - `preview_replace(path, rules, max_bytes=None)`
@@ -71,7 +71,10 @@ The package currently exports:
 
 `rules` is a list of literal audit markers. `node_info_paths` accepts additional
 YAML files using the same semantics as the CLI `--node-info` option. Python
-operation mode names use underscores, for example `best_effort`.
+operation mode names use underscores, for example `best_effort`. By default,
+`audit()` recursively audits referenced scene files. Pass `recursive=False` to
+audit only the supplied root scene while still reporting its outgoing reference
+edges.
 
 ## Patterns
 

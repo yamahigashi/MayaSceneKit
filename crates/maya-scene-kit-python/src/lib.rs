@@ -52,7 +52,8 @@ fn collect_paths(
     max_preview = 96,
     include_digests = true,
     node_info_paths = Vec::<String>::new(),
-    max_bytes = None
+    max_bytes = None,
+    recursive = true
 ))]
 fn audit(
     py: Python<'_>,
@@ -62,6 +63,7 @@ fn audit(
     include_digests: bool,
     node_info_paths: Vec<String>,
     max_bytes: Option<usize>,
+    recursive: bool,
 ) -> PyResult<PyObject> {
     value_to_py(
         py,
@@ -71,6 +73,7 @@ fn audit(
             max_preview,
             include_digests,
             &node_info_paths,
+            recursive,
             max_bytes,
         )
         .map_err(scene_tool_error_to_pyerr)?,
