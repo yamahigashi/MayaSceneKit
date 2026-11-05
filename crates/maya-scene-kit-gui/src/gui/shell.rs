@@ -289,6 +289,7 @@ impl GuiShell {
             path_resolution_refresh_state: PathResolutionRefreshState::default(),
             persist_flush_state: PersistFlushState::default(),
             active_path_edit: None,
+            path_search_in_flight: false,
             selected_path_rows: BTreeSet::new(),
             path_selection_anchor: None,
             suppress_next_path_focus_out_clear: false,

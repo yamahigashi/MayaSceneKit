@@ -1867,6 +1867,7 @@ pub(super) fn operation_label_for_job_history(i18n: &I18n, operation: &str) -> S
         "to-ascii" => operation_label(i18n, RowOperation::ToAscii),
         "save" => operation_label(i18n, RowOperation::Save),
         "path-collect" => i18n.text("log.path_collect"),
+        "path-search" => i18n.text("log.path_search"),
         other => other.to_string(),
     }
 }

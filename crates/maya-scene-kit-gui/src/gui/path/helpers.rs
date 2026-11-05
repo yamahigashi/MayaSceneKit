@@ -235,7 +235,26 @@ pub(in crate::gui) fn resolved_target_file_path_for_entry(
     resolved_path.is_file().then_some(resolved_path)
 }
 
-fn effective_path_value_for_entry(row: &SceneRow, entry_index: usize) -> Option<String> {
+pub(in crate::gui) fn missing_path_entry_file_name(
+    row: &SceneRow,
+    entry_index: usize,
+) -> Option<String> {
+    let current_value = effective_path_value_for_entry(row, entry_index)?;
+    let resolution = row
+        .path_resolution(entry_index, &current_value)
+        .cloned()
+        .or_else(|| row.path_resolution_fallback(entry_index, &current_value))?;
+    if !matches!(resolution.status, ScenePathResolutionStatus::Missing) {
+        return None;
+    }
+
+    basename_for_scene_path_value(&current_value).map(ToOwned::to_owned)
+}
+
+pub(in crate::gui) fn effective_path_value_for_entry(
+    row: &SceneRow,
+    entry_index: usize,
+) -> Option<String> {
     let report = row.display_paths_report()?;
     let entry = report.entries.get(entry_index)?;
     Some(
@@ -244,4 +263,10 @@ fn effective_path_value_for_entry(row: &SceneRow, entry_index: usize) -> Option<
             .cloned()
             .unwrap_or_else(|| entry.value.clone()),
     )
+}
+
+fn basename_for_scene_path_value(value: &str) -> Option<&str> {
+    value
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
 }

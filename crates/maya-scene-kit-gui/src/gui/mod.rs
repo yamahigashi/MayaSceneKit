@@ -209,6 +209,7 @@ struct GuiShell {
     path_resolution_refresh_state: PathResolutionRefreshState,
     persist_flush_state: PersistFlushState,
     active_path_edit: Option<Vec<(u64, usize)>>,
+    path_search_in_flight: bool,
     selected_path_rows: BTreeSet<PathEditTargets>,
     path_selection_anchor: Option<PathEditTargets>,
     suppress_next_path_focus_out_clear: bool,
