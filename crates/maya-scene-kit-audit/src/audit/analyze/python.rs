@@ -243,8 +243,9 @@ fn record_maya_uncertainty(
     mut evidence: Vec<AuditEvidence>,
     analysis: &mut SurfaceAnalysis,
 ) {
-    use crate::scene::UnknownSemanticFact;
     use maya_scene_kit_observe::scene::evidence::UnknownSemanticDetail;
+
+    use crate::scene::UnknownSemanticFact;
 
     evidence.push(AuditEvidence::FreeText {
         value: reason.clone(),
