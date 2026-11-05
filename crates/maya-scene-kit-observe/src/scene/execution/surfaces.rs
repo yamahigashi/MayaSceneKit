@@ -7,8 +7,8 @@ use maya_scene_kit_formats::{
 
 use crate::{
     mb::{
-        MbParseBudget, parse_section_chunks_with_hints, resolve_section_layout_hints,
-        visit_group_chunks_with_layout_with_budget,
+        FourCC, LayoutHints, MbParseBudget, parse_section_chunks_with_hints,
+        resolve_section_layout_hints, visit_group_chunks_with_layout_with_budget,
     },
     scene::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
@@ -552,119 +552,112 @@ fn collect_mb_coverage(
     let mut coverage_issues = Vec::new();
     let dispatcher = DecoderDispatcher::new(registry);
 
-    for child in &mb.root.children {
-        let form = child.form_type.clone().unwrap_or_default();
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &child.tag,
-            child.form_type.as_deref(),
-            child.child_alignment,
-            child.child_header_size,
+    for child in mb.root().children() {
+        let form = child.form_type().map(|f| f.to_string()).unwrap_or_default();
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let payload = &mb.data[child.payload_offset..child.payload_end];
+        let child_alignment = hints.alignment().map(|a| a.get());
+        let child_header_size = hints.header_format().map(|f| f.header_size());
+        let payload = &mb.data()[child.payload_offset()..child.payload_end()];
         let inner_data = if payload.len() >= 4 {
             &payload[4..]
         } else {
             &[]
         };
 
-        visit_group_chunks_with_layout_with_budget(
-            inner_data,
-            child_alignment,
-            child_header_size,
-            2,
-            budget,
-            |chunk| {
-                if raw_chunk_form_is_known_benign_container(form.as_str()) {
-                    return;
-                }
-                if !raw_chunk_tag_may_contain_execution_text(
-                    chunk.tag.as_str(),
-                    chunk.payload_span.len(),
-                ) {
-                    return;
-                }
-                let raw = RawChunkRecord {
-                    chunk_ref: ChunkRef {
-                        form: form.clone(),
-                        tag: chunk.tag,
-                        node_offset: child.offset,
-                        parent_tag: Some(child.tag.clone()),
-                        chunk_aux: Some(chunk.aux),
-                        child_alignment,
-                        child_header_size,
-                        payload_size: chunk.payload_span.len(),
+        visit_group_chunks_with_layout_with_budget(inner_data, hints, 2, budget, |chunk| {
+            if raw_chunk_form_is_known_benign_container(form.as_str()) {
+                return;
+            }
+            if !raw_chunk_tag_may_contain_execution_text(chunk.tag(), chunk.payload_span().len()) {
+                return;
+            }
+            let raw = RawChunkRecord {
+                chunk_ref: ChunkRef {
+                    form: form.clone(),
+                    tag: chunk.tag().to_string(),
+                    node_offset: child.offset(),
+                    parent_tag: Some(child.tag().to_string()),
+                    chunk_aux: Some(chunk.aux()),
+                    child_alignment,
+                    child_header_size,
+                    payload_size: chunk.payload_span().len(),
+                },
+                payload_span: chunk.payload_span().offset(child.payload_offset() + 4),
+            };
+            let chunk_payload = raw.payload(mb.data());
+            let decoded = dispatcher.decode_with_quality(
+                &raw.chunk_ref.form,
+                &raw.chunk_ref.tag,
+                chunk_payload,
+                raw.chunk_ref.node_offset,
+                raw.chunk_ref.chunk_aux,
+                raw.chunk_ref.child_alignment,
+                raw.chunk_ref.child_header_size,
+                Some(raw.chunk_ref.form.as_str()),
+                raw.chunk_ref.parent_tag.as_deref(),
+            );
+            if decoded.quality != SchemaDecodeAttemptResult::Failed {
+                return;
+            }
+            if !decoded
+                .events
+                .iter()
+                .all(|event| matches!(event, DecodedEvent::Unknown(_)))
+            {
+                return;
+            }
+            let Some(text) = decode_raw_chunk_text(raw.chunk_ref.tag.as_str(), chunk_payload)
+            else {
+                return;
+            };
+            let marker = first_payload_audit_marker(chunk_payload)
+                .filter(|_| contains_any_audit_marker(&text));
+            let (kind, detail) = if let Some(marker) = marker {
+                (
+                    ExecutionCoverageIssueKind::UnknownRawMbPayload,
+                    ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker },
+                )
+            } else {
+                (
+                    ExecutionCoverageIssueKind::UnexplainedRawMbPayload,
+                    ExecutionCoverageIssueDetail::UnexplainedRawMbPayload {
+                        reason: format!(
+                            "undecoded text-like MB payload in {}:{}",
+                            raw.chunk_ref.form, raw.chunk_ref.tag
+                        ),
                     },
-                    payload_span: chunk.payload_span.offset(child.payload_offset + 4),
-                };
-                let chunk_payload = raw.payload(mb.data.as_ref());
-                let decoded = dispatcher.decode_with_quality(
-                    &raw.chunk_ref.form,
-                    &raw.chunk_ref.tag,
-                    chunk_payload,
-                    raw.chunk_ref.node_offset,
-                    raw.chunk_ref.chunk_aux,
-                    raw.chunk_ref.child_alignment,
-                    raw.chunk_ref.child_header_size,
-                    Some(raw.chunk_ref.form.as_str()),
-                    raw.chunk_ref.parent_tag.as_deref(),
-                );
-                if decoded.quality != SchemaDecodeAttemptResult::Failed {
-                    return;
-                }
-                if !decoded
-                    .events
-                    .iter()
-                    .all(|event| matches!(event, DecodedEvent::Unknown(_)))
-                {
-                    return;
-                }
-                let Some(text) = decode_raw_chunk_text(raw.chunk_ref.tag.as_str(), chunk_payload)
-                else {
-                    return;
-                };
-                let marker = first_payload_audit_marker(chunk_payload)
-                    .filter(|_| contains_any_audit_marker(&text));
-                let (kind, detail) = if let Some(marker) = marker {
-                    (
-                        ExecutionCoverageIssueKind::UnknownRawMbPayload,
-                        ExecutionCoverageIssueDetail::UnknownRawMbPayload { marker },
-                    )
-                } else {
-                    (
-                        ExecutionCoverageIssueKind::UnexplainedRawMbPayload,
-                        ExecutionCoverageIssueDetail::UnexplainedRawMbPayload {
-                            reason: format!(
-                                "undecoded text-like MB payload in {}:{}",
-                                raw.chunk_ref.form, raw.chunk_ref.tag
-                            ),
-                        },
-                    )
-                };
+                )
+            };
 
-                coverage_issues.push(ExecutionCoverageIssueRecord {
-                    kind,
-                    detail,
-                    origin: Some(ExecutionOrigin {
-                        lang: ExecutionLanguage::Unknown,
-                        trigger: ExecutionTrigger::FileOpen,
-                        surface_kind: ExecutionSurfaceKind::RawChunkText,
-                        node_name: None,
-                        attr_name: None,
-                        source_range: None,
-                        source_kind: Some(format!("{}:{}", raw.chunk_ref.form, raw.chunk_ref.tag)),
-                        chunk_form: Some(raw.chunk_ref.form.clone()),
-                        chunk_tag: Some(raw.chunk_ref.tag.clone()),
-                        chunk_node_offset: Some(raw.chunk_ref.node_offset),
-                        chunk_aux: raw.chunk_ref.chunk_aux,
-                        chunk_payload_offset: Some(raw.payload_span.start),
-                        chunk_payload_size: Some(raw.payload_span.len()),
-                        chunk_child_alignment: raw.chunk_ref.child_alignment,
-                        chunk_child_header_size: raw.chunk_ref.child_header_size,
-                    }),
-                    preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
-                });
-            },
-        )?;
+            coverage_issues.push(ExecutionCoverageIssueRecord {
+                kind,
+                detail,
+                origin: Some(ExecutionOrigin {
+                    lang: ExecutionLanguage::Unknown,
+                    trigger: ExecutionTrigger::FileOpen,
+                    surface_kind: ExecutionSurfaceKind::RawChunkText,
+                    node_name: None,
+                    attr_name: None,
+                    source_range: None,
+                    source_kind: Some(format!("{}:{}", raw.chunk_ref.form, raw.chunk_ref.tag)),
+                    chunk_form: Some(raw.chunk_ref.form.clone()),
+                    chunk_tag: Some(raw.chunk_ref.tag.clone()),
+                    chunk_node_offset: Some(raw.chunk_ref.node_offset),
+                    chunk_aux: raw.chunk_ref.chunk_aux,
+                    chunk_payload_offset: Some(raw.payload_span.start),
+                    chunk_payload_size: Some(raw.payload_span.len()),
+                    chunk_child_alignment: raw.chunk_ref.child_alignment,
+                    chunk_child_header_size: raw.chunk_ref.child_header_size,
+                }),
+                preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
+            });
+        })?;
     }
 
     Ok(ExecutionCoverageCollection {
@@ -680,38 +673,40 @@ fn collect_mb_native_script_surfaces(
     let mut surfaces = Vec::new();
     let mut seen = HashSet::new();
 
-    for child in &mb.root.children {
-        let Some(form_type) = child.form_type.as_deref() else {
+    for child in mb.root().children() {
+        let Some(form_type) = child.form_type().map(|f| f.to_string()) else {
             continue;
         };
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &child.tag,
-            child.form_type.as_deref(),
-            child.child_alignment,
-            child.child_header_size,
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let payload = &mb.data[child.payload_offset..child.payload_end];
+        let child_alignment = hints.alignment().map(|a| a.get());
+        let child_header_size = hints.header_format().map(|f| f.header_size());
+        let payload = &mb.data()[child.payload_offset()..child.payload_end()];
         if payload.len() < 4 || &payload[..4] != form_type.as_bytes() {
             continue;
         }
 
         let mut selected_node_name = None;
-        let node_type = form_typeid(form_type)
+        let node_type = form_typeid(&form_type)
             .and_then(|typeid| execution_semantics.node_type_for_typeid(typeid));
         let mut node_type = node_type.map(str::to_string);
         if form_type == "SLCT" {
-            let selected =
-                parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size)
-                    .chunks
-                    .iter()
-                    .find_map(|chunk| {
-                        if chunk.tag != "SLCT" {
-                            return None;
-                        }
-                        let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
-                        let trimmed = text.trim_matches(char::from(0)).trim();
-                        (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
-                    });
+            let selected = parse_section_chunks_with_hints(&payload[4..], hints)
+                .chunks()
+                .iter()
+                .find_map(|chunk| {
+                    if chunk.tag() != "SLCT" {
+                        return None;
+                    }
+                    let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
+                    let trimmed = text.trim_matches(char::from(0)).trim();
+                    (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
+                });
             node_type = node_type.or_else(|| {
                 selected
                     .as_deref()
@@ -724,9 +719,8 @@ fn collect_mb_native_script_surfaces(
             .as_deref()
             .map(|node_type| execution_semantics.profiles_for_node(node_type))
             .unwrap_or(&[]);
-        let parsed =
-            parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
-        let mut node_name = format!("<{}@0x{:X}>", form_type, child.offset);
+        let parsed = parse_section_chunks_with_hints(&payload[4..], hints);
+        let mut node_name = format!("<{}@0x{:X}>", form_type, child.offset());
         if let Some(selected_node_name) = &selected_node_name {
             node_name = selected_node_name.clone();
         } else if let Some(decoded_node_name) =
@@ -742,8 +736,8 @@ fn collect_mb_native_script_surfaces(
         let mut source_type = None;
         let mut attr_values = Vec::<(String, Vec<u8>)>::new();
 
-        for chunk in parsed.chunks {
-            if chunk.tag == "CREA" {
+        for chunk in parsed.into_chunks() {
+            if chunk.tag() == "CREA" {
                 continue;
             }
 
@@ -792,7 +786,7 @@ fn collect_mb_native_script_surfaces(
                             format!("{body_attr}:{body}"),
                             lang.as_str(),
                             trigger.as_str(),
-                            child.offset,
+                            child.offset(),
                         );
                         if !seen.insert(key) {
                             continue;
@@ -809,7 +803,7 @@ fn collect_mb_native_script_surfaces(
                                 source_kind: source_kind.clone(),
                                 chunk_form: Some(form_type.to_string()),
                                 chunk_tag: Some("STR ".to_string()),
-                                chunk_node_offset: Some(child.offset),
+                                chunk_node_offset: Some(child.offset()),
                                 ..ExecutionOrigin::without_chunk_address()
                             },
                             requires_mel_modeling: true,
@@ -832,7 +826,7 @@ fn collect_mb_native_script_surfaces(
                             format!("{}:{body}", callback_attr.short_name),
                             profile.default_language.as_str(),
                             profile.default_trigger.as_str(),
-                            child.offset,
+                            child.offset(),
                         );
                         if !seen.insert(key) {
                             continue;
@@ -849,7 +843,7 @@ fn collect_mb_native_script_surfaces(
                                 source_kind: Some(callback_attr.display_name.clone()),
                                 chunk_form: Some(form_type.to_string()),
                                 chunk_tag: Some("STR ".to_string()),
-                                chunk_node_offset: Some(child.offset),
+                                chunk_node_offset: Some(child.offset()),
                                 ..ExecutionOrigin::without_chunk_address()
                             },
                             requires_mel_modeling: true,
@@ -873,7 +867,7 @@ fn collect_mb_native_script_surfaces(
                 format!("{attr_name}:{body}"),
                 ExecutionLanguage::Mel.as_str(),
                 generic_execution_attr_trigger(attr_name).as_str(),
-                child.offset,
+                child.offset(),
             );
             if !seen.insert(key) {
                 continue;
@@ -890,7 +884,7 @@ fn collect_mb_native_script_surfaces(
                     source_kind: Some(attr_name.clone()),
                     chunk_form: Some(form_type.to_string()),
                     chunk_tag: Some("STR ".to_string()),
-                    chunk_node_offset: Some(child.offset),
+                    chunk_node_offset: Some(child.offset()),
                     ..ExecutionOrigin::without_chunk_address()
                 },
                 requires_mel_modeling: true,
@@ -1024,12 +1018,12 @@ fn decode_raw_chunk_text(tag: &str, payload: &[u8]) -> Option<String> {
     decode_text_like_payload(payload)
 }
 
-fn raw_chunk_tag_may_contain_execution_text(tag: &str, payload_len: usize) -> bool {
-    match tag {
-        "STR " => true,
+fn raw_chunk_tag_may_contain_execution_text(tag: FourCC, payload_len: usize) -> bool {
+    match tag.as_ascii() {
+        Some("STR ") => true,
         // Reference/path inventory chunks can contain words such as "Source" in
         // exporter metadata, but they are dependency evidence rather than code.
-        "FRDI" | "FREF" | "RTFT" => false,
+        Some("FRDI") | Some("FREF") | Some("RTFT") => false,
         _ => payload_len <= MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES,
     }
 }
@@ -1174,7 +1168,7 @@ fn clamp_char_boundary(text: &str, mut index: usize) -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use maya_scene_kit_formats::{ma, mel};
+    use maya_scene_kit_formats::{ma, mb::FourCC, mel};
 
     use super::{
         MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES, collect_execution_coverage_from_ma_parts,
@@ -1534,11 +1528,11 @@ mod tests {
         payload.extend_from_slice(b"source \"tools/startup.mel\"");
 
         assert!(!raw_chunk_tag_may_contain_execution_text(
-            "DATA",
+            FourCC::new(*b"DATA"),
             payload.len()
         ));
         assert!(raw_chunk_tag_may_contain_execution_text(
-            "STR ",
+            FourCC::new(*b"STR "),
             payload.len()
         ));
         assert!(decode_raw_chunk_text("DATA", &payload).is_none());
@@ -1546,7 +1540,11 @@ mod tests {
 
     #[test]
     fn reference_metadata_chunks_are_not_raw_execution_candidates() {
-        for tag in ["FRDI", "FREF", "RTFT"] {
+        for tag in [
+            FourCC::new(*b"FRDI"),
+            FourCC::new(*b"FREF"),
+            FourCC::new(*b"RTFT"),
+        ] {
             assert!(!raw_chunk_tag_may_contain_execution_text(tag, 128));
         }
     }
@@ -1558,7 +1556,7 @@ mod tests {
 
         assert!(first_payload_audit_marker(&payload).is_some());
         assert!(raw_chunk_tag_may_contain_execution_text(
-            "STR ",
+            FourCC::new(*b"STR "),
             payload.len()
         ));
         assert!(decode_raw_chunk_text("STR ", &payload).is_none());

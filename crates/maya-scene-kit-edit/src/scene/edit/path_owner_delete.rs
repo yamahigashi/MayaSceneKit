@@ -118,7 +118,7 @@ impl PatchPlanner {
                 )));
             }
             let (rewritten, removed) =
-                crate::mb::remove_root_forms_from_mb_by_locator(&mb.data, &mb.root, &owner_forms);
+                crate::mb::remove_root_forms_from_mb_by_locator(mb.data(), mb.root(), &owner_forms);
             if removed.is_empty() {
                 return Err(SceneToolError::Message(format!(
                     "no matching path owner forms found in {}",

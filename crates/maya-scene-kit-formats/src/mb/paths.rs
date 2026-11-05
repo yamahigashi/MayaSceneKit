@@ -9,8 +9,8 @@ use std::{
 
 use crate::{
     mb::{
-        Chunk, MayaBinaryFile, encode_root_chunk, parse_section_chunks_with_hints,
-        resolve_section_layout_hints,
+        Chunk, FourCC, LayoutHints, MayaBinaryFile, encode_root_chunk,
+        parse_section_chunks_with_hints, resolve_section_layout_hints,
     },
     reference_semantics::{
         ScenePathAttrKind, classify_scene_path_attr, normalize_reference_file_type_token,
@@ -56,20 +56,23 @@ pub struct MbRtftOwnerTrace {
 
 pub fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> Vec<String> {
     let mut names = Vec::new();
-    for child in &root.children {
-        if child.form_type.as_deref() != Some("SCRP") {
+    for child in root.children() {
+        if child.form_type().is_none_or(|f| f != "SCRP") {
             continue;
         }
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &child.tag,
-            child.form_type.as_deref(),
-            child.child_alignment,
-            child.child_header_size,
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let payload = &data[child.payload_offset..child.payload_end];
+        let child_alignment = hints.alignment().map(|a| a.get());
+        let child_header_size = hints.header_format().map(|f| f.header_size());
+        let payload = &data[child.payload_offset()..child.payload_end()];
         let name =
             extract_mb_script_node_name_with_layout(payload, child_alignment, child_header_size)
-                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset));
+                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
         names.push(name);
     }
     names
@@ -79,20 +82,23 @@ pub fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, S
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for child in &mb.root.children {
-        if child.form_type.as_deref() != Some("SCRP") {
+    for child in mb.root().children() {
+        if child.form_type().is_none_or(|f| f != "SCRP") {
             continue;
         }
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &child.tag,
-            child.form_type.as_deref(),
-            child.child_alignment,
-            child.child_header_size,
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let payload = &mb.data[child.payload_offset..child.payload_end];
+        let child_alignment = hints.alignment().map(|a| a.get());
+        let child_header_size = hints.header_format().map(|f| f.header_size());
+        let payload = &mb.data()[child.payload_offset()..child.payload_end()];
         let name =
             extract_mb_script_node_name_with_layout(payload, child_alignment, child_header_size)
-                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset));
+                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
         let body =
             extract_script_body_from_scrp_with_layout(payload, child_alignment, child_header_size);
         if seen.insert((name.clone(), body.clone())) {
@@ -120,20 +126,23 @@ pub fn locate_raw_script_node_forms_in_mb_by_name(
     let mut removed_locators = Vec::new();
     let mut removed_names = Vec::new();
 
-    for child in &root.children {
-        if child.form_type.as_deref() != Some("SCRP") {
+    for child in root.children() {
+        if child.form_type().is_none_or(|f| f != "SCRP") {
             continue;
         }
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &child.tag,
-            child.form_type.as_deref(),
-            child.child_alignment,
-            child.child_header_size,
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let payload = &data[child.payload_offset..child.payload_end];
+        let child_alignment = hints.alignment().map(|a| a.get());
+        let child_header_size = hints.header_format().map(|f| f.header_size());
+        let payload = &data[child.payload_offset()..child.payload_end()];
         let name =
             extract_mb_script_node_name_with_layout(payload, child_alignment, child_header_size)
-                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset));
+                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
         let payload_text = String::from_utf8_lossy(payload);
         let matched_target = targets
             .iter()
@@ -142,7 +151,7 @@ pub fn locate_raw_script_node_forms_in_mb_by_name(
         if !target_all && matched_target.is_none() {
             continue;
         }
-        removed_locators.push(("SCRP".to_string(), child.offset));
+        removed_locators.push(("SCRP".to_string(), child.offset()));
         removed_names.push(matched_target.unwrap_or(name.as_str()).to_string());
     }
 
@@ -154,7 +163,7 @@ pub fn remove_root_forms_from_mb_by_locator(
     root: &Chunk,
     target_forms: &[(String, usize)],
 ) -> (Vec<u8>, Vec<(String, usize)>) {
-    let children = &root.children;
+    let children = root.children();
     if children.is_empty() {
         return (data.to_vec(), vec![]);
     }
@@ -172,19 +181,20 @@ pub fn remove_root_forms_from_mb_by_locator(
 
     for (idx, child) in children.iter().enumerate() {
         let next_offset = if idx + 1 < children.len() {
-            children[idx + 1].offset
+            children[idx + 1].offset()
         } else {
-            root.payload_end
+            root.payload_end()
         };
-        let child_form = child.form_type.as_deref();
-        let matched = child_form
-            .map(|form| (form, child.offset))
+        let rendered = child.form_type().map(|f| f.to_string());
+        let matched = rendered
+            .as_deref()
+            .map(|form| (form, child.offset()))
             .filter(|locator| targets.contains(locator));
         if let Some((form, node_offset)) = matched {
             removed.push((form.to_string(), node_offset));
             continue;
         }
-        kept_spans.push((child.offset, next_offset));
+        kept_spans.push((child.offset(), next_offset));
     }
 
     if removed.is_empty() {
@@ -215,7 +225,7 @@ pub fn remove_raw_script_nodes_from_mb_by_name(
 }
 
 pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEntry> {
-    extract_raw_scene_paths_from_mb_parts(&mb.data, &mb.root)
+    extract_raw_scene_paths_from_mb_parts(mb.data(), mb.root())
 }
 
 pub(crate) fn extract_raw_scene_paths_from_mb_parts(
@@ -241,20 +251,22 @@ pub(crate) fn extract_raw_scene_path_records_from_mb_parts(
 ) -> Vec<MbScenePathEntry> {
     let mut out = Vec::new();
 
-    for child in &root.children {
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &child.tag,
-            child.form_type.as_deref(),
-            child.child_alignment,
-            child.child_header_size,
+    for child in root.children() {
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let form = child.form_type.as_deref().unwrap_or("");
-        let payload = &data[child.payload_offset..child.payload_end];
+        let child_alignment = hints.alignment().map(|a| a.get());
+        let child_header_size = hints.header_format().map(|f| f.header_size());
+        let payload = &data[child.payload_offset()..child.payload_end()];
 
-        if form == "FREF" {
+        if child.form_type().is_some_and(|f| f == "FREF") {
             for e in extract_reference_entries_from_fref_payload(
                 payload,
-                child.offset,
+                child.offset(),
                 child_alignment,
                 child_header_size,
             ) {
@@ -262,10 +274,10 @@ pub(crate) fn extract_raw_scene_path_records_from_mb_parts(
             }
             continue;
         }
-        if form == "FRDI" {
+        if child.form_type().is_some_and(|f| f == "FRDI") {
             for e in extract_reference_entries_from_frdi_payload(
                 payload,
-                child.offset,
+                child.offset(),
                 child_alignment,
                 child_header_size,
             ) {
@@ -273,13 +285,13 @@ pub(crate) fn extract_raw_scene_path_records_from_mb_parts(
             }
             continue;
         }
-        if form == "RTFT" {
+        if child.form_type().is_some_and(|f| f == "RTFT") {
             for e in extract_file_entries_from_rtft_payload(
                 payload,
-                child.offset,
+                child.offset(),
                 child_alignment,
                 child_header_size,
-                Some(child.tag.as_str()),
+                Some(&child.tag().to_string()),
             ) {
                 out.push(e);
             }
@@ -324,52 +336,50 @@ pub fn collect_rtft_owner_traces_from_mb(mb: &MayaBinaryFile) -> Vec<MbRtftOwner
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for child in &mb.root.children {
-        if child.form_type.as_deref() != Some("RTFT") {
+    for child in mb.root().children() {
+        if child.form_type().is_none_or(|f| f != "RTFT") {
             continue;
         }
         let Some(node_name) = child
-            .children
+            .children()
             .iter()
-            .find(|chunk| chunk.tag == "CREA")
+            .find(|chunk| chunk.tag() == "CREA")
             .and_then(|chunk| extract_node_name_from_crea_payload(mb.payload(chunk)))
         else {
             continue;
         };
         let trace_tag = child
-            .children
+            .children()
             .iter()
             .find_map(|chunk| {
-                decode_string_attr_from_rtft_chunk(
-                    &chunk.tag,
-                    mb.payload(chunk),
-                    Some(chunk.aux),
-                    Some(child.tag.as_str()),
+                decode_string_attr_from_rtft_chunk(mb.payload(chunk), Some(chunk.aux())).and_then(
+                    |(attr_name, _value)| {
+                        matches!(
+                            classify_scene_path_attr(&attr_name),
+                            Some(ScenePathAttrKind::FileTexturePath)
+                        )
+                        .then(|| chunk.tag().to_string())
+                    },
                 )
-                .and_then(|(attr_name, _value)| {
-                    matches!(
-                        classify_scene_path_attr(&attr_name),
-                        Some(ScenePathAttrKind::FileTexturePath)
-                    )
-                    .then(|| chunk.tag.clone())
-                })
             })
             .or_else(|| {
                 child
-                    .children
+                    .children()
                     .iter()
-                    .find_map(|chunk| (chunk.tag == "STR ").then(|| chunk.tag.clone()))
+                    .find_map(|chunk| (chunk.tag() == "STR ").then(|| chunk.tag().to_string()))
             });
 
-        let key = (node_name.clone(), child.offset);
+        let key = (node_name.clone(), child.offset());
         if seen.insert(key) {
             out.push(MbRtftOwnerTrace {
                 node_name,
                 trace_form: "RTFT".to_string(),
                 trace_tag,
-                trace_node_offset: child.offset,
-                trace_child_alignment: child.child_alignment,
-                trace_child_header_size: child.child_header_size,
+                trace_node_offset: child.offset(),
+                trace_child_alignment: child.child_layout().map(|layout| layout.alignment_usize()),
+                trace_child_header_size: child
+                    .child_layout()
+                    .map(|layout| layout.header_format().header_size()),
             });
         }
     }
@@ -396,9 +406,12 @@ pub fn extract_mb_form_node_name_with_layout(
     if payload.len() < 4 {
         return None;
     }
-    let parsed = parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
-    for chunk in parsed.chunks {
-        if chunk.tag == "CREA" {
+    let parsed = parse_section_chunks_with_hints(
+        &payload[4..],
+        LayoutHints::from_numeric(child_alignment, child_header_size),
+    );
+    for chunk in parsed.into_chunks() {
+        if chunk.tag() == "CREA" {
             if let Some(name) = decode_crea_name_from_payload(chunk.payload(&payload[4..])) {
                 return Some(name);
             }
@@ -434,9 +447,12 @@ fn extract_script_body_from_scrp_with_layout(
         return String::new();
     }
     let mut bodies = Vec::new();
-    let parsed = parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
-    for chunk in parsed.chunks {
-        if chunk.tag != "STR " {
+    let parsed = parse_section_chunks_with_hints(
+        &payload[4..],
+        LayoutHints::from_numeric(child_alignment, child_header_size),
+    );
+    for chunk in parsed.into_chunks() {
+        if chunk.tag() != "STR " {
             continue;
         }
         if let Some((attr_name, _, value)) = decode_attr_triplet(chunk.payload(&payload[4..])) {
@@ -456,14 +472,17 @@ fn extract_file_entries_from_rtft_payload(
     offset: usize,
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
-    parent_tag: Option<&str>,
+    _parent_tag: Option<&str>,
 ) -> Vec<MbScenePathEntry> {
     if payload.len() < 4 {
         return Vec::new();
     }
     let inner = &payload[4..];
-    let parsed = parse_section_chunks_with_hints(inner, child_alignment, child_header_size);
-    if parsed.chunks.is_empty() {
+    let parsed = parse_section_chunks_with_hints(
+        inner,
+        LayoutHints::from_numeric(child_alignment, child_header_size),
+    );
+    if parsed.chunks().is_empty() {
         return Vec::new();
     }
 
@@ -472,23 +491,22 @@ fn extract_file_entries_from_rtft_payload(
     let mut paths: Vec<(String, usize)> = Vec::new();
     let mut attrs: Vec<String> = Vec::new();
 
-    for chunk in &parsed.chunks {
+    for chunk in parsed.chunks() {
         let raw = chunk.payload(inner);
-        if chunk.tag == "CREA" {
+        if chunk.tag() == "CREA" {
             if let Some(n) = extract_node_name_from_crea_payload(raw) {
                 node_name = n;
             }
             continue;
         }
-        let Some((attr_name, value)) =
-            decode_string_attr_from_rtft_chunk(&chunk.tag, raw, Some(chunk.aux), parent_tag)
+        let Some((attr_name, value)) = decode_string_attr_from_rtft_chunk(raw, Some(chunk.aux()))
         else {
             continue;
         };
 
         match classify_scene_path_attr(&attr_name) {
             Some(ScenePathAttrKind::FileTexturePath) => {
-                paths.push((value.clone(), chunk.chunk_start));
+                paths.push((value.clone(), chunk.chunk_start()));
             }
             Some(ScenePathAttrKind::FileTextureColorSpace) => color_space = Some(value.clone()),
             _ => {}
@@ -547,17 +565,20 @@ fn extract_reference_entries_from_fref_payload(
         return Vec::new();
     }
     let inner = &payload[4..];
-    let parsed = parse_section_chunks_with_hints(inner, child_alignment, child_header_size);
+    let parsed = parse_section_chunks_with_hints(
+        inner,
+        LayoutHints::from_numeric(child_alignment, child_header_size),
+    );
 
     let mut out = Vec::new();
-    for chunk in parsed.chunks {
-        if chunk.tag != "FREF" {
+    for chunk in parsed.into_chunks() {
+        if chunk.tag() != "FREF" {
             continue;
         }
         if let Some(entry) = decode_reference_from_fref_chunk(
             chunk.payload(inner),
             offset,
-            chunk.chunk_start,
+            chunk.chunk_start(),
             child_alignment,
             child_header_size,
         ) {
@@ -577,17 +598,20 @@ fn extract_reference_entries_from_frdi_payload(
         return Vec::new();
     }
     let inner = &payload[4..];
-    let parsed = parse_section_chunks_with_hints(inner, child_alignment, child_header_size);
+    let parsed = parse_section_chunks_with_hints(
+        inner,
+        LayoutHints::from_numeric(child_alignment, child_header_size),
+    );
 
     let mut out = Vec::new();
-    for chunk in parsed.chunks {
-        if chunk.tag != "FRDI" {
+    for chunk in parsed.into_chunks() {
+        if chunk.tag() != "FRDI" {
             continue;
         }
         if let Some(entry) = decode_reference_from_frdi_chunk(
             chunk.payload(inner),
             offset,
-            chunk.chunk_start,
+            chunk.chunk_start(),
             child_alignment,
             child_header_size,
         ) {
@@ -760,10 +784,8 @@ fn decode_attr_triplet(payload: &[u8]) -> Option<(String, u8, Vec<u8>)> {
 }
 
 fn decode_string_attr_from_rtft_chunk(
-    _tag: &str,
     payload: &[u8],
     _chunk_aux: Option<u32>,
-    _parent_tag: Option<&str>,
 ) -> Option<(String, String)> {
     decode_attr_triplet(payload).and_then(|(attr_name, _kind, value_raw)| {
         let value = decode_raw_string_value(&value_raw);
@@ -847,12 +869,13 @@ fn encode_root_chunk_with_kept_spans(
     root: &Chunk,
     kept_spans: &[(usize, usize)],
 ) -> Option<Vec<u8>> {
-    let root_form = root.form_type.as_deref().unwrap_or("Maya").as_bytes();
+    let root_form_owned = root.form_type().unwrap_or(FourCC::new(*b"Maya"));
+    let root_form = root_form_owned.as_bytes();
     let mut payload_parts: Vec<u8> = Vec::new();
     payload_parts.extend_from_slice(root_form);
 
-    let first_child_start = root.children.first().map(|child| child.offset)?;
-    let prefix_start = root.payload_offset + 4;
+    let first_child_start = root.children().first().map(|child| child.offset())?;
+    let prefix_start = root.payload_offset() + 4;
     if first_child_start > prefix_start {
         payload_parts.extend_from_slice(&data[prefix_start..first_child_start]);
     }
@@ -860,12 +883,12 @@ fn encode_root_chunk_with_kept_spans(
         payload_parts.extend_from_slice(&data[*start..*end]);
     }
 
-    encode_root_chunk(root, &payload_parts)
+    encode_root_chunk(root, &payload_parts).ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, num::NonZeroUsize, path::PathBuf};
 
     use tempfile::tempdir;
 
@@ -876,8 +899,8 @@ mod tests {
         parse_fref_record, remove_root_forms_from_mb_by_locator,
     };
     use crate::mb::{
-        parse_file, paths::extract_raw_scene_paths_from_mb, rewrite::encode_chunk,
-        section::SectionHeaderFormat,
+        ChunkLayout, FourCC, HeaderFormat, parse_file, paths::extract_raw_scene_paths_from_mb,
+        rewrite::encode_chunk,
     };
 
     fn repo_root() -> PathBuf {
@@ -891,19 +914,29 @@ mod tests {
         inner_tail: &[u8],
     ) -> Vec<u8> {
         let mut inner = encode_chunk(
-            inner_chunk_tag,
+            inner_chunk_tag.parse::<FourCC>().expect("4-byte tag"),
             0,
             inner_chunk_payload,
-            8,
-            SectionHeaderFormat::EightByte,
+            ChunkLayout::new(
+                NonZeroUsize::new(8).expect("nonzero alignment"),
+                HeaderFormat::EightByte,
+            ),
         )
         .expect("inner chunk");
         inner.extend_from_slice(inner_tail);
 
         let mut child_payload = form.as_bytes().to_vec();
         child_payload.extend_from_slice(&inner);
-        let child = encode_chunk("FOR8", 0, &child_payload, 8, SectionHeaderFormat::EightByte)
-            .expect("child chunk");
+        let child = encode_chunk(
+            FourCC::new(*b"FOR8"),
+            0,
+            &child_payload,
+            ChunkLayout::new(
+                NonZeroUsize::new(8).expect("nonzero alignment"),
+                HeaderFormat::EightByte,
+            ),
+        )
+        .expect("child chunk");
 
         let mut root_payload = b"Maya".to_vec();
         root_payload.extend_from_slice(&child);
@@ -1007,8 +1040,7 @@ mod tests {
     #[test]
     fn decode_rtft_string_attr_decodes_schema_triplet() {
         let payload = b"ftn\0\x00textures/albedo.png\0";
-        let decoded =
-            decode_string_attr_from_rtft_chunk("STR ", payload, None, None).expect("decode");
+        let decoded = decode_string_attr_from_rtft_chunk(payload, None).expect("decode");
         assert_eq!(decoded.0, "ftn");
         assert_eq!(decoded.1, "textures/albedo.png");
     }
@@ -1016,8 +1048,7 @@ mod tests {
     #[test]
     fn decode_rtft_string_attr_accepts_file_texture_name_alias() {
         let payload = b"fileTextureName\0\x00sourceimages/layered.psd\0";
-        let decoded =
-            decode_string_attr_from_rtft_chunk("STR ", payload, None, None).expect("decode");
+        let decoded = decode_string_attr_from_rtft_chunk(payload, None).expect("decode");
         assert_eq!(decoded.0, "fileTextureName");
         assert_eq!(decoded.1, "sourceimages/layered.psd");
     }
@@ -1027,26 +1058,28 @@ mod tests {
         let source = repo_root().join("tests/02/sphere.mb");
         let parsed = parse_file(&source).expect("parse fixture");
         let target = parsed
-            .root
-            .children
+            .root()
+            .children()
             .iter()
             .find_map(|child| {
                 child
-                    .form_type
-                    .as_ref()
-                    .map(|form| (form.clone(), child.offset))
+                    .form_type()
+                    .map(|form| (form.to_string(), child.offset()))
             })
             .expect("owner form target");
         let target_form_count = parsed
-            .root
-            .children
+            .root()
+            .children()
             .iter()
-            .filter(|child| child.form_type.as_deref() == Some(target.0.as_str()))
+            .filter(|child| {
+                let rendered = child.form_type().map(|f| f.to_string());
+                rendered.as_deref() == Some(target.0.as_str())
+            })
             .count();
 
         let (rewritten, removed) = remove_root_forms_from_mb_by_locator(
-            &parsed.data,
-            &parsed.root,
+            parsed.data(),
+            parsed.root(),
             std::slice::from_ref(&target),
         );
 
@@ -1057,13 +1090,19 @@ mod tests {
         fs::write(&output, rewritten).expect("write cleaned");
         let reparsed = parse_file(&output).expect("reparse cleaned");
         let rewritten_form_count = reparsed
-            .root
-            .children
+            .root()
+            .children()
             .iter()
-            .filter(|child| child.form_type.as_deref() == Some(target.0.as_str()))
+            .filter(|child| {
+                let rendered = child.form_type().map(|f| f.to_string());
+                rendered.as_deref() == Some(target.0.as_str())
+            })
             .count();
 
-        assert_eq!(reparsed.root.children.len() + 1, parsed.root.children.len());
+        assert_eq!(
+            reparsed.root().children().len() + 1,
+            parsed.root().children().len()
+        );
         assert_eq!(rewritten_form_count + 1, target_form_count);
     }
 
@@ -1096,14 +1135,24 @@ mod tests {
 
     #[test]
     fn extract_raw_scene_paths_preserves_file_texture_name_attr_label() {
-        let crea = encode_chunk("CREA", 0, b"psdTex1\0", 8, SectionHeaderFormat::EightByte)
-            .expect("crea chunk");
+        let crea = encode_chunk(
+            FourCC::new(*b"CREA"),
+            0,
+            b"psdTex1\0",
+            ChunkLayout::new(
+                NonZeroUsize::new(8).expect("nonzero alignment"),
+                HeaderFormat::EightByte,
+            ),
+        )
+        .expect("crea chunk");
         let path = encode_chunk(
-            "STR ",
+            FourCC::new(*b"STR "),
             0,
             b"fileTextureName\0\x00sourceimages/layered.psd\0",
-            8,
-            SectionHeaderFormat::EightByte,
+            ChunkLayout::new(
+                NonZeroUsize::new(8).expect("nonzero alignment"),
+                HeaderFormat::EightByte,
+            ),
         )
         .expect("str chunk");
         let mut payload = b"RTFT".to_vec();
@@ -1121,11 +1170,13 @@ mod tests {
     #[test]
     fn extract_mb_form_node_name_reads_crea_from_non_script_form() {
         let crea = encode_chunk(
-            "CREA",
+            FourCC::new(*b"CREA"),
             0,
             b"ExampleExpression\0",
-            8,
-            SectionHeaderFormat::EightByte,
+            ChunkLayout::new(
+                NonZeroUsize::new(8).expect("nonzero alignment"),
+                HeaderFormat::EightByte,
+            ),
         )
         .expect("crea chunk");
         let mut payload = b"DEXP".to_vec();
@@ -1149,5 +1200,9 @@ mod tests {
         assert_eq!(traces[1].node_name, "ExampleFileB");
         assert!(traces.iter().all(|trace| trace.trace_form == "RTFT"));
         assert!(traces.iter().all(|trace| trace.trace_node_offset > 0));
+        for trace in &traces {
+            assert_eq!(trace.trace_child_alignment, Some(8));
+            assert_eq!(trace.trace_child_header_size, Some(16));
+        }
     }
 }

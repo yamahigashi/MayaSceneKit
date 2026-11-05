@@ -58,7 +58,7 @@ impl PatchPlanner {
                 })
                 .collect::<Vec<_>>();
             let (rewritten, _) =
-                crate::mb::replace_scene_paths_in_mb(&mb.data, &mb.root, &mb_rules);
+                crate::mb::replace_scene_paths_in_mb(mb.data(), mb.root(), &mb_rules);
             return Ok(rewritten);
         }
 
@@ -88,8 +88,8 @@ impl PatchPlanner {
         if report.scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
             let (rewritten, _) = crate::mb::rewrite::replace_scene_paths_in_mb_by_index(
-                &mb.data,
-                &mb.root,
+                mb.data(),
+                mb.root(),
                 &indexed_replacements,
             );
             return Ok(rewritten);
@@ -109,7 +109,7 @@ pub fn collect_raw_chunks(path: impl AsRef<Path>) -> Result<Vec<RawChunkDump>, S
     Ok(collect_raw_chunk_records(&mb)
         .into_iter()
         .map(|raw| {
-            let payload = raw.payload(mb.data.as_ref()).to_vec();
+            let payload = raw.payload(mb.data()).to_vec();
             RawChunkDump {
                 trace_form: raw.chunk_ref.form,
                 trace_tag: raw.chunk_ref.tag,

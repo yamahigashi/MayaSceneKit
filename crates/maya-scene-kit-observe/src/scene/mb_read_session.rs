@@ -62,8 +62,7 @@ impl MbReadSession {
         schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
-        let mut mb = parse_bytes_with_budget(bytes, budget)?;
-        mb.path = Some(path.to_path_buf());
+        let mb = parse_bytes_with_budget(bytes, budget)?.with_path(path);
         Self::from_mb(mb, schema_context, budget)
     }
 
@@ -95,7 +94,7 @@ impl MbReadSession {
         let decoded = self.decoded()?;
         let scene_facts = self.scene_facts()?;
         let build = Ok(Arc::new(builder::build_scene_model_from_decoded_chunks(
-            Arc::clone(&self.mb.data),
+            Arc::clone(self.mb.data_arc()),
             decoded.raw_chunks.clone(),
             decoded.decoded_chunks.clone(),
             scene_facts.nodes.clone(),
@@ -167,7 +166,7 @@ impl MbReadSession {
         let raw_chunks = collect_raw_chunk_records_with_budget(&self.mb, &self.budget)?;
         let decoded_chunks = collect_decoded_chunk_records(
             &raw_chunks,
-            self.mb.data.as_ref(),
+            self.mb.data(),
             self.schema_context()?.registry(),
         );
         let decode_qualities = collect_decode_quality_records(&decoded_chunks);

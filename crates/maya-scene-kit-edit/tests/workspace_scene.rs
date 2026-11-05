@@ -352,10 +352,10 @@ fn script_check_and_clean_mb() {
     let parsed = parse_file(&output).unwrap();
     assert!(
         !parsed
-            .root
-            .children
+            .root()
+            .children()
             .iter()
-            .any(|child| child.form_type.as_deref() == Some("SCRP"))
+            .any(|child| child.form_type().is_some_and(|f| f == "SCRP"))
     );
 }
 

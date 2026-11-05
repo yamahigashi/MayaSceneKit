@@ -87,3 +87,85 @@ impl From<MayaBinaryParseError> for SceneToolError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mb::LayoutHints;
+    use maya_scene_kit_formats::mb::{
+        MbParseBudget, parse_bytes, parse_bytes_with_budget,
+        walk_group_chunks_with_layout_with_budget,
+    };
+
+    #[test]
+    fn mb_error_conversion_preserves_classification() {
+        let byte_error = parse_bytes_with_budget(
+            b"FOR8".to_vec(),
+            &MbParseBudget {
+                max_parse_bytes: 3,
+                ..MbParseBudget::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            SceneToolError::from(byte_error),
+            SceneToolError::MbParseBudgetExceeded {
+                limit: MbParseBudgetLimit::MaxParseBytes
+            }
+        ));
+
+        for (budget, starting_depth, expected_limit) in [
+            (
+                MbParseBudget {
+                    max_depth: 0,
+                    ..MbParseBudget::default()
+                },
+                1,
+                MbParseBudgetLimit::MaxDepth,
+            ),
+            (
+                MbParseBudget {
+                    max_children_per_group: 0,
+                    ..MbParseBudget::default()
+                },
+                0,
+                MbParseBudgetLimit::MaxChildrenPerGroup,
+            ),
+            (
+                MbParseBudget {
+                    max_total_chunks: 0,
+                    ..MbParseBudget::default()
+                },
+                0,
+                MbParseBudgetLimit::MaxTotalChunks,
+            ),
+        ] {
+            let error = walk_group_chunks_with_layout_with_budget(
+                b"DATA\0\0\0\0",
+                LayoutHints::from_numeric(Some(4), Some(8)),
+                starting_depth,
+                &budget,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(SceneToolError::from(error), SceneToolError::MbParseBudgetExceeded { limit } if limit == expected_limit)
+            );
+        }
+        let short = parse_bytes(b"FOR8".to_vec()).unwrap_err();
+        assert!(matches!(
+            SceneToolError::from(short),
+            SceneToolError::Parse(MayaBinaryParseError::StreamTooShort {
+                actual: 4,
+                minimum: 8,
+                ..
+            })
+        ));
+        let io = MayaBinaryParseError::from(std::io::Error::other("Example"));
+        let SceneToolError::Parse(MayaBinaryParseError::Io(original)) = SceneToolError::from(io)
+        else {
+            panic!("expected an I/O error classified as a parse failure");
+        };
+        assert_eq!(original.kind(), std::io::ErrorKind::Other);
+        assert_eq!(original.to_string(), "Example");
+    }
+}
