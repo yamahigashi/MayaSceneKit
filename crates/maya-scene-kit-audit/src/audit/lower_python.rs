@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use maya_scene_kit_observe::scene::execution::normalize_python_compat_source;
 use rustpython_parser::{Parse, ast};
+
+mod maya;
+pub(crate) use maya::{MayaCall, MayaKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PythonCallKind {
@@ -34,6 +37,10 @@ pub(crate) enum PythonSignal {
         first_arg: PythonBodyArgKind,
     },
     Capability(PythonCapabilityKind),
+    Maya(MayaCall),
+    MayaUncertain {
+        message: String,
+    },
     AutorunPersistenceMarker {
         marker: String,
     },
@@ -87,6 +94,7 @@ struct SignalVisitor {
     module_alias_scopes: Vec<HashMap<String, String>>,
     capability_alias_scopes: Vec<HashMap<String, PythonCapabilityKind>>,
     string_value_scopes: Vec<HashMap<String, PythonBodyArgKind>>,
+    conditional_bindings: Vec<(usize, BTreeSet<String>)>,
 }
 
 impl SignalVisitor {
@@ -96,11 +104,20 @@ impl SignalVisitor {
         }
     }
 
-    fn visit_nested_suite(&mut self, suite: &ast::Suite) {
+    fn visit_nested_suite(&mut self, suite: &ast::Suite, args: Option<&ast::Arguments>) {
         self.alias_scopes.push(HashMap::new());
-        self.module_alias_scopes.push(HashMap::new());
+        self.module_alias_scopes
+            .push(self.module_alias_scopes.last().cloned().unwrap_or_default());
         self.capability_alias_scopes.push(HashMap::new());
         self.string_value_scopes.push(HashMap::new());
+        if let Some(args) = args {
+            self.shadow_arguments(args);
+            let mut names = HashSet::new();
+            collect_local_bindings(suite, &mut names);
+            for name in names {
+                self.set_module_alias(&name, None);
+            }
+        }
         self.visit_suite(suite);
         self.alias_scopes.pop();
         self.module_alias_scopes.pop();
@@ -108,15 +125,78 @@ impl SignalVisitor {
         self.string_value_scopes.pop();
     }
 
+    fn shadow_arguments(&mut self, args: &ast::Arguments) {
+        for arg in args
+            .posonlyargs
+            .iter()
+            .chain(&args.args)
+            .chain(&args.kwonlyargs)
+        {
+            self.set_module_alias(arg.def.arg.as_str(), None);
+        }
+        for arg in args.vararg.iter().chain(&args.kwarg) {
+            self.set_module_alias(arg.arg.as_str(), None);
+        }
+    }
+
+    fn visit_argument_defaults(&mut self, args: &ast::Arguments) {
+        for arg in args
+            .posonlyargs
+            .iter()
+            .chain(&args.args)
+            .chain(&args.kwonlyargs)
+        {
+            if let Some(value) = &arg.default {
+                self.visit_expr(value);
+            }
+        }
+    }
+
     fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+        let conditional_aliases = matches!(
+            stmt,
+            ast::Stmt::If(_)
+                | ast::Stmt::While(_)
+                | ast::Stmt::For(_)
+                | ast::Stmt::AsyncFor(_)
+                | ast::Stmt::Try(_)
+                | ast::Stmt::TryStar(_)
+                | ast::Stmt::Match(_)
+        )
+        .then(|| self.current_module_aliases().cloned().unwrap_or_default());
+        if conditional_aliases.is_some() {
+            self.conditional_bindings
+                .push((self.module_alias_scopes.len(), BTreeSet::new()));
+        }
         match stmt {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
                     self.record_capability_module(alias.name.as_str());
                     self.record_hard_markers(hard_markers_for_imported_module(alias.name.as_str()));
                     self.record_module_import_alias(
-                        alias_local_name(alias.name.as_str(), alias.asname.as_ref()),
-                        alias.name.as_str(),
+                        alias
+                            .asname
+                            .as_ref()
+                            .map(|name| name.to_string())
+                            .unwrap_or_else(|| {
+                                alias
+                                    .name
+                                    .as_str()
+                                    .split('.')
+                                    .next()
+                                    .unwrap_or(alias.name.as_str())
+                                    .to_string()
+                            }),
+                        if alias.asname.is_some() {
+                            alias.name.as_str()
+                        } else {
+                            alias
+                                .name
+                                .as_str()
+                                .split('.')
+                                .next()
+                                .unwrap_or(alias.name.as_str())
+                        },
                     );
                 }
             }
@@ -125,12 +205,22 @@ impl SignalVisitor {
                     self.record_capability_module(module.as_str());
                     self.record_hard_markers(hard_markers_for_imported_module(module.as_str()));
                     for alias in &import.names {
+                        if alias.name.as_str() == "*" && is_maya_target(module.as_str()) {
+                            self.signals.push(PythonSignal::MayaUncertain {
+                                message: "Maya wildcard import leaves callable bindings unresolved"
+                                    .to_string(),
+                            });
+                        }
                         self.record_hard_markers(hard_markers_for_imported_name(
                             module.as_str(),
                             alias.name.as_str(),
                         ));
                         self.record_import_from_alias(
-                            module.as_str(),
+                            if import.level.is_some_and(|level| level.to_u32() != 0) {
+                                "<relative>"
+                            } else {
+                                module.as_str()
+                            },
                             alias.name.as_str(),
                             alias_local_name(alias.name.as_str(), alias.asname.as_ref()),
                         );
@@ -138,13 +228,24 @@ impl SignalVisitor {
                 }
             }
             ast::Stmt::FunctionDef(function) => {
-                self.visit_nested_suite(&function.body);
+                self.visit_argument_defaults(&function.args);
+                for decorator in &function.decorator_list {
+                    self.visit_expr(decorator);
+                }
+                self.set_module_alias(function.name.as_str(), None);
+                self.visit_nested_suite(&function.body, Some(&function.args));
             }
             ast::Stmt::AsyncFunctionDef(function) => {
-                self.visit_nested_suite(&function.body);
+                self.visit_argument_defaults(&function.args);
+                for decorator in &function.decorator_list {
+                    self.visit_expr(decorator);
+                }
+                self.set_module_alias(function.name.as_str(), None);
+                self.visit_nested_suite(&function.body, Some(&function.args));
             }
             ast::Stmt::ClassDef(class_def) => {
-                self.visit_nested_suite(&class_def.body);
+                self.set_module_alias(class_def.name.as_str(), None);
+                self.visit_nested_suite(&class_def.body, None);
             }
             ast::Stmt::For(stmt) => {
                 self.visit_expr(&stmt.target);
@@ -220,6 +321,9 @@ impl SignalVisitor {
                             if let Some(expr) = &handler.type_ {
                                 self.visit_expr(expr);
                             }
+                            if let Some(name) = &handler.name {
+                                self.set_module_alias(name.as_str(), None);
+                            }
                             for stmt in &handler.body {
                                 self.visit_stmt(stmt);
                             }
@@ -242,6 +346,9 @@ impl SignalVisitor {
                         ast::ExceptHandler::ExceptHandler(handler) => {
                             if let Some(expr) = &handler.type_ {
                                 self.visit_expr(expr);
+                            }
+                            if let Some(name) = &handler.name {
+                                self.set_module_alias(name.as_str(), None);
                             }
                             for stmt in &handler.body {
                                 self.visit_stmt(stmt);
@@ -353,6 +460,27 @@ impl SignalVisitor {
             | ast::Stmt::Continue(_)
             | ast::Stmt::TypeAlias(_) => {}
         }
+        if let Some(before) = conditional_aliases {
+            let after = self.current_module_aliases().cloned().unwrap_or_default();
+            let (_, mut changed) = self.conditional_bindings.pop().expect("conditional scope");
+            for name in before.keys().chain(after.keys()) {
+                if before.get(name) != after.get(name)
+                    && before
+                        .get(name)
+                        .into_iter()
+                        .chain(after.get(name))
+                        .any(|target| is_maya_target(target))
+                {
+                    changed.insert(name.clone());
+                }
+            }
+            for name in changed {
+                self.set_module_alias(&name, None);
+                self.signals.push(PythonSignal::MayaUncertain {
+                    message: format!("control flow leaves Maya alias {name} unresolved"),
+                });
+            }
+        }
     }
 
     fn visit_expr(&mut self, expr: &ast::Expr) {
@@ -363,15 +491,23 @@ impl SignalVisitor {
                 }
             }
             ast::Expr::NamedExpr(expr) => {
-                self.visit_expr(&expr.target);
                 self.visit_expr(&expr.value);
+                let target = imported_module_name(&expr.value, self.current_module_aliases());
+                self.record_module_alias_assignment(&expr.target, target);
             }
             ast::Expr::BinOp(expr) => {
                 self.visit_expr(&expr.left);
                 self.visit_expr(&expr.right);
             }
             ast::Expr::UnaryOp(expr) => self.visit_expr(&expr.operand),
-            ast::Expr::Lambda(expr) => self.visit_expr(&expr.body),
+            ast::Expr::Lambda(expr) => {
+                self.visit_argument_defaults(&expr.args);
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
+                self.shadow_arguments(&expr.args);
+                self.visit_expr(&expr.body);
+                self.module_alias_scopes.pop();
+            }
             ast::Expr::IfExp(expr) => {
                 self.visit_expr(&expr.test);
                 self.visit_expr(&expr.body);
@@ -391,21 +527,33 @@ impl SignalVisitor {
                 }
             }
             ast::Expr::ListComp(expr) => {
-                self.visit_expr(&expr.elt);
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
                 self.visit_comprehensions(&expr.generators);
+                self.visit_expr(&expr.elt);
+                self.module_alias_scopes.pop();
             }
             ast::Expr::SetComp(expr) => {
-                self.visit_expr(&expr.elt);
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
                 self.visit_comprehensions(&expr.generators);
+                self.visit_expr(&expr.elt);
+                self.module_alias_scopes.pop();
             }
             ast::Expr::DictComp(expr) => {
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
+                self.visit_comprehensions(&expr.generators);
                 self.visit_expr(&expr.key);
                 self.visit_expr(&expr.value);
-                self.visit_comprehensions(&expr.generators);
+                self.module_alias_scopes.pop();
             }
             ast::Expr::GeneratorExp(expr) => {
-                self.visit_expr(&expr.elt);
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
                 self.visit_comprehensions(&expr.generators);
+                self.visit_expr(&expr.elt);
+                self.module_alias_scopes.pop();
             }
             ast::Expr::Await(expr) => self.visit_expr(&expr.value),
             ast::Expr::Yield(expr) => {
@@ -492,8 +640,8 @@ impl SignalVisitor {
 
     fn visit_comprehensions(&mut self, generators: &[ast::Comprehension]) {
         for generator in generators {
-            self.visit_expr(&generator.target);
             self.visit_expr(&generator.iter);
+            self.record_module_alias_assignment(&generator.target, None);
             for condition in &generator.ifs {
                 self.visit_expr(condition);
             }
@@ -501,6 +649,23 @@ impl SignalVisitor {
     }
 
     fn visit_call(&mut self, call: &ast::ExprCall) {
+        if let ast::Expr::Call(dispatch) = call.func.as_ref()
+            && is_dynamic_dispatch_call(dispatch)
+            && dispatch
+                .args
+                .first()
+                .and_then(|value| module_name_for_expr(value, self.current_module_aliases()))
+                .is_some_and(|target| is_maya_target(&target))
+        {
+            self.signals.push(PythonSignal::MayaUncertain {
+                message: "Maya callable obtained through runtime attribute lookup".to_string(),
+            });
+        }
+        if let Some(target) = module_name_for_expr(&call.func, self.current_module_aliases())
+            && let Some(operation) = maya::classify(&target, call)
+        {
+            self.signals.push(PythonSignal::Maya(operation));
+        }
         if let Some(kind) = call_kind(
             &call.func,
             self.current_aliases(),
@@ -590,6 +755,17 @@ impl SignalVisitor {
     }
 
     fn set_module_alias(&mut self, name: &str, module: Option<String>) {
+        let touches_maya = module.as_deref().is_some_and(is_maya_target)
+            || self
+                .current_module_aliases()
+                .and_then(|scope| scope.get(name))
+                .is_some_and(|target| is_maya_target(target));
+        if touches_maya
+            && let Some((depth, names)) = self.conditional_bindings.last_mut()
+            && *depth == self.module_alias_scopes.len()
+        {
+            names.insert(name.to_string());
+        }
         let Some(scope) = self.module_alias_scopes.last_mut() else {
             return;
         };
@@ -654,6 +830,24 @@ impl SignalVisitor {
                 }
             }
             ast::Expr::Starred(expr) => self.clear_aliases_for_target(&expr.value),
+            ast::Expr::Attribute(attr) => {
+                let mut root = attr.value.as_ref();
+                while let ast::Expr::Attribute(parent) = root {
+                    root = parent.value.as_ref();
+                }
+                if let ast::Expr::Name(name) = root
+                    && self
+                        .current_module_aliases()
+                        .and_then(|scope| scope.get(name.id.as_str()))
+                        .is_some_and(|target| is_maya_target(target))
+                {
+                    self.set_module_alias(name.id.as_str(), None);
+                    self.signals.push(PythonSignal::MayaUncertain {
+                        message: "Maya module attribute assignment invalidates target resolution"
+                            .to_string(),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -703,13 +897,11 @@ impl SignalVisitor {
     }
 
     fn record_module_import_alias(&mut self, local_name: String, module: &str) {
-        self.set_module_alias(
-            &local_name,
-            Some(module.split('.').next().unwrap_or(module).to_string()),
-        );
+        self.set_module_alias(&local_name, Some(module.to_string()));
     }
 
     fn record_import_from_alias(&mut self, module: &str, name: &str, local_name: String) {
+        self.set_module_alias(&local_name, Some(format!("{module}.{name}")));
         let top = module.split('.').next().unwrap_or(module);
         if let Some(kind) = imported_call_alias(top, name) {
             self.set_alias(&local_name, Some(kind));
@@ -724,6 +916,173 @@ impl SignalVisitor {
         self.record_module_alias_assignment(target, None);
         self.record_capability_alias_assignment(target, None);
     }
+}
+
+fn is_maya_target(target: &str) -> bool {
+    target == "maya"
+        || target.starts_with("maya.")
+        || target == "pymel"
+        || target.starts_with("pymel.")
+}
+
+fn collect_target_bindings(target: &ast::Expr, names: &mut HashSet<String>) {
+    match target {
+        ast::Expr::Name(name) => {
+            names.insert(name.id.to_string());
+        }
+        ast::Expr::Tuple(value) => {
+            for target in &value.elts {
+                collect_target_bindings(target, names);
+            }
+        }
+        ast::Expr::List(value) => {
+            for target in &value.elts {
+                collect_target_bindings(target, names);
+            }
+        }
+        ast::Expr::Starred(value) => collect_target_bindings(&value.value, names),
+        _ => {}
+    }
+}
+
+fn collect_local_bindings(suite: &[ast::Stmt], names: &mut HashSet<String>) {
+    for stmt in suite {
+        match stmt {
+            ast::Stmt::Assign(value) => {
+                for target in &value.targets {
+                    collect_target_bindings(target, names);
+                }
+            }
+            ast::Stmt::AnnAssign(value) => collect_target_bindings(&value.target, names),
+            ast::Stmt::AugAssign(value) => collect_target_bindings(&value.target, names),
+            ast::Stmt::Delete(value) => {
+                for target in &value.targets {
+                    collect_target_bindings(target, names);
+                }
+            }
+            ast::Stmt::Import(value) => {
+                for alias in &value.names {
+                    names.insert(
+                        alias
+                            .asname
+                            .as_ref()
+                            .map(|name| name.to_string())
+                            .unwrap_or_else(|| {
+                                alias
+                                    .name
+                                    .as_str()
+                                    .split('.')
+                                    .next()
+                                    .unwrap_or(alias.name.as_str())
+                                    .to_string()
+                            }),
+                    );
+                }
+            }
+            ast::Stmt::ImportFrom(value) => {
+                for alias in &value.names {
+                    names.insert(alias_local_name(alias.name.as_str(), alias.asname.as_ref()));
+                }
+            }
+            ast::Stmt::FunctionDef(value) => {
+                names.insert(value.name.to_string());
+            }
+            ast::Stmt::AsyncFunctionDef(value) => {
+                names.insert(value.name.to_string());
+            }
+            ast::Stmt::ClassDef(value) => {
+                names.insert(value.name.to_string());
+            }
+            ast::Stmt::If(value) => {
+                collect_local_bindings(&value.body, names);
+                collect_local_bindings(&value.orelse, names);
+            }
+            ast::Stmt::While(value) => {
+                collect_local_bindings(&value.body, names);
+                collect_local_bindings(&value.orelse, names);
+            }
+            ast::Stmt::For(value) => {
+                collect_target_bindings(&value.target, names);
+                collect_local_bindings(&value.body, names);
+                collect_local_bindings(&value.orelse, names);
+            }
+            ast::Stmt::AsyncFor(value) => {
+                collect_target_bindings(&value.target, names);
+                collect_local_bindings(&value.body, names);
+                collect_local_bindings(&value.orelse, names);
+            }
+            ast::Stmt::With(value) => {
+                for item in &value.items {
+                    if let Some(target) = &item.optional_vars {
+                        collect_target_bindings(target, names);
+                    }
+                }
+                collect_local_bindings(&value.body, names);
+            }
+            ast::Stmt::AsyncWith(value) => {
+                for item in &value.items {
+                    if let Some(target) = &item.optional_vars {
+                        collect_target_bindings(target, names);
+                    }
+                }
+                collect_local_bindings(&value.body, names);
+            }
+            ast::Stmt::Try(value) => collect_try_bindings(
+                &value.body,
+                &value.handlers,
+                &value.orelse,
+                &value.finalbody,
+                names,
+            ),
+            ast::Stmt::TryStar(value) => collect_try_bindings(
+                &value.body,
+                &value.handlers,
+                &value.orelse,
+                &value.finalbody,
+                names,
+            ),
+            ast::Stmt::Match(value) => {
+                for case in &value.cases {
+                    collect_local_bindings(&case.body, names);
+                }
+            }
+            _ => {}
+        }
+    }
+    for stmt in suite {
+        match stmt {
+            ast::Stmt::Global(value) => {
+                for name in &value.names {
+                    names.remove(name.as_str());
+                }
+            }
+            ast::Stmt::Nonlocal(value) => {
+                for name in &value.names {
+                    names.remove(name.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_try_bindings(
+    body: &[ast::Stmt],
+    handlers: &[ast::ExceptHandler],
+    orelse: &[ast::Stmt],
+    finalbody: &[ast::Stmt],
+    names: &mut HashSet<String>,
+) {
+    collect_local_bindings(body, names);
+    for handler in handlers {
+        let ast::ExceptHandler::ExceptHandler(handler) = handler;
+        if let Some(name) = &handler.name {
+            names.insert(name.to_string());
+        }
+        collect_local_bindings(&handler.body, names);
+    }
+    collect_local_bindings(orelse, names);
+    collect_local_bindings(finalbody, names);
 }
 
 fn call_kind(
@@ -757,6 +1116,7 @@ fn direct_call_kind(name: &str) -> Option<PythonCallKind> {
 }
 
 fn qualified_call_kind(module: &str, member: &str) -> Option<PythonCallKind> {
+    let module = module.split('.').next().unwrap_or(module);
     match (module, member) {
         ("builtins", "exec") => Some(PythonCallKind::Exec),
         ("builtins", "eval") => Some(PythonCallKind::Eval),
@@ -816,6 +1176,8 @@ fn imported_module_name(
         ast::Expr::Name(name) => {
             module_aliases.and_then(|scope| scope.get(name.id.as_str()).cloned())
         }
+        ast::Expr::Attribute(attr) => module_name_for_expr(&attr.value, module_aliases)
+            .map(|module| format!("{module}.{}", attr.attr)),
         ast::Expr::Call(call) => {
             let kind = call_kind(&call.func, None, module_aliases)?;
             if kind != PythonCallKind::Import {
@@ -850,7 +1212,8 @@ fn module_name_for_expr(
                 _ => None,
             }),
         ast::Expr::Call(_) => imported_module_name(expr, module_aliases),
-        ast::Expr::Attribute(attr) => module_name_for_expr(&attr.value, module_aliases),
+        ast::Expr::Attribute(attr) => module_name_for_expr(&attr.value, module_aliases)
+            .map(|module| format!("{module}.{}", attr.attr)),
         _ => None,
     }
 }
@@ -880,6 +1243,7 @@ fn imported_call_alias(module: &str, name: &str) -> Option<PythonCallKind> {
 }
 
 fn capability_for_module_member(module: &str, member: &str) -> Option<PythonCapabilityKind> {
+    let module = module.split('.').next().unwrap_or(module);
     match module {
         "subprocess" => Some(PythonCapabilityKind::Subprocess),
         "socket" => Some(PythonCapabilityKind::Socket),

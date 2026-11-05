@@ -2,6 +2,7 @@ mod analyze;
 mod lower_python;
 mod policy;
 mod rules;
+mod source;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -16,6 +17,7 @@ use maya_scene_kit_observe::scene::{
 };
 
 pub use self::rules::ScriptAuditPlan;
+pub use self::source::audit_source_text;
 use crate::scene::{
     AuditDisposition, AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail,
     AuditGraphReport, AuditGraphRoot, AuditNotice, AuditOptions, AuditProfile, AuditReferenceEdge,
@@ -172,15 +174,8 @@ fn audit_observation_source_with_digests(
     let scene_path = observation.scene_path().to_path_buf();
     let scene_format = observation.scene_format();
     let validation_state = observation.validation_state();
-    let ObservedExecutionCatalog {
-        surfaces: observed_surfaces,
-        unit_summaries,
-        dependency_facts,
-        unknown_semantics,
-        digests: observed_digests,
-        coverage_state,
-        coverage_issues,
-    } = match observation.observed_execution_catalog_with_digests(plan.max_preview, include_digests)
+    let catalog = match observation
+        .observed_execution_catalog_with_digests(plan.max_preview, include_digests)
     {
         Ok(catalog) => catalog,
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
@@ -217,6 +212,35 @@ fn audit_observation_source_with_digests(
         }
         Err(err) => return Err(err),
     };
+    Ok(evaluate_catalog(
+        catalog,
+        scene_path,
+        scene_format,
+        validation_state,
+        plan,
+        options,
+        include_digests,
+    ))
+}
+
+fn evaluate_catalog(
+    catalog: ObservedExecutionCatalog,
+    scene_path: PathBuf,
+    scene_format: SceneFormat,
+    validation_state: ValidationState,
+    plan: &ScriptAuditPlan,
+    options: AuditOptions,
+    include_digests: bool,
+) -> AuditReport {
+    let ObservedExecutionCatalog {
+        surfaces: observed_surfaces,
+        unit_summaries,
+        dependency_facts,
+        mut unknown_semantics,
+        digests: observed_digests,
+        coverage_state,
+        coverage_issues,
+    } = catalog;
     let surface_count = observed_surfaces.len();
     let mut mel_surface_facts_cache = HashMap::<Arc<str>, Arc<_>>::with_capacity(surface_count);
     let has_custom_rules = !plan.rules.is_empty();
@@ -254,6 +278,7 @@ fn audit_observation_source_with_digests(
         };
         findings.extend(analysis.findings);
         review_signals.extend(analysis.review_signals);
+        unknown_semantics.extend(analysis.unknown_semantics);
         surfaces.extend(analysis.derived_surfaces);
         surfaces[surface_index].discard_analysis_state();
         surface_index += 1;
@@ -304,7 +329,7 @@ fn audit_observation_source_with_digests(
             policy_bundle_sha256: None,
         }
     };
-    Ok(AuditReport {
+    AuditReport {
         scene_path,
         scene_format,
         profile: options.profile,
@@ -326,7 +351,7 @@ fn audit_observation_source_with_digests(
             .collect(),
         review_signals,
         findings,
-    })
+    }
 }
 
 pub fn audit_script_nodes_with_options(

@@ -1,6 +1,7 @@
 from .maya_scene_kit_native import (
     MayaSceneKitError,
     audit,
+    audit_source_text,
     clean,
     collect_paths,
     dump_requires,
@@ -15,6 +16,7 @@ from .maya_scene_kit_native import (
 __all__ = [
     "MayaSceneKitError",
     "audit",
+    "audit_source_text",
     "clean",
     "collect_paths",
     "dump_requires",

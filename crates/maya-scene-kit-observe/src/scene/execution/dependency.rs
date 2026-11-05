@@ -6,9 +6,8 @@ use crate::scene::{
     source::{ObservationBundle, ObservationData},
 };
 
-pub(super) fn collect_dependency_facts(
+pub(super) fn collect_scene_dependency_facts(
     observation: &ObservationBundle,
-    observed: &[ObservedExecutionSurfaceCore],
 ) -> Result<Vec<DependencyFact>, SceneToolError> {
     let mut facts = Vec::new();
     match &observation.data {
@@ -94,6 +93,13 @@ pub(super) fn collect_dependency_facts(
         }
     }
 
+    Ok(facts)
+}
+
+pub(super) fn collect_surface_dependency_facts(
+    observed: &[ObservedExecutionSurfaceCore],
+) -> Vec<DependencyFact> {
+    let mut facts = Vec::new();
     let mut seen = HashSet::new();
     for surface in observed {
         if let Some(mel) = &surface.mel {
@@ -154,7 +160,7 @@ pub(super) fn collect_dependency_facts(
         }
     }
 
-    Ok(facts)
+    facts
 }
 
 pub(crate) fn build_scene_path_dependency_fact(

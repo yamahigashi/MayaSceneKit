@@ -8,6 +8,7 @@ pub(crate) mod surfaces;
 use std::sync::Arc;
 
 pub use self::{
+    catalog::observe_source_text,
     mel_surface::{
         MelCodeLikeValueFact, MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind,
         MelStringAssemblyMarker, MelSurfaceCall, MelSurfaceCallSurfaceKind, MelSurfaceCommandMode,

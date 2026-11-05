@@ -145,7 +145,7 @@ pub enum ExecutionSurfaceKind {
     TopLevelProcDefinition,
     /// Top-level unsupported MEL statement text.
     TopLevelOtherStatement,
-    /// Raw MB chunk text.
+    /// Raw text, with optional scene-container provenance.
     RawChunkText,
 }
 

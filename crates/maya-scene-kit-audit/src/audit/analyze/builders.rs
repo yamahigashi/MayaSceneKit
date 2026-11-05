@@ -134,6 +134,13 @@ fn audit_finding_code(finding_id: &str) -> AuditFindingCode {
         "python_ctypes" => AuditFindingCode::PythonCtypes,
         "python_file_open" => AuditFindingCode::PythonFileOpen,
         "python_file_write" => AuditFindingCode::PythonFileWrite,
+        "python_maya_file" => AuditFindingCode::PythonMayaFile,
+        "python_maya_script_job" => AuditFindingCode::PythonMayaScriptJob,
+        "python_maya_command_port" => AuditFindingCode::PythonMayaCommandPort,
+        "python_maya_script_node" => AuditFindingCode::PythonMayaScriptNode,
+        "python_maya_load_plugin" => AuditFindingCode::PythonMayaLoadPlugin,
+        "python_maya_eval_deferred" => AuditFindingCode::PythonMayaEvalDeferred,
+        "python_maya_callback" => AuditFindingCode::PythonMayaCallback,
         "python_pyeval" => AuditFindingCode::PythonEval,
         "python_pyexec" => AuditFindingCode::PythonExec,
         "python_pyimport" => AuditFindingCode::PythonImport,
@@ -149,6 +156,7 @@ fn audit_finding_code(finding_id: &str) -> AuditFindingCode {
 
 fn audit_review_code(review_id: &str) -> AuditReviewCode {
     match review_id {
+        "python_maya_uncertain" => AuditReviewCode::PythonMayaUncertain,
         "mel_callback_body" => AuditReviewCode::MelCallbackBody,
         "mel_callback_proc_reference" => AuditReviewCode::MelCallbackProcReference,
         "mel_body_assembly_without_sink" => AuditReviewCode::MelBodyAssemblyWithoutSink,
@@ -192,6 +200,15 @@ fn audit_finding_detail(finding_id: &str, message: &str) -> AuditFindingDetail {
         "python_ctypes" => Some(StaticAuditFindingDetail::CtypesCapabilityDetected),
         "python_file_open" => Some(StaticAuditFindingDetail::PythonFileOpenDetected),
         "python_file_write" => Some(StaticAuditFindingDetail::PythonFileWriteDetected),
+        "python_maya_file" => Some(StaticAuditFindingDetail::PythonMayaFileDetected),
+        "python_maya_script_job" => Some(StaticAuditFindingDetail::PythonMayaScriptJobDetected),
+        "python_maya_command_port" => Some(StaticAuditFindingDetail::PythonMayaCommandPortDetected),
+        "python_maya_script_node" => Some(StaticAuditFindingDetail::PythonMayaScriptNodeDetected),
+        "python_maya_load_plugin" => Some(StaticAuditFindingDetail::PythonMayaLoadPluginDetected),
+        "python_maya_eval_deferred" => {
+            Some(StaticAuditFindingDetail::PythonMayaEvalDeferredDetected)
+        }
+        "python_maya_callback" => Some(StaticAuditFindingDetail::PythonMayaCallbackDetected),
         "python_pyeval" => Some(StaticAuditFindingDetail::PythonEvalDetected),
         "python_pyexec" => Some(StaticAuditFindingDetail::PythonExecDetected),
         "python_parse_failure" => Some(StaticAuditFindingDetail::PythonParseFailed),
@@ -218,6 +235,7 @@ fn audit_finding_detail(finding_id: &str, message: &str) -> AuditFindingDetail {
 
 fn audit_review_detail(review_id: &str, message: &str) -> AuditReviewDetail {
     let static_detail = match review_id {
+        "python_maya_uncertain" => Some(StaticAuditReviewDetail::PythonMayaSemanticsUncertain),
         "mel_callback_body" => Some(StaticAuditReviewDetail::MelCallbackBodyDetected),
         "mel_callback_proc_reference" => {
             Some(StaticAuditReviewDetail::MelCallbackProcReferenceDetected)

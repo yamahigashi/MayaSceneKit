@@ -5,13 +5,13 @@ mod public;
 pub mod scene {
     #[allow(unused_imports)]
     pub(crate) use maya_scene_kit_observe::scene::core::{SceneFormat, ValidationState};
+    pub use maya_scene_kit_observe::scene::evidence::ExecutionLanguage;
     #[allow(unused_imports)]
     pub(crate) use maya_scene_kit_observe::scene::evidence::{
         DependencyFact, DependencyFactKind, DependencyRiskClass, EffectCertainty,
         ExecutionCoverageIssue, ExecutionCoverageIssueKind, ExecutionCoverageState,
-        ExecutionEffectClass, ExecutionLanguage, ExecutionOrigin, ExecutionSemanticClass,
-        ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet,
-        UnknownSemanticFact,
+        ExecutionEffectClass, ExecutionOrigin, ExecutionSemanticClass, ExecutionSurfaceKind,
+        ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
     };
     #[allow(unused_imports)]
     pub(crate) use maya_scene_kit_observe::scene::{
@@ -19,6 +19,7 @@ pub mod scene {
     };
 
     pub use crate::{
+        audit::audit_source_text,
         persistent_cache::{
             AuditCacheAccess, AuditCacheHit, AuditCacheIdentity, AuditCacheMaintenanceStats,
             AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,

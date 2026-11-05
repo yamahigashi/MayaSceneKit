@@ -4,7 +4,7 @@ use maya_scene_kit_audit::{
     audit::{
         audit_reference_graph_roots_with_traversal_options_and_digests, build_script_audit_plan,
     },
-    scene::{AuditOptions, ReferenceGraphOptions},
+    scene::{AuditOptions, ExecutionLanguage, ReferenceGraphOptions, audit_source_text},
 };
 use maya_scene_kit_edit::scene::{
     MaterializeOptions, OperationMode, PathReplaceMode, PathReplaceRule,
@@ -140,6 +140,24 @@ pub(crate) fn audit_json(
         include_digests,
     );
     Ok(json_map::audit_graph_report(&report))
+}
+
+pub(crate) fn audit_source_text_json(
+    source: &str,
+    language: &str,
+) -> Result<Value, SceneToolError> {
+    let language = match language {
+        "python" => ExecutionLanguage::Python,
+        "mel" => ExecutionLanguage::Mel,
+        other => {
+            return Err(SceneToolError::Config(format!(
+                "unsupported source language '{other}', expected python or mel"
+            )));
+        }
+    };
+    Ok(json_map::audit_report(&audit_source_text(
+        source, language,
+    )?))
 }
 
 pub(crate) fn preview_clean_json(

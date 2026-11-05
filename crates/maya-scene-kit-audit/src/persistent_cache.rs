@@ -15,7 +15,7 @@ use crate::{
     scene::{AuditOptions, AuditReport},
 };
 
-const AUDIT_CACHE_SCHEMA_VERSION: u32 = 1;
+const AUDIT_CACHE_SCHEMA_VERSION: u32 = 2;
 const DB_FILE: &str = "cache.sqlite3";
 const AUDIT_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const AUDIT_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -23,7 +23,7 @@ const BLOB_FILE_EXTENSION: &str = "json.zst";
 const BLOB_CODEC_ZSTD: &str = "zstd";
 const BLOB_COMPRESSION_LEVEL: i32 = 3;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditCacheIdentity {
     pub cache_schema_version: u32,
     pub scene_sha256: String,
@@ -101,10 +101,11 @@ impl AuditCacheIdentity {
 
     fn blob_name(&self) -> String {
         format!(
-            "{}-{}-{}.{}",
+            "{}-{}-{}-v{}.{}",
             self.scene_sha256,
             self.audit_options_fingerprint,
             self.audit_plan_fingerprint,
+            self.cache_schema_version,
             BLOB_FILE_EXTENSION
         )
     }
@@ -563,6 +564,7 @@ impl AuditCacheStore {
                 AUDIT_CACHE_TTL,
             ) && record.file_state.size == file_state.size
                 && record.file_state.modified_unix_nanos == file_state.modified_unix_nanos
+                && record.identity.cache_schema_version == AUDIT_CACHE_SCHEMA_VERSION
                 && record.identity.audit_options_fingerprint == options_fingerprint
                 && record.identity.audit_plan_fingerprint == plan_fingerprint
         })
@@ -626,12 +628,14 @@ impl AuditCacheStore {
                 WHERE scene_sha256 = ?1
                   AND audit_options_fingerprint = ?2
                   AND audit_plan_fingerprint = ?3
-                  AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs >= ?4)
+                  AND cache_schema_version = ?4
+                  AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs >= ?5)
             )",
             params![
                 &identity.scene_sha256,
                 &identity.audit_options_fingerprint,
                 &identity.audit_plan_fingerprint,
+                i64::from(identity.cache_schema_version),
                 u64_to_sql(now_unix_secs.saturating_sub(AUDIT_CACHE_TTL.as_secs())).unwrap_or(0)
             ],
             |row| row.get::<_, i64>(0),
@@ -645,6 +649,9 @@ impl AuditCacheStore {
         conn: &Connection,
         identity: &AuditCacheIdentity,
     ) -> io::Result<Option<AuditedSceneSnapshot>> {
+        if identity.cache_schema_version != AUDIT_CACHE_SCHEMA_VERSION {
+            return Ok(None);
+        }
         let row = conn
             .query_row(
                 "SELECT cache_schema_version, scene_sha256, audit_options_fingerprint,
@@ -654,11 +661,13 @@ impl AuditCacheStore {
                  WHERE scene_sha256 = ?1
                    AND audit_options_fingerprint = ?2
                    AND audit_plan_fingerprint = ?3
+                   AND cache_schema_version = ?4
                  LIMIT 1",
                 params![
                     &identity.scene_sha256,
                     &identity.audit_options_fingerprint,
-                    &identity.audit_plan_fingerprint
+                    &identity.audit_plan_fingerprint,
+                    i64::from(identity.cache_schema_version)
                 ],
                 |row| {
                     Ok((
@@ -867,6 +876,9 @@ impl AuditCacheStore {
         conn: &Connection,
         record: &AuditCacheIndexRecord,
     ) -> io::Result<Option<AuditedSceneSnapshot>> {
+        if record.identity.cache_schema_version != AUDIT_CACHE_SCHEMA_VERSION {
+            return Ok(None);
+        }
         let path = self.blob_path(&record.blob.relative_path);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -885,7 +897,9 @@ impl AuditCacheStore {
         };
         match serde_json::from_slice::<AuditedSceneSnapshot>(&payload) {
             Ok(mut snapshot) => {
-                snapshot.identity = record.identity.clone();
+                if snapshot.identity != record.identity {
+                    return Ok(None);
+                }
                 snapshot.file_state = record.file_state.clone();
                 snapshot.report.scene_path = record.file_state.path.clone();
                 Ok(Some(snapshot))
@@ -1080,6 +1094,84 @@ mod tests {
             ),
         )
         .expect("write sample scene");
+    }
+
+    #[test]
+    fn old_schema_judgments_are_rejected_by_every_lookup_path() {
+        let dir = tempdir().expect("temporary cache directory");
+        let source = dir.path().join("TestScene.ma");
+        write_sample_scene(&source);
+        let plan = build_script_audit_plan(vec![], 64).expect("plan");
+        let plan_fingerprint = fingerprint_audit_plan(&plan);
+        let options = AuditOptions::strict_default();
+        let report =
+            audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
+                .expect("report");
+        let mut snapshot =
+            AuditedSceneSnapshot::new(report, options, plan_fingerprint.clone()).expect("snapshot");
+        let current_identity = snapshot.identity.clone();
+        snapshot.identity.cache_schema_version = 1;
+        assert_ne!(
+            snapshot.identity.cache_schema_version,
+            super::AUDIT_CACHE_SCHEMA_VERSION
+        );
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        store.save(&snapshot).expect("save old judgment");
+        assert!(
+            store
+                .load_by_path_if_fresh(&source, options, &plan_fingerprint)
+                .expect("path lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .load_by_identity(&snapshot.identity)
+                .expect("old identity lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .load_by_identity(&current_identity)
+                .expect("current identity lookup")
+                .is_none()
+        );
+        let renamed = dir.path().join("Example.ma");
+        fs::rename(&source, &renamed).expect("rename scene");
+        assert!(
+            store
+                .load_by_path_with_hash_fallback(&renamed, options, &plan_fingerprint)
+                .expect("hash lookup")
+                .is_none()
+        );
+        let old_identity = snapshot.identity.clone();
+        snapshot.identity = current_identity;
+        snapshot.file_state = super::file_state_for_path(&renamed).expect("renamed file state");
+        snapshot.report.scene_path = renamed.clone();
+        store.save(&snapshot).expect("save current judgment");
+        assert!(
+            store
+                .load_by_path_if_fresh(&renamed, options, &plan_fingerprint)
+                .expect("current path lookup")
+                .is_some()
+        );
+        let current = store
+            .load_by_identity(&snapshot.identity)
+            .expect("current cached identity")
+            .expect("current-schema entry coexists with old-schema entry");
+        assert_eq!(current.identity, snapshot.identity);
+        assert!(
+            store
+                .load_by_identity(&old_identity)
+                .expect("old identity after current save")
+                .is_none()
+        );
+        let copied = dir.path().join("ExampleCopy.ma");
+        fs::copy(&renamed, &copied).expect("copy synthetic scene");
+        let hash_hit = store
+            .load_by_path_with_hash_fallback(&copied, options, &plan_fingerprint)
+            .expect("hash lookup with both schema versions")
+            .expect("current-schema hash hit");
+        assert_eq!(hash_hit.identity, snapshot.identity);
     }
 
     #[test]
