@@ -1,12 +1,11 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroUsize};
 
 use crate::{
     ma::text::escape_ma_string,
     maya_defaults::DEFAULT_MAYA_VERSION,
     mb::{
-        Chunk, MayaBinaryFile, parse_section_chunks_full_with_hints,
-        parse_section_chunks_with_hints, resolve_section_layout_hints,
-        rewrite::{chunk_header_format_from_chunk, encode_chunk},
+        Chunk, ChunkLayout, FourCC, LayoutHints, MayaBinaryFile, parse_section_chunks_with_hints,
+        resolve_section_layout_hints, rewrite::encode_chunk,
     },
     unit_semantics::{
         DEFAULT_ANGULAR_UNIT, DEFAULT_LINEAR_UNIT, DEFAULT_TIME_UNIT, normalize_angular_unit,
@@ -55,53 +54,52 @@ pub fn extract_head_metadata(mb: &MayaBinaryFile) -> HeadMetadata {
     let mut metadata = HeadMetadata::default();
 
     for head in mb
-        .root
-        .children
+        .root()
+        .children()
         .iter()
-        .filter(|chunk| chunk.form_type.as_deref() == Some("HEAD"))
+        .filter(|chunk| chunk.form_type().is_some_and(|f| f == "HEAD"))
     {
-        let payload = &mb.data[head.payload_offset..head.payload_end];
+        let payload = &mb.data()[head.payload_offset()..head.payload_end()];
         if payload.len() < 4 {
             continue;
         }
-        let (child_alignment, child_header_size) = resolve_section_layout_hints(
-            &head.tag,
-            head.form_type.as_deref(),
-            head.child_alignment,
-            head.child_header_size,
+        let hints = resolve_section_layout_hints(
+            head.tag(),
+            head.form_type(),
+            head.child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let parsed =
-            parse_section_chunks_with_hints(&payload[4..], child_alignment, child_header_size);
-        for chunk in parsed.chunks {
+        let parsed = parse_section_chunks_with_hints(&payload[4..], hints);
+        for chunk in parsed.into_chunks() {
             let raw = chunk.payload(&payload[4..]);
             let text = String::from_utf8_lossy(raw)
                 .trim_end_matches('\0')
                 .to_string();
-            match chunk.tag.as_str() {
-                "VERS" if !text.is_empty() => {
+            match chunk.tag().as_ascii() {
+                Some("VERS") if !text.is_empty() => {
                     metadata.vers = Some(text);
                 }
-                "CHNG" if !text.is_empty() => {
+                Some("CHNG") if !text.is_empty() => {
                     metadata.chng = Some(text);
                 }
-                "LUNI" if !text.is_empty() => {
+                Some("LUNI") if !text.is_empty() => {
                     metadata.luni = Some(normalize_linear_unit(&text));
                 }
-                "AUNI" if !text.is_empty() => {
+                Some("AUNI") if !text.is_empty() => {
                     metadata.auni = Some(normalize_angular_unit(&text));
                 }
-                "TUNI" if !text.is_empty() => {
+                Some("TUNI") if !text.is_empty() => {
                     metadata.tuni = Some(normalize_time_unit(&text));
                 }
-                "TDUR" if !text.is_empty() => {
+                Some("TDUR") if !text.is_empty() => {
                     metadata.tdur = Some(text);
                 }
-                "FINF" => {
+                Some("FINF") => {
                     if let Some((key, value)) = decode_finf(raw) {
                         metadata.file_info.push((key, value));
                     }
                 }
-                "PLUG" => {
+                Some("PLUG") => {
                     if let Some(req) = decode_plug_to_requires_entry(raw) {
                         metadata.requires.push(req);
                     }
@@ -143,7 +141,7 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
     target_forms: &[(String, usize)],
     target_rendered: &[String],
 ) -> (Vec<u8>, Vec<(String, usize)>, Vec<String>) {
-    let children = &root.children;
+    let children = root.children();
     if children.is_empty() {
         return (data.to_vec(), Vec::new(), Vec::new());
     }
@@ -160,10 +158,10 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
     let target_all = targets.is_empty();
 
     let mut payload_parts: Vec<u8> = Vec::new();
-    payload_parts.extend_from_slice(root.form_type.as_deref().unwrap_or("Maya").as_bytes());
+    payload_parts.extend_from_slice(root.form_type().unwrap_or(FourCC::new(*b"Maya")).as_bytes());
 
-    let first_child_start = children[0].offset;
-    let prefix_start = root.payload_offset + 4;
+    let first_child_start = children[0].offset();
+    let prefix_start = root.payload_offset() + 4;
     if first_child_start > prefix_start {
         payload_parts.extend_from_slice(&data[prefix_start..first_child_start]);
     }
@@ -174,19 +172,20 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
 
     for (idx, child) in children.iter().enumerate() {
         let next_offset = if idx + 1 < children.len() {
-            children[idx + 1].offset
+            children[idx + 1].offset()
         } else {
-            root.payload_end
+            root.payload_end()
         };
-        let original_span = &data[child.offset..next_offset];
-        if let Some(form) = child.form_type.as_deref()
-            && form_targets.contains(&(form, child.offset))
+        let original_span = &data[child.offset()..next_offset];
+        let rendered = child.form_type().map(|f| f.to_string());
+        if let Some(form) = rendered.as_deref()
+            && form_targets.contains(&(form, child.offset()))
         {
-            removed_forms.push((form.to_string(), child.offset));
+            removed_forms.push((form.to_string(), child.offset()));
             changed = true;
             continue;
         }
-        if child.form_type.as_deref() != Some("HEAD") {
+        if child.form_type().is_none_or(|f| f != "HEAD") {
             payload_parts.extend_from_slice(original_span);
             continue;
         }
@@ -206,7 +205,7 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
         return (data.to_vec(), Vec::new(), Vec::new());
     }
 
-    let Some(encoded) = crate::mb::encode_root_chunk(root, &payload_parts) else {
+    let Ok(encoded) = crate::mb::encode_root_chunk(root, &payload_parts) else {
         return (data.to_vec(), Vec::new(), Vec::new());
     };
     (encoded, removed_forms, removed)
@@ -270,27 +269,28 @@ fn rewrite_head_child_without_plugin_requires(
     targets: &HashSet<&str>,
     target_all: bool,
 ) -> Option<(Vec<u8>, Vec<String>)> {
-    let payload = &data[child.payload_offset..child.payload_end];
+    let payload = &data[child.payload_offset()..child.payload_end()];
     if payload.len() < 4 {
         return None;
     }
     let inner = &payload[4..];
-    let (child_alignment, child_header_size) = resolve_section_layout_hints(
-        &child.tag,
-        child.form_type.as_deref(),
-        child.child_alignment,
-        child.child_header_size,
+    let hints = resolve_section_layout_hints(
+        child.tag(),
+        child.form_type(),
+        child
+            .child_layout()
+            .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_full_with_hints(inner, child_alignment, child_header_size);
-    if parsed.chunks.is_empty() {
+    let parsed = parse_section_chunks_with_hints(inner, hints);
+    if parsed.chunks().is_empty() {
         return None;
     }
 
     let mut removed = Vec::new();
     let mut new_inner = Vec::new();
-    for chunk in &parsed.chunks {
+    for chunk in parsed.chunks() {
         let raw = chunk.payload(inner);
-        let rendered = if chunk.tag == "PLUG" {
+        let rendered = if chunk.tag() == "PLUG" {
             decode_plug_to_requires_entry(raw)
                 .map(|entry| render_requires_entry(&entry))
                 .filter(|rendered| target_all || targets.contains(rendered.as_str()))
@@ -303,7 +303,7 @@ fn rewrite_head_child_without_plugin_requires(
             continue;
         }
 
-        new_inner.extend_from_slice(&inner[chunk.chunk_start..chunk.chunk_end]);
+        new_inner.extend_from_slice(&inner[chunk.chunk_start()..chunk.chunk_end()]);
     }
     new_inner.extend_from_slice(parsed.tail(inner));
 
@@ -315,12 +315,15 @@ fn rewrite_head_child_without_plugin_requires(
     new_payload.extend_from_slice(b"HEAD");
     new_payload.extend_from_slice(&new_inner);
     let encoded = encode_chunk(
-        child.tag.as_str(),
-        child.aux,
+        child.tag(),
+        child.aux(),
         &new_payload,
-        4,
-        chunk_header_format_from_chunk(child),
-    )?;
+        ChunkLayout::new(
+            NonZeroUsize::new(4).expect("nonzero alignment"),
+            child.header_format(),
+        ),
+    )
+    .ok()?;
     Some((encoded, removed))
 }
 
@@ -404,8 +407,8 @@ mod tests {
         .expect("parse with budget");
 
         let (rewritten, removed) = remove_plugin_requires_from_mb(
-            &mb.data,
-            &mb.root,
+            mb.data(),
+            mb.root(),
             &[String::from("requires \"pluginA\" \"1.0\";")],
         );
         assert_eq!(removed, vec!["requires \"pluginA\" \"1.0\";".to_string()]);

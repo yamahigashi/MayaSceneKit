@@ -45,7 +45,7 @@ fn inspect_mb_with_budget(
     Ok(MbInspectReport {
         scene_path: scene_path.to_path_buf(),
         scene_format: SceneFormat::Mb,
-        root: inspect_node(&mb.root, &mb.data, 0, options),
+        root: inspect_node(mb.root(), mb.data(), 0, options),
     })
 }
 
@@ -62,34 +62,36 @@ fn inspect_node(
         Vec::new()
     } else {
         chunk
-            .children
+            .children()
             .iter()
             .map(|child| inspect_node(child, file_data, depth + 1, options))
             .collect()
     };
 
     MbInspectNode {
-        tag: chunk.tag.clone(),
-        offset: chunk.offset,
-        aux: chunk.aux,
-        size: chunk.size,
-        payload_offset: chunk.payload_offset,
-        payload_end: chunk.payload_end,
-        child_alignment: chunk.child_alignment,
-        child_header_size: chunk.child_header_size,
-        form_type: chunk.form_type.clone(),
-        opaque: chunk.is_group() && !chunk.children_parsed,
+        tag: chunk.tag().to_string(),
+        offset: chunk.offset(),
+        aux: chunk.aux(),
+        size: chunk.size(),
+        payload_offset: chunk.payload_offset(),
+        payload_end: chunk.payload_end(),
+        child_alignment: chunk.child_layout().map(|layout| layout.alignment_usize()),
+        child_header_size: chunk
+            .child_layout()
+            .map(|layout| layout.header_format().header_size()),
+        form_type: chunk.form_type().map(|f| f.to_string()),
+        opaque: chunk.is_group() && !chunk.children_complete(),
         payload_preview: payload_preview(file_data, chunk, options.preview_bytes),
         children,
     }
 }
 
 fn payload_preview(data: &[u8], chunk: &Chunk, preview_bytes: usize) -> Option<String> {
-    if preview_bytes == 0 || chunk.size == 0 || chunk.form_type.is_some() {
+    if preview_bytes == 0 || chunk.size() == 0 || chunk.form_type().is_some() {
         return None;
     }
-    let end = std::cmp::min(chunk.payload_end, chunk.payload_offset + preview_bytes);
-    let raw = &data[chunk.payload_offset..end];
+    let end = std::cmp::min(chunk.payload_end(), chunk.payload_offset() + preview_bytes);
+    let raw = &data[chunk.payload_offset()..end];
     let text: String = raw
         .iter()
         .map(|b| {
@@ -110,7 +112,7 @@ mod tests {
 
     use super::{
         MbInspectOptions, MbParseBudget, SceneFormat, SceneToolError, inspect_mb,
-        inspect_mb_with_budget, inspect_mb_with_max_parse_bytes,
+        inspect_mb_with_budget, inspect_mb_with_max_parse_bytes, inspect_node,
     };
 
     fn repo_root() -> PathBuf {
@@ -129,6 +131,27 @@ mod tests {
         assert_eq!(report.scene_format, SceneFormat::Mb);
         assert!(report.root.tag == "FOR4" || report.root.tag == "FOR8");
         assert!(!report.root.children.is_empty());
+    }
+
+    #[test]
+    fn inspect_node_preserves_group_and_leaf_child_layout() {
+        let source = repo_root().join("tests/02/sphere.mb");
+        let parsed = crate::mb::parse_file(&source).expect("parse fixture");
+        let root = inspect_node(parsed.root(), parsed.data(), 0, MbInspectOptions::default());
+
+        assert_eq!(root.tag, "FOR8");
+        assert_eq!(root.form_type.as_deref(), Some("Maya"));
+        assert_eq!(root.child_alignment, Some(4));
+        assert_eq!(root.child_header_size, Some(16));
+
+        let leaf = parsed
+            .walk()
+            .into_iter()
+            .find(|chunk| !chunk.is_group())
+            .expect("fixture leaf");
+        let leaf = inspect_node(leaf, parsed.data(), 0, MbInspectOptions::default());
+        assert_eq!(leaf.child_alignment, None);
+        assert_eq!(leaf.child_header_size, None);
     }
 
     #[test]

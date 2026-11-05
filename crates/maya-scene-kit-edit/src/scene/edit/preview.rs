@@ -134,7 +134,7 @@ impl PatchPlanner {
             removed_names
         } else if scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
-            let (_, removed_names) = remove_raw_script_nodes_from_mb(&mb.data, &mb.root);
+            let (_, removed_names) = remove_raw_script_nodes_from_mb(mb.data(), mb.root());
             removed_names
         } else {
             return Err(unsupported_scene_format(src, scene_format));
@@ -167,8 +167,8 @@ impl PatchPlanner {
         } else if scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
             let (_, removed_names) = crate::mb::paths::remove_raw_script_nodes_from_mb_by_name(
-                &mb.data,
-                &mb.root,
+                mb.data(),
+                mb.root(),
                 &normalized,
             );
             removed_names
@@ -250,7 +250,9 @@ impl PatchPlanner {
                         let mb = mb.as_ref().expect("mb bytes");
                         let (_, removed_names) =
                             crate::mb::paths::remove_raw_script_nodes_from_mb_by_name(
-                                &mb.data, &mb.root, &names,
+                                mb.data(),
+                                mb.root(),
+                                &names,
                             );
                         removed_names
                     } else {
@@ -270,7 +272,7 @@ impl PatchPlanner {
                     } else if scene_format == SceneFormat::Mb {
                         let mb = mb.as_ref().expect("mb bytes");
                         let (_, removed) =
-                            remove_plugin_requires_from_mb(&mb.data, &mb.root, &rendered_targets);
+                            remove_plugin_requires_from_mb(mb.data(), mb.root(), &rendered_targets);
                         removed
                     } else {
                         return Err(unsupported_scene_format(input_path, scene_format));
@@ -317,7 +319,7 @@ impl PatchPlanner {
                         ));
                     }
                     let mb = mb.as_ref().expect("mb bytes");
-                    if super::clean::mb_root_form_present(&mb.root, form, *node_offset) {
+                    if super::clean::mb_root_form_present(mb.root(), form, *node_offset) {
                         cleaned_targets.push(target.clone());
                     }
                 }

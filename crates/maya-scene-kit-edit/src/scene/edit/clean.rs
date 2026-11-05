@@ -18,7 +18,7 @@ impl PatchPlanner {
 
         if scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
-            let (cleaned, _) = remove_raw_script_nodes_from_mb(&mb.data, &mb.root);
+            let (cleaned, _) = remove_raw_script_nodes_from_mb(mb.data(), mb.root());
             return Ok(cleaned);
         }
 
@@ -44,7 +44,9 @@ impl PatchPlanner {
         if scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
             let (cleaned, _) = crate::mb::paths::remove_raw_script_nodes_from_mb_by_name(
-                &mb.data, &mb.root, node_names,
+                mb.data(),
+                mb.root(),
+                node_names,
             );
             return Ok(cleaned);
         }
@@ -147,8 +149,8 @@ impl PatchPlanner {
                 .collect::<Vec<_>>();
             let (mut owner_form_targets, _) =
                 crate::mb::paths::locate_raw_script_node_forms_in_mb_by_name(
-                    &mb.data,
-                    &mb.root,
+                    mb.data(),
+                    mb.root(),
                     &script_nodes,
                 );
             owner_form_targets.extend(normalized.iter().filter_map(|target| match target {
@@ -178,12 +180,12 @@ impl PatchPlanner {
 
             let (cleaned, _, removed_requires) =
                 crate::mb::remove_root_forms_and_plugin_requires_from_mb(
-                    &mb.data,
-                    &mb.root,
+                    mb.data(),
+                    mb.root(),
                     &owner_form_targets,
                     &plugin_requires,
                 );
-            if cleaned.as_slice() == mb.data.as_ref()
+            if cleaned.as_slice() == mb.data()
                 && removed_requires.is_empty()
                 && owner_form_targets.is_empty()
             {
@@ -304,7 +306,8 @@ pub(super) fn mb_root_form_present(
     form: &str,
     node_offset: usize,
 ) -> bool {
-    root.children
-        .iter()
-        .any(|child| child.offset == node_offset && child.form_type.as_deref() == Some(form))
+    root.children().iter().any(|child| {
+        let rendered = child.form_type().map(|f| f.to_string());
+        child.offset() == node_offset && rendered.as_deref() == Some(form)
+    })
 }

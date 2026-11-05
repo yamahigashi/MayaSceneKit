@@ -29,7 +29,7 @@ pub(crate) fn build_scene_model(
     let typeid_resolver = typeid_resolver.or(default_typeid_resolver.as_ref());
     let raw_chunks = recover::collect_raw_chunk_records(mb);
     build_scene_model_from_raw_chunks(
-        Arc::clone(&mb.data),
+        Arc::clone(mb.data_arc()),
         raw_chunks,
         typeid_resolver,
         registry,
@@ -46,7 +46,7 @@ pub(crate) fn build_scene_model_with_budget(
 ) -> Result<SceneBuildOutput, MayaBinaryParseError> {
     let raw_chunks = recover::collect_raw_chunk_records_with_budget(mb, budget)?;
     Ok(build_scene_model_from_raw_chunks(
-        Arc::clone(&mb.data),
+        Arc::clone(mb.data_arc()),
         raw_chunks,
         Some(typeid_resolver),
         registry,
@@ -112,7 +112,7 @@ mod tests {
     use super::build_scene_model;
     use crate::{
         mb::{
-            Chunk, MayaBinaryFile, parse_file,
+            MayaBinaryFile, parse_file,
             paths::{MbScenePathEntry, MbScenePathMeta},
         },
         scene::{
@@ -150,46 +150,21 @@ mod tests {
     }
 
     fn build_test_mb(children: &[Vec<u8>]) -> MayaBinaryFile {
-        let mut data = Vec::new();
-        let mut root_children = Vec::new();
-
-        for (idx, child_payload) in children.iter().enumerate() {
-            let chunk_offset = data.len();
-            data.extend_from_slice(child_payload);
-            let payload_offset = chunk_offset + 16;
-            let payload_end = data.len();
-            root_children.push(Chunk {
-                tag: "FOR8".to_string(),
-                offset: idx * 0x100,
-                aux: 0,
-                size: child_payload.len().saturating_sub(16),
-                payload_offset,
-                payload_end,
-                form_type: Some("SCRP".to_string()),
-                child_alignment: Some(8),
-                child_header_size: Some(16),
-                children_parsed: false,
-                children: vec![],
-            });
+        let mut payload = b"Maya".to_vec();
+        for child in children {
+            payload.extend_from_slice(&build_test_chunk("FOR8", &child[16..]));
         }
-
-        MayaBinaryFile {
-            path: None,
-            data: data.clone().into(),
-            root: Chunk {
-                tag: "FOR8".to_string(),
-                offset: 0,
-                aux: 0,
-                size: data.len(),
-                payload_offset: 0,
-                payload_end: data.len(),
-                form_type: Some("Maya".to_string()),
-                child_alignment: Some(8),
-                child_header_size: Some(16),
-                children_parsed: true,
-                children: root_children,
+        let mut bytes = b"FOR8\0\0\0\0".to_vec();
+        bytes.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        crate::mb::parse_bytes_with_budget(
+            bytes,
+            &crate::mb::MbParseBudget {
+                max_depth: 1,
+                ..Default::default()
             },
-        }
+        )
+        .expect("parse synthetic scene")
     }
 
     #[test]

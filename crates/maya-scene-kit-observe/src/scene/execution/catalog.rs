@@ -306,7 +306,7 @@ pub(crate) fn build_scene_digests(
 ) -> Result<SceneDigestSet, SceneToolError> {
     let bytes = match &observation.data {
         ObservationData::Ma { data } => data.bytes()?,
-        ObservationData::Mb { session } => session.mb.data.as_ref(),
+        ObservationData::Mb { session } => session.mb.data(),
     };
     Ok(SceneDigestSet {
         scene_sha256: sha256_hex(bytes),

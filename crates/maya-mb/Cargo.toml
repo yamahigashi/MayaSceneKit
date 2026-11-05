@@ -1,0 +1,16 @@
+[package]
+name = "maya-mb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "Low-level Autodesk Maya Binary (.mb) IFF chunk reading, walking, and encoding."
+
+[lib]
+name = "maya_mb"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "2"

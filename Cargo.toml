@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/maya-mb",
     "crates/maya-scene-kit-formats",
     "crates/maya-scene-kit-observe",
     "crates/maya-scene-kit-audit",

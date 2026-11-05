@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use maya_scene_kit_formats::mb::{
-    MayaBinaryParseError, MbParseBudget, MbParseBudgetLimit, extract_head_metadata, parse_file,
-    parse_file_with_budget, resolve_section_layout_hints,
+    FourCC, LayoutHints, MayaBinaryParseError, MbParseBudget, MbParseBudgetLimit,
+    extract_head_metadata, parse_file, parse_file_with_budget, resolve_section_layout_hints,
     walk_group_chunks_with_layout_with_budget,
 };
 
@@ -69,18 +69,21 @@ fn write_temp_mb(bytes: &[u8], suffix: &str) -> PathBuf {
 #[test]
 fn parse_small_sample_root_and_header_group() {
     let mb = parse_file(repo_root().join("tests/02/sphere.mb")).unwrap();
-    assert_eq!(mb.root.tag, "FOR8");
-    assert_eq!(mb.root.form_type.as_deref(), Some("Maya"));
-    assert!(!mb.root.children.is_empty());
-    assert_eq!(mb.root.children[0].tag, "FOR8");
-    assert_eq!(mb.root.children[0].form_type.as_deref(), Some("HEAD"));
+    assert_eq!(mb.root().tag(), "FOR8");
+    assert_eq!(mb.root().form_type(), Some(FourCC::new(*b"Maya")));
+    assert!(!mb.root().children().is_empty());
+    assert_eq!(mb.root().children()[0].tag(), "FOR8");
+    assert_eq!(
+        mb.root().children()[0].form_type(),
+        Some(FourCC::new(*b"HEAD"))
+    );
 }
 
 #[test]
 fn parse_legacy_sample() {
     let mb = parse_file(repo_root().join("tests/01/skin.mb")).unwrap();
-    assert_eq!(mb.root.tag, "FOR8");
-    assert_eq!(mb.root.form_type.as_deref(), Some("Maya"));
+    assert_eq!(mb.root().tag(), "FOR8");
+    assert_eq!(mb.root().form_type(), Some(FourCC::new(*b"Maya")));
     assert!(mb.walk().len() > 10);
 }
 
@@ -90,7 +93,14 @@ fn parse_error_for_too_small_data() {
     std::fs::write(&path, b"FOR8").unwrap();
     let result = parse_file(&path);
     let _ = std::fs::remove_file(&path);
-    assert!(matches!(result, Err(MayaBinaryParseError::Message(_))));
+    assert!(matches!(
+        result,
+        Err(MayaBinaryParseError::StreamTooShort {
+            actual: 4,
+            minimum: 8,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -111,10 +121,13 @@ fn parse_file_with_budget_limits_nested_group_expansion() {
     .expect("parse with depth budget");
     let _ = std::fs::remove_file(&source);
 
-    assert_eq!(mb.root.children.len(), 1);
-    assert_eq!(mb.root.children[0].form_type.as_deref(), Some("DEEP"));
-    assert!(!mb.root.children[0].children_parsed);
-    assert!(mb.root.children[0].children.is_empty());
+    assert_eq!(mb.root().children().len(), 1);
+    assert_eq!(
+        mb.root().children()[0].form_type(),
+        Some(FourCC::new(*b"DEEP"))
+    );
+    assert!(!mb.root().children()[0].children_complete());
+    assert!(mb.root().children()[0].children().is_empty());
 }
 
 #[test]
@@ -139,8 +152,8 @@ fn parse_file_with_budget_limits_children_per_group() {
     .expect("parse with child budget");
     let _ = std::fs::remove_file(&source);
 
-    assert_eq!(mb.root.children[0].children.len(), 2);
-    assert!(!mb.root.children[0].children_parsed);
+    assert_eq!(mb.root().children()[0].children().len(), 2);
+    assert!(!mb.root().children()[0].children_complete());
 }
 
 #[test]
@@ -165,8 +178,8 @@ fn parse_file_with_budget_limits_total_chunks() {
     .expect("parse with total chunk budget");
     let _ = std::fs::remove_file(&source);
 
-    assert_eq!(mb.root.children[0].children.len(), 1);
-    assert!(!mb.root.children[0].children_parsed);
+    assert_eq!(mb.root().children()[0].children().len(), 1);
+    assert!(!mb.root().children()[0].children_complete());
 }
 
 #[test]
@@ -211,7 +224,7 @@ fn extract_head_metadata_reads_head_payload_without_child_parse() {
     .expect("parse with head depth budget");
     let _ = std::fs::remove_file(&source);
 
-    assert!(!mb.root.children[0].children_parsed);
+    assert!(!mb.root().children()[0].children_complete());
     let metadata = extract_head_metadata(&mb);
     assert_eq!(metadata.vers.as_deref(), Some("2026"));
     assert_eq!(metadata.requires.len(), 1);
@@ -229,18 +242,17 @@ fn budgeted_raw_walk_rejects_child_overflow() {
     let mb = parse_file(&source).expect("parse");
     let _ = std::fs::remove_file(&source);
 
-    let node = &mb.root.children[0];
-    let payload = &mb.data[node.payload_offset..node.payload_end];
-    let (child_alignment, child_header_size) = resolve_section_layout_hints(
-        &node.tag,
-        node.form_type.as_deref(),
-        node.child_alignment,
-        node.child_header_size,
+    let node = &mb.root().children()[0];
+    let payload = &mb.data()[node.payload_offset()..node.payload_end()];
+    let hints = resolve_section_layout_hints(
+        node.tag(),
+        node.form_type(),
+        node.child_layout()
+            .map_or_else(LayoutHints::new, LayoutHints::from),
     );
     let err = walk_group_chunks_with_layout_with_budget(
         &payload[4..],
-        child_alignment,
-        child_header_size,
+        hints,
         2,
         &MbParseBudget {
             max_children_per_group: 1,

@@ -504,6 +504,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "maya-mb"
+version = "0.2.4"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "maya-mel"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,6 +527,7 @@ name = "maya-scene-kit-formats"
 version = "0.2.4"
 dependencies = [
  "chrono",
+ "maya-mb",
  "maya-mel",
  "once_cell",
  "regex",
