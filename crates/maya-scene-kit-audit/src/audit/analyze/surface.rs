@@ -17,6 +17,7 @@ pub(crate) struct AnalysisSurface {
 #[derive(Debug, Default)]
 pub(crate) struct SurfaceAnalysis {
     pub(crate) findings: Vec<AuditFinding>,
+    pub(crate) unknown_semantics: Vec<crate::scene::UnknownSemanticFact>,
     pub(crate) review_signals: Vec<AuditReviewSignal>,
     pub(crate) derived_surfaces: Vec<AnalysisSurface>,
 }

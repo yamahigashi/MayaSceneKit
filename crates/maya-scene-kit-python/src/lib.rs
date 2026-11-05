@@ -80,6 +80,14 @@ fn audit(
     )
 }
 
+#[pyfunction(signature = (source, language))]
+fn audit_source_text(py: Python<'_>, source: &str, language: &str) -> PyResult<PyObject> {
+    value_to_py(
+        py,
+        api::audit_source_text_json(source, language).map_err(scene_tool_error_to_pyerr)?,
+    )
+}
+
 #[pyfunction(signature = (path, max_bytes=None))]
 fn preview_clean(py: Python<'_>, path: String, max_bytes: Option<usize>) -> PyResult<PyObject> {
     value_to_py(
@@ -168,6 +176,7 @@ fn maya_scene_kit_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dump_requires, m)?)?;
     m.add_function(wrap_pyfunction!(collect_paths, m)?)?;
     m.add_function(wrap_pyfunction!(audit, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_source_text, m)?)?;
     m.add_function(wrap_pyfunction!(preview_clean, m)?)?;
     m.add_function(wrap_pyfunction!(clean, m)?)?;
     m.add_function(wrap_pyfunction!(preview_replace, m)?)?;
@@ -203,5 +212,122 @@ fn scene_tool_error_category(err: &SceneToolError) -> &'static str {
         SceneToolError::MelParseBudgetExceeded { .. } => "mel_parse_budget_exceeded",
         SceneToolError::MbParseBudgetExceeded { .. } => "mb_parse_budget_exceeded",
         SceneToolError::Parse(_) => "parse",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+
+    use pyo3::{
+        prelude::*,
+        types::{PyDict, PyModule},
+    };
+
+    use super::{MayaSceneKitError, maya_scene_kit_native};
+
+    #[test]
+    fn source_audit_binding_returns_reports_and_configuration_errors() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new(py, "maya_scene_kit_native").expect("native module");
+            maya_scene_kit_native(&module).expect("register native functions");
+            let function = module
+                .getattr("audit_source_text")
+                .expect("source function");
+            for (language, source, disposition) in [
+                ("python", "print('Example')", "allow_with_notice"),
+                ("mel", "print(\"Example\");", "allow_with_notice"),
+                ("python", "exec('print(1)')", "deny_malicious"),
+                ("python", "if :", "deny_malicious"),
+            ] {
+                let value = function.call1((source, language)).expect("source report");
+                let report = value.downcast::<PyDict>().expect("report dictionary");
+                assert_eq!(
+                    report
+                        .get_item("disposition")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    disposition
+                );
+                assert_eq!(
+                    report
+                        .get_item("scene_path")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    ""
+                );
+                assert!(report.contains("findings").unwrap());
+                assert!(report.contains("coverage_state").unwrap());
+                assert!(report.contains("blocked_on_uncertainty").unwrap());
+                assert!(!report.contains("reports").unwrap());
+            }
+            for language in ["unknown", "Python", "", "python2"] {
+                let error = function
+                    .call1(("", language))
+                    .expect_err("invalid language");
+                assert!(error.is_instance_of::<MayaSceneKitError>(py));
+                let (_, category) = error
+                    .value(py)
+                    .getattr("args")
+                    .unwrap()
+                    .extract::<(String, String)>()
+                    .unwrap();
+                assert_eq!(category, "config");
+            }
+        });
+    }
+
+    #[test]
+    fn python_package_exports_the_registered_source_function() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let native = PyModule::new(py, "maya_scene_kit_native").expect("native module");
+            maya_scene_kit_native(&native).expect("register native functions");
+            let package = PyModule::new(py, "example_package").expect("test package");
+            package.add("__package__", "example_package").unwrap();
+            package.add("__path__", Vec::<String>::new()).unwrap();
+            let modules = PyModule::import(py, "sys")
+                .unwrap()
+                .getattr("modules")
+                .unwrap();
+            modules.set_item("example_package", &package).unwrap();
+            modules
+                .set_item("example_package.maya_scene_kit_native", &native)
+                .unwrap();
+            let source =
+                CString::new(include_str!("../python/maya_scene_kit/__init__.py")).unwrap();
+            py.run(source.as_c_str(), Some(&package.dict()), None)
+                .expect("import package exports");
+            let function = package
+                .getattr("audit_source_text")
+                .expect("package source function");
+            assert!(function.is(&native.getattr("audit_source_text").unwrap()));
+            assert!(
+                package
+                    .getattr("__all__")
+                    .unwrap()
+                    .extract::<Vec<String>>()
+                    .unwrap()
+                    .contains(&"audit_source_text".to_string())
+            );
+            let value = function.call1(("print('Example')", "python")).unwrap();
+            assert_eq!(
+                value
+                    .get_item("disposition")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "allow_with_notice"
+            );
+            modules
+                .del_item("example_package.maya_scene_kit_native")
+                .unwrap();
+            modules.del_item("example_package").unwrap();
+        });
     }
 }

@@ -487,6 +487,7 @@ pub(in crate::cli) fn render_audit_finding_detail(detail: &AuditFindingDetail) -
 pub(in crate::cli) fn render_audit_review_detail(detail: &AuditReviewDetail) -> String {
     match detail {
         AuditReviewDetail::Static { value } => match value {
+            StaticAuditReviewDetail::PythonMayaSemanticsUncertain => value.message().to_string(),
             StaticAuditReviewDetail::MelCallbackBodyDetected => value.message().to_string(),
             StaticAuditReviewDetail::MelCallbackProcReferenceDetected => {
                 value.message().to_string()

@@ -1,10 +1,10 @@
 use super::{
     AnalysisSurface, SurfaceAnalysis,
-    builders::{build_finding, capability_finding, severity_for_trigger},
+    builders::{build_finding, build_review_signal, capability_finding, severity_for_trigger},
 };
 use crate::{
     audit::lower_python::{
-        PythonBodyArgKind, PythonCallKind, PythonCapabilityKind, PythonSignal,
+        MayaCall, MayaKind, PythonBodyArgKind, PythonCallKind, PythonCapabilityKind, PythonSignal,
         collect_python_signals,
     },
     scene::{AuditEvidence, AuditSeverity, AuditSinkKind},
@@ -88,6 +88,12 @@ pub(super) fn analyze_python_surface_impl(
                     None,
                 ));
             }
+            PythonSignal::MayaUncertain { message } => {
+                record_maya_uncertainty(surface_index, surface, message, Vec::new(), &mut analysis)
+            }
+            PythonSignal::Maya(call) => {
+                analyze_maya_call(surface_index, surface, call, &mut analysis)
+            }
             PythonSignal::Capability(kind) => {
                 let (id, sink, message, severity) = match kind {
                     PythonCapabilityKind::Subprocess => (
@@ -168,4 +174,92 @@ pub(super) fn analyze_python_surface_impl(
     }
 
     analysis
+}
+
+fn analyze_maya_call(
+    surface_index: usize,
+    surface: &AnalysisSurface,
+    call: MayaCall,
+    analysis: &mut SurfaceAnalysis,
+) {
+    use crate::scene::AuditEvidenceKey;
+
+    let (id, sink) = match call.kind {
+        MayaKind::File => ("python_maya_file", AuditSinkKind::PyMayaFile),
+        MayaKind::SysFile => ("python_file_write", AuditSinkKind::PyFileWrite),
+        MayaKind::ScriptJob => ("python_maya_script_job", AuditSinkKind::PyMayaScriptJob),
+        MayaKind::CommandPort => ("python_maya_command_port", AuditSinkKind::PySocket),
+        MayaKind::ScriptNode => ("python_maya_script_node", AuditSinkKind::PyMayaScriptNode),
+        MayaKind::LoadPlugin => ("python_maya_load_plugin", AuditSinkKind::PyMayaLoadPlugin),
+        MayaKind::EvalDeferred => (
+            "python_maya_eval_deferred",
+            AuditSinkKind::PyMayaEvalDeferred,
+        ),
+        MayaKind::Callback => ("python_maya_callback", AuditSinkKind::PyMayaCallback),
+    };
+    let mut evidence = vec![AuditEvidence::KeyValue {
+        key: AuditEvidenceKey::Command,
+        value: call.target.clone(),
+    }];
+    evidence.extend(call.flags.into_iter().map(|value| AuditEvidence::KeyValue {
+        key: AuditEvidenceKey::Flag,
+        value,
+    }));
+    evidence.extend(
+        call.operations
+            .iter()
+            .map(|operation| AuditEvidence::FreeText {
+                value: format!("operation={operation}"),
+            }),
+    );
+    if !call.operations.is_empty() {
+        let severity = if call.critical {
+            AuditSeverity::Critical
+        } else {
+            AuditSeverity::High
+        };
+        analysis.findings.push(build_finding(
+            surface_index,
+            surface,
+            id,
+            severity_for_trigger(severity, surface.origin.trigger),
+            sink,
+            None,
+            "Python Maya capability detected",
+            evidence.clone(),
+            None,
+        ));
+    }
+    if !call.uncertainty.is_empty() {
+        let reason = format!("{}: {}", call.target, call.uncertainty.join("; "));
+        record_maya_uncertainty(surface_index, surface, reason, evidence, analysis);
+    }
+}
+
+fn record_maya_uncertainty(
+    surface_index: usize,
+    surface: &AnalysisSurface,
+    reason: String,
+    mut evidence: Vec<AuditEvidence>,
+    analysis: &mut SurfaceAnalysis,
+) {
+    use crate::scene::UnknownSemanticFact;
+    use maya_scene_kit_observe::scene::evidence::UnknownSemanticDetail;
+
+    evidence.push(AuditEvidence::FreeText {
+        value: reason.clone(),
+    });
+    analysis.review_signals.push(build_review_signal(
+        surface,
+        surface_index,
+        "python_maya_uncertain",
+        "Python Maya semantics require review",
+        evidence,
+        None,
+    ));
+    analysis.unknown_semantics.push(UnknownSemanticFact {
+        origin: surface.origin.clone(),
+        detail: UnknownSemanticDetail::GenericUncertain,
+        preview: reason,
+    });
 }

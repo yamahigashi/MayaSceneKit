@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use maya_scene_kit_formats::mel::mel_parse_budget_limit_from_message;
+use maya_scene_kit_formats::mel::{MelParseBudget, mel_parse_budget_limit_from_message};
 use rustpython_parser::ast;
 use sha2::{Digest, Sha256};
 
@@ -25,8 +25,8 @@ use crate::scene::{
     DependencyFact, EffectCertainty, ExecutionCoverageIssue, ExecutionCoverageIssueDetail,
     ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage,
     ExecutionOrigin, ExecutionReason, ExecutionReasonTemplate, ExecutionSemanticClass,
-    ExecutionSurfaceKind, ExecutionUnitSummary, SceneDigestSet, SceneFormat, SceneToolError,
-    StaticExecutionReason, UnknownSemanticDetail, UnknownSemanticFact,
+    ExecutionSurfaceKind, ExecutionTrigger, ExecutionUnitSummary, SceneDigestSet, SceneFormat,
+    SceneToolError, StaticExecutionReason, UnknownSemanticDetail, UnknownSemanticFact,
     source::{ObservationBundle, ObservationData},
 };
 
@@ -67,7 +67,7 @@ pub(crate) struct UnknownSemanticFactCore {
 pub(crate) fn build_observed_execution_core(
     observation: &ObservationBundle,
 ) -> Result<ObservedExecutionCore, SceneToolError> {
-    let mut coverage = match &observation.data {
+    let coverage = match &observation.data {
         ObservationData::Ma { data } => {
             let semantics = data.node_execution_semantics()?;
             surfaces::collect_execution_coverage_from_ma_parts(
@@ -90,6 +90,74 @@ pub(crate) fn build_observed_execution_core(
         }
     }?;
 
+    let mut core = build_execution_core(coverage, observation.mel_parse_budget())?;
+    let mut dependency_facts = dependency::collect_scene_dependency_facts(observation)?;
+    dependency_facts.append(&mut core.dependency_facts);
+    core.dependency_facts = dependency_facts;
+    Ok(core)
+}
+
+pub fn observe_source_text(
+    source: &str,
+    language: ExecutionLanguage,
+) -> Result<ObservedExecutionCatalog, SceneToolError> {
+    if language == ExecutionLanguage::Unknown {
+        return Err(SceneToolError::Config(
+            "source language must be python or mel".to_string(),
+        ));
+    }
+    let origin = ExecutionOrigin {
+        lang: language,
+        trigger: ExecutionTrigger::Manual,
+        surface_kind: ExecutionSurfaceKind::RawChunkText,
+        source_kind: Some("standalone_source_text".to_string()),
+        ..ExecutionOrigin::without_chunk_address()
+    };
+    let coverage = surfaces::ExecutionCoverageCollection {
+        surfaces: vec![surfaces::ExecutionSurfaceRecord {
+            text: Arc::from(source),
+            origin,
+            requires_mel_modeling: true,
+        }],
+        coverage_issues: Vec::new(),
+    };
+    let mut core = build_execution_core(coverage, &MelParseBudget::default())?;
+    if let Some(summary) = core.unit_summaries.first()
+        && summary.reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                ExecutionReason::Static {
+                    value: StaticExecutionReason::PythonParseFailurePreventsProvenEffectSummary
+                }
+            )
+        })
+    {
+        core.coverage_issues
+            .push(surfaces::ExecutionCoverageIssueRecord {
+                kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+                detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+                    diagnostic: "Python parse failed".to_string(),
+                },
+                origin: Some(summary.origin.clone()),
+                preview: summary.preview.clone(),
+            });
+        core.coverage_state = ExecutionCoverageState::Incomplete;
+    }
+    Ok(materialize_observed_execution_catalog(
+        &core,
+        96,
+        SceneDigestSet {
+            scene_sha256: String::new(),
+            schema_bundle_sha256: None,
+            policy_bundle_sha256: None,
+        },
+    ))
+}
+
+fn build_execution_core(
+    mut coverage: surfaces::ExecutionCoverageCollection,
+    mel_parse_budget: &MelParseBudget,
+) -> Result<ObservedExecutionCore, SceneToolError> {
     let surface_capacity = coverage.surfaces.len();
     let mut mel_surface_facts_cache = HashMap::with_capacity(surface_capacity);
     let mut observed = Vec::with_capacity(surface_capacity);
@@ -107,7 +175,7 @@ pub(crate) fn build_observed_execution_core(
                     &mut mel_surface_facts_cache,
                     &surface.text,
                     syntax,
-                    observation.mel_parse_budget(),
+                    mel_parse_budget,
                 ))
             }
             ExecutionLanguage::Mel | ExecutionLanguage::Unknown => None,
@@ -164,9 +232,8 @@ pub(crate) fn build_observed_execution_core(
         });
     }
 
-    let coverage_state =
-        derive_coverage_state(observation.scene_format(), &coverage.coverage_issues);
-    let dependency_facts = dependency::collect_dependency_facts(observation, &observed)?;
+    let coverage_state = derive_coverage_state(SceneFormat::Unknown, &coverage.coverage_issues);
+    let dependency_facts = dependency::collect_surface_dependency_facts(&observed);
 
     Ok(ObservedExecutionCore {
         surfaces: observed,

@@ -192,6 +192,13 @@ pub enum AuditFindingCode {
     PythonParseFailure,
     PythonSubprocess,
     PythonSocket,
+    PythonMayaFile,
+    PythonMayaScriptJob,
+    PythonMayaCommandPort,
+    PythonMayaScriptNode,
+    PythonMayaLoadPlugin,
+    PythonMayaEvalDeferred,
+    PythonMayaCallback,
     PythonUnresolvedCallTarget,
     PythonExec,
     UnknownExecutionLanguage,
@@ -222,6 +229,13 @@ impl AuditFindingCode {
             Self::PythonParseFailure => "python_parse_failure",
             Self::PythonSubprocess => "python_subprocess",
             Self::PythonSocket => "python_socket",
+            Self::PythonMayaFile => "python_maya_file",
+            Self::PythonMayaScriptJob => "python_maya_script_job",
+            Self::PythonMayaCommandPort => "python_maya_command_port",
+            Self::PythonMayaScriptNode => "python_maya_script_node",
+            Self::PythonMayaLoadPlugin => "python_maya_load_plugin",
+            Self::PythonMayaEvalDeferred => "python_maya_eval_deferred",
+            Self::PythonMayaCallback => "python_maya_callback",
             Self::PythonUnresolvedCallTarget => "python_unresolved_call_target",
             Self::PythonExec => "python_pyexec",
             Self::UnknownExecutionLanguage => "unknown_execution_language",
@@ -233,6 +247,7 @@ impl AuditFindingCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditReviewCode {
+    PythonMayaUncertain,
     MelCallbackBody,
     MelCallbackProcReference,
     MelBodyAssemblyWithoutSink,
@@ -241,6 +256,7 @@ pub enum AuditReviewCode {
 impl AuditReviewCode {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::PythonMayaUncertain => "python_maya_uncertain",
             Self::MelCallbackBody => "mel_callback_body",
             Self::MelCallbackProcReference => "mel_callback_proc_reference",
             Self::MelBodyAssemblyWithoutSink => "mel_body_assembly_without_sink",
@@ -312,6 +328,13 @@ pub enum StaticAuditFindingDetail {
     MelExecCommandDetected,
     MelParseDiagnosticsPresent,
     PythonBodyAssemblyMarkersDetected,
+    PythonMayaFileDetected,
+    PythonMayaScriptJobDetected,
+    PythonMayaCommandPortDetected,
+    PythonMayaScriptNodeDetected,
+    PythonMayaLoadPluginDetected,
+    PythonMayaEvalDeferredDetected,
+    PythonMayaCallbackDetected,
     PythonCallTargetCouldNotBeResolved,
     PythonCompileDetected,
     PythonEvalDetected,
@@ -357,6 +380,13 @@ impl StaticAuditFindingDetail {
             Self::PythonBodyAssemblyMarkersDetected => {
                 "Python body-assembly / obfuscation markers detected"
             }
+            Self::PythonMayaFileDetected => "Python Maya file capability detected",
+            Self::PythonMayaScriptJobDetected => "Python Maya script job capability detected",
+            Self::PythonMayaCommandPortDetected => "Python Maya command port capability detected",
+            Self::PythonMayaScriptNodeDetected => "Python Maya script node capability detected",
+            Self::PythonMayaLoadPluginDetected => "Python Maya load plugin capability detected",
+            Self::PythonMayaEvalDeferredDetected => "Python Maya eval deferred capability detected",
+            Self::PythonMayaCallbackDetected => "Python Maya callback capability detected",
             Self::PythonCallTargetCouldNotBeResolved => {
                 "Python call target could not be resolved without executing dynamic dispatch"
             }
@@ -389,6 +419,7 @@ impl StaticAuditFindingDetail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StaticAuditReviewDetail {
+    PythonMayaSemanticsUncertain,
     MelCallbackBodyDetected,
     MelCallbackProcReferenceDetected,
     MelBodyAssemblyWithoutSinkDetected,
@@ -397,6 +428,9 @@ pub enum StaticAuditReviewDetail {
 impl StaticAuditReviewDetail {
     pub fn message(self) -> &'static str {
         match self {
+            Self::PythonMayaSemanticsUncertain => {
+                "Python Maya operation or callback semantics require review"
+            }
             Self::MelCallbackBodyDetected => {
                 "MEL callback flag embeds inline script body; derived analysis determines whether it remains review-only or is denied"
             }
@@ -484,19 +518,19 @@ impl AuditSurfaceDerivation {
 /// Aggregate report returned by script auditing operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReport {
-    /// Source scene path.
+    /// Source scene path, or an empty path for standalone source text.
     pub scene_path: PathBuf,
-    /// Detected source scene format.
+    /// Detected scene format, or Unknown when the input is standalone source text.
     pub scene_format: SceneFormat,
     /// Audit profile used for policy decisions.
     pub profile: AuditProfile,
-    /// Integrity summary shared with other read-only APIs.
+    /// Scene integrity, or source parsing validation for standalone text.
     pub validation_state: ValidationState,
     /// Effective user-supplied inline and file-backed rules.
     pub effective_rules: Vec<String>,
     /// Number of directly observed surfaces inspected before rule evaluation.
     pub surface_count: usize,
-    /// Observe-owned execution coverage summary.
+    /// Observe-owned execution coverage of the input, excluding uninspected dependencies.
     pub coverage_state: ExecutionCoverageState,
     /// Observe-owned coverage issues that forced conservative blocking.
     pub coverage_issues: Vec<ExecutionCoverageIssue>,
@@ -510,7 +544,7 @@ pub struct AuditReport {
     pub dependency_facts: Vec<DependencyFact>,
     /// Observe-owned uncertainty facts.
     pub unknown_semantics: Vec<UnknownSemanticFact>,
-    /// Stable digests describing the scene and audit environment.
+    /// Stable scene/environment digests; disabled for standalone source text.
     pub digests: SceneDigestSet,
     /// Scene-level notices emitted before or alongside surface analysis.
     pub notices: Vec<AuditNotice>,
@@ -753,6 +787,18 @@ pub enum AuditSinkKind {
     PyFileWrite,
     /// Python autorun persistence marker.
     PyAutorunPersistence,
+    /// Python Maya file capability.
+    PyMayaFile,
+    /// Python Maya script job capability.
+    PyMayaScriptJob,
+    /// Python Maya script node capability.
+    PyMayaScriptNode,
+    /// Python Maya load plugin capability.
+    PyMayaLoadPlugin,
+    /// Python Maya eval deferred capability.
+    PyMayaEvalDeferred,
+    /// Python Maya callback capability.
+    PyMayaCallback,
 }
 
 impl AuditSinkKind {
@@ -779,6 +825,12 @@ impl AuditSinkKind {
             Self::PyFileOpen => "py_file_open",
             Self::PyFileWrite => "py_file_write",
             Self::PyAutorunPersistence => "py_autorun_persistence",
+            Self::PyMayaFile => "py_maya_file",
+            Self::PyMayaScriptJob => "py_maya_script_job",
+            Self::PyMayaScriptNode => "py_maya_script_node",
+            Self::PyMayaLoadPlugin => "py_maya_load_plugin",
+            Self::PyMayaEvalDeferred => "py_maya_eval_deferred",
+            Self::PyMayaCallback => "py_maya_callback",
         }
     }
 }
