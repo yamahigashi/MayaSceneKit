@@ -6,11 +6,14 @@ mod clipboard;
 mod collect;
 mod collect_dialog;
 mod helpers;
+mod search;
 mod table_state;
 
 pub(super) use clipboard::*;
 pub(super) use collect::*;
 pub(super) use helpers::*;
+#[cfg(test)]
+pub(super) use search::{find_missing_path_file_hits, path_search_hit_key};
 
 impl GuiShell {
     pub(super) fn current_path_value(&self, row: &SceneRow, entry_index: usize) -> Option<String> {

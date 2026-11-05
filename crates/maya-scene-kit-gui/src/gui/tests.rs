@@ -70,11 +70,12 @@ use super::{
     missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
-        collected_path_rewrite_value, parse_path_collect_folder_input, path_collect_default_folder,
-        path_collect_destination_supports_rewrite_mode, path_value_edit_supported_for_edit_targets,
-        path_value_edit_supported_for_entry, resolved_target_file_paths_for_edit_targets,
-        shared_workspace_root_for_targets, workspace_relative_override_value_for_entry,
-        write_back_selected_scene_path,
+        collected_path_rewrite_value, find_missing_path_file_hits, missing_path_entry_file_name,
+        parse_path_collect_folder_input, path_collect_default_folder,
+        path_collect_destination_supports_rewrite_mode, path_search_hit_key,
+        path_value_edit_supported_for_edit_targets, path_value_edit_supported_for_entry,
+        resolved_target_file_paths_for_edit_targets, shared_workspace_root_for_targets,
+        workspace_relative_override_value_for_entry, write_back_selected_scene_path,
     },
     path_edit_keyboard_outcome, path_overrides_from_replace_preview, path_table_columns,
     path_text_highlights, persisted_column_widths, reconcile_workspace_rows, render_banner_message,
@@ -7593,6 +7594,124 @@ fn path_context_menu_state_keeps_workspace_relative_for_non_deleted_rows() {
 }
 
 #[test]
+fn path_context_menu_state_enables_search_for_mixed_missing_selection() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(workspace.join("sourceimages/exists.tx"), "tx").expect("write existing");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/exists.tx\";\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/missing.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+    row.refresh_path_resolution_cache();
+
+    let state = path_context_menu_state(&[row], &vec![(1, 0), (1, 1)]);
+
+    assert!(state.can_search_missing_files);
+    assert!(!state.show_disabled_search_missing_files);
+}
+
+#[test]
+fn path_context_menu_state_disables_search_for_non_editable_missing_targets() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/missing.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+    row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+        node_type: "file".to_string(),
+        node_name: "file1".to_string(),
+    }]);
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.refresh_path_resolution_cache();
+
+    let state = path_context_menu_state(&[row], &vec![(1, 0)]);
+
+    assert!(!state.can_search_missing_files);
+    assert!(state.show_disabled_search_missing_files);
+}
+
+#[test]
+fn path_context_menu_state_disables_search_for_processing_missing_targets() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/missing.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.status = FileStatus::Processing(RowOperation::Analyze);
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+    row.refresh_path_resolution_cache();
+
+    let state = path_context_menu_state(&[row], &vec![(1, 0)]);
+
+    assert!(!state.can_search_missing_files);
+    assert!(state.show_disabled_search_missing_files);
+}
+
+#[test]
+fn path_context_menu_state_search_skips_processing_targets_when_editable_missing_exists() {
+    let dir = tempdir().expect("tmpdir");
+    let first_scene = dir.path().join("first.ma");
+    let second_scene = dir.path().join("second.ma");
+    let scene_body = concat!(
+        "//Maya ASCII 2026 scene\n",
+        "createNode file -n \"file1\";\n",
+        "    setAttr \".ftn\" -type \"string\" \"sourceimages/missing.tx\";\n",
+    );
+    fs::write(&first_scene, scene_body).expect("write first scene");
+    fs::write(&second_scene, scene_body).expect("write second scene");
+
+    let mut first_row = test_row(1, &first_scene);
+    first_row.selected = true;
+    first_row.paths_report =
+        Some(collect_scene_paths(&first_scene, PathKind::File).expect("paths"));
+    first_row.refresh_path_resolution_cache();
+    let mut second_row = test_row(2, &second_scene);
+    second_row.selected = true;
+    second_row.status = FileStatus::Processing(RowOperation::Analyze);
+    second_row.paths_report =
+        Some(collect_scene_paths(&second_scene, PathKind::File).expect("paths"));
+    second_row.refresh_path_resolution_cache();
+
+    let state = path_context_menu_state(&[first_row, second_row], &vec![(1, 0), (2, 0)]);
+
+    assert!(state.can_search_missing_files);
+    assert!(!state.show_disabled_search_missing_files);
+}
+
+#[test]
 fn path_value_edit_supported_for_entry_only_blocks_deleted_owner_rows() {
     let dir = tempdir().expect("tmpdir");
     let scene = dir.path().join("scene.ma");
@@ -7938,6 +8057,330 @@ fn write_back_selected_scene_path_prefers_workspace_relative_and_preserves_doubl
         ),
         format!("{workspace_display}//sourceimages/hero.tx")
     );
+}
+
+#[test]
+fn missing_path_entry_file_name_extracts_basename_for_missing_entries() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages\\\\nested\\\\missing.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    let mut row = test_row(1, &scene);
+    row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+    row.refresh_path_resolution_cache();
+
+    assert_eq!(
+        missing_path_entry_file_name(&row, 0),
+        Some("missing.tx".to_string())
+    );
+}
+
+#[test]
+fn find_missing_path_file_hits_uses_breadth_first_sorted_first_hit() {
+    let dir = tempdir().expect("tmpdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("b_folder")).expect("mkdir b");
+    fs::create_dir_all(root.join("a_folder/deeper")).expect("mkdir a");
+    fs::write(root.join("b_folder/TestAsset.tx"), "b").expect("write b");
+    fs::write(root.join("a_folder/TestAsset.tx"), "a").expect("write a");
+    fs::write(root.join("a_folder/deeper/TestAsset.tx"), "deep").expect("write deep");
+
+    let hits = find_missing_path_file_hits(
+        root,
+        &BTreeSet::from(["TestAsset.tx".to_string()]),
+        &ignore_state(false, &[]),
+    );
+
+    assert_eq!(
+        hits.get(&path_search_hit_key("TestAsset.tx")),
+        Some(&root.join("a_folder/TestAsset.tx"))
+    );
+}
+
+#[test]
+fn find_missing_path_file_hits_skips_ignored_folders() {
+    let dir = tempdir().expect("tmpdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("backup")).expect("mkdir backup");
+    fs::create_dir_all(root.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(root.join("backup/Sample.tx"), "ignored").expect("write ignored");
+    fs::write(root.join("sourceimages/Sample.tx"), "kept").expect("write kept");
+
+    let hits = find_missing_path_file_hits(
+        root,
+        &BTreeSet::from(["Sample.tx".to_string()]),
+        &ignore_state(true, &["backup"]),
+    );
+
+    assert_eq!(
+        hits.get(&path_search_hit_key("Sample.tx")),
+        Some(&root.join("sourceimages/Sample.tx"))
+    );
+}
+
+#[test]
+fn find_missing_path_file_hits_matches_case_insensitively_and_multiple_targets() {
+    let dir = tempdir().expect("tmpdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("sourceimages")).expect("mkdir sourceimages");
+    fs::write(root.join("sourceimages/sample_diffuse.TX"), "diffuse").expect("write diffuse");
+    fs::write(root.join("sourceimages/Sample_Normal.tx"), "normal").expect("write normal");
+
+    let hits = find_missing_path_file_hits(
+        root,
+        &BTreeSet::from([
+            "SAMPLE_DIFFUSE.tx".to_string(),
+            "sample_normal.TX".to_string(),
+        ]),
+        &ignore_state(false, &[]),
+    );
+
+    assert_eq!(
+        hits.get(&path_search_hit_key("SAMPLE_DIFFUSE.tx")),
+        Some(&root.join("sourceimages/sample_diffuse.TX"))
+    );
+    assert_eq!(
+        hits.get(&path_search_hit_key("sample_normal.TX")),
+        Some(&root.join("sourceimages/Sample_Normal.tx"))
+    );
+}
+
+#[test]
+fn find_missing_path_file_hits_returns_empty_for_no_hits() {
+    let dir = tempdir().expect("tmpdir");
+    fs::create_dir_all(dir.path().join("sourceimages")).expect("mkdir sourceimages");
+
+    let hits = find_missing_path_file_hits(
+        dir.path(),
+        &BTreeSet::from(["Missing.tx".to_string()]),
+        &ignore_state(false, &[]),
+    );
+
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn search_write_back_preserves_plain_relative_values_inside_workspace() {
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let found = workspace.join("sourceimages/Sample.tx");
+    fs::create_dir_all(found.parent().expect("parent")).expect("mkdir sourceimages");
+    fs::write(&found, "tx").expect("write found");
+
+    assert_eq!(
+        write_back_selected_scene_path(
+            &found,
+            Some(&workspace),
+            ScenePathValueStyle::PlainRelative,
+        ),
+        "sourceimages/Sample.tx"
+    );
+}
+
+#[gpui::test]
+fn search_missing_path_write_back_preserves_entry_value_styles(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let recovered = workspace.join("recovered");
+    let plain_hit = recovered.join("SamplePlain.tx");
+    let double_slash_hit = recovered.join("SampleWorkspace.tx");
+    fs::create_dir_all(&recovered).expect("mkdir recovered");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(&plain_hit, "plain").expect("write plain");
+    fs::write(&double_slash_hit, "workspace").expect("write workspace");
+    let workspace_display = workspace.to_string_lossy().replace('\\', "/");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        format!(
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "createNode file -n \"file1\";\n",
+                "    setAttr \".ftn\" -type \"string\" \"sourceimages/SamplePlain.tx\";\n",
+                "createNode file -n \"file2\";\n",
+                "    setAttr \".ftn\" -type \"string\" \"{workspace_display}//sourceimages/SampleWorkspace.tx\";\n",
+            ),
+            workspace_display = workspace_display
+        ),
+    )
+    .expect("write scene");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+            let targets = shell.missing_path_search_targets(&vec![(1, 0), (1, 1)]);
+            let hits = BTreeMap::from([
+                (path_search_hit_key("SamplePlain.tx"), plain_hit.clone()),
+                (
+                    path_search_hit_key("SampleWorkspace.tx"),
+                    double_slash_hit.clone(),
+                ),
+            ]);
+
+            shell.apply_missing_path_file_hits(
+                targets,
+                workspace.clone(),
+                hits,
+                Duration::from_secs(0),
+                window,
+                cx,
+            );
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].path_overrides.get(&0),
+            Some(&"recovered/SamplePlain.tx".to_string())
+        );
+        assert_eq!(
+            shell.rows[0].path_overrides.get(&1),
+            Some(&format!(
+                "{workspace_display}//recovered/SampleWorkspace.tx"
+            ))
+        );
+    });
+}
+
+#[gpui::test]
+fn search_missing_path_write_back_skips_rows_that_disappeared(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let recovered = workspace.join("recovered");
+    let first_hit = recovered.join("SampleFirst.tx");
+    let second_hit = recovered.join("SampleSecond.tx");
+    fs::create_dir_all(&recovered).expect("mkdir recovered");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(&first_hit, "first").expect("write first");
+    fs::write(&second_hit, "second").expect("write second");
+    let first_scene = workspace.join("first.ma");
+    let second_scene = workspace.join("second.ma");
+    fs::write(
+        &first_scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/SampleFirst.tx\";\n",
+        ),
+    )
+    .expect("write first scene");
+    fs::write(
+        &second_scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/SampleSecond.tx\";\n",
+        ),
+    )
+    .expect("write second scene");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut first_row = test_row(1, &first_scene);
+            first_row.paths_report =
+                Some(collect_scene_paths(&first_scene, PathKind::File).expect("paths"));
+            first_row.refresh_path_resolution_cache();
+            let mut second_row = test_row(2, &second_scene);
+            second_row.paths_report =
+                Some(collect_scene_paths(&second_scene, PathKind::File).expect("paths"));
+            second_row.refresh_path_resolution_cache();
+            shell.rows = vec![first_row, second_row];
+            let targets = shell.missing_path_search_targets(&vec![(1, 0), (2, 0)]);
+            shell.rows.retain(|row| row.id == 1);
+            let hits = BTreeMap::from([
+                (path_search_hit_key("SampleFirst.tx"), first_hit.clone()),
+                (path_search_hit_key("SampleSecond.tx"), second_hit.clone()),
+            ]);
+
+            shell.apply_missing_path_file_hits(
+                targets,
+                workspace.clone(),
+                hits,
+                Duration::from_secs(0),
+                window,
+                cx,
+            );
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(shell.rows.len(), 1);
+        assert_eq!(
+            shell.rows[0].path_overrides.get(&0),
+            Some(&"recovered/SampleFirst.tx".to_string())
+        );
+    });
+}
+
+#[gpui::test]
+fn search_missing_path_write_back_skips_targets_whose_value_changed(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let recovered = workspace.join("recovered");
+    let hit = recovered.join("Sample.tx");
+    fs::create_dir_all(&recovered).expect("mkdir recovered");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    fs::write(&hit, "tx").expect("write hit");
+    let scene = workspace.join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"sourceimages/Sample.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.refresh_path_resolution_cache();
+            shell.rows = vec![row];
+            let targets = shell.missing_path_search_targets(&vec![(1, 0)]);
+            shell.rows[0]
+                .path_overrides
+                .insert(0, "sourceimages/SampleChanged.tx".to_string());
+            let hits = BTreeMap::from([(path_search_hit_key("Sample.tx"), hit.clone())]);
+
+            shell.apply_missing_path_file_hits(
+                targets,
+                workspace.clone(),
+                hits,
+                Duration::from_secs(0),
+                window,
+                cx,
+            );
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].path_overrides.get(&0),
+            Some(&"sourceimages/SampleChanged.tx".to_string())
+        );
+    });
 }
 
 #[test]

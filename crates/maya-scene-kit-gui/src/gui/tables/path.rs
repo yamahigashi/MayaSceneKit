@@ -426,6 +426,7 @@ impl TableDelegate for PathTableDelegate {
 
         let copy_label = I18n::new(self.locale).text("action.copy_path_name");
         let copy_file_label = I18n::new(self.locale).text("action.copy_file");
+        let search_missing_files_label = I18n::new(self.locale).text("action.search_missing_files");
         let convert_absolute_label = I18n::new(self.locale).text("action.convert_to_absolute");
         let convert_workspace_double_slash_relative_label =
             I18n::new(self.locale).text("action.convert_to_workspace_double_slash_relative");
@@ -571,6 +572,21 @@ impl TableDelegate for PathTableDelegate {
                     });
                 }
             }))
+        } else {
+            menu
+        };
+        let menu = if path_menu_state.can_search_missing_files {
+            menu.item(PopupMenuItem::new(search_missing_files_label).on_click({
+                let view = view.clone();
+                let selected_targets = selected_targets.clone();
+                move |_, window, cx| {
+                    view.update(cx, |shell, cx| {
+                        shell.search_missing_path_files(selected_targets.clone(), window, cx);
+                    });
+                }
+            }))
+        } else if path_menu_state.show_disabled_search_missing_files {
+            menu.item(PopupMenuItem::new(search_missing_files_label).disabled(true))
         } else {
             menu
         };

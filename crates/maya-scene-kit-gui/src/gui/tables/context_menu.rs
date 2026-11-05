@@ -4,8 +4,9 @@ use super::super::{
     AuditRowCleanState, AuditTableRow, DirtyKind, ExecutionCleanTarget, PathCollectRewriteMode,
     PathEditTargets, SceneRow, clean_targets_for_threat_findings,
     path_edit::{
-        absolute_override_value_for_entry, path_value_edit_supported_for_entry,
-        resolved_target_file_path_for_entry, workspace_relative_override_value_for_entry,
+        absolute_override_value_for_entry, missing_path_entry_file_name,
+        path_value_edit_supported_for_entry, resolved_target_file_path_for_entry,
+        workspace_relative_override_value_for_entry,
     },
 };
 
@@ -126,6 +127,8 @@ pub(in crate::gui) struct PathContextMenuState {
     pub show_disabled_collect_files_to_folder: bool,
     pub can_collect_files: bool,
     pub show_disabled_collect_files: bool,
+    pub can_search_missing_files: bool,
+    pub show_disabled_search_missing_files: bool,
 }
 
 pub(in crate::gui) fn path_context_menu_state(
@@ -148,6 +151,8 @@ pub(in crate::gui) fn path_context_menu_state(
     let mut has_plain_relative_target = false;
     let mut has_absolute_target = false;
     let mut has_collectable_file_target = false;
+    let mut has_missing_search_target = false;
+    let mut has_editable_missing_search_target = false;
     for (row_id, entry_index) in edit_targets {
         let Some(row) = row_by_id.get(row_id).copied() else {
             all_targets_editable = false;
@@ -155,6 +160,7 @@ pub(in crate::gui) fn path_context_menu_state(
             shared_workspace_root = false;
             continue;
         };
+        let target_editable = path_value_edit_supported_for_entry(row, *entry_index);
         has_workspace_double_slash_relative_target |= workspace_relative_override_value_for_entry(
             row,
             *entry_index,
@@ -171,12 +177,17 @@ pub(in crate::gui) fn path_context_menu_state(
         let has_resolved_file = resolved_target_file_path_for_entry(row, *entry_index).is_some();
         has_collectable_file_target |= has_resolved_file;
         all_targets_collectable_files &= has_resolved_file;
-        all_targets_editable &= path_value_edit_supported_for_entry(row, *entry_index);
+        all_targets_editable &= target_editable;
+        if missing_path_entry_file_name(row, *entry_index).is_some() {
+            has_missing_search_target = true;
+            has_editable_missing_search_target |= target_editable;
+        }
         shared_workspace_root &= row.scene_workspace_root.as_ref() == first_workspace_root;
     }
     let can_edit_path_values = all_targets_editable;
     let can_collect_files_to_folder = shared_workspace_root && all_targets_collectable_files;
     let can_collect_files = can_collect_files_to_folder && can_edit_path_values;
+    let can_search_missing_files = has_editable_missing_search_target;
 
     PathContextMenuState {
         can_convert_to_absolute: has_absolute_target && can_edit_path_values,
@@ -192,5 +203,7 @@ pub(in crate::gui) fn path_context_menu_state(
             && !can_collect_files_to_folder,
         can_collect_files,
         show_disabled_collect_files: has_collectable_file_target && !can_collect_files,
+        can_search_missing_files,
+        show_disabled_search_missing_files: has_missing_search_target && !can_search_missing_files,
     }
 }
