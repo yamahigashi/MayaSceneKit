@@ -114,6 +114,9 @@ impl Default for AnalysisBudgets {
 /// One rule hit produced by script auditing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditFinding {
+    /// Exact body permission and its retained source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_by: Option<super::allowlist::AuditAllowRef>,
     /// Stable finding identifier emitted by the audit engine.
     pub code: AuditFindingCode,
     /// Severity assigned to this finding.

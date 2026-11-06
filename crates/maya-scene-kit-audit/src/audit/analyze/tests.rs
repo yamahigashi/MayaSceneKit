@@ -29,6 +29,7 @@ fn sink_word_scan_tracks_whole_word_hits_without_overlap() {
 #[test]
 fn parser_backed_lookup_matches_call_name_case_insensitively() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"source "evil.mel""#),
         preview: r#"source "evil.mel""#.to_string(),
         origin: ExecutionOrigin {
@@ -71,6 +72,7 @@ fn parser_backed_lookup_matches_call_name_case_insensitively() {
 #[test]
 fn mel_exec_command_emits_dedicated_finding() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"exec "SampleTool.exe";"#),
         preview: "exec".to_string(),
         origin: ExecutionOrigin {
@@ -102,6 +104,7 @@ fn mel_exec_command_emits_dedicated_finding() {
 #[test]
 fn mel_exec_detection_does_not_scan_nested_python_strings() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"python("exec('print(1)')");"#),
         preview: "python".to_string(),
         origin: ExecutionOrigin {
@@ -142,6 +145,7 @@ fn mel_exec_detection_does_not_scan_nested_python_strings() {
 #[test]
 fn callback_inline_body_emits_review_signal_and_derived_surface() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"modelEditor -e -editorChanged "print \"ok\";" modelPanel4;"#),
         preview: "modelEditor".to_string(),
         origin: ExecutionOrigin {
@@ -201,6 +205,7 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
 #[test]
 fn bare_identifier_callback_flag_emits_review_signal_only() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"modelEditor -e -editorChanged "safeProc" modelPanel4;"#),
         preview: "modelEditor".to_string(),
         origin: ExecutionOrigin {
@@ -252,6 +257,7 @@ fn bare_identifier_callback_flag_emits_review_signal_only() {
 #[test]
 fn empty_braced_callback_flag_is_ignored() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"nodeOutliner -e -selectCommand "{}" outlinerPanel1;"#),
         preview: "nodeOutliner".to_string(),
         origin: ExecutionOrigin {
@@ -283,6 +289,7 @@ fn empty_braced_callback_flag_is_ignored() {
 #[test]
 fn bare_mel_variable_is_not_obfuscation_marker() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"$editorName = "panel1"; modelEditor -q -camera $editorName;"#),
         preview: "$editorName".to_string(),
         origin: ExecutionOrigin {
@@ -324,6 +331,7 @@ fn bare_mel_variable_is_not_obfuscation_marker() {
 #[test]
 fn mel_sink_finding_uses_rendered_body_as_preview_override() {
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(r#"eval("print \"sample\";");"#),
         preview: "eval".to_string(),
         origin: ExecutionOrigin {
@@ -375,6 +383,7 @@ fn dynamic_mel_sink_finding_uses_sink_span_preview_override() {
         "eval($ExampleBody);"
     );
     let surface = AnalysisSurface {
+        root_index: 0,
         text: Arc::from(source),
         preview: "float $ExampleFrame = frame".to_string(),
         origin: ExecutionOrigin {

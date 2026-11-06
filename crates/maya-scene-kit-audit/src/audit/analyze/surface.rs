@@ -7,6 +7,7 @@ use crate::scene::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct AnalysisSurface {
+    pub(crate) root_index: usize,
     pub(crate) text: Arc<str>,
     pub(crate) preview: String,
     pub(crate) origin: ExecutionOrigin,
@@ -23,8 +24,9 @@ pub(crate) struct SurfaceAnalysis {
 }
 
 impl AnalysisSurface {
-    pub(crate) fn observed(surface: ObservedExecutionSurface) -> Self {
+    pub(crate) fn observed(root_index: usize, surface: ObservedExecutionSurface) -> Self {
         Self {
+            root_index,
             text: surface.surface.text,
             preview: surface.surface.preview,
             origin: surface.surface.origin,
