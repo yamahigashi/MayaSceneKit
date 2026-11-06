@@ -102,6 +102,7 @@ pub(super) fn analyze_callback_flags(
                     Some(format!("mel callback flag {command_name}.{flag_name}"));
                 let mel = collect_cached_mel_surface_facts(mel_surface_facts_cache, &body);
                 derived_surfaces.push(AnalysisSurface {
+                    root_index: surface.root_index,
                     preview: preview_window(
                         &body,
                         0,

@@ -1969,3 +1969,440 @@ fn audit_mb_child_budget_exceed_returns_blocked_report() {
         "parse budget exceeded: max_children_per_group"
     );
 }
+
+#[test]
+fn allowlist_report_json_compatibility() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let source = dir.path().join("Example.ma");
+    write_scene(
+        &source,
+        "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExampleScriptNode\";\n\tsetAttr \".b\" -type \"string\" \"exec \\\"Example\\\"\";\n\tsetAttr \".st\" 1;\n",
+    );
+    let mut report = audit_script_nodes(&source, &audit_plan()).expect("audit");
+    report.scene_path = PathBuf::from("Example.ma");
+    const BASELINE: &str = r###"{"scene_path":"Example.ma","scene_format":"ma","profile":"strict_default","validation_state":"validated","effective_rules":[],"surface_count":1,"coverage_state":"complete","coverage_issues":[],"blocked_on_uncertainty":false,"disposition":"deny_malicious","unit_summaries":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"effect":"external_dependency","semantic_class":"dependency_write","certainty":"proven","preview":"exec \"Example\"","reasons":[{"kind":"named","template":"external_dependency_mel_command_detected","value":"exec"}]}],"dependency_facts":[{"kind":"require","risk":"informational","target":"requires maya \"2026\";","detail":{"kind":"require"},"origin":null}],"unknown_semantics":[],"digests":{"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","schema_bundle_sha256":null,"policy_bundle_sha256":null},"notices":[],"surfaces":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"preview":"exec \"Example\"","derivation":"observed"}],"review_signals":[],"findings":[{"code":"mel_exec","severity":"critical","surface_index":0,"sink":"mel_exec","rule":null,"detail":{"kind":"static","value":"mel_exec_command_detected"},"evidence":[{"kind":"key_value","key":"node_name","value":"ExampleScriptNode"},{"kind":"key_value","key":"command","value":"exec"},{"kind":"free_text","value":"fixed literal command: Example"}],"preview_override":"Example"}]}"###;
+    const IDENTITY: &str = r###"{"cache_schema_version":2,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
+    assert_eq!(serde_json::to_vec(&report).unwrap(), BASELINE.as_bytes());
+    let empty_plan =
+        audit_plan().with_allowlist(maya_scene_kit_audit::scene::AuditAllowlist::default());
+    let mut empty = audit_script_nodes(&source, &empty_plan).unwrap();
+    empty.scene_path = PathBuf::from("Example.ma");
+    assert_eq!(serde_json::to_vec(&empty).unwrap(), BASELINE.as_bytes());
+    let old: AuditReport = serde_json::from_str(BASELINE).unwrap();
+    assert!(
+        old.findings
+            .iter()
+            .all(|finding| finding.allowed_by.is_none())
+    );
+    let old_identity: maya_scene_kit_audit::scene::AuditCacheIdentity =
+        serde_json::from_str(IDENTITY).unwrap();
+    let mut expected_identity = old_identity.clone();
+    if usize::BITS == 32 {
+        expected_identity.audit_plan_fingerprint =
+            "b7aaf7542765ede5b774dcf911800f6bce37c8ceaf6508b528be0a4987138cff".into();
+    }
+    assert_eq!(
+        maya_scene_kit_audit::scene::AuditCacheIdentity::new(
+            report.digests.scene_sha256.clone(),
+            AuditOptions::strict_default(),
+            maya_scene_kit_audit::scene::fingerprint_audit_plan(&empty_plan)
+        ),
+        expected_identity
+    );
+    let snapshot = format!(
+        r###"{{"identity":{IDENTITY},"file_state":{{"path":"Example.ma","size":0,"modified_unix_nanos":null}},"report":{BASELINE}}}"###
+    );
+    let old_snapshot: maya_scene_kit_audit::scene::AuditedSceneSnapshot =
+        serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(old_snapshot.identity, old_identity);
+    assert!(
+        old_snapshot
+            .report
+            .findings
+            .iter()
+            .all(|finding| finding.allowed_by.is_none())
+    );
+    let hash = maya_scene_kit_audit::scene::allowlist_surface_hash(
+        &report.surfaces[0].origin,
+        "exec \"Example\"",
+    );
+    let allowed = allowlist_contract_tests::allow(hash, &["mel_exec"]);
+    let mut permitted = audit_script_nodes(&source, &audit_plan().with_allowlist(allowed)).unwrap();
+    permitted.scene_path = PathBuf::from("Example.ma");
+    let json = serde_json::to_string(&permitted).unwrap();
+    assert!(json.contains(&format!(
+        r###""allowed_by":{{"hash":"{hash}","source":"app"}}"###
+    )));
+    let roundtrip: AuditReport = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        roundtrip.findings[0].allowed_by,
+        permitted.findings[0].allowed_by
+    );
+    assert!(roundtrip.findings[0].allowed_by.is_some());
+    for finding in &mut permitted.findings {
+        finding.allowed_by = None;
+    }
+    permitted.disposition = report.disposition;
+    assert_eq!(serde_json::to_vec(&permitted).unwrap(), BASELINE.as_bytes());
+}
+
+mod allowlist_contract_tests {
+    use super::*;
+    use maya_scene_kit_audit::scene::{
+        AllowlistHash, AllowlistSource, AuditAllowlist, AuditFindingCode, allowlist_surface_hash,
+    };
+    use serde_json::json;
+
+    const BODY: &str = "exec \"Example\"";
+
+    pub(super) fn allow(hash: AllowlistHash, codes: &[&str]) -> AuditAllowlist {
+        AuditAllowlist::from_json(
+            &json!({"version":1,"entries":[{"hash":hash,"codes":codes}]}).to_string(),
+            AllowlistSource::App,
+        )
+        .unwrap()
+    }
+
+    fn scene(body: &str, python: bool) -> String {
+        format!(
+            "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExampleScriptNode\";\n\tsetAttr \".b\" -type \"string\" \"{}\";\n\tsetAttr \".st\" 1;\n{}",
+            escape_ma_string(body),
+            if python {
+                "\tsetAttr \".stp\" 1;\n"
+            } else {
+                ""
+            }
+        )
+    }
+
+    fn run(text: &str, plan: &ScriptAuditPlan, options: AuditOptions) -> AuditReport {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        write_scene(&path, text);
+        let mut report =
+            audit_script_nodes_with_options(&path, plan, &LoadOptions::default(), options).unwrap();
+        report.scene_path = PathBuf::from("Example.ma");
+        report
+    }
+
+    fn hash(report: &AuditReport, body: &str) -> AllowlistHash {
+        allowlist_surface_hash(&report.surfaces[0].origin, body)
+    }
+
+    #[test]
+    fn allowlist_matches_body_context_and_exact_rule() {
+        let text = scene(BODY, false);
+        let plan = audit_plan();
+        let baseline = run(&text, &plan, AuditOptions::strict_default());
+        let h = hash(&baseline, BODY);
+        let permitted = run(
+            &text,
+            &plan.clone().with_allowlist(allow(h, &["mel_exec"])),
+            AuditOptions::strict_default(),
+        );
+        assert_eq!(permitted.findings.len(), 1);
+        assert_eq!(
+            permitted.findings[0].allowed_by.as_ref().unwrap().source,
+            AllowlistSource::App
+        );
+        assert_eq!(permitted.findings[0].allowed_by.as_ref().unwrap().hash, h);
+        for changed in [text.replace(".b", ".a"), text.replace(".st\" 1", ".st\" 0")] {
+            let report = run(
+                &changed,
+                &plan.clone().with_allowlist(allow(h, &["mel_exec"])),
+                AuditOptions::strict_default(),
+            );
+            assert!(!report.findings.is_empty());
+            assert!(report.findings.iter().all(|f| f.allowed_by.is_none()));
+        }
+        let wrong_code = run(
+            &text,
+            &plan.with_allowlist(allow(h, &["mel_eval"])),
+            AuditOptions::strict_default(),
+        );
+        assert!(wrong_code.findings.iter().all(|f| f.allowed_by.is_none()));
+        let plan = build_script_audit_plan(vec!["exec".into(), "Example".into()], 64)
+            .unwrap()
+            .with_allowlist(allow(h, &["custom_rule_match:exec"]));
+        let report = run(&text, &plan, AuditOptions::strict_default());
+        let rules: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.code == AuditFindingCode::CustomRuleMatch)
+            .collect();
+        assert_eq!(rules.len(), 2);
+        for finding in rules {
+            assert_eq!(
+                finding.allowed_by.is_some(),
+                finding.rule.as_deref() == Some("exec")
+            );
+        }
+        let bare = build_script_audit_plan(vec!["exec".into(), "Example".into()], 64)
+            .unwrap()
+            .with_allowlist(allow(h, &["custom_rule_match"]));
+        let report = run(&text, &bare, AuditOptions::strict_default());
+        assert!(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.code == AuditFindingCode::CustomRuleMatch)
+                .all(|f| f.allowed_by.is_none())
+        );
+    }
+
+    #[test]
+    fn allowlist_never_allows_uncertainty_or_poisoned_surfaces() {
+        let cases = [
+            (
+                scene(BODY, false).replace(".st\" 1", ".st\" 99"),
+                BODY,
+                "unknown_execution_trigger",
+            ),
+            (
+                scene("getattr(example_object, example_name)()", true),
+                "getattr(example_object, example_name)()",
+                "python_unresolved_call_target",
+            ),
+            (
+                scene(
+                    "$callback = `optionVar -q exampleCallbackName`; modelEditor -e -editorChanged $callback examplePanel;",
+                    false,
+                ),
+                "$callback = `optionVar -q exampleCallbackName`; modelEditor -e -editorChanged $callback examplePanel;",
+                "mel_callback_flag",
+            ),
+            (
+                scene("if example syntax:\n    value = data.decode(", true),
+                "if example syntax:\n    value = data.decode(",
+                "python_body_assembly",
+            ),
+            (
+                scene(
+                    "python(\"if example syntax:\\n    value = data.decode(\");",
+                    false,
+                ),
+                "python(\"if example syntax:\\n    value = data.decode(\");",
+                "mel_python",
+            ),
+        ];
+        for (text, body, code) in cases {
+            for options in [
+                AuditOptions::strict_default(),
+                AuditOptions::hardened_untrusted(),
+            ] {
+                let baseline = run(&text, &audit_plan(), options);
+                assert!(
+                    baseline.findings.iter().any(|f| f.code.as_str() == code),
+                    "{code}: {:?}",
+                    baseline.findings
+                );
+                let plan = audit_plan().with_allowlist(allow(hash(&baseline, body), &[code]));
+                let report = run(&text, &plan, options);
+                assert!(
+                    report.findings.iter().all(|f| f.allowed_by.is_none()),
+                    "{code}"
+                );
+                assert_eq!(
+                    serde_json::to_vec(&report).unwrap(),
+                    serde_json::to_vec(&baseline).unwrap()
+                );
+                if code == "python_body_assembly" {
+                    assert!(
+                        report
+                            .findings
+                            .iter()
+                            .any(|f| f.code == AuditFindingCode::PythonParseFailure)
+                    );
+                    let indices: Vec<_> = report
+                        .findings
+                        .iter()
+                        .filter(|f| {
+                            matches!(
+                                f.code,
+                                AuditFindingCode::PythonParseFailure
+                                    | AuditFindingCode::PythonBodyAssembly
+                            )
+                        })
+                        .map(|f| f.surface_index)
+                        .collect();
+                    assert_eq!(indices.len(), 2);
+                    assert_eq!(indices[0], indices[1]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn allowlist_derived_findings_use_the_observed_root_hash() {
+        let body = "python(\"exec('print(1)')\")";
+        let text = scene(body, false);
+        let baseline = run(&text, &audit_plan(), AuditOptions::strict_default());
+        let index = baseline
+            .findings
+            .iter()
+            .find(|f| f.code == AuditFindingCode::PythonExec)
+            .unwrap()
+            .surface_index;
+        assert_eq!(
+            baseline.surfaces[index].derivation,
+            AuditSurfaceDerivation::MelPythonLiteralBridge
+        );
+        let root_hash = hash(&baseline, body);
+        let derived_hash =
+            allowlist_surface_hash(&baseline.surfaces[index].origin, "exec('print(1)')");
+        for (hash, expected) in [(root_hash, true), (derived_hash, false)] {
+            let report = run(
+                &text,
+                &audit_plan().with_allowlist(allow(hash, &["python_pyexec"])),
+                AuditOptions::strict_default(),
+            );
+            assert_eq!(
+                report
+                    .findings
+                    .iter()
+                    .find(|f| f.code == AuditFindingCode::PythonExec)
+                    .unwrap()
+                    .allowed_by
+                    .is_some(),
+                expected
+            );
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .find(|f| f.code == AuditFindingCode::MelPython)
+                    .unwrap()
+                    .allowed_by
+                    .is_none()
+            );
+            assert_eq!(report.surface_count, 1);
+        }
+        let callback = "button -command \"python(\\\"exec('print(1)')\\\")\";";
+        let text = scene(callback, false);
+        let baseline = run(&text, &audit_plan(), AuditOptions::strict_default());
+        let report = run(
+            &text,
+            &audit_plan().with_allowlist(allow(hash(&baseline, callback), &["python_pyexec"])),
+            AuditOptions::strict_default(),
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .find(|f| f.code == AuditFindingCode::PythonExec)
+                .unwrap()
+                .allowed_by
+                .is_some()
+        );
+        assert!(
+            report
+                .surfaces
+                .iter()
+                .any(|s| s.derivation == AuditSurfaceDerivation::MelCallbackLiteral)
+        );
+        assert!(!report.review_signals.is_empty());
+        assert_eq!(
+            serde_json::to_value(&report.review_signals).unwrap(),
+            serde_json::to_value(&baseline.review_signals).unwrap()
+        );
+        assert_eq!(report.surface_count, 1);
+
+        let body = "import maya.mel as mel\nmel.eval('eval(\"print(1)\")')";
+        let text = scene(body, true);
+        let baseline = run(&text, &audit_plan(), AuditOptions::strict_default());
+        let finding = baseline
+            .findings
+            .iter()
+            .find(|f| f.code == AuditFindingCode::MelEval)
+            .unwrap();
+        assert_eq!(
+            baseline.surfaces[finding.surface_index].derivation,
+            AuditSurfaceDerivation::Observed
+        );
+        assert_eq!(baseline.surface_count, 2);
+        let independent = allowlist_surface_hash(
+            &baseline.surfaces[finding.surface_index].origin,
+            "eval(\"print(1)\")",
+        );
+        for (h, expected) in [(hash(&baseline, body), false), (independent, true)] {
+            let report = run(
+                &text,
+                &audit_plan().with_allowlist(allow(h, &["mel_eval"])),
+                AuditOptions::strict_default(),
+            );
+            assert_eq!(
+                report
+                    .findings
+                    .iter()
+                    .find(|f| f.code == AuditFindingCode::MelEval)
+                    .unwrap()
+                    .allowed_by
+                    .is_some(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn allowlist_dispositions_preserve_unit_contributions() {
+        let text = scene(BODY, false);
+        for options in [
+            AuditOptions::strict_default(),
+            AuditOptions::hardened_untrusted(),
+        ] {
+            let expected =
+                if options.profile == maya_scene_kit_audit::scene::AuditProfile::StrictDefault {
+                    AuditDisposition::Review
+                } else {
+                    AuditDisposition::DenyUncertain
+                };
+            for rules in [
+                vec![],
+                vec!["exec".into()],
+                vec!["exec".into(), "Example".into()],
+            ] {
+                let plan = build_script_audit_plan(rules, 64).unwrap();
+                let baseline = run(&text, &plan, options);
+                assert_eq!(baseline.disposition, AuditDisposition::DenyMalicious);
+                let h = hash(&baseline, BODY);
+                let all = [
+                    "mel_exec",
+                    "custom_rule_match:exec",
+                    "custom_rule_match:Example",
+                ];
+                let permitted = run(&text, &plan.clone().with_allowlist(allow(h, &all)), options);
+                assert!(permitted.findings.iter().all(|f| f.allowed_by.is_some()));
+                assert_eq!(permitted.disposition, expected);
+                assert_eq!(permitted.unit_summaries.len(), 1);
+                assert_eq!(
+                    permitted.unit_summaries[0].effect,
+                    ExecutionEffectClass::ExternalDependency
+                );
+                assert!(permitted.review_signals.is_empty());
+                assert!(!permitted.blocked_on_uncertainty);
+                assert!(
+                    permitted
+                        .dependency_facts
+                        .iter()
+                        .all(|f| f.risk == DependencyRiskClass::Informational)
+                );
+                assert_eq!(
+                    serde_json::to_value(&permitted.unit_summaries).unwrap(),
+                    serde_json::to_value(&baseline.unit_summaries).unwrap()
+                );
+                if !plan.effective_rules().is_empty() {
+                    for codes in [&["mel_exec"][..], &["custom_rule_match:exec"][..]] {
+                        let partial = run(
+                            &text,
+                            &plan.clone().with_allowlist(allow(h, codes)),
+                            options,
+                        );
+                        assert!(partial.findings.iter().any(|f| f.allowed_by.is_some()));
+                        assert!(partial.findings.iter().any(|f| f.allowed_by.is_none()));
+                        assert_eq!(partial.disposition, AuditDisposition::DenyMalicious);
+                    }
+                }
+            }
+        }
+    }
+}

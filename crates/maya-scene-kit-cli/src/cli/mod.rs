@@ -318,6 +318,7 @@ mod tests {
     #[test]
     fn render_audit_hit_omits_preview_when_empty() {
         let hit = AuditHit {
+            allowed_by: None,
             code: AuditFindingCode::MelPython,
             severity: crate::scene::AuditSeverity::Medium,
             surface_index: 0,
@@ -380,6 +381,7 @@ mod tests {
     #[test]
     fn render_audit_hit_includes_raw_chunk_addresses() {
         let hit = AuditHit {
+            allowed_by: None,
             code: AuditFindingCode::UnknownExecutionLanguage,
             severity: crate::scene::AuditSeverity::High,
             surface_index: 0,
@@ -446,6 +448,7 @@ mod tests {
     #[test]
     fn grouped_audit_hit_includes_count_and_evidence() {
         let hit = AuditHit {
+            allowed_by: None,
             code: AuditFindingCode::MelCallbackFlag,
             severity: crate::scene::AuditSeverity::High,
             surface_index: 0,
@@ -558,6 +561,7 @@ mod tests {
     #[test]
     fn group_audit_hit_indexes_collapses_duplicates() {
         let hit = AuditHit {
+            allowed_by: None,
             code: AuditFindingCode::MelCallbackFlag,
             severity: crate::scene::AuditSeverity::High,
             surface_index: 0,

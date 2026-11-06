@@ -1,6 +1,6 @@
 use regex::{Regex, RegexBuilder};
 
-use crate::scene::SceneToolError;
+use crate::scene::{AuditAllowlist, SceneToolError};
 
 #[derive(Debug, Clone)]
 pub(crate) enum CompiledRule {
@@ -10,12 +10,18 @@ pub(crate) enum CompiledRule {
 #[derive(Debug, Clone)]
 /// Compiled audit rules and rendering options used by `audit_script_nodes`.
 pub struct ScriptAuditPlan {
+    pub(crate) allowlist: AuditAllowlist,
     pub(crate) rules: Vec<CompiledRule>,
     pub(crate) effective_rules: Vec<String>,
     pub(crate) max_preview: usize,
 }
 
 impl ScriptAuditPlan {
+    pub fn with_allowlist(mut self, allowlist: AuditAllowlist) -> Self {
+        self.allowlist = allowlist;
+        self
+    }
+
     /// Returns the effective user-supplied inline literal rules.
     pub fn effective_rules(&self) -> &[String] {
         &self.effective_rules
@@ -37,6 +43,7 @@ pub(crate) fn build_script_audit_plan(
         .collect::<Vec<_>>();
     let rules = compile_audit_rules(effective_rules.clone())?;
     Ok(ScriptAuditPlan {
+        allowlist: AuditAllowlist::default(),
         rules,
         effective_rules,
         max_preview,

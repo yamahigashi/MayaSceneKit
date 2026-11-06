@@ -368,6 +368,10 @@ pub fn fingerprint_audit_plan(plan: &ScriptAuditPlan) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{:?}", plan.effective_rules()));
     hasher.update(plan.max_preview().to_le_bytes());
+    if !plan.allowlist.is_empty() {
+        hasher.update(b"msk-allow-plan-v1\0");
+        hasher.update(plan.allowlist.canonical_digest());
+    }
     format!("{:x}", hasher.finalize())
 }
 

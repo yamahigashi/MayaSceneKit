@@ -296,6 +296,7 @@ where
             bridged_origin.lang = ExecutionLanguage::Python;
             bridged_origin.source_kind = Some("mel->python literal bridge".to_string());
             derived_surfaces.push(AnalysisSurface {
+                root_index: surface.root_index,
                 preview: preview_window(body, 0, body.len().min(24), surface.preview.len().max(16)),
                 text: Arc::from(body),
                 origin: bridged_origin,
@@ -369,6 +370,7 @@ where
             bridged_origin.lang = ExecutionLanguage::Python;
             bridged_origin.source_kind = Some("mel->python literal bridge".to_string());
             derived_surfaces.push(AnalysisSurface {
+                root_index: surface.root_index,
                 preview: preview_window(body, 0, body.len().min(24), surface.preview.len().max(16)),
                 text: Arc::from(body),
                 origin: bridged_origin,
@@ -580,5 +582,71 @@ impl<'a> MelSinkCalls<'a> {
             && self.eval.is_some()
             && self.command_port.is_some()
             && self.exec.is_some()
+    }
+}
+
+#[cfg(test)]
+mod allowlist_root_tests {
+    use super::*;
+    use crate::scene::{AuditSurfaceDerivation, ExecutionOrigin, ExecutionTrigger};
+    use maya_scene_kit_observe::scene::execution::collect_mel_surface_facts;
+
+    #[test]
+    fn allowlist_root_survives_literal_callback_and_parser_fallback() {
+        let body = "python(\"exec('print(1)')\")";
+        let mut surface = AnalysisSurface {
+            root_index: 0,
+            text: Arc::from(body),
+            preview: body.into(),
+            origin: ExecutionOrigin {
+                lang: ExecutionLanguage::Mel,
+                trigger: ExecutionTrigger::FileOpen,
+                ..ExecutionOrigin::without_chunk_address()
+            },
+            derivation: AuditSurfaceDerivation::Observed,
+            mel: None,
+        };
+        let call = MelSurfaceCall {
+            name: "python".into(),
+            surface_kind: crate::scene::execution::MelSurfaceCallSurfaceKind::Function,
+            captured: false,
+            literal_first_arg: Some("exec('print(1)')".into()),
+            dynamic: false,
+            span_start: 0,
+            span_end: body.len(),
+        };
+        let mut derived = Vec::new();
+        let findings = analyze_mel_parser_sink(
+            0,
+            &surface,
+            Some(&call),
+            "python",
+            AuditSinkKind::MelPython,
+            |_| (AuditSeverity::Medium, "Example"),
+            true,
+            &mut derived,
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(derived.len(), 1);
+        assert_eq!(derived[0].root_index, 0);
+        assert_eq!(derived[0].text.as_ref(), "exec('print(1)')");
+        surface.mel = Some(Arc::new(collect_mel_surface_facts(body)));
+        let normal = analyze_mel_surface_impl(0, &surface, &mut HashMap::new());
+        assert_eq!(normal.derived_surfaces.len(), 1);
+        assert_eq!(normal.derived_surfaces[0].root_index, derived[0].root_index);
+        let callback = "button -command \"python(\\\"exec('print(1)')\\\")\";";
+        surface.text = Arc::from(callback);
+        surface.mel = Some(Arc::new(collect_mel_surface_facts(callback)));
+        let callback_analysis = analyze_mel_surface_impl(0, &surface, &mut HashMap::new());
+        assert!(!callback_analysis.review_signals.is_empty());
+        let callback_surface = callback_analysis
+            .derived_surfaces
+            .iter()
+            .find(|s| s.derivation == AuditSurfaceDerivation::MelCallbackLiteral)
+            .unwrap();
+        assert_eq!(callback_surface.root_index, 0);
+        let python = analyze_mel_surface_impl(1, callback_surface, &mut HashMap::new());
+        assert_eq!(python.derived_surfaces.len(), 1);
+        assert_eq!(python.derived_surfaces[0].root_index, 0);
     }
 }

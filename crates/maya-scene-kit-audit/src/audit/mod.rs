@@ -246,8 +246,17 @@ fn evaluate_catalog(
     let has_custom_rules = !plan.rules.is_empty();
     let mut surfaces = observed_surfaces
         .into_iter()
-        .map(analyze::AnalysisSurface::observed)
+        .enumerate()
+        .map(|(index, surface)| analyze::AnalysisSurface::observed(index, surface))
         .collect::<Vec<_>>();
+    let root_hashes = if plan.allowlist.is_empty() {
+        Vec::new()
+    } else {
+        surfaces
+            .iter()
+            .map(|surface| crate::scene::allowlist_surface_hash(&surface.origin, &surface.text))
+            .collect::<Vec<_>>()
+    };
     let mut findings = Vec::new();
     let mut review_signals = Vec::new();
     let mut surface_index = 0usize;
@@ -291,6 +300,37 @@ fn evaluate_catalog(
             .then_with(|| a.detail.sort_key().cmp(b.detail.sort_key()))
             .then_with(|| a.surface_index.cmp(&b.surface_index))
     });
+    if !plan.allowlist.is_empty() {
+        let mut poisoned = vec![false; surfaces.len()];
+        for finding in &findings {
+            if matches!(
+                finding.code,
+                AuditFindingCode::UnknownExecutionLanguage
+                    | AuditFindingCode::UnknownExecutionTrigger
+                    | AuditFindingCode::PythonParseFailure
+                    | AuditFindingCode::PythonUnresolvedCallTarget
+                    | AuditFindingCode::MelParseDiagnostics
+                    | AuditFindingCode::MelCallbackFlag
+            ) {
+                poisoned[surfaces[finding.surface_index].root_index] = true;
+            }
+        }
+        for finding in &mut findings {
+            // A body that is not fully understood anywhere in its derivation tree is never allowed.
+            if poisoned[surfaces[finding.surface_index].root_index] {
+                continue;
+            }
+            let hash = &root_hashes[surfaces[finding.surface_index].root_index];
+            finding.allowed_by = if finding.code == AuditFindingCode::CustomRuleMatch {
+                finding.rule.as_ref().and_then(|rule| {
+                    plan.allowlist
+                        .lookup(hash, &format!("custom_rule_match:{rule}"))
+                })
+            } else {
+                plan.allowlist.lookup(hash, finding.code.as_str())
+            };
+        }
+    }
     review_signals.sort_by(|a, b| {
         a.code
             .as_str()
@@ -318,7 +358,7 @@ fn evaluate_catalog(
         &dependency_facts,
         blocked_on_uncertainty,
         !review_signals.is_empty(),
-        !findings.is_empty(),
+        findings.iter().any(|finding| finding.allowed_by.is_none()),
     );
     let digests = if include_digests {
         observed_digests
@@ -903,6 +943,7 @@ fn surface_uncertainty_findings(
     let mut findings = Vec::new();
     if surface.origin.lang == ExecutionLanguage::Unknown {
         findings.push(AuditFinding {
+            allowed_by: None,
             code: AuditFindingCode::UnknownExecutionLanguage,
             severity: AuditSeverity::High,
             surface_index,
@@ -936,6 +977,7 @@ fn surface_uncertainty_findings(
     }
     if surface.origin.trigger == crate::scene::ExecutionTrigger::Unknown {
         findings.push(AuditFinding {
+            allowed_by: None,
             code: AuditFindingCode::UnknownExecutionTrigger,
             severity: AuditSeverity::High,
             surface_index,
@@ -968,4 +1010,148 @@ fn surface_uncertainty_findings(
         });
     }
     findings
+}
+
+#[cfg(test)]
+mod allowlist_disposition_tests {
+    use super::*;
+    use crate::scene::{
+        AllowlistSource, AuditAllowlist, AuditReviewCode, AuditReviewDetail, AuditReviewSignal,
+        ExecutionOrigin, ExecutionSurfaceKind, ExecutionTrigger, StaticAuditReviewDetail,
+        allowlist_surface_hash,
+    };
+    use maya_scene_kit_observe::scene::{
+        evidence::DependencyFactDetail, execution::observe_source_text,
+    };
+
+    #[test]
+    fn allowlist_keeps_each_uncertainty_and_review_contribution() {
+        let body = "exec \"Example\"";
+        let mut catalog = observe_source_text(body, ExecutionLanguage::Mel).unwrap();
+        let origin = ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            attr_name: Some(".b".into()),
+            node_name: Some("ExampleScriptNode".into()),
+            source_kind: Some("scriptType=1".into()),
+            trigger: ExecutionTrigger::FileOpen,
+            ..ExecutionOrigin::without_chunk_address()
+        };
+        catalog.surfaces[0].surface.origin = origin.clone();
+        catalog.unit_summaries[0].origin = origin.clone();
+        let hash = allowlist_surface_hash(&origin, body);
+        let allowlist = AuditAllowlist::from_json(
+            &serde_json::json!({"version":1,"entries":[{"hash":hash,"codes":["mel_exec"]}]})
+                .to_string(),
+            AllowlistSource::App,
+        )
+        .unwrap();
+        let plan = build_script_audit_plan(vec![], 64)
+            .unwrap()
+            .with_allowlist(allowlist);
+        for options in [
+            AuditOptions::strict_default(),
+            AuditOptions::hardened_untrusted(),
+        ] {
+            let report = evaluate_catalog(
+                catalog.clone(),
+                PathBuf::from("Example.ma"),
+                SceneFormat::Ma,
+                ValidationState::Validated,
+                &plan,
+                options,
+                false,
+            );
+            assert_eq!(report.surface_count, 1);
+            assert_eq!(report.findings.len(), 1);
+            assert!(report.findings[0].allowed_by.is_some());
+            assert!(!report.blocked_on_uncertainty);
+            assert!(report.review_signals.is_empty());
+            assert!(report.dependency_facts.is_empty());
+            let expected = if options.profile == AuditProfile::StrictDefault {
+                AuditDisposition::Review
+            } else {
+                AuditDisposition::DenyUncertain
+            };
+            let mut neutral_unit = report.unit_summaries[0].clone();
+            neutral_unit.effect = ExecutionEffectClass::PureComputation;
+            neutral_unit.certainty = EffectCertainty::Proven;
+            let has_findings = report.findings.iter().any(|f| f.allowed_by.is_none());
+            assert_eq!(
+                determine_disposition(
+                    options.profile,
+                    &[neutral_unit.clone()],
+                    &[],
+                    false,
+                    false,
+                    has_findings
+                ),
+                AuditDisposition::AllowWithNotice
+            );
+            let mut uncertain_unit = neutral_unit.clone();
+            uncertain_unit.certainty = EffectCertainty::Uncertain;
+            assert_eq!(
+                determine_disposition(
+                    options.profile,
+                    &[uncertain_unit],
+                    &[],
+                    false,
+                    false,
+                    has_findings
+                ),
+                expected
+            );
+            let dependency = DependencyFact {
+                kind: crate::scene::DependencyFactKind::SourceCommand,
+                risk: DependencyRiskClass::Uncertain,
+                target: "asset/example/file.mel".into(),
+                detail: DependencyFactDetail::MelDependencyObserved {
+                    command_name: "source".into(),
+                },
+                origin: Some(origin.clone()),
+            };
+            assert_eq!(
+                determine_disposition(
+                    options.profile,
+                    &[neutral_unit.clone()],
+                    &[dependency],
+                    false,
+                    false,
+                    has_findings
+                ),
+                expected
+            );
+            assert_eq!(
+                determine_disposition(
+                    options.profile,
+                    &[neutral_unit.clone()],
+                    &[],
+                    true,
+                    false,
+                    has_findings
+                ),
+                expected
+            );
+            let review_signals = [AuditReviewSignal {
+                code: AuditReviewCode::MelCallbackBody,
+                surface_index: 0,
+                detail: AuditReviewDetail::Static {
+                    value: StaticAuditReviewDetail::MelCallbackBodyDetected,
+                },
+                evidence: vec![],
+                preview_override: None,
+            }];
+            assert_eq!(
+                determine_disposition(
+                    options.profile,
+                    &[neutral_unit],
+                    &[],
+                    false,
+                    !review_signals.is_empty(),
+                    has_findings
+                ),
+                expected
+            );
+        }
+    }
 }

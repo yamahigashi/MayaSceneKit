@@ -63,6 +63,7 @@ pub(super) fn build_finding(
 ) -> AuditFinding {
     prepend_node_name_evidence(&mut evidence, surface);
     AuditFinding {
+        allowed_by: None,
         code: audit_finding_code(finding_id),
         severity,
         surface_index,
