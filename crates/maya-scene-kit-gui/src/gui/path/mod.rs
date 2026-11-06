@@ -1518,6 +1518,7 @@ impl GuiShell {
             sink: String::new(),
             preview: String::new(),
             provenance: Vec::new(),
+            detail_fields: Vec::new(),
             source_line: None,
             evidence: Vec::new(),
             dirty: state == AuditRowCleanState::Staged,

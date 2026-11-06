@@ -306,6 +306,7 @@ impl GuiShell {
             path_resolution_filter: default_path_resolution_filter(),
             audit_severity_filter: default_audit_severity_filter(),
             audit_detail_dialog: None,
+            audit_detail_code_request: 0,
             plugin_registry,
             status_message: None,
             max_bytes_dialog: None,
