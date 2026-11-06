@@ -109,6 +109,14 @@ pub(super) fn build_parser() -> Command {
                         .value_parser(clap::value_parser!(String))
                         .help("Additional literal marker that emits custom_rule_match (repeatable)"),
                 )
+                .arg(
+                    Arg::new("allowlist")
+                        .long("allowlist")
+                        .action(ArgAction::Append)
+                        .num_args(1)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Allowlist JSON file; matching findings are marked allowed (repeatable, earlier files win)"),
+                )
                 .arg(Arg::new("json").long("json").action(ArgAction::SetTrue))
                 .arg(
                     Arg::new("summary-only")

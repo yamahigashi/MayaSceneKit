@@ -61,7 +61,7 @@ The package currently exports:
 - `dump_scripts(path, max_bytes=None)`
 - `dump_requires(path, max_bytes=None)`
 - `collect_paths(path, kind="all", max_bytes=None)`
-- `audit(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None, recursive=True)`
+- `audit(path, rules=[], max_preview=96, include_digests=True, node_info_paths=[], max_bytes=None, recursive=True, allowlist_paths=[])`
 - `preview_clean(path, max_bytes=None)`
 - `clean(input_path, output_path, max_bytes=None)`
 - `preview_replace(path, rules, max_bytes=None)`
@@ -74,7 +74,11 @@ YAML files using the same semantics as the CLI `--node-info` option. Python
 operation mode names use underscores, for example `best_effort`. By default,
 `audit()` recursively audits referenced scene files. Pass `recursive=False` to
 audit only the supplied root scene while still reporting its outgoing reference
-edges.
+edges. `allowlist_paths` accepts allowlist JSON files with the same semantics as
+the CLI `--allowlist` option (see
+[Audit allowlists](advanced_usage.md#audit-allowlists)); an unreadable or
+invalid file raises `MayaSceneKitError`. Each finding carries `allowed_by`
+(`None` or `{"hash", "source"}`), and reports carry `allowed_finding_count`.
 
 ## Patterns
 

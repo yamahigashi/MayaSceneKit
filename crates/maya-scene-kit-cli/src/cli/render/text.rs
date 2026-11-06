@@ -66,6 +66,11 @@ pub(in crate::cli) fn render_grouped_audit_hit_text(
         format!("severity={}", hit.severity.as_str()),
         format!("sink={}", hit.sink.as_str()),
         format!("finding_id={}", hit.code.as_str()),
+    ]);
+    if let Some(allowed) = &hit.allowed_by {
+        parts.push(format!("allowed={}", allowed.source.as_str()));
+    }
+    parts.extend([
         format!(
             "node={}",
             surface.origin.node_name.as_deref().unwrap_or("-")
@@ -188,6 +193,10 @@ pub(in crate::cli) fn group_audit_hit_indexes(report: &AuditReport) -> Vec<(usiz
         let preview = report.finding_preview(hit);
         let key = GroupedAuditHitKey {
             finding_id: hit.code.as_str(),
+            allowed: hit
+                .allowed_by
+                .as_ref()
+                .map(|allowed| allowed.source.as_str()),
             severity: hit.severity.as_str(),
             sink: hit.sink.as_str(),
             message: render_audit_finding_detail(&hit.detail),
@@ -510,6 +519,7 @@ pub(in crate::cli) fn render_audit_evidence(evidence: &AuditEvidence) -> String 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GroupedAuditHitKey<'a> {
     finding_id: &'a str,
+    allowed: Option<&'a str>,
     severity: &'a str,
     sink: &'a str,
     message: String,

@@ -21,13 +21,14 @@ use super::super::{
     runtime_context::load_options,
 };
 use crate::scene::{
-    AuditOptions, AuditReport, ExecutionCoverageIssue, SceneToolError,
-    audit_reference_graph_roots_with_options_and_digests, build_script_audit_plan,
+    AllowlistSource, AuditAllowlist, AuditOptions, AuditReport, ExecutionCoverageIssue,
+    SceneToolError, audit_reference_graph_roots_with_options_and_digests, build_script_audit_plan,
 };
 
 pub(crate) struct ScriptAuditArgs<'a> {
     pub(crate) input: &'a Path,
     pub(crate) inline_rules: Vec<String>,
+    pub(crate) allowlist_paths: &'a [PathBuf],
     pub(crate) json_output: bool,
     pub(crate) summary_only: bool,
     pub(crate) max_preview: usize,
@@ -39,6 +40,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
     let ScriptAuditArgs {
         input,
         inline_rules,
+        allowlist_paths,
         json_output,
         summary_only,
         max_preview,
@@ -57,6 +59,15 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
             return 1;
         }
     };
+    let plan = match load_allowlists(allowlist_paths) {
+        Ok(allowlist) => plan.with_allowlist(allowlist),
+        Err(err) => {
+            eprintln!("error: {err}");
+            return 2;
+        }
+    };
+    // Allowlist fields are emitted only on request so output without allowlists stays unchanged.
+    let report_allowed = !allowlist_paths.is_empty();
     let load_options = load_options(node_info_paths, max_bytes);
 
     let files = match collect_scene_files(input) {
@@ -93,11 +104,13 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
 
     if json_output {
         let mut file_summaries = Vec::new();
+        let mut file_allowed_counts = Vec::new();
         for report in &graph_report.reports {
             let file_hit_count = report.finding_count();
             let file_review_count = report.review_signal_count();
             let file_notice_count = report.notice_count();
             let scene_path = report.scene_path.to_string_lossy();
+            file_allowed_counts.push(report.allowed_finding_count());
             file_summaries.push((
                 scene_path.clone().into_owned(),
                 report.scene_format,
@@ -126,7 +139,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
             .iter()
             .map(|report| report.notices.len())
             .sum::<usize>();
-        let doc = json!({
+        let mut doc = json!({
             "contract_version": JSON_CONTRACT_VERSION,
             "input": input.display().to_string(),
             "profile": audit_options.profile.as_str(),
@@ -320,6 +333,14 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 })
                 .collect::<Vec<_>>(),
         });
+        if report_allowed {
+            doc["allowed_finding_count"] = json!(graph_report.allowed_finding_count());
+            if let Some(files) = doc["files"].as_array_mut() {
+                for (file, allowed) in files.iter_mut().zip(&file_allowed_counts) {
+                    file["allowed_finding_count"] = json!(allowed);
+                }
+            }
+        }
         match serde_json::to_string_pretty(&doc) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -346,7 +367,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
             let file_notice_count = report.notice_count();
             let scene_path = report.scene_path.to_string_lossy();
 
-            let _ = writeln!(
+            let _ = write!(
                 output,
                 "path={} format={} profile={} state={} coverage_state={} coverage_issues={} blocked_on_uncertainty={} disposition={} findings={} reviews={} notices={} surfaces={}",
                 scene_path.as_ref(),
@@ -362,6 +383,10 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 file_notice_count,
                 report.surface_count,
             );
+            if report_allowed {
+                let _ = write!(output, " allowed={}", report.allowed_finding_count());
+            }
+            let _ = writeln!(output);
 
             total_findings += report.findings.len();
 
@@ -443,7 +468,15 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 issue.message,
             );
         }
-        let _ = writeln!(output, "total_findings={total_findings}");
+        let _ = write!(output, "total_findings={total_findings}");
+        if report_allowed {
+            let _ = write!(
+                output,
+                " total_allowed={}",
+                graph_report.allowed_finding_count()
+            );
+        }
+        let _ = writeln!(output);
 
         match graph_report.disposition {
             crate::scene::AuditDisposition::Allow
@@ -500,6 +533,18 @@ fn coverage_issue_group_key(issue: &ExecutionCoverageIssue, message: &str) -> St
     )
 }
 
+fn load_allowlists(paths: &[PathBuf]) -> Result<AuditAllowlist, String> {
+    let mut layers = Vec::with_capacity(paths.len());
+    for path in paths {
+        let text = std::fs::read_to_string(path)
+            .map_err(|err| format!("failed to read allowlist {}: {err}", path.display()))?;
+        let layer = AuditAllowlist::from_json(&text, AllowlistSource::App)
+            .map_err(|err| format!("allowlist {}: {err}", path.display()))?;
+        layers.push(layer);
+    }
+    Ok(AuditAllowlist::merge(layers))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
@@ -533,6 +578,7 @@ mod tests {
         let code = run_script_audit(ScriptAuditArgs {
             input: &source,
             inline_rules: Vec::new(),
+            allowlist_paths: &[],
             json_output: true,
             summary_only: false,
             max_preview: 64,

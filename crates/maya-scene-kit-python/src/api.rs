@@ -4,7 +4,10 @@ use maya_scene_kit_audit::{
     audit::{
         audit_reference_graph_roots_with_traversal_options_and_digests, build_script_audit_plan,
     },
-    scene::{AuditOptions, ExecutionLanguage, ReferenceGraphOptions, audit_source_text},
+    scene::{
+        AllowlistSource, AuditAllowlist, AuditOptions, ExecutionLanguage, ReferenceGraphOptions,
+        audit_source_text,
+    },
 };
 use maya_scene_kit_edit::scene::{
     MaterializeOptions, OperationMode, PathReplaceMode, PathReplaceRule,
@@ -121,11 +124,13 @@ pub(crate) fn audit_json(
     max_preview: usize,
     include_digests: bool,
     node_info_paths: &[String],
+    allowlist_paths: &[String],
     recursive: bool,
     max_bytes: Option<usize>,
 ) -> Result<Value, SceneToolError> {
     let load_options = load_options(node_info_paths, max_bytes)?;
-    let plan = build_script_audit_plan(rules.to_vec(), max_preview)?;
+    let plan = build_script_audit_plan(rules.to_vec(), max_preview)?
+        .with_allowlist(load_allowlists(allowlist_paths)?);
     let graph_options = if recursive {
         ReferenceGraphOptions::recursive_default()
     } else {
@@ -140,6 +145,19 @@ pub(crate) fn audit_json(
         include_digests,
     );
     Ok(json_map::audit_graph_report(&report))
+}
+
+fn load_allowlists(paths: &[String]) -> Result<AuditAllowlist, SceneToolError> {
+    let mut layers = Vec::with_capacity(paths.len());
+    for path in paths {
+        let text = std::fs::read_to_string(path).map_err(|err| {
+            SceneToolError::Config(format!("failed to read allowlist {path}: {err}"))
+        })?;
+        let layer = AuditAllowlist::from_json(&text, AllowlistSource::App)
+            .map_err(|err| SceneToolError::Config(format!("allowlist {path}: {err}")))?;
+        layers.push(layer);
+    }
+    Ok(AuditAllowlist::merge(layers))
 }
 
 pub(crate) fn audit_source_text_json(
@@ -359,6 +377,7 @@ mod tests {
             96,
             true,
             &[],
+            &[],
             true,
             None,
         )
@@ -392,14 +411,81 @@ mod tests {
         )
         .expect("child");
 
-        let value = audit_json(&root.display().to_string(), &[], 96, true, &[], false, None)
-            .expect("audit");
+        let value = audit_json(
+            &root.display().to_string(),
+            &[],
+            96,
+            true,
+            &[],
+            &[],
+            false,
+            None,
+        )
+        .expect("audit");
 
         assert_eq!(value["scene_count"], 1);
         assert_eq!(value["edge_count"], 1);
         assert_eq!(value["traversal_issue_count"], 0);
         assert_eq!(value["edges"][0]["raw_target"], "child.ma");
         assert!(value["edges"][0]["target_report_index"].is_null());
+    }
+
+    #[test]
+    fn audit_json_marks_allowlisted_findings() {
+        use maya_scene_kit_audit::{
+            audit::{audit_script_nodes, build_script_audit_plan},
+            scene::allowlist_surface_hash,
+        };
+        use maya_scene_kit_observe::scene::SceneToolError;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let scene = dir.path().join("example.ma");
+        std::fs::write(
+            &scene,
+            "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExampleScriptNode\";\n\tsetAttr \".b\" -type \"string\" \"exec \\\"Example\\\"\";\n\tsetAttr \".st\" 1;\n",
+        )
+        .expect("scene");
+        let plan = build_script_audit_plan(vec![], 96).expect("plan");
+        let report = audit_script_nodes(&scene, &plan).expect("report");
+        let hash = allowlist_surface_hash(&report.surfaces[0].origin, "exec \"Example\"");
+        let allowlist = dir.path().join("allowlist.json");
+        std::fs::write(
+            &allowlist,
+            serde_json::json!({"version": 1, "entries": [{"hash": hash.to_string(), "codes": ["mel_exec"]}]})
+                .to_string(),
+        )
+        .expect("allowlist");
+        let scene_path = scene.display().to_string();
+
+        let plain = audit_json(&scene_path, &[], 96, true, &[], &[], false, None).expect("audit");
+        assert_eq!(plain["allowed_finding_count"], 0);
+        assert!(plain["findings"][0]["allowed_by"].is_null());
+        assert_eq!(plain["disposition"], "deny_malicious");
+
+        let allowed = audit_json(
+            &scene_path,
+            &[],
+            96,
+            true,
+            &[],
+            &[allowlist.display().to_string()],
+            false,
+            None,
+        )
+        .expect("audit");
+        assert_eq!(allowed["allowed_finding_count"], 1);
+        assert_eq!(allowed["root_report"]["allowed_finding_count"], 1);
+        assert_eq!(allowed["findings"][0]["allowed_by"]["source"], "app");
+        assert_eq!(
+            allowed["findings"][0]["allowed_by"]["hash"],
+            hash.to_string()
+        );
+        assert_eq!(allowed["disposition"], "review");
+
+        let missing = dir.path().join("missing.json").display().to_string();
+        let error = audit_json(&scene_path, &[], 96, true, &[], &[missing], false, None)
+            .expect_err("missing allowlist");
+        assert!(matches!(error, SceneToolError::Config(message) if message.contains("allowlist")));
     }
 
     #[test]
@@ -410,6 +496,7 @@ mod tests {
             &[],
             96,
             true,
+            &[],
             &[],
             true,
             Some(1),
