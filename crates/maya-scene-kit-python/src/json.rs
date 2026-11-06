@@ -68,6 +68,7 @@ pub(crate) fn audit_report(report: &AuditReport) -> Value {
         "findings": report.findings.iter().map(audit_finding).collect::<Vec<_>>(),
         "notice_count": report.notice_count(),
         "finding_count": report.finding_count(),
+        "allowed_finding_count": report.allowed_finding_count(),
         "review_signal_count": report.review_signal_count(),
     })
 }
@@ -123,6 +124,7 @@ pub(crate) fn audit_graph_report(report: &AuditGraphReport) -> Value {
         "traversal_issue_count": report.traversal_issues.len(),
         "surface_count": surface_count,
         "finding_count": report.finding_count(),
+        "allowed_finding_count": report.allowed_finding_count(),
         "review_signal_count": report.review_signal_count(),
         "notice_count": report.notice_count(),
         "notices": notices,
@@ -260,6 +262,7 @@ fn audit_finding(finding: &AuditFinding) -> Value {
         "detail": finding.detail,
         "evidence": finding.evidence,
         "preview_override": finding.preview_override.clone(),
+        "allowed_by": finding.allowed_by,
     })
 }
 

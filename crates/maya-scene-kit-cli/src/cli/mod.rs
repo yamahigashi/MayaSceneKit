@@ -88,6 +88,10 @@ pub fn main(argv: Vec<String>) -> i32 {
                 .get_many::<String>("rule")
                 .map(|v| v.map(|s| s.to_string()).collect::<Vec<_>>())
                 .unwrap_or_default();
+            let allowlist_paths = m
+                .get_many::<PathBuf>("allowlist")
+                .map(|v| v.cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
             let json_output = m.get_flag("json");
             let summary_only = m.get_flag("summary-only");
             let max_preview = *m.get_one::<usize>("max-preview").unwrap_or(&96);
@@ -99,6 +103,7 @@ pub fn main(argv: Vec<String>) -> i32 {
             run_script_audit(ScriptAuditArgs {
                 input,
                 inline_rules: rules,
+                allowlist_paths: &allowlist_paths,
                 json_output,
                 summary_only,
                 max_preview,

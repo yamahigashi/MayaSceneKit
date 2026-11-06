@@ -53,7 +53,8 @@ fn collect_paths(
     include_digests = true,
     node_info_paths = Vec::<String>::new(),
     max_bytes = None,
-    recursive = true
+    recursive = true,
+    allowlist_paths = Vec::<String>::new()
 ))]
 fn audit(
     py: Python<'_>,
@@ -64,6 +65,7 @@ fn audit(
     node_info_paths: Vec<String>,
     max_bytes: Option<usize>,
     recursive: bool,
+    allowlist_paths: Vec<String>,
 ) -> PyResult<PyObject> {
     value_to_py(
         py,
@@ -73,6 +75,7 @@ fn audit(
             max_preview,
             include_digests,
             &node_info_paths,
+            &allowlist_paths,
             recursive,
             max_bytes,
         )

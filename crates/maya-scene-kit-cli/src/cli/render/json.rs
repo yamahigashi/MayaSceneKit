@@ -10,7 +10,7 @@ pub(in crate::cli) fn render_audit_hit_json(
 ) -> serde_json::Value {
     let surface = report.surface_for(hit);
     let preview = report.finding_preview(hit);
-    json!({
+    let mut value = json!({
         "path": scene_path,
         "scene_format": report.scene_format.as_str(),
         "finding_id": hit.code.as_str(),
@@ -36,7 +36,11 @@ pub(in crate::cli) fn render_audit_hit_json(
             "chunk_child_alignment": surface.origin.chunk_child_alignment,
             "chunk_child_header_size": surface.origin.chunk_child_header_size,
         }
-    })
+    });
+    if let Some(allowed) = &hit.allowed_by {
+        value["allowed_by"] = json!(allowed);
+    }
+    value
 }
 
 pub(in crate::cli) fn render_review_signal_json(

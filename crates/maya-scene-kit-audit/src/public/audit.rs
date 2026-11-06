@@ -595,6 +595,13 @@ impl AuditGraphReport {
             .map(AuditReport::notice_count)
             .sum::<usize>()
     }
+
+    pub fn allowed_finding_count(&self) -> usize {
+        self.reports
+            .iter()
+            .map(AuditReport::allowed_finding_count)
+            .sum::<usize>()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -641,6 +648,14 @@ impl AuditReport {
     /// Returns the number of findings in the report.
     pub fn finding_count(&self) -> usize {
         self.findings.len()
+    }
+
+    /// Returns the number of findings marked as allowed by an allowlist entry.
+    pub fn allowed_finding_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.allowed_by.is_some())
+            .count()
     }
 
     /// Returns the number of review signals in the report.

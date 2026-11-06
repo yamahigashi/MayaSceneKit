@@ -7,12 +7,13 @@ pub use maya_scene_kit_audit::{
         build_parse_budget_blocked_audit_report, build_script_audit_plan,
     },
     scene::{
-        AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
-        AuditFindingCode, AuditFindingDetail, AuditGraphReport, AuditGraphRoot, AuditHit,
-        AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile, AuditReferenceEdge, AuditReport,
-        AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity, AuditSinkKind,
-        AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue, AuditTraversalIssueKind,
-        ScriptAuditReport, StaticAuditFindingDetail, StaticAuditReviewDetail,
+        AllowlistSource, AnalysisBudgets, AuditAllowlist, AuditDisposition, AuditEvidence,
+        AuditEvidenceKey, AuditFinding, AuditFindingCode, AuditFindingDetail, AuditGraphReport,
+        AuditGraphRoot, AuditHit, AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile,
+        AuditReferenceEdge, AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal,
+        AuditSeverity, AuditSinkKind, AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue,
+        AuditTraversalIssueKind, ScriptAuditReport, StaticAuditFindingDetail,
+        StaticAuditReviewDetail,
     },
 };
 #[allow(unused_imports)]

@@ -121,3 +121,126 @@ fn audit_cli_text_uses_concise_unit_and_finding_sections() {
     assert!(stdout.contains("(+"));
     assert!(!stdout.contains("; read-only MEL command"));
 }
+
+const ALLOWLIST_SCENE: &str = "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExampleScriptNode\";\n\tsetAttr \".b\" -type \"string\" \"exec \\\"Example\\\"\";\n\tsetAttr \".st\" 1;\n";
+
+fn write_allowlist_fixture(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+    use maya_scene_kit_audit::{
+        audit::{audit_script_nodes, build_script_audit_plan},
+        scene::allowlist_surface_hash,
+    };
+
+    let scene = dir.join("allowlist_example.ma");
+    std::fs::write(&scene, ALLOWLIST_SCENE).expect("write scene");
+    let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
+    let report = audit_script_nodes(&scene, &plan).expect("audit report");
+    let hash = allowlist_surface_hash(&report.surfaces[0].origin, "exec \"Example\"");
+    let allowlist = dir.join("allowlist.json");
+    std::fs::write(
+        &allowlist,
+        serde_json::json!({
+            "version": 1,
+            "entries": [{"hash": hash.to_string(), "codes": ["mel_exec"], "reason": "Example"}],
+        })
+        .to_string(),
+    )
+    .expect("write allowlist");
+    (scene, allowlist)
+}
+
+fn run_audit_cli(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_maya-scene-kit"))
+        .arg("audit")
+        .args(args)
+        .output()
+        .expect("run audit cli")
+}
+
+#[test]
+fn audit_cli_without_allowlist_omits_allowlist_fields() {
+    let dir = tempdir().expect("tmpdir");
+    let (scene, _) = write_allowlist_fixture(dir.path());
+
+    let text = run_audit_cli(&[scene.as_os_str()]);
+    assert_eq!(text.status.code(), Some(10));
+    assert!(!String::from_utf8(text.stdout).unwrap().contains("allowed"));
+
+    let json = run_audit_cli(&[scene.as_os_str(), "--json".as_ref()]);
+    assert_eq!(json.status.code(), Some(10));
+    let stdout = String::from_utf8(json.stdout).unwrap();
+    assert!(!stdout.contains("allowed"), "{stdout}");
+}
+
+#[test]
+fn audit_cli_allowlist_marks_matching_findings() {
+    let dir = tempdir().expect("tmpdir");
+    let (scene, allowlist) = write_allowlist_fixture(dir.path());
+
+    let json = run_audit_cli(&[
+        scene.as_os_str(),
+        "--allowlist".as_ref(),
+        allowlist.as_os_str(),
+        "--json".as_ref(),
+    ]);
+    // The allowed exec finding no longer denies; its unit still asks for review.
+    assert_eq!(json.status.code(), Some(20));
+    let doc: Value = serde_json::from_str(&String::from_utf8(json.stdout).unwrap()).unwrap();
+    assert_eq!(doc["allowed_finding_count"], 1);
+    assert_eq!(doc["files"][0]["allowed_finding_count"], 1);
+    assert_eq!(doc["finding_count"], 1);
+    let hit = &doc["hits"][0];
+    assert_eq!(hit["finding_id"], "mel_exec");
+    assert_eq!(hit["allowed_by"]["source"], "app");
+    assert!(
+        hit["allowed_by"]["hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+
+    let text = run_audit_cli(&[
+        scene.as_os_str(),
+        "--allowlist".as_ref(),
+        allowlist.as_os_str(),
+    ]);
+    assert_eq!(text.status.code(), Some(20));
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    let header = stdout.lines().next().unwrap();
+    assert!(
+        header.ends_with(" findings=1 reviews=0 notices=0 surfaces=1 allowed=1"),
+        "{header}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("- finding ")
+            && line.contains("finding_id=mel_exec allowed=app node=")),
+        "{stdout}"
+    );
+
+    let summary = run_audit_cli(&[
+        scene.as_os_str(),
+        "--allowlist".as_ref(),
+        allowlist.as_os_str(),
+        "--summary-only".as_ref(),
+    ]);
+    let summary = String::from_utf8(summary.stdout).unwrap();
+    let lines = summary.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{summary}");
+    assert!(lines[0].ends_with(" allowed=1"), "{summary}");
+    assert_eq!(lines[1], "total_findings=1 total_allowed=1");
+}
+
+#[test]
+fn audit_cli_rejects_unreadable_or_invalid_allowlist() {
+    let dir = tempdir().expect("tmpdir");
+    let (scene, _) = write_allowlist_fixture(dir.path());
+    let invalid = dir.path().join("invalid.json");
+    std::fs::write(&invalid, r#"{"version":2,"entries":[]}"#).unwrap();
+    let missing = dir.path().join("missing.json");
+
+    for path in [&invalid, &missing] {
+        let output = run_audit_cli(&[scene.as_os_str(), "--allowlist".as_ref(), path.as_os_str()]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("allowlist"), "{stderr}");
+    }
+}

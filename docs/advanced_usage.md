@@ -31,7 +31,9 @@ Command-specific options worth knowing:
 
 - `audit --json` emits the full machine-readable report; `audit --summary-only`
   prints a one-line summary per file; `audit --rule <marker>` (repeatable) adds
-  literal markers; `audit --max-preview <chars>` caps evidence preview length
+  literal markers; `audit --allowlist <file>` (repeatable) marks findings listed
+  in an allowlist file as allowed; `audit --max-preview <chars>` caps evidence
+  preview length
 - `paths --json` and `paths --kind <file|reference|all>` control path output
 - `inspect --max-depth`, `--preview-bytes`, and `--at <offset>` scope the chunk dump
 - `to-ascii --issues-json`, `--write-unknown-blobs`, `--embed-metadata`, and
@@ -213,6 +215,51 @@ Exit codes:
 - `20`: review
 - `1`: scene decode or processing error
 - `2`: CLI usage or I/O error
+
+## Audit Allowlists
+
+An allowlist marks findings that a reviewer has already accepted for one exact
+script body. Pass it with `audit --allowlist <file>` (repeatable; when two files
+list the same entry, the earlier file wins) or `audit(..., allowlist_paths=[...])`.
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "hash": "sha256:<64 lowercase hex>",
+      "codes": ["mel_exec"],
+      "label": "optional",
+      "preview": "optional",
+      "reason": "optional",
+      "added_at": "optional",
+      "added_by": "optional"
+    }
+  ]
+}
+```
+
+- `hash` covers the script body text together with its language, surface kind,
+  attribute, trigger, and source kind. Node names and file positions are not
+  part of it, so the same body under another node still matches, while the same
+  body under another trigger does not. Findings inside text derived from a body
+  (for example `python("...")` inside MEL) use the hash of the outer body.
+- `codes` lists finding ids to allow. User markers are listed as
+  `custom_rule_match:<marker>`. There is no wildcard.
+- Allowed findings stay in the report with `allowed_by` and no longer count as
+  findings for the disposition. Units, dependency facts, review signals, and
+  coverage are unchanged, so an allowed body can still produce `review`.
+- These ids are never allowed, and any of them anywhere in a body blocks every
+  allowance for that body: `unknown_execution_language`,
+  `unknown_execution_trigger`, `python_parse_failure`,
+  `python_unresolved_call_target`, `mel_parse_diagnostics`, `mel_callback_flag`.
+- An unreadable or invalid file is an error (exit code `2`), not an empty list.
+- With an allowlist, text output adds `allowed=<n>` to each file line,
+  `allowed=<source>` to allowed findings, and `total_allowed=<n>`; JSON output
+  adds `allowed_finding_count` and per-hit `allowed_by`. Without one, output is
+  unchanged.
+- An allowed body that evaluates data at run time (for example `eval` of an
+  attribute value) trusts that data, because the hash covers only the body.
 
 ## Related Docs
 

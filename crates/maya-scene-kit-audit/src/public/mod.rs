@@ -72,6 +72,15 @@ pub mod allowlist {
         User,
     }
 
+    impl AllowlistSource {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::App => "app",
+                Self::User => "user",
+            }
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct AuditAllowRef {
         pub hash: AllowlistHash,
