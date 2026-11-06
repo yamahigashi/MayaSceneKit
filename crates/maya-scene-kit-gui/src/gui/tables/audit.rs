@@ -268,7 +268,7 @@ impl TableDelegate for AuditTableDelegate {
             });
         }
         let i18n = I18n::new(self.locale);
-        let copy_label = i18n.text("action.copy_source_text");
+        let copy_label = i18n.text("action.copy_details");
         let clean_label = i18n.text("action.clean_audit_context");
         let undo_label = i18n.text("action.discard_changes");
         let row_key = row.key.clone();

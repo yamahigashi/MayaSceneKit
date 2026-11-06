@@ -226,6 +226,7 @@ struct GuiShell {
     path_resolution_filter: BTreeSet<PathResolutionBadge>,
     audit_severity_filter: BTreeSet<AuditSeverityFilter>,
     audit_detail_dialog: Option<AuditDetailDialogState>,
+    audit_detail_code_request: u64,
     plugin_registry: PluginRegistry,
     status_message: Option<BannerMessage>,
     max_bytes_dialog: Option<MaxBytesDialogState>,
@@ -466,6 +467,8 @@ struct RowEditTransition {
 
 #[derive(Clone)]
 struct SceneRowEditState {
+    audit_report: Option<AuditReport>,
+    audit_file_state: Option<GuiFileState>,
     status: FileStatus,
     findings: usize,
     clean_preview: Option<ExecutionCleanPreview>,
@@ -527,6 +530,31 @@ struct AuditResultRowKey {
     item_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuditDetailTab {
+    Code,
+    Details,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuditDetailFieldKind {
+    RuleId,
+    Sink,
+    Node,
+    Attribute,
+    Surface,
+    Trigger,
+    Language,
+    Source,
+    Line,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuditDetailField {
+    kind: AuditDetailFieldKind,
+    raw: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuditResultRow {
     key: AuditResultRowKey,
@@ -537,6 +565,7 @@ struct AuditResultRow {
     sink: String,
     preview: String,
     provenance: Vec<String>,
+    detail_fields: Vec<AuditDetailField>,
     source_line: Option<usize>,
     evidence: Vec<String>,
     dirty: bool,
@@ -557,6 +586,7 @@ struct AuditTableRow {
     sink: String,
     preview: String,
     provenance: Vec<String>,
+    detail_fields: Vec<AuditDetailField>,
     source_line: Option<usize>,
     evidence: Vec<String>,
     dirty: bool,
@@ -572,10 +602,52 @@ struct AuditTableModel {
 #[derive(Clone, Debug)]
 struct AuditDetailDialogState {
     key: AuditResultRowKey,
-    preview_input: Entity<InputState>,
+    active_tab: AuditDetailTab,
+    code_input: Entity<InputState>,
     preview_text: String,
-    evidence_input: Entity<InputState>,
-    evidence_text: String,
+    code_text: SharedString,
+    code: AuditDetailCodeState,
+    code_target: Option<AuditDetailCodeTarget>,
+    code_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AuditDetailCodeState {
+    NotApplicable,
+    Loading { request: u64 },
+    Loaded { derived: bool },
+    NotFound,
+    Ambiguous,
+    Failed { error: String },
+    Unavailable,
+    FileChanged,
+    TooLarge,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuditDetailCodeTarget {
+    origin: ExecutionOrigin,
+    derived: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GuiFileState {
+    size: u64,
+    modified_unix_nanos: Option<u128>,
+}
+
+impl GuiFileState {
+    fn read(path: &Path) -> io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            size: metadata.len(),
+            modified_unix_nanos: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos()),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -601,6 +673,7 @@ struct AuditDetailViewModel {
     sink: String,
     preview: String,
     provenance: Vec<String>,
+    detail_fields: Vec<AuditDetailField>,
     source_line: Option<usize>,
     evidence: Vec<String>,
     clean_target: Option<ExecutionCleanTarget>,
@@ -645,6 +718,8 @@ struct SceneRow {
     findings: usize,
     scene_workspace_root: Option<PathBuf>,
     audit_report: Option<AuditReport>,
+    audit_file_state: Option<GuiFileState>,
+    audit_generation: u64,
     paths_report: Option<ScenePathsReport>,
     dump_report: Option<SceneDumpReport>,
     analyzed_audit_mode: Option<AuditModePreference>,
@@ -915,6 +990,7 @@ enum DirtyKind {
 }
 
 struct AnalyzeRowResult {
+    audit_file_state: Option<GuiFileState>,
     audit_report: AuditReport,
     paths_report: Option<ScenePathsReport>,
     dump_report: Option<SceneDumpReport>,
@@ -1068,6 +1144,8 @@ impl SceneRow {
             findings: 0,
             scene_workspace_root: None,
             audit_report: None,
+            audit_file_state: None,
+            audit_generation: 0,
             paths_report: None,
             dump_report: None,
             analyzed_audit_mode: None,
@@ -1091,6 +1169,12 @@ impl SceneRow {
             replace_generation: 0,
             replace_artifact_generation: None,
         }
+    }
+
+    fn set_audit_report(&mut self, report: Option<AuditReport>, file_state: Option<GuiFileState>) {
+        self.audit_report = report;
+        self.audit_file_state = file_state;
+        self.audit_generation += 1;
     }
 
     fn refresh_scene_workspace_root(&mut self) {
@@ -1292,6 +1376,8 @@ impl SceneRow {
 
     fn edit_state(&self) -> SceneRowEditState {
         SceneRowEditState {
+            audit_report: self.audit_report.clone(),
+            audit_file_state: self.audit_file_state,
             status: self.status.clone(),
             findings: self.findings,
             clean_preview: self.clean_preview.clone(),
@@ -1314,6 +1400,7 @@ impl SceneRow {
     }
 
     fn apply_edit_state(&mut self, state: &SceneRowEditState) {
+        self.set_audit_report(state.audit_report.clone(), state.audit_file_state);
         self.status = state.status.clone();
         self.findings = state.findings;
         self.clean_preview = state.clean_preview.clone();
@@ -1396,6 +1483,7 @@ enum RowJobResult {
     },
     Save {
         output_path: PathBuf,
+        audit_file_state: Option<GuiFileState>,
     },
 }
 

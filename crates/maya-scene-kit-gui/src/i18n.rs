@@ -24,6 +24,12 @@ impl I18n {
             .to_string()
     }
 
+    pub fn try_text(&self, key: &str) -> Option<String> {
+        lookup(self.locale, key)
+            .or_else(|| lookup(SupportedLocale::English, key))
+            .map(str::to_string)
+    }
+
     pub fn format(&self, key: &'static str, replacements: &[(&str, String)]) -> String {
         let mut rendered = self.text(key);
         for (name, value) in replacements {
@@ -50,7 +56,7 @@ impl I18n {
     }
 }
 
-fn lookup(locale: SupportedLocale, key: &'static str) -> Option<&'static str> {
+fn lookup(locale: SupportedLocale, key: &str) -> Option<&'static str> {
     let catalog = match locale {
         SupportedLocale::English => english_catalog(),
         SupportedLocale::Chinese => chinese_catalog(),
@@ -96,7 +102,49 @@ mod tests {
             "action.clean_audit_context",
             "action.clean_file_context",
             "action.delete_ui_configuration_script_node",
-            "action.copy_source_text",
+            "tab.audit_detail_code",
+            "tab.audit_detail_details",
+            "action.close",
+            "action.copy_details",
+            "label.audit_detail.rule_id",
+            "label.audit_detail.sink",
+            "label.audit_detail.node",
+            "label.audit_detail.attribute",
+            "label.audit_detail.surface",
+            "label.audit_detail.trigger",
+            "label.audit_detail.language",
+            "label.audit_detail.source",
+            "label.audit_detail.line",
+            "audit_value.trigger.unknown",
+            "audit_value.trigger.manual",
+            "audit_value.trigger.file_open",
+            "audit_value.trigger.file_close",
+            "audit_value.trigger.gui_open_close",
+            "audit_value.trigger.render",
+            "audit_value.trigger.time_changed",
+            "audit_value.trigger.event_hook",
+            "audit_value.surface.script_node_body",
+            "audit_value.surface.file_command_callback",
+            "audit_value.surface.node_attr_callback",
+            "audit_value.surface.top_level_command",
+            "audit_value.surface.top_level_proc_definition",
+            "audit_value.surface.top_level_other_statement",
+            "audit_value.surface.raw_chunk_text",
+            "audit_value.language.mel",
+            "audit_value.language.python",
+            "audit_value.language.unknown",
+            "audit_value.attribute.before",
+            "audit_value.attribute.after",
+            "audit_value.script_type.0",
+            "audit_value.script_type.1",
+            "audit_value.script_type.2",
+            "audit_value.script_type.3",
+            "audit_value.script_type.4",
+            "audit_value.script_type.5",
+            "audit_value.script_type.6",
+            "audit_value.script_type.7",
+            "audit_value.source_type.0",
+            "audit_value.source_type.1",
             "action.reveal_in_explorer",
             "action.detail",
             "action.discard_edits_and_exit",
@@ -182,5 +230,110 @@ mod tests {
             ),
             "Workspace auto analyze completed for 12 file(s) in 2.50s"
         );
+    }
+
+    #[test]
+    fn audit_detail_catalogs_directly_cover_all_keys_and_variants() {
+        use maya_scene_kit_observe::scene::evidence::{
+            ExecutionLanguage, ExecutionSurfaceKind, ExecutionTrigger,
+        };
+        let languages = [
+            ExecutionLanguage::Mel,
+            ExecutionLanguage::Python,
+            ExecutionLanguage::Unknown,
+        ];
+        let triggers = [
+            ExecutionTrigger::Unknown,
+            ExecutionTrigger::Manual,
+            ExecutionTrigger::FileOpen,
+            ExecutionTrigger::FileClose,
+            ExecutionTrigger::GuiOpenClose,
+            ExecutionTrigger::Render,
+            ExecutionTrigger::TimeChanged,
+            ExecutionTrigger::EventHook,
+        ];
+        let surfaces = [
+            ExecutionSurfaceKind::ScriptNodeBody,
+            ExecutionSurfaceKind::FileCommandCallback,
+            ExecutionSurfaceKind::NodeAttrCallback,
+            ExecutionSurfaceKind::TopLevelCommand,
+            ExecutionSurfaceKind::TopLevelProcDefinition,
+            ExecutionSurfaceKind::TopLevelOtherStatement,
+            ExecutionSurfaceKind::RawChunkText,
+        ];
+        for catalog in [
+            super::english_catalog(),
+            super::japanese_catalog(),
+            super::chinese_catalog(),
+        ] {
+            for key in [
+                "action.copy_code",
+                "audit_detail.code_loading",
+                "audit_detail.code_derived_parent",
+                "audit_detail.code_not_found",
+                "audit_detail.code_ambiguous",
+                "audit_detail.code_load_failed",
+                "audit_detail.code_unavailable",
+                "audit_detail.code_file_changed",
+                "audit_detail.code_too_large",
+                "tab.audit_detail_code",
+                "tab.audit_detail_details",
+                "action.close",
+                "action.copy_details",
+                "label.audit_detail.rule_id",
+                "label.audit_detail.sink",
+                "label.audit_detail.node",
+                "label.audit_detail.attribute",
+                "label.audit_detail.surface",
+                "label.audit_detail.trigger",
+                "label.audit_detail.language",
+                "label.audit_detail.source",
+                "label.audit_detail.line",
+                "audit_value.trigger.unknown",
+                "audit_value.trigger.manual",
+                "audit_value.trigger.file_open",
+                "audit_value.trigger.file_close",
+                "audit_value.trigger.gui_open_close",
+                "audit_value.trigger.render",
+                "audit_value.trigger.time_changed",
+                "audit_value.trigger.event_hook",
+                "audit_value.surface.script_node_body",
+                "audit_value.surface.file_command_callback",
+                "audit_value.surface.node_attr_callback",
+                "audit_value.surface.top_level_command",
+                "audit_value.surface.top_level_proc_definition",
+                "audit_value.surface.top_level_other_statement",
+                "audit_value.surface.raw_chunk_text",
+                "audit_value.language.mel",
+                "audit_value.language.python",
+                "audit_value.language.unknown",
+                "audit_value.attribute.before",
+                "audit_value.attribute.after",
+                "audit_value.script_type.0",
+                "audit_value.script_type.1",
+                "audit_value.script_type.2",
+                "audit_value.script_type.3",
+                "audit_value.script_type.4",
+                "audit_value.script_type.5",
+                "audit_value.script_type.6",
+                "audit_value.script_type.7",
+                "audit_value.source_type.0",
+                "audit_value.source_type.1",
+            ] {
+                assert!(catalog.contains_key(key), "missing {key}");
+            }
+            for language in languages {
+                assert!(
+                    catalog.contains_key(&format!("audit_value.language.{}", language.as_str()))
+                );
+            }
+            for trigger in triggers {
+                assert!(catalog.contains_key(&format!("audit_value.trigger.{}", trigger.as_str())));
+            }
+            for surface in surfaces {
+                assert!(catalog.contains_key(&format!("audit_value.surface.{}", surface.as_str())));
+            }
+            assert!(!catalog.contains_key("action.copy_source_text"));
+        }
     }
 }

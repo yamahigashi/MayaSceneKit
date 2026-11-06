@@ -269,7 +269,13 @@ impl GuiShell {
                         .map(|notice| notice.message.clone())
                         .unwrap_or_else(|| "parse budget exceeded".to_string());
                     row.findings = findings;
-                    row.audit_report = Some(snapshot.report);
+                    row.set_audit_report(
+                        Some(snapshot.report),
+                        Some(GuiFileState {
+                            size: snapshot.file_state.size,
+                            modified_unix_nanos: snapshot.file_state.modified_unix_nanos,
+                        }),
+                    );
                     row.analyzed_audit_mode = Some(self.state.audit_mode);
                     row.status = if parse_budget_blocked {
                         FileStatus::Error(blocked_message)

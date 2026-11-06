@@ -1,3 +1,4 @@
+use super::{AuditDetailCodeState, GuiFileState};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -46,11 +47,11 @@ use maya_scene_kit_observe::scene::{
 use tempfile::tempdir;
 
 use super::{
-    AuditDetailDialogState, AuditResultItemKind, AuditResultRow, AuditResultRowKey,
-    AuditRowCleanState, AuditSeverityFilter, AuditSortKey, AuditTableSort,
-    AutoAnalyzeParallelismPreference, AutoAnalyzePriority, AutoAnalyzeQueueState,
-    BackupLocationPreference, BannerMessage, DirtyKind, FileSortKey, FileStatus,
-    FileTableSelectAll, FileTableSort, MenuAutoAnalyzeParallelism32,
+    AuditDetailDialogState, AuditDetailField, AuditDetailFieldKind, AuditDetailTab,
+    AuditResultItemKind, AuditResultRow, AuditResultRowKey, AuditRowCleanState,
+    AuditSeverityFilter, AuditSortKey, AuditTableSort, AutoAnalyzeParallelismPreference,
+    AutoAnalyzePriority, AutoAnalyzeQueueState, BackupLocationPreference, BannerMessage, DirtyKind,
+    FileSortKey, FileStatus, FileTableSelectAll, FileTableSort, MenuAutoAnalyzeParallelism32,
     MenuEditDeleteUiConfigurationScriptNode, MenuEditRedo, MenuEditUndo, MenuPurgeAnalysisCache,
     MenuToggleAnalysisCache, MenuToggleIgnoreFolderNames, PathCollectRewriteMode,
     PathEditKeyboardOutcome, PathFormFilter, PathOrderSnapshot, PathResolutionBadge, PathSortKey,
@@ -235,6 +236,24 @@ fn test_audit_row(
         sink: "py_exec".to_string(),
         preview: "preview".to_string(),
         provenance: vec!["node: scriptNode1".to_string(), "line: 3".to_string()],
+        detail_fields: vec![
+            AuditDetailField {
+                kind: AuditDetailFieldKind::RuleId,
+                raw: "audit_code".to_string(),
+            },
+            AuditDetailField {
+                kind: AuditDetailFieldKind::Sink,
+                raw: "py_exec".to_string(),
+            },
+            AuditDetailField {
+                kind: AuditDetailFieldKind::Node,
+                raw: "scriptNode1".to_string(),
+            },
+            AuditDetailField {
+                kind: AuditDetailFieldKind::Line,
+                raw: "3".to_string(),
+            },
+        ],
         source_line: Some(3),
         evidence: evidence.iter().map(|entry| entry.to_string()).collect(),
         dirty: false,
@@ -299,7 +318,13 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
     }
     if let Some(snapshot) = update.audit_snapshot {
         row.findings = snapshot.report.findings.len();
-        row.audit_report = Some(snapshot.report);
+        row.set_audit_report(
+            Some(snapshot.report),
+            Some(GuiFileState {
+                size: snapshot.file_state.size,
+                modified_unix_nanos: snapshot.file_state.modified_unix_nanos,
+            }),
+        );
         row.analyzed_audit_mode = Some(state.audit_mode);
         row.status = FileStatus::Audited;
         row.sync_findings_count();
@@ -542,7 +567,7 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
         panic!("expected analyze result");
     };
     let mut row = test_row(1, scene);
-    row.audit_report = Some(result.audit_report.clone());
+    row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
     row.dump_report = result.dump_report.clone();
 
     let mut clean_targets = result
@@ -636,7 +661,7 @@ fn dump_script_audit_fixture() -> (SceneRow, AuditResultRowKey) {
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report.clone());
+    row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
     row.dump_report = result.dump_report;
 
     let audit_row = build_audit_result_rows(std::slice::from_ref(&row), &[0])
@@ -993,6 +1018,7 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    audit_file_state: None,
                     output_path: scene.clone(),
                 },
                 None,
@@ -1089,6 +1115,7 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    audit_file_state: None,
                     output_path: scene.clone(),
                 },
                 None,
@@ -1200,7 +1227,7 @@ fn clean_result_keeps_active_audit_tab_and_marks_audit_rows_staged(cx: &mut Test
             else {
                 panic!("expected analyze result");
             };
-            row.audit_report = Some(result.audit_report);
+            row.set_audit_report(Some(result.audit_report), result.audit_file_state);
             row.dump_report = result.dump_report;
             shell.state.active_tab = ResultTab::Audit;
             shell.rows = vec![row];
@@ -1380,7 +1407,7 @@ fn scene_edit_clean_undo_restores_findings_count_and_findings_filter(cx: &mut Te
                 "fixture should produce findings before clean"
             );
 
-            row.audit_report = Some(result.audit_report);
+            row.set_audit_report(Some(result.audit_report), result.audit_file_state);
             row.dump_report = result.dump_report;
             row.findings = original_findings;
             shell.rows = vec![row];
@@ -1604,6 +1631,7 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    audit_file_state: None,
                     output_path: scene_a.clone(),
                 },
                 None,
@@ -1905,7 +1933,7 @@ fn build_file_table_rows_prefers_report_findings_when_cached_count_is_stale() {
 
     let mut row = test_row(1, &scene);
     let findings = result.audit_report.findings.len();
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dump_report = result.dump_report;
     row.findings = 0;
 
@@ -2562,7 +2590,7 @@ fn build_audit_result_rows_prefixes_the_source_file() {
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
     let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
 
@@ -2609,6 +2637,16 @@ fn filter_audit_result_rows_keeps_only_selected_severities() {
             sink: "none".to_string(),
             preview: String::new(),
             provenance: Vec::new(),
+            detail_fields: vec![
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::RuleId,
+                    raw: "info_code".to_string(),
+                },
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::Sink,
+                    raw: "none".to_string(),
+                },
+            ],
             source_line: None,
             evidence: Vec::new(),
             dirty: false,
@@ -2628,6 +2666,16 @@ fn filter_audit_result_rows_keeps_only_selected_severities() {
             sink: "py_exec".to_string(),
             preview: String::new(),
             provenance: Vec::new(),
+            detail_fields: vec![
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::RuleId,
+                    raw: "high_code".to_string(),
+                },
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::Sink,
+                    raw: "py_exec".to_string(),
+                },
+            ],
             source_line: None,
             evidence: Vec::new(),
             dirty: false,
@@ -2769,7 +2817,7 @@ fn build_audit_result_rows_marks_script_node_findings_cleanable() {
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
     let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
 
@@ -2796,7 +2844,7 @@ fn build_audit_result_rows_marks_pending_clean_targets_as_staged() {
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.pending_clean_targets
         .insert(ExecutionCleanTarget::ScriptNode {
             node_name: "literalPythonReview".to_string(),
@@ -2852,6 +2900,20 @@ fn audit_context_menu_state_keeps_clean_action_visible_when_blocked_by_other_dir
         sink: "observe".to_string(),
         preview: "print".to_string(),
         provenance: vec!["node: scriptNode1".to_string()],
+        detail_fields: vec![
+            AuditDetailField {
+                kind: AuditDetailFieldKind::RuleId,
+                raw: "script_node".to_string(),
+            },
+            AuditDetailField {
+                kind: AuditDetailFieldKind::Sink,
+                raw: "observe".to_string(),
+            },
+            AuditDetailField {
+                kind: AuditDetailFieldKind::Node,
+                raw: "scriptNode1".to_string(),
+            },
+        ],
         source_line: None,
         evidence: vec!["node: scriptNode1".to_string()],
         dirty: false,
@@ -2879,7 +2941,7 @@ fn build_audit_result_rows_marks_top_level_command_findings_cleanable() {
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
     let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
     let detail = rows.iter().find_map(|audit_row| {
@@ -2909,7 +2971,7 @@ fn clean_targets_for_threat_findings_include_finding_backed_script_node_targets(
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
     let targets = clean_targets_for_threat_findings(&row);
 
@@ -2943,7 +3005,7 @@ fn file_context_menu_state_enables_clean_for_selected_finding_backed_row() {
 
     let mut row = test_row(1, &path);
     row.selected = true;
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
     let state = file_context_menu_state(&[row], 1);
 
@@ -2979,7 +3041,7 @@ fn file_context_menu_state_ignores_other_selected_targets_when_clicked_row_is_un
 
     let mut selected_row = test_row(1, &selected_path);
     selected_row.selected = true;
-    selected_row.audit_report = Some(result.audit_report);
+    selected_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     let clicked_row = test_row(2, &clicked_path);
 
     let state = file_context_menu_state(&[selected_row, clicked_row], 2);
@@ -3065,7 +3127,7 @@ fn file_context_menu_state_disables_delete_actions_for_replace_rows() {
 
     let mut row = test_row(1, &path);
     row.selected = true;
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dirty_kind = Some(DirtyKind::Replace);
     row.path_overrides
         .insert(0, "asset/example/edited.fbx".to_string());
@@ -3091,7 +3153,7 @@ fn file_context_menu_state_keeps_clean_enabled_when_selected_rows_mix_eligible_a
 
     let mut eligible_row = test_row(1, &eligible_path);
     eligible_row.selected = true;
-    eligible_row.audit_report = Some(result.audit_report);
+    eligible_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     let mut blocked_row = test_row(2, &blocked_path);
     blocked_row.selected = true;
     blocked_row.dirty_kind = Some(DirtyKind::Replace);
@@ -3224,7 +3286,7 @@ fn build_audit_result_rows_marks_file_command_callback_findings_cleanable() {
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
     let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
     let audit_row = rows
@@ -3318,6 +3380,16 @@ fn resolve_audit_detail_view_model_returns_none_for_unknown_row_key() {
         sink: "none".to_string(),
         preview: String::new(),
         provenance: Vec::new(),
+        detail_fields: vec![
+            AuditDetailField {
+                kind: AuditDetailFieldKind::RuleId,
+                raw: "note".to_string(),
+            },
+            AuditDetailField {
+                kind: AuditDetailFieldKind::Sink,
+                raw: "none".to_string(),
+            },
+        ],
         source_line: None,
         evidence: Vec::new(),
         dirty: false,
@@ -3469,7 +3541,7 @@ fn dump_script_rows_use_mb_owner_form_target_when_audit_provenance_is_available(
     else {
         panic!("expected analyze result");
     };
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dump_report = result.dump_report;
 
     let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
@@ -3570,7 +3642,7 @@ fn refresh_audit_table_caches_rows_and_clears_hidden_dialog(cx: &mut TestAppCont
         panic!("expected analyze result");
     };
     row.selected = true;
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dump_report = result.dump_report;
 
     shell.update_in(visual_cx, |shell, window, cx| {
@@ -3625,7 +3697,7 @@ fn audit_table_supports_multi_select(cx: &mut TestAppContext) {
         panic!("expected analyze result");
     };
     row.selected = true;
-    row.audit_report = Some(result.audit_report);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dump_report = result.dump_report;
 
     shell.update_in(visual_cx, |shell, _window, cx| {
@@ -3673,17 +3745,11 @@ fn audit_detail_dialog_open_populates_read_only_inputs(cx: &mut TestAppContext) 
             .expect("audit detail state");
 
         assert!(!state.preview_text.is_empty());
-        assert!(!state.evidence_text.is_empty());
         assert_eq!(
-            state.preview_input.read(cx).value().to_string(),
+            state.code_input.read(cx).value().to_string(),
             state.preview_text
         );
-        assert_eq!(
-            state.evidence_input.read(cx).value().to_string(),
-            state.evidence_text
-        );
-        assert!(state.preview_input.read(cx).is_read_only());
-        assert!(state.evidence_input.read(cx).is_read_only());
+        assert!(state.code_input.read(cx).is_read_only());
     });
 }
 
@@ -3750,30 +3816,18 @@ fn audit_detail_dialog_sync_refreshes_stale_input_text(cx: &mut TestAppContext) 
         shell.toggle_audit_severity(AuditSeverityFilter::Info, cx);
         shell.open_audit_detail_dialog(key, window, cx);
 
-        let AuditDetailDialogState {
-            preview_input,
-            evidence_input,
-            ..
-        } = shell
+        let AuditDetailDialogState { code_input, .. } = shell
             .audit_detail_dialog
             .as_ref()
             .expect("audit detail state")
             .clone();
 
-        preview_input.update(cx, |input, cx| input.set_value("stale preview", window, cx));
-        evidence_input.update(cx, |input, cx| {
-            input.set_value("stale evidence", window, cx)
-        });
+        code_input.update(cx, |input, cx| input.set_value("stale preview", window, cx));
         shell
             .audit_detail_dialog
             .as_mut()
             .expect("detail state")
             .preview_text = "stale preview".to_string();
-        shell
-            .audit_detail_dialog
-            .as_mut()
-            .expect("detail state")
-            .evidence_text = "stale evidence".to_string();
 
         shell.sync_audit_detail_dialog_inputs(window, cx);
 
@@ -3783,14 +3837,9 @@ fn audit_detail_dialog_sync_refreshes_stale_input_text(cx: &mut TestAppContext) 
             .expect("audit detail state");
 
         assert_ne!(state.preview_text, "stale preview");
-        assert_ne!(state.evidence_text, "stale evidence");
         assert_eq!(
-            state.preview_input.read(cx).value().to_string(),
+            state.code_input.read(cx).value().to_string(),
             state.preview_text
-        );
-        assert_eq!(
-            state.evidence_input.read(cx).value().to_string(),
-            state.evidence_text
         );
     });
 }
@@ -4615,15 +4664,18 @@ fn selected_audit_notice_lines_include_budget_notice(cx: &mut TestAppContext) {
         let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
         let mut row = test_row(1, &scene);
         row.selected = true;
-        row.audit_report = Some(build_parse_budget_blocked_audit_report(
-            scene.clone(),
-            SceneFormat::Ma,
-            ValidationState::Invalid,
-            &plan,
-            AuditOptions::strict_default(),
-            maya_scene_kit_observe::scene::MelParseBudgetLimit::MaxBytes,
+        row.set_audit_report(
+            Some(build_parse_budget_blocked_audit_report(
+                scene.clone(),
+                SceneFormat::Ma,
+                ValidationState::Invalid,
+                &plan,
+                AuditOptions::strict_default(),
+                maya_scene_kit_observe::scene::MelParseBudgetLimit::MaxBytes,
+                None,
+            )),
             None,
-        ));
+        );
         shell.rows = vec![row];
 
         let lines = selected_audit_notice_lines(shell, &[0]);
@@ -4644,15 +4696,18 @@ fn selected_rows_parse_budget_blocked_without_paths_detects_blocked_selection(
         let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
         let mut row = test_row(1, &scene);
         row.selected = true;
-        row.audit_report = Some(build_parse_budget_blocked_audit_report(
-            scene.clone(),
-            SceneFormat::Ma,
-            ValidationState::Invalid,
-            &plan,
-            AuditOptions::strict_default(),
-            maya_scene_kit_observe::scene::MelParseBudgetLimit::MaxBytes,
+        row.set_audit_report(
+            Some(build_parse_budget_blocked_audit_report(
+                scene.clone(),
+                SceneFormat::Ma,
+                ValidationState::Invalid,
+                &plan,
+                AuditOptions::strict_default(),
+                maya_scene_kit_observe::scene::MelParseBudgetLimit::MaxBytes,
+                None,
+            )),
             None,
-        ));
+        );
         row.paths_report = None;
         shell.rows = vec![row];
 
@@ -6279,7 +6334,7 @@ fn file_context_clean_stages_finding_backed_script_node_targets(cx: &mut TestApp
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
             row.selected = true;
-            row.audit_report = Some(result.audit_report.clone());
+            row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
 
@@ -6319,7 +6374,7 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
             row.selected = true;
-            row.audit_report = Some(result.audit_report.clone());
+            row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
             shell.run_clean(window, cx);
@@ -6340,7 +6395,7 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
             row.selected = true;
-            row.audit_report = Some(result.audit_report.clone());
+            row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
             shell.undo_stack.clear();
@@ -6381,10 +6436,16 @@ fn file_context_clean_from_unselected_row_is_noop(cx: &mut TestAppContext) {
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let mut row_a = test_row(1, &scene_a);
-            row_a.audit_report = Some(result_a.audit_report.clone());
+            row_a.set_audit_report(
+                Some(result_a.audit_report.clone()),
+                result_a.audit_file_state,
+            );
             let mut row_b = test_row(2, &scene_b);
             row_b.selected = true;
-            row_b.audit_report = Some(result_b.audit_report.clone());
+            row_b.set_audit_report(
+                Some(result_b.audit_report.clone()),
+                result_b.audit_file_state,
+            );
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
             shell.run_file_context_clean_from_row(1, window, cx);
@@ -6420,7 +6481,7 @@ fn file_context_clean_from_replace_row_is_noop(cx: &mut TestAppContext) {
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
             row.selected = true;
-            row.audit_report = Some(result.audit_report.clone());
+            row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
             row.dirty_kind = Some(DirtyKind::Replace);
             row.path_overrides
                 .insert(0, "asset/example/edited.fbx".to_string());
@@ -6457,7 +6518,8 @@ fn file_context_clean_skips_replace_rows_in_selected_group(cx: &mut TestAppConte
         shell.update(app, |shell, cx| {
             let mut eligible_row = test_row(1, &eligible_scene);
             eligible_row.selected = true;
-            eligible_row.audit_report = Some(result.audit_report.clone());
+            eligible_row
+                .set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
 
             let mut blocked_row = test_row(2, &blocked_scene);
             blocked_row.selected = true;
@@ -9514,4 +9576,1178 @@ fn persisted_column_widths_captures_column_keys_and_widths() {
             },
         ]
     );
+}
+
+#[gpui::test]
+fn audit_detail_tabs_select_one_panel_and_reset_on_reopen(cx: &mut TestAppContext) {
+    use gpui_component::WindowExt;
+
+    let (shell, visual_cx) = open_test_shell(cx);
+    let mut row = test_audit_row(1, 0, "TestScene.ma", "Example", &[]);
+    row.preview = r"Example\n\t".to_string();
+    let key = row.key.clone();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.locale = LocalePreference::English;
+        shell.audit_rows = display_audit_rows(vec![row]);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let state = shell.audit_detail_dialog.as_ref().expect("dialog state");
+        assert_eq!(state.active_tab, AuditDetailTab::Code);
+        assert_eq!(state.code_input.read(cx).value().as_ref(), r"Example\n\t");
+    });
+    let assert_panel = |visual_cx: &mut VisualTestContext, selected| {
+        let (rows, state) = shell.update_in(visual_cx, |shell, _, _| {
+            (
+                shell.audit_rows.clone(),
+                shell.audit_detail_dialog.clone().unwrap(),
+            )
+        });
+        // GPUI retains debug bounds between frames, so inspect each selection in a fresh window.
+        let (snapshot, snapshot_cx) = open_test_shell(visual_cx);
+        snapshot.update_in(snapshot_cx, |shell, window, cx| {
+            shell.state.locale = LocalePreference::English;
+            shell.audit_rows = rows;
+            shell.open_audit_detail_dialog(state.key, window, cx);
+            shell.audit_detail_dialog.as_mut().unwrap().active_tab = state.active_tab;
+            cx.notify();
+        });
+        for (index, selector) in ["audit-detail-panel-code", "audit-detail-panel-details"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                snapshot_cx.debug_bounds(selector).is_some(),
+                index == selected,
+                "{selector}"
+            );
+        }
+    };
+    assert_panel(visual_cx, 0);
+    let tabs = visual_cx
+        .debug_bounds("audit-detail-tabs")
+        .expect("tab bounds");
+    visual_cx.simulate_click(
+        point(tabs.left() + px(90.0), tabs.center().y),
+        Modifiers::default(),
+    );
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert_eq!(
+            shell.audit_detail_dialog.as_ref().unwrap().active_tab,
+            AuditDetailTab::Details
+        );
+        shell.sync_audit_detail_dialog_inputs(window, cx);
+        assert_eq!(
+            shell.audit_detail_dialog.as_ref().unwrap().active_tab,
+            AuditDetailTab::Details
+        );
+    });
+    assert_panel(visual_cx, 1);
+    let close = visual_cx
+        .debug_bounds("audit-detail-close")
+        .expect("close bounds");
+    visual_cx.simulate_click(close.center(), Modifiers::default());
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(shell.audit_detail_dialog.is_none());
+        assert!(!window.has_active_dialog(cx));
+        shell.audit_rows[0].preview.clear();
+        shell.open_audit_detail_dialog(key, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().expect("reopened dialog");
+        assert_eq!(state.active_tab, AuditDetailTab::Code);
+        assert_eq!(state.code_input.read(cx).value().as_ref(), "-");
+        let detail = resolve_audit_detail_view_model(&shell.audit_rows, &state.key).unwrap();
+        assert_eq!(
+            super::audit_detail_dialog::audit_detail_preview_text(&detail),
+            "-"
+        );
+    });
+    assert_panel(visual_cx, 0);
+}
+
+#[test]
+fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
+    use super::helpers::build_audit_detail_fields;
+    use AuditDetailFieldKind::*;
+    let fields = |pairs: &[(AuditDetailFieldKind, &str)]| {
+        pairs
+            .iter()
+            .map(|(kind, raw)| AuditDetailField {
+                kind: *kind,
+                raw: (*raw).to_string(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("TestScene.ma");
+    let prefix = "//Maya ASCII 2026 scene\nrequires maya \"2026\";\n";
+    fs::write(&path, format!("{prefix}python(\"import subprocess\\nsubprocess.call(['echo', 'Example'])\");\ncreateNode script -n \"ExampleScriptNode\";\nsetAttr \".b\" -type \"string\" \"print(1)\";\nsetAttr \".st\" 2;\nsetAttr \".stp\" 1;\n")).expect("write synthetic scene");
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze")
+    else {
+        panic!("expected analysis");
+    };
+    let finding = result
+        .audit_report
+        .findings
+        .iter()
+        .find(|finding| {
+            result.audit_report.surface_for(finding).origin.surface_kind
+                == ExecutionSurfaceKind::TopLevelCommand
+        })
+        .expect("top-level finding");
+    let origin = ExecutionOrigin {
+        lang: ExecutionLanguage::Python,
+        trigger: ExecutionTrigger::GuiOpenClose,
+        surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+        node_name: Some("ExampleScriptNode".to_string()),
+        attr_name: Some(".b".to_string()),
+        source_kind: Some("scriptType=2,sourceType=1".to_string()),
+        ..ExecutionOrigin::without_chunk_address()
+    };
+    let expected = fields(&[
+        (RuleId, finding.code.as_str()),
+        (Sink, finding.sink.as_str()),
+        (Node, "ExampleScriptNode"),
+        (Attribute, ".b"),
+        (Surface, "script_node_body"),
+        (Trigger, "gui_open_close"),
+        (Language, "python"),
+        (Source, "scriptType=2,sourceType=1"),
+        (Line, "3"),
+    ]);
+    assert_eq!(
+        build_audit_detail_fields(
+            finding.code.as_str(),
+            finding.sink.as_str(),
+            &origin,
+            Some(3)
+        ),
+        expected
+    );
+    let mut optional_origin = origin.clone();
+    optional_origin.node_name = None;
+    optional_origin.attr_name = None;
+    optional_origin.source_kind = None;
+    assert_eq!(
+        build_audit_detail_fields("Example", "Example", &optional_origin, None),
+        fields(&[
+            (RuleId, "Example"),
+            (Sink, "Example"),
+            (Surface, "script_node_body"),
+            (Trigger, "gui_open_close"),
+            (Language, "python"),
+        ])
+    );
+    optional_origin.node_name = Some(String::new());
+    optional_origin.attr_name = Some(String::new());
+    optional_origin.source_kind = Some(String::new());
+    assert_eq!(
+        build_audit_detail_fields("Example", "Example", &optional_origin, None),
+        fields(&[
+            (RuleId, "Example"),
+            (Sink, "Example"),
+            (Node, ""),
+            (Attribute, ""),
+            (Surface, "script_node_body"),
+            (Trigger, "gui_open_close"),
+            (Language, "python"),
+            (Source, ""),
+        ])
+    );
+    assert_eq!(
+        result
+            .audit_report
+            .surface_for(finding)
+            .origin
+            .source_range
+            .unwrap()
+            .start,
+        prefix.len()
+    );
+    let finding_index = result
+        .audit_report
+        .findings
+        .iter()
+        .position(|item| std::ptr::eq(item, finding))
+        .unwrap();
+    let mut scene_row = test_row(1, &path);
+    scene_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    scene_row.dump_report = result.dump_report;
+    let rows = build_audit_result_rows(&[scene_row], &[0]);
+    let finding_row = rows
+        .iter()
+        .find(|row| {
+            row.key.item_kind == AuditResultItemKind::Finding && row.key.item_index == finding_index
+        })
+        .unwrap();
+    assert_eq!(finding_row.source_line, Some(3));
+    assert!(finding_row.provenance.contains(&"line: 3".to_string()));
+    assert_eq!(
+        finding_row
+            .detail_fields
+            .iter()
+            .find(|field| field.kind == Line)
+            .unwrap()
+            .raw,
+        "3"
+    );
+    let require = rows
+        .iter()
+        .find(|row| row.key.item_kind == AuditResultItemKind::DumpRequire)
+        .expect("require row");
+    assert_eq!(
+        require.detail_fields,
+        fields(&[(RuleId, "require"), (Sink, "observe")])
+    );
+    let script = rows
+        .iter()
+        .find(|row| row.key.item_kind == AuditResultItemKind::DumpScriptNode)
+        .expect("script row");
+    assert_eq!(
+        script.detail_fields,
+        fields(&[
+            (RuleId, "script_node"),
+            (Sink, "observe"),
+            (Node, "ExampleScriptNode")
+        ])
+    );
+    let table = display_audit_rows(rows.clone());
+    for row in &rows {
+        assert_eq!(
+            resolve_audit_detail_view_model(&table, &row.key)
+                .unwrap()
+                .detail_fields,
+            row.detail_fields
+        );
+    }
+    let mut first = test_audit_row(1, 0, "ExampleA.ma", "Example", &[]);
+    first.detail_fields = expected.clone();
+    let mut second = first.clone();
+    second.key.row_id = 2;
+    second.scene_name = "ExampleB.ma".to_string();
+    second
+        .detail_fields
+        .iter_mut()
+        .find(|field| field.kind == Language)
+        .unwrap()
+        .raw = "mel".to_string();
+    let keys = vec![first.key.clone(), second.key.clone()];
+    let dedup = build_audit_table_model(
+        &[first, second],
+        &BTreeSet::new(),
+        &default_audit_severity_filter(),
+        false,
+        true,
+        "",
+        default_audit_sort(),
+        SupportedLocale::English,
+    );
+    assert_eq!(dedup.rows.len(), 1);
+    assert_eq!(dedup.rows[0].row_keys, keys);
+    assert_eq!(dedup.rows[0].detail_fields, expected);
+    assert_eq!(
+        resolve_audit_detail_view_model(&dedup.rows, &keys[0])
+            .unwrap()
+            .detail_fields,
+        expected
+    );
+    assert!(resolve_audit_detail_view_model(&dedup.rows, &keys[1]).is_none());
+}
+
+#[test]
+fn audit_detail_values_translate_only_complete_known_values() {
+    use super::audit_detail_dialog::audit_detail_field_display;
+    use AuditDetailFieldKind::*;
+    let en = I18n::new(SupportedLocale::English);
+    let ja = I18n::new(SupportedLocale::Japanese);
+    let surface = vec![AuditDetailField {
+        kind: Surface,
+        raw: "script_node_body".to_string(),
+    }];
+    let display = |kind, raw: &str, i18n: &I18n| {
+        audit_detail_field_display(
+            &AuditDetailField {
+                kind,
+                raw: raw.to_string(),
+            },
+            &surface,
+            i18n,
+        )
+    };
+    assert_eq!(
+        display(Trigger, "gui_open_close", &ja),
+        "GUI でシーンを開くとき／閉じるとき (gui_open_close)"
+    );
+    assert_eq!(
+        display(Trigger, "gui_open_close", &en),
+        "On GUI scene open/close (gui_open_close)"
+    );
+    assert_eq!(display(Trigger, "unknown", &ja), "不明 (unknown)");
+    assert_eq!(display(Trigger, "example_trigger", &ja), "example_trigger");
+    assert_eq!(
+        display(Source, "scriptType=2,sourceType=1", &en),
+        "GUI Open/Close / Python (scriptType=2,sourceType=1)"
+    );
+    assert_eq!(
+        display(Source, "scriptType=2", &en),
+        "GUI Open/Close (scriptType=2)"
+    );
+    assert_eq!(
+        display(Source, "sourceType=1", &en),
+        "Python (sourceType=1)"
+    );
+    for raw in [
+        "custom",
+        "scriptType=99",
+        "scriptType=2,sourceType=99",
+        "scriptType=02",
+        "scriptType=+2",
+        "scriptType=-2",
+        "scriptType=２",
+        "scriptType= 2",
+        " scriptType=2",
+        "scriptType=2 ",
+        "scriptType=",
+        "sourceType=",
+        "sourceType=1,scriptType=2",
+        "scriptType=2,sourceType=1,sourceType=0",
+        "scriptType=2,sourceType=",
+        "",
+    ] {
+        assert_eq!(display(Source, raw, &en), raw);
+    }
+    for (raw, expected) in [
+        (".b", "before script (.b)"),
+        ("b", "before script (b)"),
+        (".a", "after script (.a)"),
+        ("a", "after script (a)"),
+        ("Example", "Example"),
+        ("", ""),
+    ] {
+        assert_eq!(display(Attribute, raw, &en), expected);
+    }
+    let callback = vec![AuditDetailField {
+        kind: Surface,
+        raw: "node_attr_callback".to_string(),
+    }];
+    let attribute = AuditDetailField {
+        kind: Attribute,
+        raw: ".b".to_string(),
+    };
+    assert_eq!(audit_detail_field_display(&attribute, &callback, &en), ".b");
+    assert_eq!(audit_detail_field_display(&attribute, &[], &en), ".b");
+    for kind in [RuleId, Sink, Node, Line, Surface, Trigger, Language] {
+        assert_eq!(display(kind, "", &en), "");
+    }
+    let key = format!("audit_value.trigger.{}", "gui_open_close");
+    assert_eq!(
+        ja.try_text(&key),
+        Some("GUI でシーンを開くとき／閉じるとき".to_string())
+    );
+    assert_eq!(
+        ja.try_text(&format!("audit_value.trigger.{}", "example_missing")),
+        None
+    );
+}
+
+#[test]
+fn audit_detail_evidence_filters_entries_without_changing_copy_payload() {
+    use super::audit_detail_dialog::audit_detail_evidence_text;
+    let mut row = test_audit_row(
+        1,
+        0,
+        "ExampleA.ma",
+        "Example",
+        &["node_name: ExampleScriptNode", "command: example"],
+    );
+    row.provenance = vec!["node: ExampleScriptNode".to_string()];
+    row.preview = "Example preview".to_string();
+    let table = display_audit_rows(vec![row]);
+    let mut detail = resolve_audit_detail_view_model(&table, &table[0].key).unwrap();
+    assert_eq!(audit_detail_evidence_text(&detail), "command: example");
+    let expected = "node: ExampleScriptNode\n\nExample preview\n\nnode_name: ExampleScriptNode\ncommand: example";
+    assert_eq!(
+        build_audit_clipboard_payload(&detail.provenance, &detail.preview, &detail.evidence),
+        expected
+    );
+    assert_eq!(
+        resolve_audit_clipboard_payload(&table, &table[0].key).as_deref(),
+        Some(expected)
+    );
+    detail.evidence = vec!["node_name: ExampleScriptNode".to_string()];
+    assert_eq!(audit_detail_evidence_text(&detail), "-");
+    detail.scene_names = vec!["ExampleA.ma".to_string(), "ExampleB.ma".to_string()];
+    assert_eq!(
+        audit_detail_evidence_text(&detail),
+        "scenes:\nExampleA.ma\nExampleB.ma\n-"
+    );
+    detail.evidence.clear();
+    assert_eq!(
+        audit_detail_evidence_text(&detail),
+        "scenes:\nExampleA.ma\nExampleB.ma\n-"
+    );
+    detail.scene_names.truncate(1);
+    assert_eq!(audit_detail_evidence_text(&detail), "-");
+    for entry in [
+        "node: ExampleScriptNode",
+        " node_name: ExampleScriptNode",
+        "node_name:",
+        "Example\nnode_name: ExampleScriptNode",
+    ] {
+        detail.evidence = vec![entry.to_string()];
+        assert_eq!(audit_detail_evidence_text(&detail), entry);
+    }
+    detail.evidence = vec!["node_name: ExampleScriptNode\ncommand: example".to_string()];
+    assert_eq!(audit_detail_evidence_text(&detail), "-");
+}
+
+#[test]
+fn audit_detail_header_facts_follow_locale_and_omit_unknown_trigger() {
+    use super::audit_detail_dialog::audit_detail_header_facts;
+    use AuditDetailFieldKind::*;
+    let en = I18n::new(SupportedLocale::English);
+    let ja = I18n::new(SupportedLocale::Japanese);
+    let node = AuditDetailField {
+        kind: Node,
+        raw: "ExampleScriptNode".to_string(),
+    };
+    let trigger = AuditDetailField {
+        kind: Trigger,
+        raw: "gui_open_close".to_string(),
+    };
+    let fields = vec![trigger.clone(), node.clone()];
+    assert_eq!(
+        audit_detail_header_facts(&fields, &ja).as_deref(),
+        Some(
+            "ノード: ExampleScriptNode  |  実行契機: GUI でシーンを開くとき／閉じるとき (gui_open_close)"
+        )
+    );
+    assert_eq!(
+        audit_detail_header_facts(&fields, &en).as_deref(),
+        Some("Node: ExampleScriptNode  |  Trigger: On GUI scene open/close (gui_open_close)")
+    );
+    assert_eq!(
+        audit_detail_header_facts(&[node], &ja).as_deref(),
+        Some("ノード: ExampleScriptNode")
+    );
+    assert_eq!(
+        audit_detail_header_facts(&[trigger], &en).as_deref(),
+        Some("Trigger: On GUI scene open/close (gui_open_close)")
+    );
+    assert_eq!(audit_detail_header_facts(&[], &ja), None);
+    assert_eq!(
+        audit_detail_header_facts(
+            &[
+                AuditDetailField {
+                    kind: RuleId,
+                    raw: "require".to_string()
+                },
+                AuditDetailField {
+                    kind: Sink,
+                    raw: "observe".to_string()
+                }
+            ],
+            &ja
+        ),
+        None
+    );
+    assert_eq!(
+        audit_detail_header_facts(
+            &[AuditDetailField {
+                kind: Node,
+                raw: String::new()
+            }],
+            &ja
+        )
+        .as_deref(),
+        Some("ノード: ")
+    );
+    assert_eq!(
+        audit_detail_header_facts(
+            &[AuditDetailField {
+                kind: Trigger,
+                raw: "unknown".to_string()
+            }],
+            &ja
+        ),
+        None
+    );
+}
+
+#[test]
+fn audit_detail_surface_text_matching_is_unique_and_preserves_origin_identity() {
+    use super::audit_detail_dialog::{AuditSurfaceMatch, match_audit_surface_text};
+    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    let origin = ExecutionOrigin {
+        lang: ExecutionLanguage::Python,
+        surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+        node_name: Some("ExampleScriptNode".to_string()),
+        source_kind: Some("scriptType=1,sourceType=1".to_string()),
+        ..ExecutionOrigin::without_chunk_address()
+    };
+    let surface = ExecutionSurface {
+        origin: origin.clone(),
+        text: "print('Example')".into(),
+        preview: String::new(),
+    };
+    let single = std::slice::from_ref(&surface);
+    assert_eq!(
+        match_audit_surface_text(&origin, false, single),
+        AuditSurfaceMatch::Found(surface.text.clone())
+    );
+    let mut derived = origin.clone();
+    derived.lang = ExecutionLanguage::Mel;
+    derived.source_kind = Some("Example literal".to_string());
+    assert_eq!(
+        match_audit_surface_text(&derived, true, single),
+        AuditSurfaceMatch::Found(surface.text.clone())
+    );
+    let mut other_node = derived.clone();
+    other_node.node_name = Some("ExampleOtherNode".to_string());
+    assert_eq!(
+        match_audit_surface_text(&other_node, true, single),
+        AuditSurfaceMatch::NotFound
+    );
+    let mut other_language = origin.clone();
+    other_language.lang = ExecutionLanguage::Mel;
+    assert_eq!(
+        match_audit_surface_text(&other_language, false, single),
+        AuditSurfaceMatch::NotFound
+    );
+    assert_eq!(
+        match_audit_surface_text(&origin, false, &[]),
+        AuditSurfaceMatch::NotFound
+    );
+    assert_eq!(
+        match_audit_surface_text(&origin, false, &[surface.clone(), surface.clone()]),
+        AuditSurfaceMatch::Ambiguous
+    );
+
+    let mut parent = surface.clone();
+    parent.text = r#"maya.mel.eval("python(\"print('Example')\")")"#.into();
+    let mut bridge = surface;
+    bridge.origin.lang = ExecutionLanguage::Mel;
+    bridge.origin.source_kind = Some("python->maya.mel.eval literal bridge".to_string());
+    bridge.text = r#"python("print('Example')")"#.into();
+    assert_eq!(
+        match_audit_surface_text(&derived, true, &[parent, bridge]),
+        AuditSurfaceMatch::Ambiguous
+    );
+}
+
+fn audit_detail_code_test_row(path: &Path) -> SceneRow {
+    let body = "import subprocess\nsubprocess.call(['echo', 'Example'])\r\nprint('Example')";
+    let encoded = body.replace('\r', "\\r").replace('\n', "\\n");
+    fs::write(path, format!("//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExampleScriptNode\";\n    setAttr \".b\" -type \"string\" \"{encoded}\";\n    setAttr \".st\" 1;\n    setAttr \".stp\" 1;\n")).unwrap();
+    let RowJobResult::Analyze(result) =
+        analyze_row(path, AuditModePreference::StrictDefault).unwrap()
+    else {
+        panic!("expected analysis");
+    };
+    let mut row = test_row(1, path);
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    row.dump_report = result.dump_report;
+    row
+}
+
+fn prepare_audit_detail_code_test(
+    shell: &mut GuiShell,
+    row: SceneRow,
+    kind: AuditResultItemKind,
+) -> AuditResultRowKey {
+    shell.replace_rows(vec![row]);
+    shell.audit_rows = display_audit_rows(build_audit_result_rows(&shell.rows, &[0]));
+    shell
+        .audit_rows
+        .iter()
+        .flat_map(|row| &row.row_keys)
+        .find(|key| key.item_kind == kind)
+        .unwrap()
+        .clone()
+}
+
+#[gpui::test]
+fn audit_detail_code_loads_full_text_and_sync_preserves_it(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::load_audit_surface_text;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    assert_eq!(
+        row.audit_file_state,
+        Some(GuiFileState::read(&path).unwrap())
+    );
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        let AuditDetailCodeState::Loading { request } = state.code else {
+            panic!("expected loading");
+        };
+        let target = state.code_target.clone().unwrap();
+        assert_eq!(
+            target.origin.node_name.as_deref(),
+            Some("ExampleScriptNode")
+        );
+        let result = load_audit_surface_text(&path, &shell.scene_load_options(), &target);
+        shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+        let expected =
+            "import subprocess\nsubprocess.call(['echo', 'Example'])\r\nprint('Example')";
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(state.code, AuditDetailCodeState::Loaded { derived: false });
+        assert_eq!(
+            state.code_input.read(cx).value().as_bytes(),
+            expected.as_bytes()
+        );
+        assert_eq!(state.code_text, expected);
+        assert_eq!(
+            shell.audit_detail_code_clipboard_text(cx).as_deref(),
+            Some(expected)
+        );
+        let preview = state.preview_text.clone();
+        shell.audit_detail_dialog.as_mut().unwrap().active_tab = AuditDetailTab::Details;
+        shell.sync_audit_detail_dialog_inputs(window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(
+            state.code_input.read(cx).value().as_bytes(),
+            expected.as_bytes()
+        );
+        assert_eq!(state.preview_text, preview);
+        assert_eq!(state.code_text, expected);
+        assert_eq!(state.active_tab, AuditDetailTab::Details);
+    });
+}
+
+#[gpui::test]
+fn audit_detail_code_missing_file_opens_asynchronously_then_fails(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::{
+        audit_detail_code_note_key, load_audit_surface_text_for_file_state,
+    };
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    fs::remove_file(&path).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        let AuditDetailCodeState::Loading { request } = state.code else {
+            panic!("open must only spawn the load");
+        };
+        let preview = state.preview_text.clone();
+        let result = load_audit_surface_text_for_file_state(
+            &path,
+            &shell.scene_load_options(),
+            state.code_target.as_ref().unwrap(),
+            shell.rows[0].audit_file_state,
+        );
+        shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert!(matches!(&state.code, AuditDetailCodeState::Failed { error } if !error.is_empty()));
+        assert_eq!(state.code_input.read(cx).value().as_ref(), preview);
+        assert_eq!(
+            audit_detail_code_note_key(&state.code),
+            Some("audit_detail.code_load_failed")
+        );
+    });
+}
+
+#[gpui::test]
+fn audit_detail_code_drops_results_from_an_old_request(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::load_audit_surface_text;
+    use gpui_component::WindowExt;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let old = shell.audit_detail_dialog.as_ref().unwrap().clone();
+        let AuditDetailCodeState::Loading { request } = old.code else {
+            panic!("expected loading");
+        };
+        let result = load_audit_surface_text(
+            &path,
+            &shell.scene_load_options(),
+            old.code_target.as_ref().unwrap(),
+        );
+        shell.clear_audit_detail_dialog_state(cx);
+        window.close_dialog(cx);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let current = shell.audit_detail_dialog.as_ref().unwrap().clone();
+        assert_ne!(current.code, old.code);
+        shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(state.code, current.code);
+        assert_eq!(state.code_text, current.code_text);
+        assert_eq!(
+            state.code_input.read(cx).value().as_ref(),
+            current.code_text.as_ref()
+        );
+    });
+}
+
+#[gpui::test]
+fn audit_detail_code_dump_script_uses_preview_without_loading(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::audit_detail_code_note_key;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::DumpScriptNode);
+        let preview = resolve_audit_detail_view_model(&shell.audit_rows, &key)
+            .unwrap()
+            .preview;
+        let request = shell.audit_detail_code_request;
+        shell.open_audit_detail_dialog(key, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(state.code, AuditDetailCodeState::NotApplicable);
+        assert_eq!(shell.audit_detail_code_request, request);
+        assert_eq!(state.code_input.read(cx).value().as_ref(), preview);
+        assert_eq!(
+            shell.audit_detail_code_clipboard_text(cx).as_deref(),
+            Some(preview.as_str())
+        );
+        assert_eq!(audit_detail_code_note_key(&state.code), None);
+    });
+}
+
+#[gpui::test]
+fn audit_detail_code_changed_file_keeps_preview(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::{
+        audit_detail_code_note_key, load_audit_surface_text_for_file_state,
+    };
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    fs::write(&path, "//Maya ASCII 2026 scene\n").unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        let AuditDetailCodeState::Loading { request } = state.code else {
+            panic!("expected loading");
+        };
+        let preview = state.preview_text.clone();
+        let result = load_audit_surface_text_for_file_state(
+            &path,
+            &shell.scene_load_options(),
+            state.code_target.as_ref().unwrap(),
+            shell.rows[0].audit_file_state,
+        );
+        shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(state.code, AuditDetailCodeState::FileChanged);
+        assert_eq!(state.code_input.read(cx).value().as_ref(), preview);
+        assert_eq!(
+            audit_detail_code_note_key(&state.code),
+            Some("audit_detail.code_file_changed")
+        );
+    });
+}
+
+#[gpui::test]
+fn audit_detail_code_generation_change_invalidates_loaded_text(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::load_audit_surface_text;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        let AuditDetailCodeState::Loading { request } = state.code else {
+            panic!("expected loading");
+        };
+        let result = load_audit_surface_text(
+            &path,
+            &shell.scene_load_options(),
+            state.code_target.as_ref().unwrap(),
+        );
+        shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+        assert_eq!(
+            shell.audit_detail_dialog.as_ref().unwrap().code,
+            AuditDetailCodeState::Loaded { derived: false }
+        );
+        let row = &mut shell.rows[0];
+        row.set_audit_report(row.audit_report.clone(), row.audit_file_state);
+        shell.sync_audit_detail_dialog_inputs(window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(state.code, AuditDetailCodeState::Unavailable);
+        assert_eq!(
+            state.code_input.read(cx).value().as_ref(),
+            state.preview_text
+        );
+        assert_eq!(state.code_text, state.preview_text);
+    });
+}
+
+fn audit_detail_fix_target(row: &SceneRow) -> super::AuditDetailCodeTarget {
+    let report = row.display_audit_report().unwrap();
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| {
+            report.surface_for(finding).origin.node_name.as_deref() == Some("ExampleScriptNode")
+        })
+        .unwrap();
+    super::AuditDetailCodeTarget {
+        origin: report.surface_for(finding).origin.clone(),
+        derived: false,
+    }
+}
+
+#[test]
+fn audit_detail_fix_equal_file_state_loads_full_text() {
+    use super::audit_detail_dialog::load_audit_surface_text_for_file_state;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let result = load_audit_surface_text_for_file_state(
+        &path,
+        &LoadOptions::default(),
+        &audit_detail_fix_target(&row),
+        row.audit_file_state,
+    );
+    assert_eq!(
+        result.state,
+        AuditDetailCodeState::Loaded { derived: false }
+    );
+    assert_eq!(
+        result.text.as_deref(),
+        Some("import subprocess\nsubprocess.call(['echo', 'Example'])\r\nprint('Example')")
+    );
+}
+
+#[gpui::test]
+fn audit_detail_fix_spawned_missing_file_applies_failure(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::audit_detail_code_note_key;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    fs::remove_file(&path).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    let preview = shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert!(matches!(state.code, AuditDetailCodeState::Loading { .. }));
+        state.preview_text.clone()
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, cx| {
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert!(
+            matches!(&state.code, AuditDetailCodeState::Failed { error } if !error.is_empty()),
+            "spawned result was not applied: {:?}",
+            state.code
+        );
+        assert_eq!(state.code_input.read(cx).value().as_ref(), preview);
+        assert_eq!(
+            audit_detail_code_note_key(&state.code),
+            Some("audit_detail.code_load_failed")
+        );
+    });
+}
+
+#[gpui::test]
+fn audit_detail_fix_analysis_apply_records_file_state(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let result = analyze_row(&path, AuditModePreference::StrictDefault).unwrap();
+    let expected = Some(GuiFileState::read(&path).unwrap());
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![row]);
+        let generation = shell.rows[0].audit_generation;
+        shell.apply_job_result(1, RowOperation::Analyze, result, None, window, cx);
+        assert_eq!(shell.rows[0].audit_file_state, expected);
+        assert!(shell.rows[0].audit_generation > generation);
+    });
+}
+
+#[gpui::test]
+fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let mut row = audit_detail_code_test_row(&path);
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.staged_audit_report = row.audit_report.clone();
+    let saved = format!("{}// Example\n", fs::read_to_string(&path).unwrap());
+    fs::write(&path, saved).unwrap();
+    let expected = Some(GuiFileState::read(&path).unwrap());
+    assert_ne!(row.audit_file_state, expected);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.replace_rows(vec![row]);
+        let generation = shell.rows[0].audit_generation;
+        shell.apply_job_result(
+            1,
+            RowOperation::Save,
+            RowJobResult::Save {
+                output_path: path.clone(),
+                audit_file_state: expected,
+            },
+            None,
+            window,
+            cx,
+        );
+        assert_eq!(shell.rows[0].audit_file_state, expected);
+        assert!(shell.rows[0].audit_generation > generation);
+        assert!(shell.rows[0].staged_audit_report.is_none());
+    });
+}
+
+#[gpui::test]
+fn audit_detail_fix_cache_restore_records_file_state(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).unwrap()
+    else {
+        panic!("expected analysis");
+    };
+    let snapshot = result.audit_snapshot.unwrap();
+    let expected = Some(GuiFileState {
+        size: snapshot.file_state.size,
+        modified_unix_nanos: snapshot.file_state.modified_unix_nanos,
+    });
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![row]);
+        let generation = shell.rows[0].audit_generation;
+        shell.apply_cache_restore_updates(
+            vec![super::cache_restore::CacheHydrationUpdate {
+                row_id: 1,
+                observe_snapshot: None,
+                observe_access: None,
+                audit_snapshot: Some(snapshot),
+                audit_access: None,
+            }],
+            window,
+            cx,
+        );
+        assert_eq!(shell.rows[0].audit_file_state, expected);
+        assert!(shell.rows[0].audit_generation > generation);
+    });
+}
+
+#[gpui::test]
+fn audit_detail_fix_dedup_only_blocks_findings(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::audit_detail_code_note_key;
+    use gpui_component::WindowExt;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let mut other = test_row(2, &path);
+    other.set_audit_report(row.audit_report.clone(), row.audit_file_state);
+    other.dump_report = row.dump_report.clone();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![row, other]);
+        let mut severities = default_audit_severity_filter();
+        severities.insert(AuditSeverityFilter::Info);
+        shell.audit_rows = build_audit_table_model(
+            &build_audit_result_rows(&shell.rows, &[0, 1]),
+            &BTreeSet::new(),
+            &severities,
+            false,
+            true,
+            "",
+            default_audit_sort(),
+            SupportedLocale::English,
+        )
+        .rows;
+        for kind in [
+            AuditResultItemKind::Finding,
+            AuditResultItemKind::DumpScriptNode,
+            AuditResultItemKind::DumpRequire,
+        ] {
+            let audit_row = shell
+                .audit_rows
+                .iter()
+                .find(|row| row.key.item_kind == kind)
+                .unwrap();
+            assert!(audit_row.row_keys.len() > 1);
+            let key = audit_row.key.clone();
+            let request = shell.audit_detail_code_request;
+            shell.open_audit_detail_dialog(key, window, cx);
+            let expected = if kind == AuditResultItemKind::Finding {
+                AuditDetailCodeState::Unavailable
+            } else {
+                AuditDetailCodeState::NotApplicable
+            };
+            let state = shell.audit_detail_dialog.as_ref().unwrap();
+            assert_eq!(state.code, expected);
+            assert_eq!(shell.audit_detail_code_request, request);
+            let note = if kind == AuditResultItemKind::Finding {
+                Some("audit_detail.code_unavailable")
+            } else {
+                None
+            };
+            assert_eq!(audit_detail_code_note_key(&state.code), note);
+            if kind != AuditResultItemKind::Finding {
+                let row = &mut shell.rows[0];
+                row.set_audit_report(row.audit_report.clone(), row.audit_file_state);
+                shell.sync_audit_detail_dialog_inputs(window, cx);
+                let state = shell.audit_detail_dialog.as_ref().unwrap();
+                assert_eq!(state.code, AuditDetailCodeState::NotApplicable);
+                assert_eq!(audit_detail_code_note_key(&state.code), None);
+            }
+            shell.clear_audit_detail_dialog_state(cx);
+            window.close_dialog(cx);
+        }
+    });
+}
+
+#[gpui::test]
+fn audit_detail_fix_loading_generation_rejects_old_result(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::audit_surface_code_result;
+    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        shell.open_audit_detail_dialog(key.clone(), window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        let AuditDetailCodeState::Loading { request } = state.code else {
+            panic!("expected loading");
+        };
+        let target = state.code_target.clone().unwrap();
+        let result = audit_surface_code_result(
+            &target,
+            &[ExecutionSurface {
+                origin: target.origin.clone(),
+                text: "Example full text".into(),
+                preview: String::new(),
+            }],
+        );
+        let row = &mut shell.rows[0];
+        row.set_audit_report(row.audit_report.clone(), row.audit_file_state);
+        shell
+            .audit_rows
+            .iter_mut()
+            .find(|row| row.key == key)
+            .unwrap()
+            .preview = "Example current preview".to_string();
+        shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+        let state = shell.audit_detail_dialog.as_ref().unwrap();
+        assert_eq!(state.code, AuditDetailCodeState::Unavailable);
+        assert_eq!(
+            state.code_input.read(cx).value().as_ref(),
+            "Example current preview"
+        );
+        assert_eq!(state.code_text, "Example current preview");
+    });
+}
+
+#[test]
+fn audit_detail_fix_missing_file_state_does_not_load() {
+    use super::audit_detail_dialog::load_audit_surface_text_for_file_state;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let result = load_audit_surface_text_for_file_state(
+        &path,
+        &LoadOptions::default(),
+        &audit_detail_fix_target(&row),
+        None,
+    );
+    assert_eq!(result.state, AuditDetailCodeState::FileChanged);
+    assert!(result.text.is_none());
+}
+
+fn audit_detail_fix_assert_too_large(text: String) {
+    use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
+    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+    let target = super::AuditDetailCodeTarget {
+        origin: ExecutionOrigin::without_chunk_address(),
+        derived: false,
+    };
+    let result = audit_surface_code_result(
+        &target,
+        &[ExecutionSurface {
+            origin: target.origin.clone(),
+            text: text.into(),
+            preview: String::new(),
+        }],
+    );
+    assert_eq!(result.state, AuditDetailCodeState::TooLarge);
+    assert!(result.text.is_none());
+    assert_eq!(
+        audit_detail_code_note_key(&result.state),
+        Some("audit_detail.code_too_large")
+    );
+}
+
+#[test]
+fn audit_detail_fix_total_text_limit() {
+    let text = format!("{}E", "E\n".repeat(1024 * 1024));
+    assert_eq!(text.len(), 2 * 1024 * 1024 + 1);
+    audit_detail_fix_assert_too_large(text);
+}
+
+#[test]
+fn audit_detail_fix_single_line_limit() {
+    audit_detail_fix_assert_too_large("E".repeat(65537));
+}
+
+#[gpui::test]
+fn audit_detail_fix_unmatched_results_preserve_preview(cx: &mut TestAppContext) {
+    use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
+    use gpui_component::WindowExt;
+    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let row = audit_detail_code_test_row(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let key = prepare_audit_detail_code_test(shell, row, AuditResultItemKind::Finding);
+        for (count, expected, note) in [
+            (
+                0,
+                AuditDetailCodeState::NotFound,
+                "audit_detail.code_not_found",
+            ),
+            (
+                2,
+                AuditDetailCodeState::Ambiguous,
+                "audit_detail.code_ambiguous",
+            ),
+        ] {
+            shell.open_audit_detail_dialog(key.clone(), window, cx);
+            let state = shell.audit_detail_dialog.as_ref().unwrap();
+            let AuditDetailCodeState::Loading { request } = state.code else {
+                panic!("expected loading");
+            };
+            let preview = state.preview_text.clone();
+            let target = state.code_target.clone().unwrap();
+            let surfaces = vec![
+                ExecutionSurface {
+                    origin: target.origin.clone(),
+                    text: "Example full text".into(),
+                    preview: String::new()
+                };
+                count
+            ];
+            let result = audit_surface_code_result(&target, &surfaces);
+            shell.apply_audit_detail_code_result(&key, request, result, window, cx);
+            let state = shell.audit_detail_dialog.as_ref().unwrap();
+            assert_eq!(state.code, expected);
+            assert_eq!(state.code_input.read(cx).value().as_ref(), preview);
+            assert_eq!(state.code_text, preview);
+            assert_eq!(audit_detail_code_note_key(&state.code), Some(note));
+            shell.clear_audit_detail_dialog_state(cx);
+            window.close_dialog(cx);
+        }
+    });
 }

@@ -707,6 +707,7 @@ impl GuiShell {
         match result {
             RowJobResult::Analyze(result) => {
                 let AnalyzeRowResult {
+                    audit_file_state,
                     audit_report,
                     paths_report,
                     dump_report,
@@ -738,7 +739,7 @@ impl GuiShell {
                     FileStatus::Audited
                 };
                 self.rows[index].findings = findings;
-                self.rows[index].audit_report = Some(audit_report);
+                self.rows[index].set_audit_report(Some(audit_report), audit_file_state);
                 self.rows[index].paths_report = paths_report;
                 self.rows[index].dump_report = dump_report;
                 self.rows[index].analyzed_audit_mode = Some(audit_mode);
@@ -851,7 +852,10 @@ impl GuiShell {
                     self.complete_edit_transaction_success(edit_sequence, row_id);
                 }
             }
-            RowJobResult::Save { output_path } => {
+            RowJobResult::Save {
+                output_path,
+                audit_file_state,
+            } => {
                 self.prune_edit_history_for_row_ids(&[row_id]);
                 self.complete_save_ui_block(cx);
                 let dirty_kind = self.rows[index].dirty_kind;
@@ -862,7 +866,7 @@ impl GuiShell {
                     }
                 } else if dirty_kind == Some(DirtyKind::SceneEdits) {
                     if let Some(report) = self.rows[index].staged_audit_report.take() {
-                        self.rows[index].audit_report = Some(report);
+                        self.rows[index].set_audit_report(Some(report), audit_file_state);
                     }
                     if let Some(report) = self.rows[index].staged_paths_report.take() {
                         self.rows[index].paths_report = Some(report);
@@ -1310,7 +1314,10 @@ impl GuiShell {
                     };
                     save_staged_artifact_with_backup(&artifact, &path, backup_location)
                         .map_err(|err| err.to_string())?;
-                    Ok(RowJobResult::Save { output_path: path })
+                    Ok(RowJobResult::Save {
+                        audit_file_state: GuiFileState::read(&path).ok(),
+                        output_path: path,
+                    })
                 },
             );
             self.begin_save_ui_block(1, cx);

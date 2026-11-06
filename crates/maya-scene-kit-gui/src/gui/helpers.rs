@@ -22,6 +22,7 @@ pub(super) fn build_audit_result_rows(
                 let clean_target = clean_target_for_execution_origin(&surface.origin);
                 let clean_state = audit_row_clean_state(row, clean_target.as_ref());
                 let dirty = audit_item_dirty(row, clean_target.as_ref());
+                let source_line = audit_source_line(row, &surface.origin);
                 out.push(AuditResultRow {
                     key: AuditResultRowKey {
                         row_id: row.id,
@@ -34,11 +35,14 @@ pub(super) fn build_audit_result_rows(
                     code: finding.code.as_str().to_string(),
                     sink: finding.sink.as_str().to_string(),
                     preview: report.finding_preview(finding).to_string(),
-                    provenance: audit_provenance_lines(
+                    provenance: audit_provenance_lines(&surface.origin, source_line),
+                    detail_fields: build_audit_detail_fields(
+                        finding.code.as_str(),
+                        finding.sink.as_str(),
                         &surface.origin,
-                        audit_source_line(row, &surface.origin),
+                        source_line,
                     ),
-                    source_line: audit_source_line(row, &surface.origin),
+                    source_line,
                     evidence: finding.evidence.iter().map(render_audit_evidence).collect(),
                     dirty,
                     clean_target,
@@ -85,6 +89,16 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
             sink: "observe".to_string(),
             preview: require.rendered.clone(),
             provenance: Vec::new(),
+            detail_fields: vec![
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::RuleId,
+                    raw: "require".to_string(),
+                },
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::Sink,
+                    raw: "observe".to_string(),
+                },
+            ],
             source_line: None,
             evidence: Vec::new(),
             dirty: audit_item_dirty(row, clean_target.as_ref()),
@@ -108,6 +122,20 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
             sink: "observe".to_string(),
             preview: entry.body.trim_end_matches('\n').to_string(),
             provenance: vec![format!("node: {}", entry.name)],
+            detail_fields: vec![
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::RuleId,
+                    raw: "script_node".to_string(),
+                },
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::Sink,
+                    raw: "observe".to_string(),
+                },
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::Node,
+                    raw: entry.name.clone(),
+                },
+            ],
             source_line: None,
             evidence: vec![format!("node: {}", entry.name)],
             dirty: audit_item_dirty(row, clean_target.as_ref()),
@@ -210,6 +238,56 @@ fn audit_source_line(row: &SceneRow, origin: &ExecutionOrigin) -> Option<usize> 
             .count()
             + 1,
     )
+}
+
+pub(super) fn build_audit_detail_fields(
+    code: &str,
+    sink: &str,
+    origin: &ExecutionOrigin,
+    source_line: Option<usize>,
+) -> Vec<AuditDetailField> {
+    use AuditDetailFieldKind::*;
+    let mut fields = vec![
+        AuditDetailField {
+            kind: RuleId,
+            raw: code.to_string(),
+        },
+        AuditDetailField {
+            kind: Sink,
+            raw: sink.to_string(),
+        },
+    ];
+    for (kind, raw) in [(Node, &origin.node_name), (Attribute, &origin.attr_name)] {
+        if let Some(raw) = raw {
+            fields.push(AuditDetailField {
+                kind,
+                raw: raw.clone(),
+            });
+        }
+    }
+    for (kind, raw) in [
+        (Surface, origin.surface_kind.as_str()),
+        (Trigger, origin.trigger.as_str()),
+        (Language, origin.lang.as_str()),
+    ] {
+        fields.push(AuditDetailField {
+            kind,
+            raw: raw.to_string(),
+        });
+    }
+    if let Some(raw) = &origin.source_kind {
+        fields.push(AuditDetailField {
+            kind: Source,
+            raw: raw.clone(),
+        });
+    }
+    if let Some(line) = source_line {
+        fields.push(AuditDetailField {
+            kind: Line,
+            raw: line.to_string(),
+        });
+    }
+    fields
 }
 
 fn audit_provenance_lines(origin: &ExecutionOrigin, source_line: Option<usize>) -> Vec<String> {
@@ -319,6 +397,7 @@ pub(super) fn build_audit_table_model(
                 sink: group.row.sink,
                 preview: group.row.preview,
                 provenance: group.row.provenance,
+                detail_fields: group.row.detail_fields,
                 source_line: group.row.source_line,
                 evidence: group.row.evidence,
                 dirty: group.row.dirty,
@@ -341,6 +420,7 @@ pub(super) fn build_audit_table_model(
                 sink: row.sink,
                 preview: row.preview,
                 provenance: row.provenance,
+                detail_fields: row.detail_fields,
                 source_line: row.source_line,
                 evidence: row.evidence,
                 dirty: row.dirty,
@@ -374,6 +454,7 @@ pub(super) fn resolve_audit_detail_view_model(
         sink: row.sink.clone(),
         preview: row.preview.clone(),
         provenance: row.provenance.clone(),
+        detail_fields: row.detail_fields.clone(),
         source_line: row.source_line,
         evidence: row.evidence.clone(),
         clean_target: row.clean_target.clone(),
@@ -1666,9 +1747,17 @@ pub(super) fn analyze_row_with_options(
     load_options: &LoadOptions,
 ) -> Result<RowJobResult, String> {
     let started_at = Instant::now();
+    let audit_file_state = GuiFileState::read(path).ok();
     match Loader::new(load_options.clone()).observe_analysis_path(path) {
         Ok(observation) => {
-            analyze_observation(&observation, audit_mode, load_options, started_at.elapsed())
+            let mut result = analyze_observation_result(
+                &observation,
+                audit_mode,
+                load_options,
+                started_at.elapsed(),
+            )?;
+            result.audit_file_state = audit_file_state;
+            Ok(RowJobResult::Analyze(result))
         }
         Err(
             maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { .. }
@@ -1685,6 +1774,7 @@ pub(super) fn analyze_row_with_options(
             )
             .map_err(|err| err.to_string())?;
             Ok(RowJobResult::Analyze(AnalyzeRowResult {
+                audit_file_state,
                 audit_report,
                 paths_report: None,
                 dump_report: None,
@@ -1729,6 +1819,7 @@ pub(super) fn analyze_row_bytes_with_options(
                 None,
             );
             Ok(AnalyzeRowResult {
+                audit_file_state: None,
                 audit_report: audit_report.clone(),
                 paths_report: None,
                 dump_report: None,
@@ -1754,6 +1845,7 @@ pub(super) fn analyze_row_bytes_with_options(
                 None,
             );
             Ok(AnalyzeRowResult {
+                audit_file_state: None,
                 audit_report: audit_report.clone(),
                 paths_report: None,
                 dump_report: None,
@@ -1768,20 +1860,6 @@ pub(super) fn analyze_row_bytes_with_options(
         }
         Err(err) => Err(err.to_string()),
     }
-}
-
-fn analyze_observation(
-    observation: &maya_scene_kit_observe::scene::ObservationBundle,
-    audit_mode: AuditModePreference,
-    load_options: &LoadOptions,
-    elapsed: Duration,
-) -> Result<RowJobResult, String> {
-    Ok(RowJobResult::Analyze(analyze_observation_result(
-        observation,
-        audit_mode,
-        load_options,
-        elapsed,
-    )?))
 }
 
 fn analyze_observation_result(
@@ -1812,6 +1890,7 @@ fn analyze_observation_result(
             .map_err(|err| err.to_string())?;
 
     Ok(AnalyzeRowResult {
+        audit_file_state: None,
         audit_report,
         paths_report: Some(paths_report),
         dump_report: Some(dump_report),
