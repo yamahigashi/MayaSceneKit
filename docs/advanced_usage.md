@@ -268,6 +268,9 @@ Windows). A file that cannot be read keeps showing an error line and counts as
 empty. Use **Settings > Reload allowlists** after editing a file outside the GUI.
 Allowed findings are hidden in the audit table until **Show allowed** is toggled,
 are not counted as threats, and are skipped by bulk threat removal.
+In **Settings > Manage allowlists…**, you can view both allowlist files and remove
+user entries; app entries are read-only, and a code that is also listed in the app
+file or in another user entry stays allowed.
 
 To add an entry from the GUI, open a finding's audit detail, wait for the full
 script text to load, and choose **Allow this threat…**. Pick the finding ids to

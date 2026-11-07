@@ -1,6 +1,6 @@
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -78,6 +78,36 @@ pub(in crate::gui) fn reveal_file_paths_in_system_file_manager(
     {
         let _ = paths;
         Err("reveal file in Explorer is only supported on Windows".to_string())
+    }
+}
+
+pub(in crate::gui) fn reveal_allowlist_path_in_system_file_manager(
+    path: &Path,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if path.exists() {
+            return reveal_file_paths_in_system_file_manager(&[path.to_path_buf()]);
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| "failed to determine target folder".to_string())?;
+        let search_from = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let folder = search_from
+            .ancestors()
+            .find(|ancestor| ancestor.is_dir())
+            .ok_or_else(|| format!("folder not found: {}", parent.display()))?;
+        let folders = existing_absolute_paths(&[folder.to_path_buf()])?;
+        reveal_file_group_in_explorer(&folders[0], &[])
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        reveal_file_paths_in_system_file_manager(&[path.to_path_buf()])
     }
 }
 

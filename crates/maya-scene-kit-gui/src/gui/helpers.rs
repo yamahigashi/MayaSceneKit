@@ -2068,6 +2068,17 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
         BannerMessage::AllowlistAdded { count } => {
             i18n.format("banner.allowlist_added", &[("count", count.to_string())])
         }
+        BannerMessage::AllowlistRemoved { label } => {
+            i18n.format("banner.allowlist_removed", &[("label", label.clone())])
+        }
+        BannerMessage::AllowlistFileChanged => i18n.text("banner.allowlist_file_changed"),
+        BannerMessage::AllowlistReadFailed { path, error } => i18n.format(
+            "banner.allowlist_load_failed",
+            &[
+                ("path", path.display().to_string()),
+                ("error", error.clone()),
+            ],
+        ),
         BannerMessage::AllowlistAlreadyPresent => i18n.text("banner.allowlist_already_present"),
         BannerMessage::AllowlistWriteFailed { path, error } => i18n.format(
             "banner.allowlist_write_failed",
@@ -2346,6 +2357,10 @@ pub(super) fn build_app_menus(
                 MenuItem::action(
                     i18n.text("settings.reload_allowlists"),
                     MenuReloadAllowlists,
+                ),
+                MenuItem::action(
+                    i18n.text("settings.manage_allowlists"),
+                    MenuManageAllowlists,
                 ),
                 MenuItem::action(edit_max_bytes_label(i18n), MenuEditMaxBytes),
                 checked_menu_item(

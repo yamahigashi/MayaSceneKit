@@ -550,7 +550,7 @@ impl GuiShell {
         cx.notify();
     }
 
-    fn apply_audit_allow_result(
+    pub(super) fn apply_audit_allow_result(
         &mut self,
         key: &AuditResultRowKey,
         request: u64,
@@ -561,6 +561,9 @@ impl GuiShell {
         self.audit_allow_in_flight = false;
         if result.is_ok() || matches!(&result, Err(AllowAddError::WriteFailed { .. })) {
             self.reload_allowlists(window, cx);
+            if self.allowlist_manager.is_some() {
+                self.refresh_allowlist_manager_data(cx);
+            }
         }
         if let Some(state) = self.audit_detail_dialog.as_mut().filter(|state| {
             &state.key == key
