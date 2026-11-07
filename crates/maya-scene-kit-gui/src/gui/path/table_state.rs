@@ -158,6 +158,34 @@ impl GuiShell {
         cx.notify();
     }
 
+    pub(in crate::gui) fn toggle_select_all_path_rows(&mut self, cx: &mut Context<Self>) {
+        if self.active_path_edit.is_some() {
+            return;
+        }
+        let visible_targets = self
+            .current_path_table_model()
+            .rows
+            .into_iter()
+            .map(|row| row.edit_targets)
+            .filter(|targets| !targets.is_empty())
+            .collect::<BTreeSet<_>>();
+        if visible_targets.is_empty() {
+            return;
+        }
+        if visible_targets.is_subset(&self.selected_path_rows) {
+            self.selected_path_rows.clear();
+            self.path_selection_anchor = None;
+        } else {
+            self.path_selection_anchor = self
+                .path_selection_anchor
+                .take()
+                .or_else(|| visible_targets.first().cloned());
+            self.selected_path_rows = visible_targets;
+        }
+        self.refresh_path_table(cx);
+        cx.notify();
+    }
+
     pub(in crate::gui) fn toggle_path_table_dedup(&mut self, cx: &mut Context<Self>) {
         self.path_table_dedup = !self.path_table_dedup;
         self.refresh_path_table(cx);
