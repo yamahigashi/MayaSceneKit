@@ -30,9 +30,9 @@ use maya_scene_kit_audit::{
         build_parse_budget_blocked_audit_report, build_script_audit_plan,
     },
     scene::{
-        AllowlistSource, AuditAllowRef, AuditAllowlist, AuditCacheAccess, AuditCacheStore,
-        AuditEvidence, AuditFindingDetail, AuditOptions, AuditReport, AuditSeverity,
-        AuditedSceneSnapshot, StaticAuditFindingDetail, fingerprint_audit_plan,
+        AllowlistHash, AllowlistSource, AuditAllowRef, AuditAllowlist, AuditCacheAccess,
+        AuditCacheStore, AuditEvidence, AuditFindingDetail, AuditOptions, AuditReport,
+        AuditSeverity, AuditedSceneSnapshot, StaticAuditFindingDetail, fingerprint_audit_plan,
     },
 };
 use maya_scene_kit_edit::scene::{
@@ -240,6 +240,8 @@ struct GuiShell {
     audit_severity_filter: BTreeSet<AuditSeverityFilter>,
     audit_detail_dialog: Option<AuditDetailDialogState>,
     audit_detail_code_request: u64,
+    audit_detail_allow_request: u64,
+    audit_allow_in_flight: bool,
     plugin_registry: PluginRegistry,
     status_message: Option<BannerMessage>,
     max_bytes_dialog: Option<MaxBytesDialogState>,
@@ -628,16 +630,48 @@ struct AuditDetailDialogState {
     code: AuditDetailCodeState,
     code_target: Option<AuditDetailCodeTarget>,
     code_generation: u64,
+    allow_form: Option<AllowFormState>,
+}
+
+#[derive(Clone, Debug)]
+struct AllowFormState {
+    reason_input: Entity<InputState>,
+    checked_codes: BTreeSet<String>,
+    request: Option<u64>,
+    error: Option<AllowAddError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AllowAddError {
+    FileChanged,
+    VerificationRefused,
+    AuditFailed(String),
+    WriteFailed { path: PathBuf, error: String },
+    Rejected { reason_key: &'static str },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuditAllowMaterial {
+    root_origin: ExecutionOrigin,
+    hash: AllowlistHash,
+    offered_codes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AuditDetailCodeState {
     NotApplicable,
-    Loading { request: u64 },
-    Loaded { derived: bool },
+    Loading {
+        request: u64,
+    },
+    Loaded {
+        derived: bool,
+        allow: Box<AuditAllowMaterial>,
+    },
     NotFound,
     Ambiguous,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
     Unavailable,
     FileChanged,
     TooLarge,
@@ -988,6 +1022,9 @@ enum RowOperation {
 }
 
 enum BannerMessage {
+    AllowlistAdded { count: usize },
+    AllowlistAlreadyPresent,
+    AllowlistWriteFailed { path: PathBuf, error: String },
     AllowlistsReloaded { count: usize, stale_rows: usize },
     PersistFailed(String),
     CachePurged,

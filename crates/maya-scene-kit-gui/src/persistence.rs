@@ -65,6 +65,161 @@ pub fn load_allowlists(app_path: Option<&Path>, user_path: Option<&Path>) -> Loa
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UserAllowlistDocument {
+    pub(crate) version: u64,
+    pub(crate) entries: Vec<UserAllowlistEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UserAllowlistEntry {
+    pub(crate) hash: maya_scene_kit_audit::scene::AllowlistHash,
+    pub(crate) codes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) added_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) added_by: Option<String>,
+}
+
+pub(crate) struct AllowlistEntryDraft<'a> {
+    pub(crate) node: Option<&'a str>,
+    pub(crate) attr: Option<&'a str>,
+    pub(crate) body: &'a str,
+    pub(crate) reason: &'a str,
+    pub(crate) codes: &'a std::collections::BTreeSet<String>,
+}
+
+pub(crate) fn build_user_allowlist_entry(
+    hash: maya_scene_kit_audit::scene::AllowlistHash,
+    draft: AllowlistEntryDraft<'_>,
+    now: std::time::SystemTime,
+    added_by: Option<String>,
+) -> UserAllowlistEntry {
+    let reason = draft.reason.trim();
+    UserAllowlistEntry {
+        hash,
+        codes: draft.codes.iter().cloned().collect(),
+        label: Some(format!(
+            "{}{}",
+            draft.node.unwrap_or("-"),
+            draft
+                .attr
+                .map(|attr| format!(" {attr}"))
+                .unwrap_or_default()
+        )),
+        preview: Some(
+            draft
+                .body
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect(),
+        ),
+        reason: (!reason.is_empty()).then(|| reason.to_string()),
+        added_at: Some(format_allowlist_timestamp(now)),
+        added_by,
+    }
+}
+
+pub(crate) fn current_user_name() -> Option<String> {
+    select_user_name(std::env::var("USERNAME").ok(), std::env::var("USER").ok())
+}
+
+fn select_user_name(username: Option<String>, user: Option<String>) -> Option<String> {
+    username
+        .filter(|name| !name.is_empty())
+        .or_else(|| user.filter(|name| !name.is_empty()))
+}
+
+pub(crate) fn format_allowlist_timestamp(now: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(now).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+pub(crate) fn read_user_allowlist(path: &Path) -> Result<UserAllowlistDocument, String> {
+    use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(UserAllowlistDocument {
+                version: 1,
+                entries: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    AuditAllowlist::from_json(text, AllowlistSource::User).map_err(|error| error.to_string())?;
+    serde_json::from_str(text).map_err(|error| error.to_string())
+}
+
+pub(crate) fn add_user_allowlist_entry(
+    path: &Path,
+    entry: &UserAllowlistEntry,
+) -> Result<usize, String> {
+    use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+    use std::collections::BTreeSet;
+    let mut document = read_user_allowlist(path)?;
+    let existing_codes: BTreeSet<_> = document
+        .entries
+        .iter()
+        .filter(|existing| existing.hash == entry.hash)
+        .flat_map(|existing| existing.codes.iter().cloned())
+        .collect();
+    let new_codes: BTreeSet<_> = entry
+        .codes
+        .iter()
+        .filter(|code| !existing_codes.contains(*code))
+        .cloned()
+        .collect();
+    let count = new_codes.len();
+    if let Some(existing) = document
+        .entries
+        .iter_mut()
+        .find(|existing| existing.hash == entry.hash)
+    {
+        let before = existing.clone();
+        if existing.label.is_none() {
+            existing.label.clone_from(&entry.label);
+        }
+        if existing.preview.is_none() {
+            existing.preview.clone_from(&entry.preview);
+        }
+        if existing.reason.is_none() {
+            existing.reason.clone_from(&entry.reason);
+        }
+        if count == 0 && *existing == before {
+            return Ok(0);
+        }
+        let mut seen = BTreeSet::new();
+        existing.codes.retain(|code| seen.insert(code.clone()));
+        existing.codes.extend(new_codes);
+    } else {
+        let mut entry = entry.clone();
+        entry.codes = new_codes.into_iter().collect();
+        document.entries.push(entry);
+    }
+    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    AuditAllowlist::from_json(
+        std::str::from_utf8(&bytes).map_err(|error| error.to_string())?,
+        AllowlistSource::User,
+    )
+    .map_err(|error| error.to_string())?;
+    maya_scene_kit_edit::scene::write_output_bytes_atomic(path, &bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(count)
+}
+
 pub fn default_state_path() -> PathBuf {
     if cfg!(windows) {
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -164,6 +319,140 @@ mod tests {
         JobHistoryEntry, LocalePreference, PersistedState, PersistedTableColumnWidth,
         PersistedWorkspaceFile, RecentInput, ResultTab, StatusFilter, WorkspaceLayoutPreference,
     };
+
+    #[test]
+    fn user_name_selection_skips_empty_values() {
+        for (username, user, expected) in [
+            (Some("Example"), Some("Sample"), Some("Example")),
+            (Some(""), Some("Sample"), Some("Sample")),
+            (None, Some("Sample"), Some("Sample")),
+            (Some("Example"), None, Some("Example")),
+            (Some(""), Some(""), None),
+            (None, Some(""), None),
+            (Some(""), None, None),
+            (None, None, None),
+        ] {
+            assert_eq!(
+                super::select_user_name(username.map(str::to_string), user.map(str::to_string))
+                    .as_deref(),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn user_allowlist_entry_writer() {
+        use super::*;
+        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+        use std::{
+            collections::BTreeSet,
+            time::{Duration, SystemTime},
+        };
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ExampleUser/allowlist.json");
+        let hash = "sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20";
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1794043800);
+        let codes = BTreeSet::from(["mel_exec".to_string()]);
+        let build = |body, reason| {
+            build_user_allowlist_entry(
+                hash.parse().unwrap(),
+                AllowlistEntryDraft {
+                    node: Some("ExampleScriptNode"),
+                    attr: Some(".b"),
+                    body,
+                    reason,
+                    codes: &codes,
+                },
+                now,
+                Some("Example".to_string()),
+            )
+        };
+        let entry = build("exec \"Example\"", " Example reason ");
+        assert_eq!(entry.reason.as_deref(), Some("Example reason"));
+        assert_eq!(build("exec \"Example\"", "  ").reason, None);
+        let long = build(&"例".repeat(121), "");
+        assert_eq!(long.preview.as_deref(), Some("例".repeat(120).as_str()));
+        assert_eq!(add_user_allowlist_entry(&path, &entry).unwrap(), 1);
+        let expected = concat!(
+            "{\n  \"version\": 1,\n  \"entries\": [\n    {\n",
+            "      \"hash\": \"sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20\",\n",
+            "      \"codes\": [\n        \"mel_exec\"\n      ],\n",
+            "      \"label\": \"ExampleScriptNode .b\",\n",
+            "      \"preview\": \"exec \\\"Example\\\"\",\n",
+            "      \"reason\": \"Example reason\",\n",
+            "      \"added_at\": \"2026-11-07T09:30:00Z\",\n",
+            "      \"added_by\": \"Example\"\n    }\n  ]\n}\n",
+        );
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        let other = serde_json::json!({"hash":format!("sha256:{}", "11".repeat(32)),"codes":["mel_eval"],"label":"Sample"});
+        fs::write(
+            &path,
+            serde_json::json!({"version":1,"entries":[other.clone()]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(add_user_allowlist_entry(&path, &entry).unwrap(), 1);
+        let document = read_user_allowlist(&path).unwrap();
+        assert_eq!(serde_json::to_value(&document.entries[0]).unwrap(), other);
+        assert_eq!(document.entries[1], entry);
+        let mut incoming = entry.clone();
+        incoming.codes = vec!["mel_exec".into(), "mel_python".into()];
+        let existing = serde_json::json!({"hash":hash,"codes":["mel_eval","mel_exec","mel_eval"],"label":"Sample","preview":"Sample","reason":"Sample","added_at":"Sample","added_by":"Sample"});
+        fs::write(
+            &path,
+            serde_json::json!({"version":1,"entries":[existing]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(add_user_allowlist_entry(&path, &incoming).unwrap(), 1);
+        let merged = read_user_allowlist(&path).unwrap().entries.remove(0);
+        assert_eq!(merged.codes, ["mel_eval", "mel_exec", "mel_python"]);
+        for metadata in [
+            merged.label,
+            merged.preview,
+            merged.reason,
+            merged.added_at,
+            merged.added_by,
+        ] {
+            assert_eq!(metadata.as_deref(), Some("Sample"));
+        }
+        fs::write(
+            &path,
+            serde_json::json!({"version":1,"entries":[{"hash":hash,"codes":["mel_eval"]}]})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(add_user_allowlist_entry(&path, &entry).unwrap(), 1);
+        let filled = read_user_allowlist(&path).unwrap().entries.remove(0);
+        assert_eq!(filled.label, entry.label);
+        assert_eq!(filled.preview, entry.preview);
+        assert_eq!(filled.reason, entry.reason);
+        assert_eq!(filled.added_at, None);
+        assert_eq!(filled.added_by, None);
+        for invalid in [
+            "".to_string(),
+            "  \n".to_string(),
+            "{".to_string(),
+            "{\"version\":2,\"entries\":[]}".to_string(),
+            serde_json::json!({"version":1,"entries":[{"hash":hash,"codes":[]}]}).to_string(),
+            "{\"version\":1,\"entries\":[],\"Example\":true}".to_string(),
+        ] {
+            fs::write(&path, &invalid).unwrap();
+            assert!(add_user_allowlist_entry(&path, &entry).is_err());
+            assert_eq!(fs::read(&path).unwrap(), invalid.as_bytes());
+        }
+        fs::write(&path, "\u{feff}{\"version\":1,\"entries\":[]}").unwrap();
+        assert!(read_user_allowlist(&path).unwrap().entries.is_empty());
+        assert_eq!(add_user_allowlist_entry(&path, &long).unwrap(), 1);
+        let bytes = fs::read(&path).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(!text.starts_with('\u{feff}'));
+        assert!(text.ends_with('\n') && !text.ends_with("\n\n"));
+        assert!(!text.contains(&"例".repeat(121)));
+        assert!(AuditAllowlist::from_json(text, AllowlistSource::User).is_ok());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(add_user_allowlist_entry(&path, &entry).is_err());
+        assert!(fs::read_dir(&path).unwrap().next().is_none());
+    }
 
     #[test]
     fn allowlist_paths_are_pure_and_preserve_relative_parents() {
