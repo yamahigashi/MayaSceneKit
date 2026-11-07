@@ -16,8 +16,7 @@ use maya_scene_kit_observe::scene::{
     paths::{PathKind, ScenePathResolutionStatus},
 };
 
-pub use self::rules::ScriptAuditPlan;
-pub use self::source::audit_source_text;
+pub use self::{rules::ScriptAuditPlan, source::audit_source_text};
 use crate::scene::{
     AuditDisposition, AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail,
     AuditGraphReport, AuditGraphRoot, AuditNotice, AuditOptions, AuditProfile, AuditReferenceEdge,
