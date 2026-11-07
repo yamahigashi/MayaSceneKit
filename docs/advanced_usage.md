@@ -261,6 +261,23 @@ list the same entry, the earlier file wins) or `audit(..., allowlist_paths=[...]
 - An allowed body that evaluates data at run time (for example `eval` of an
   attribute value) trusts that data, because the hash covers only the body.
 
+In the GUI, two allowlist files are merged: `allowlist.json` next to the GUI
+executable (distributed by an administrator) and `allowlist.json` next to the GUI
+state file (the user's own list, for example `%APPDATA%\maya-scene-kit\` on
+Windows). A file that cannot be read keeps showing an error line and counts as
+empty. Use **Settings > Reload allowlists** after editing a file outside the GUI.
+Allowed findings are hidden in the audit table until **Show allowed** is toggled,
+are not counted as threats, and are skipped by bulk threat removal.
+
+To add an entry from the GUI, open a finding's audit detail, wait for the full
+script text to load, and choose **Allow this threat…**. Pick the finding ids to
+allow (the opened finding's id is always included), optionally give a reason,
+and choose **Add**. The GUI re-audits the scene with the candidate entry first
+and writes to the user file only if the finding would actually be allowed; it
+never overwrites a user file it cannot parse. The button stays disabled, with the
+reason shown, for findings that are already allowed, ids that can never be
+allowed, files with unsaved edits or pending re-audit, and grouped rows.
+
 ## Related Docs
 
 - [README](../README.md)

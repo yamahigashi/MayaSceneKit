@@ -2065,6 +2065,17 @@ pub(super) fn format_elapsed_seconds(elapsed: Duration) -> String {
 
 pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> String {
     match message {
+        BannerMessage::AllowlistAdded { count } => {
+            i18n.format("banner.allowlist_added", &[("count", count.to_string())])
+        }
+        BannerMessage::AllowlistAlreadyPresent => i18n.text("banner.allowlist_already_present"),
+        BannerMessage::AllowlistWriteFailed { path, error } => i18n.format(
+            "banner.allowlist_write_failed",
+            &[
+                ("path", path.display().to_string()),
+                ("error", error.clone()),
+            ],
+        ),
         BannerMessage::PersistFailed(error) => {
             i18n.format("banner.persist_failed", &[("error", error.clone())])
         }

@@ -337,6 +337,8 @@ impl GuiShell {
             audit_severity_filter: default_audit_severity_filter(),
             audit_detail_dialog: None,
             audit_detail_code_request: 0,
+            audit_detail_allow_request: 0,
+            audit_allow_in_flight: false,
             plugin_registry,
             status_message: None,
             max_bytes_dialog: None,

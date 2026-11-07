@@ -1,3 +1,4 @@
+use super::audit_detail_dialog::OfferInput;
 use super::{AuditDetailCodeState, GuiFileState};
 use std::{
     cell::RefCell,
@@ -10227,14 +10228,22 @@ fn audit_detail_surface_text_matching_is_unique_and_preserves_origin_identity() 
     let single = std::slice::from_ref(&surface);
     assert_eq!(
         match_audit_surface_text(&origin, false, single),
-        AuditSurfaceMatch::Found(surface.text.clone())
+        AuditSurfaceMatch::Found(Box::new(super::audit_detail_dialog::FoundSurface {
+            catalog_index: 0,
+            origin: origin.clone(),
+            text: surface.text.clone()
+        }))
     );
     let mut derived = origin.clone();
     derived.lang = ExecutionLanguage::Mel;
     derived.source_kind = Some("Example literal".to_string());
     assert_eq!(
         match_audit_surface_text(&derived, true, single),
-        AuditSurfaceMatch::Found(surface.text.clone())
+        AuditSurfaceMatch::Found(Box::new(super::audit_detail_dialog::FoundSurface {
+            catalog_index: 0,
+            origin: origin.clone(),
+            text: surface.text.clone()
+        }))
     );
     let mut other_node = derived.clone();
     other_node.node_name = Some("ExampleOtherNode".to_string());
@@ -10328,12 +10337,17 @@ fn audit_detail_code_loads_full_text_and_sync_preserves_it(cx: &mut TestAppConte
             target.origin.node_name.as_deref(),
             Some("ExampleScriptNode")
         );
-        let result = load_audit_surface_text(&path, &shell.scene_load_options(), &target);
+        let result = load_audit_surface_text(
+            &path,
+            &shell.scene_load_options(),
+            &target,
+            &OfferInput::from(shell.rows[0].display_audit_report().unwrap()),
+        );
         shell.apply_audit_detail_code_result(&key, request, result, window, cx);
         let expected =
             "import subprocess\nsubprocess.call(['echo', 'Example'])\r\nprint('Example')";
         let state = shell.audit_detail_dialog.as_ref().unwrap();
-        assert_eq!(state.code, AuditDetailCodeState::Loaded { derived: false });
+        assert_eq!(state.code, audit_detail_expected_loaded(&shell.rows[0]));
         assert_eq!(
             state.code_input.read(cx).value().as_bytes(),
             expected.as_bytes()
@@ -10380,6 +10394,7 @@ fn audit_detail_code_missing_file_opens_asynchronously_then_fails(cx: &mut TestA
             &shell.scene_load_options(),
             state.code_target.as_ref().unwrap(),
             shell.rows[0].audit_file_state,
+            &OfferInput::from(shell.rows[0].display_audit_report().unwrap()),
         );
         shell.apply_audit_detail_code_result(&key, request, result, window, cx);
         let state = shell.audit_detail_dialog.as_ref().unwrap();
@@ -10411,6 +10426,7 @@ fn audit_detail_code_drops_results_from_an_old_request(cx: &mut TestAppContext) 
             &path,
             &shell.scene_load_options(),
             old.code_target.as_ref().unwrap(),
+            &OfferInput::from(shell.rows[0].display_audit_report().unwrap()),
         );
         shell.clear_audit_detail_dialog_state(cx);
         window.close_dialog(cx);
@@ -10477,6 +10493,7 @@ fn audit_detail_code_changed_file_keeps_preview(cx: &mut TestAppContext) {
             &shell.scene_load_options(),
             state.code_target.as_ref().unwrap(),
             shell.rows[0].audit_file_state,
+            &OfferInput::from(shell.rows[0].display_audit_report().unwrap()),
         );
         shell.apply_audit_detail_code_result(&key, request, result, window, cx);
         let state = shell.audit_detail_dialog.as_ref().unwrap();
@@ -10507,11 +10524,12 @@ fn audit_detail_code_generation_change_invalidates_loaded_text(cx: &mut TestAppC
             &path,
             &shell.scene_load_options(),
             state.code_target.as_ref().unwrap(),
+            &OfferInput::from(shell.rows[0].display_audit_report().unwrap()),
         );
         shell.apply_audit_detail_code_result(&key, request, result, window, cx);
         assert_eq!(
             shell.audit_detail_dialog.as_ref().unwrap().code,
-            AuditDetailCodeState::Loaded { derived: false }
+            audit_detail_expected_loaded(&shell.rows[0])
         );
         let row = &mut shell.rows[0];
         row.set_audit_report(row.audit_report.clone(), row.audit_file_state);
@@ -10541,6 +10559,19 @@ fn audit_detail_fix_target(row: &SceneRow) -> super::AuditDetailCodeTarget {
     }
 }
 
+fn audit_detail_expected_loaded(row: &SceneRow) -> AuditDetailCodeState {
+    let origin = audit_detail_fix_target(row).origin;
+    let text = "import subprocess\nsubprocess.call(['echo', 'Example'])\r\nprint('Example')";
+    AuditDetailCodeState::Loaded {
+        derived: false,
+        allow: Box::new(super::AuditAllowMaterial {
+            hash: maya_scene_kit_audit::scene::allowlist_surface_hash(&origin, text),
+            root_origin: origin,
+            offered_codes: vec!["python_subprocess".to_string()],
+        }),
+    }
+}
+
 #[test]
 fn audit_detail_fix_equal_file_state_loads_full_text() {
     use super::audit_detail_dialog::load_audit_surface_text_for_file_state;
@@ -10552,11 +10583,9 @@ fn audit_detail_fix_equal_file_state_loads_full_text() {
         &LoadOptions::default(),
         &audit_detail_fix_target(&row),
         row.audit_file_state,
+        &OfferInput::from(row.display_audit_report().unwrap()),
     );
-    assert_eq!(
-        result.state,
-        AuditDetailCodeState::Loaded { derived: false }
-    );
+    assert_eq!(result.state, audit_detail_expected_loaded(&row));
     assert_eq!(
         result.text.as_deref(),
         Some("import subprocess\nsubprocess.call(['echo', 'Example'])\r\nprint('Example')")
@@ -10780,7 +10809,12 @@ fn audit_detail_fix_loading_generation_rejects_old_result(cx: &mut TestAppContex
                 text: "Example full text".into(),
                 preview: String::new(),
             }],
+            &OfferInput::default(),
         );
+        assert!(matches!(
+            &result.state,
+            AuditDetailCodeState::Loaded { allow, .. } if allow.offered_codes.is_empty()
+        ));
         let row = &mut shell.rows[0];
         row.set_audit_report(row.audit_report.clone(), row.audit_file_state);
         shell
@@ -10811,12 +10845,13 @@ fn audit_detail_fix_missing_file_state_does_not_load() {
         &LoadOptions::default(),
         &audit_detail_fix_target(&row),
         None,
+        &OfferInput::from(row.display_audit_report().unwrap()),
     );
     assert_eq!(result.state, AuditDetailCodeState::FileChanged);
     assert!(result.text.is_none());
 }
 
-fn audit_detail_fix_assert_too_large(text: String) {
+fn audit_detail_fix_assert_too_large(text: String, offers: &OfferInput) {
     use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
     use maya_scene_kit_observe::scene::execution::ExecutionSurface;
     let target = super::AuditDetailCodeTarget {
@@ -10830,6 +10865,7 @@ fn audit_detail_fix_assert_too_large(text: String) {
             text: text.into(),
             preview: String::new(),
         }],
+        offers,
     );
     assert_eq!(result.state, AuditDetailCodeState::TooLarge);
     assert!(result.text.is_none());
@@ -10843,12 +10879,12 @@ fn audit_detail_fix_assert_too_large(text: String) {
 fn audit_detail_fix_total_text_limit() {
     let text = format!("{}E", "E\n".repeat(1024 * 1024));
     assert_eq!(text.len(), 2 * 1024 * 1024 + 1);
-    audit_detail_fix_assert_too_large(text);
+    audit_detail_fix_assert_too_large(text, &OfferInput::default());
 }
 
 #[test]
 fn audit_detail_fix_single_line_limit() {
-    audit_detail_fix_assert_too_large("E".repeat(65537));
+    audit_detail_fix_assert_too_large("E".repeat(65537), &OfferInput::default());
 }
 
 #[gpui::test]
@@ -10889,7 +10925,7 @@ fn audit_detail_fix_unmatched_results_preserve_preview(cx: &mut TestAppContext) 
                 };
                 count
             ];
-            let result = audit_surface_code_result(&target, &surfaces);
+            let result = audit_surface_code_result(&target, &surfaces, &OfferInput::default());
             shell.apply_audit_detail_code_result(&key, request, result, window, cx);
             let state = shell.audit_detail_dialog.as_ref().unwrap();
             assert_eq!(state.code, expected);
