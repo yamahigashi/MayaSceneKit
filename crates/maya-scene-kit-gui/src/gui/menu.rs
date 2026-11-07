@@ -180,13 +180,18 @@ impl GuiShell {
         self.clear_workspace(window, cx);
     }
 
-    pub(super) fn on_file_table_select_all(
+    pub(super) fn on_table_select_all(
         &mut self,
-        _: &FileTableSelectAll,
+        _: &TableSelectAll,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.workspace_scan_active() {
+            return;
+        }
+        if self.path_table_focus_handle.contains_focused(window, cx) {
+            window.prevent_default();
+            self.toggle_select_all_path_rows(cx);
             return;
         }
         let focused = self.file_table_focus_handle.contains_focused(window, cx);

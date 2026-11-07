@@ -26,7 +26,7 @@ impl GuiShell {
             .child(
                 div().flex_1().min_h_0().child(
                     div()
-                        .key_context(FILE_TABLE_CONTEXT)
+                        .key_context(TABLE_CONTEXT)
                         .track_focus(&self.file_table_focus_handle)
                         .size_full()
                         .child(Table::new(&self.file_table).scrollbar_visible(true, false)),
@@ -125,7 +125,7 @@ impl Render for GuiShell {
             .on_action(cx.listener(Self::on_menu_edit_to_ascii))
             .on_action(cx.listener(Self::on_menu_exit_application))
             .on_action(cx.listener(Self::on_menu_clear_workspace))
-            .on_action(cx.listener(Self::on_file_table_select_all))
+            .on_action(cx.listener(Self::on_table_select_all))
             .on_action(cx.listener(Self::on_menu_locale_english))
             .on_action(cx.listener(Self::on_menu_locale_chinese))
             .on_action(cx.listener(Self::on_menu_locale_japanese))

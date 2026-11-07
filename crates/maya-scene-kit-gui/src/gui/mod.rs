@@ -106,7 +106,7 @@ actions!(
         MenuEditReplace,
         MenuEditToAscii,
         MenuExitApplication,
-        FileTableSelectAll,
+        TableSelectAll,
         MenuLocaleEnglish,
         MenuLocaleChinese,
         MenuLocaleJapanese,
@@ -151,7 +151,7 @@ const AUDIT_RESULTS_PER_FILE: usize = 16;
 const AUTO_ANALYZE_DEBOUNCE: Duration = Duration::from_millis(150);
 const FILE_DIALOG_UI_BLOCK_RELEASE_DELAY: Duration = Duration::from_millis(300);
 const MAX_RECENT_FOLDERS: usize = 10;
-const FILE_TABLE_CONTEXT: &str = "Table";
+const TABLE_CONTEXT: &str = "Table";
 
 struct AppAssets;
 
@@ -214,6 +214,7 @@ struct GuiShell {
     file_table: Entity<TableState<FileTableDelegate>>,
     file_table_focus_handle: FocusHandle,
     path_table: Entity<TableState<PathTableDelegate>>,
+    path_table_focus_handle: FocusHandle,
     path_table_summary: PathTableSummary,
     audit_table: Entity<TableState<AuditTableDelegate>>,
     audit_all_rows: Vec<AuditResultRow>,
@@ -1801,8 +1802,8 @@ fn init_gui_app(cx: &mut App) {
     })
     .detach();
     cx.bind_keys([
-        KeyBinding::new("ctrl-a", FileTableSelectAll, Some(FILE_TABLE_CONTEXT)),
-        KeyBinding::new("cmd-a", FileTableSelectAll, Some(FILE_TABLE_CONTEXT)),
+        KeyBinding::new("ctrl-a", TableSelectAll, Some(TABLE_CONTEXT)),
+        KeyBinding::new("cmd-a", TableSelectAll, Some(TABLE_CONTEXT)),
     ]);
     cx.set_menus(build_app_menus(
         &PersistedState::default(),

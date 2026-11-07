@@ -52,24 +52,24 @@ use super::{
     AuditResultItemKind, AuditResultRow, AuditResultRowKey, AuditRowCleanState,
     AuditSeverityFilter, AuditSortKey, AuditTableSort, AutoAnalyzeParallelismPreference,
     AutoAnalyzePriority, AutoAnalyzeQueueState, BackupLocationPreference, BannerMessage, DirtyKind,
-    FileSortKey, FileStatus, FileTableSelectAll, FileTableSort, MenuAutoAnalyzeParallelism32,
+    FileSortKey, FileStatus, FileTableSort, MenuAutoAnalyzeParallelism32,
     MenuEditDeleteUiConfigurationScriptNode, MenuEditRedo, MenuEditUndo, MenuPurgeAnalysisCache,
     MenuToggleAnalysisCache, MenuToggleIgnoreFolderNames, PathCollectRewriteMode,
     PathEditKeyboardOutcome, PathFormFilter, PathOrderSnapshot, PathResolutionBadge, PathSortKey,
     PathTableSort, PathTypeFilter, ReplaceDialogPreviewSignature, ReplaceDialogPreviewState,
     ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState, RowJobResult, RowOperation,
-    SceneRow, analyze_row, analyze_row_bytes_with_options, analyze_row_with_options,
-    apply_path_overrides_to_report, apply_persisted_column_widths, audit_context_menu_state,
-    audit_table_columns, backup_file_name, build_app_menus, build_audit_clipboard_payload,
-    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
-    build_file_operation_paths, build_file_table_rows, build_job_history_log_lines,
-    build_path_table_model, build_path_table_model_with_order_snapshot,
-    clean_targets_for_threat_findings, collect_scene_files_recursively,
-    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
-    default_path_form_filter, default_path_resolution_filter, default_path_sort,
-    default_path_type_filter, detect_format, exit_warning_required_for_rows,
-    file_context_menu_state, filter_audit_result_rows, merge_column_widths,
-    missing_path_count_for_row, next_backup_path, path_context_menu_state,
+    SceneRow, TableSelectAll, analyze_row, analyze_row_bytes_with_options,
+    analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
+    audit_context_menu_state, audit_table_columns, backup_file_name, build_app_menus,
+    build_audit_clipboard_payload, build_audit_result_rows, build_audit_table_model,
+    build_file_copy_payload, build_file_operation_paths, build_file_table_rows,
+    build_job_history_log_lines, build_path_table_model,
+    build_path_table_model_with_order_snapshot, clean_targets_for_threat_findings,
+    collect_scene_files_recursively, compute_visible_row_indices_for,
+    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
+    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
+    exit_warning_required_for_rows, file_context_menu_state, filter_audit_result_rows,
+    merge_column_widths, missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, find_missing_path_file_hits, missing_path_entry_file_name,
@@ -954,7 +954,7 @@ fn file_table_ctrl_a_selects_only_visible_rows(cx: &mut TestAppContext) {
     visual_cx.update(|window, app| {
         shell.read(app).file_table_focus_handle.focus(window);
         shell.update(app, |shell, cx| {
-            shell.on_file_table_select_all(&FileTableSelectAll, window, cx);
+            shell.on_table_select_all(&TableSelectAll, window, cx);
         });
     });
 
@@ -975,8 +975,8 @@ fn file_table_ctrl_a_toggles_to_clear_selection_when_all_visible_rows_are_select
     visual_cx.update(|window, app| {
         shell.read(app).file_table_focus_handle.focus(window);
         shell.update(app, |shell, cx| {
-            shell.on_file_table_select_all(&FileTableSelectAll, window, cx);
-            shell.on_file_table_select_all(&FileTableSelectAll, window, cx);
+            shell.on_table_select_all(&TableSelectAll, window, cx);
+            shell.on_table_select_all(&TableSelectAll, window, cx);
         });
     });
 
@@ -1000,7 +1000,7 @@ fn file_table_ctrl_a_does_not_select_rows_when_search_input_is_focused(cx: &mut 
             .focus_handle(app)
             .focus(window);
         shell.update(app, |shell, cx| {
-            shell.on_file_table_select_all(&FileTableSelectAll, window, cx);
+            shell.on_table_select_all(&TableSelectAll, window, cx);
         });
     });
 
@@ -1673,12 +1673,66 @@ fn file_table_ctrl_a_does_not_select_rows_when_path_table_is_focused(cx: &mut Te
             .focus_handle(app)
             .focus(window);
         shell.update(app, |shell, cx| {
-            shell.on_file_table_select_all(&FileTableSelectAll, window, cx);
+            shell.on_table_select_all(&TableSelectAll, window, cx);
         });
     });
 
     visual_cx.update(|_, app| {
         assert!(shell.read(app).selected_indices().is_empty());
+    });
+}
+
+#[gpui::test]
+fn path_table_ctrl_a_selects_all_visible_path_rows_then_clears(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/diffuse.tx\";\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/spec.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+            shell.rows = vec![row];
+            shell.selected_path_rows = BTreeSet::from([vec![(1, 0)]]);
+            shell.refresh_path_table(cx);
+        });
+        shell.read(app).path_table_focus_handle.focus(window);
+        shell.update(app, |shell, cx| {
+            shell.on_table_select_all(&TableSelectAll, window, cx);
+        });
+    });
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.selected_path_rows,
+            BTreeSet::from([vec![(1, 0)], vec![(1, 1)]])
+        );
+        assert_eq!(shell.selected_indices(), vec![0]);
+    });
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            shell.on_table_select_all(&TableSelectAll, window, cx);
+        });
+    });
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert!(shell.selected_path_rows.is_empty());
+        assert_eq!(shell.selected_indices(), vec![0]);
     });
 }
 
