@@ -296,5 +296,16 @@
   "audit_detail.code_load_failed": "无法加载全文（{error}），显示预览。",
   "audit_detail.code_unavailable": "此项无法获取全文，显示预览。",
   "audit_detail.code_file_changed": "分析后文件已更改，显示预览。",
-  "audit_detail.code_too_large": "全文过大，显示预览。"
+  "audit_detail.code_too_large": "全文过大，显示预览。",
+  "settings.reload_allowlists": "重新加载允许列表",
+  "banner.allowlist_load_failed": "无法加载允许列表 {path}: {error}",
+  "banner.allowlists_reloaded": "已重新加载允许列表：{count} 项",
+  "audit_table.show_allowed": "显示已允许项 ({count})",
+  "label.allowed": "已允许",
+  "label.audit_detail.allowed": "允许",
+  "label.audit_detail.allow_hash": "允许哈希",
+  "audit_value.allowlist_source.app": "管理员分发 (app)",
+  "audit_value.allowlist_source.user": "用户 (user)",
+  "banner.allowlists_stale_rows": "{count} 个文件需要重新审核（有未保存编辑的文件将在保存后更新）",
+  "banner.selected_files_need_reaudit": "所选文件需要重新审核，之后才能移除威胁"
 }

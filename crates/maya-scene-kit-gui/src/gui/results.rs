@@ -60,6 +60,15 @@ pub(super) fn render_audit_filter_bar(
             move |shell, cx| shell.toggle_audit_dirty_filter(cx),
             view.clone(),
         ))
+        .child(dirty_filter_button(
+            i18n.format(
+                "audit_table.show_allowed",
+                &[("count", shell.audit_allowed_total.to_string())],
+            ),
+            shell.audit_show_allowed,
+            move |shell, cx| shell.toggle_audit_show_allowed(cx),
+            view.clone(),
+        ))
         .child(action_button(
             "audit-table-dedup",
             dedup_label,

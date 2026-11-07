@@ -92,6 +92,82 @@ mod tests {
     use crate::model::SupportedLocale;
 
     #[test]
+    fn allowlist_catalogs_contain_exact_translations() {
+        let expected = [
+            (
+                "settings.reload_allowlists",
+                [
+                    "Reload allowlists",
+                    "許可リストを再読み込み",
+                    "重新加载允许列表",
+                ],
+            ),
+            (
+                "banner.allowlist_load_failed",
+                [
+                    "Could not load allowlist {path}: {error}",
+                    "許可リストを読み込めませんでした: {path}: {error}",
+                    "无法加载允许列表 {path}: {error}",
+                ],
+            ),
+            (
+                "banner.allowlists_reloaded",
+                [
+                    "Reloaded allowlists: {count} entries",
+                    "許可リストを再読み込みしました: {count} 件",
+                    "已重新加载允许列表：{count} 项",
+                ],
+            ),
+            (
+                "audit_table.show_allowed",
+                [
+                    "Show allowed ({count})",
+                    "許可済みを表示 ({count})",
+                    "显示已允许项 ({count})",
+                ],
+            ),
+            ("label.allowed", ["Allowed", "許可済み", "已允许"]),
+            ("label.audit_detail.allowed", ["Allowed", "許可", "允许"]),
+            (
+                "label.audit_detail.allow_hash",
+                ["Allow hash", "許可ハッシュ", "允许哈希"],
+            ),
+            (
+                "audit_value.allowlist_source.app",
+                ["Distributed (app)", "管理者配布 (app)", "管理员分发 (app)"],
+            ),
+            (
+                "audit_value.allowlist_source.user",
+                ["User (user)", "ユーザー (user)", "用户 (user)"],
+            ),
+            (
+                "banner.allowlists_stale_rows",
+                [
+                    "{count} file(s) need re-audit; files with unsaved edits update after saving",
+                    "{count} 件のファイルは再監査が必要です（未保存の編集があるファイルは保存後に更新されます）",
+                    "{count} 个文件需要重新审核（有未保存编辑的文件将在保存后更新）",
+                ],
+            ),
+        ];
+        for (index, catalog) in [
+            super::english_catalog(),
+            super::japanese_catalog(),
+            super::chinese_catalog(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (key, values) in &expected {
+                assert_eq!(
+                    catalog.get(*key).map(String::as_str),
+                    Some(values[index]),
+                    "{key}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn catalogs_cover_expected_keys() {
         let en = I18n::new(SupportedLocale::English);
         let ja = I18n::new(SupportedLocale::Japanese);

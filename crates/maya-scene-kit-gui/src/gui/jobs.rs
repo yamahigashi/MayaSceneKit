@@ -219,7 +219,7 @@ impl GuiShell {
         self.next_edit_history_commit_sequence = 0;
     }
 
-    fn apply_edit_history_entry(
+    pub(super) fn apply_edit_history_entry(
         &mut self,
         entry: &GuiEditHistoryEntry,
         restore_after: bool,
@@ -235,6 +235,13 @@ impl GuiShell {
                 &transition.before
             };
             self.rows[row_index].apply_edit_state(state);
+            // A report restored from history may predate the current allowlist.
+            if self.rows[row_index].audit_report.is_some()
+                && self.rows[row_index].audit_plan_fingerprint.as_deref()
+                    != Some(self.audit_plan_fingerprint.as_str())
+            {
+                self.rows[row_index].mark_analysis_stale();
+            }
             self.refresh_row_path_resolution_state(row_index);
         }
         self.refresh_file_table(cx);
@@ -707,6 +714,7 @@ impl GuiShell {
         match result {
             RowJobResult::Analyze(result) => {
                 let AnalyzeRowResult {
+                    audit_plan_fingerprint,
                     audit_file_state,
                     audit_report,
                     paths_report,
@@ -717,7 +725,7 @@ impl GuiShell {
                     elapsed,
                 } = result;
                 self.prune_edit_history_for_row_ids(&[row_id]);
-                let findings = audit_report.findings.len();
+                let findings = audit_report.finding_count() - audit_report.allowed_finding_count();
                 let path_count = paths_report
                     .as_ref()
                     .map_or(0, |report| report.entries.len());
@@ -740,6 +748,7 @@ impl GuiShell {
                 };
                 self.rows[index].findings = findings;
                 self.rows[index].set_audit_report(Some(audit_report), audit_file_state);
+                self.rows[index].audit_plan_fingerprint = Some(audit_plan_fingerprint.clone());
                 self.rows[index].paths_report = paths_report;
                 self.rows[index].dump_report = dump_report;
                 self.rows[index].analyzed_audit_mode = Some(audit_mode);
@@ -750,6 +759,7 @@ impl GuiShell {
                 self.rows[index].pending_path_owner_delete_targets.clear();
                 self.rows[index].staged_audit_mode = None;
                 self.rows[index].staged_audit_report = None;
+                self.rows[index].staged_audit_plan_fingerprint = None;
                 self.rows[index].staged_paths_report = None;
                 self.rows[index].staged_dump_report = None;
                 self.rows[index].staged_source_bytes = None;
@@ -760,6 +770,12 @@ impl GuiShell {
                 self.rows[index].replace_artifact_generation = None;
                 self.rows[index].status = row_status;
                 self.rows[index].sync_findings_count();
+                if audit_plan_fingerprint != self.audit_plan_fingerprint {
+                    self.rows[index].mark_analysis_stale();
+                    self.schedule_selected_auto_analysis(window, cx);
+                    self.sync_viewport_auto_analyze(window, cx);
+                    self.schedule_workspace_auto_analysis_if_enabled(window, cx);
+                }
                 self.rows[index].invalidate_path_resolution_state();
                 self.queue_path_resolution_backlog_for_row_id(row_id, window, cx);
                 self.status_message = Some(BannerMessage::AnalyzeCompleted {
@@ -776,6 +792,7 @@ impl GuiShell {
                 self.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
             }
             RowJobResult::SceneEdits {
+                audit_plan_fingerprint,
                 staged,
                 audit_mode,
                 staged_audit_report,
@@ -785,7 +802,8 @@ impl GuiShell {
             } => {
                 let cleaned = staged.preview.cleaned_targets.len();
                 let deleted = staged.preview.deleted_path_owner_targets.len();
-                self.rows[index].findings = staged_audit_report.findings.len();
+                self.rows[index].findings = staged_audit_report.finding_count()
+                    - staged_audit_report.allowed_finding_count();
                 self.rows[index].dirty_artifact = Some(staged.artifact);
                 self.rows[index].dirty_kind = Some(DirtyKind::SceneEdits);
                 self.rows[index].clean_preview = Some(ExecutionCleanPreview {
@@ -814,6 +832,11 @@ impl GuiShell {
                     .collect();
                 self.rows[index].staged_audit_mode = Some(audit_mode);
                 self.rows[index].staged_audit_report = Some(staged_audit_report);
+                if audit_plan_fingerprint != self.audit_plan_fingerprint {
+                    self.rows[index].mark_analysis_stale();
+                    self.rows[index].staged_audit_mode = None;
+                }
+                self.rows[index].staged_audit_plan_fingerprint = Some(audit_plan_fingerprint);
                 self.rows[index].staged_paths_report = Some(staged_paths_report);
                 self.rows[index].staged_dump_report = Some(staged_dump_report);
                 self.rows[index].staged_source_bytes = Some(staged_source_bytes);
@@ -865,17 +888,25 @@ impl GuiShell {
                         apply_path_overrides_to_report(report, &overrides);
                     }
                 } else if dirty_kind == Some(DirtyKind::SceneEdits) {
-                    if let Some(report) = self.rows[index].staged_audit_report.take() {
-                        self.rows[index].set_audit_report(Some(report), audit_file_state);
+                    if self.rows[index].staged_audit_plan_fingerprint.as_deref()
+                        == Some(self.audit_plan_fingerprint.as_str())
+                    {
+                        if let Some(report) = self.rows[index].staged_audit_report.take() {
+                            self.rows[index].set_audit_report(Some(report), audit_file_state);
+                            self.rows[index].audit_plan_fingerprint =
+                                self.rows[index].staged_audit_plan_fingerprint.clone();
+                        }
+                        if let Some(audit_mode) = self.rows[index].staged_audit_mode.take() {
+                            self.rows[index].analyzed_audit_mode = Some(audit_mode);
+                        }
+                    } else {
+                        self.rows[index].mark_analysis_stale();
                     }
                     if let Some(report) = self.rows[index].staged_paths_report.take() {
                         self.rows[index].paths_report = Some(report);
                     }
                     if let Some(report) = self.rows[index].staged_dump_report.take() {
                         self.rows[index].dump_report = Some(report);
-                    }
-                    if let Some(audit_mode) = self.rows[index].staged_audit_mode.take() {
-                        self.rows[index].analyzed_audit_mode = Some(audit_mode);
                     }
                 }
                 self.rows[index].dirty_artifact = None;
@@ -888,6 +919,7 @@ impl GuiShell {
                 self.rows[index].path_owner_delete_preview = None;
                 self.rows[index].staged_audit_mode = None;
                 self.rows[index].staged_audit_report = None;
+                self.rows[index].staged_audit_plan_fingerprint = None;
                 self.rows[index].staged_paths_report = None;
                 self.rows[index].staged_dump_report = None;
                 self.rows[index].staged_source_bytes = None;
@@ -980,9 +1012,18 @@ impl GuiShell {
     }
 
     pub(super) fn run_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let targets_by_row = self.file_threat_clean_targets_by_row(self.ready_selected_indices());
+        let selected = self.ready_selected_indices();
+        let needs_reaudit = selected.iter().any(|&row_index| {
+            self.rows[row_index].audit_report.is_some()
+                && !self.rows[row_index].analysis_current_for(self.state.audit_mode)
+        });
+        let targets_by_row = self.file_threat_clean_targets_by_row(selected);
         if !bulk_enabled(targets_by_row.len()) {
-            self.status_message = Some(BannerMessage::SelectFilesFirst);
+            self.status_message = Some(if needs_reaudit {
+                BannerMessage::SelectedFilesNeedReaudit
+            } else {
+                BannerMessage::SelectFilesFirst
+            });
             return;
         }
 
@@ -1145,13 +1186,16 @@ impl GuiShell {
         }
     }
 
-    fn file_threat_clean_targets_by_row(
+    pub(super) fn file_threat_clean_targets_by_row(
         &self,
         row_indices: Vec<usize>,
     ) -> Vec<(usize, BTreeSet<ExecutionCleanTarget>)> {
         row_indices
             .into_iter()
             .filter_map(|row_index| {
+                if !self.rows[row_index].analysis_current_for(self.state.audit_mode) {
+                    return None;
+                }
                 let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
                 next_targets.extend(clean_targets_for_threat_findings(&self.rows[row_index]));
                 (!next_targets.is_empty()).then_some((row_index, next_targets))

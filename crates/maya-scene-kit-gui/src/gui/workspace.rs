@@ -711,7 +711,9 @@ impl GuiShell {
 
     pub(super) fn refresh_audit_table(&mut self, cx: &mut Context<Self>) {
         let selected = self.selected_indices();
-        self.audit_all_rows = build_audit_result_rows(&self.rows, &selected);
+        self.audit_allowed_total = count_allowed_findings(&self.rows, &selected);
+        self.audit_all_rows =
+            build_audit_result_rows(&self.rows, &selected, &self.audit_allowlist, &self.i18n());
         let mut audit_model = self.current_audit_table_model();
         let visible_keys = audit_model
             .rows

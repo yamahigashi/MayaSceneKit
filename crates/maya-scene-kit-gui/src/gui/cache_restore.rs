@@ -20,6 +20,7 @@ pub(super) struct CacheHydrationUpdate {
 }
 
 pub(super) struct CacheHydrationBatchResult {
+    pub(super) plan_fingerprint: String,
     pub(super) processed_count: usize,
     pub(super) updates: Vec<CacheHydrationUpdate>,
 }
@@ -60,6 +61,7 @@ pub(super) fn hydrate_cached_analysis_batch(
         .collect::<Vec<_>>();
 
     CacheHydrationBatchResult {
+        plan_fingerprint,
         processed_count: updates.len(),
         updates,
     }
@@ -185,9 +187,7 @@ impl GuiShell {
         let generation = self.cache_restore_generation;
         let load_options = self.scene_load_options();
         let audit_options = audit_options_from_preference(self.state.audit_mode);
-        let plan_fingerprint = gui_audit_plan()
-            .map(|plan| fingerprint_audit_plan(&plan))
-            .unwrap_or_default();
+        let plan_fingerprint = fingerprint_audit_plan(&self.audit_plan);
         let observe_cache_root = self.observe_cache_root.clone();
         let audit_cache_root = self.audit_cache_root.clone();
         let view = cx.entity();
@@ -219,7 +219,12 @@ impl GuiShell {
                             }
                             shell.cache_restore_state.in_flight = false;
                             shell.cache_restore_state.completed_count += result.processed_count;
-                            shell.apply_cache_restore_updates(result.updates, window, cx);
+                            shell.apply_cache_restore_updates(
+                                result.updates,
+                                &result.plan_fingerprint,
+                                window,
+                                cx,
+                            );
                             shell.dispatch_progressive_cache_restore(window, cx);
                             if shell.should_notify_cache_restore_progress() {
                                 cx.notify();
@@ -234,9 +239,13 @@ impl GuiShell {
     pub(super) fn apply_cache_restore_updates(
         &mut self,
         updates: Vec<CacheHydrationUpdate>,
+        plan_fingerprint: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if plan_fingerprint != self.audit_plan_fingerprint {
+            return;
+        }
         let mut changed_row_ids = BTreeSet::new();
         for update in updates {
             let observe_access = update.observe_access.clone();
@@ -260,7 +269,8 @@ impl GuiShell {
 
             if let Some(snapshot) = update.audit_snapshot {
                 if !row.analysis_current_for(self.state.audit_mode) {
-                    let findings = snapshot.report.findings.len();
+                    let findings =
+                        snapshot.report.finding_count() - snapshot.report.allowed_finding_count();
                     let parse_budget_blocked = snapshot.report.is_parse_budget_blocked();
                     let blocked_message = snapshot
                         .report
@@ -276,6 +286,7 @@ impl GuiShell {
                             modified_unix_nanos: snapshot.file_state.modified_unix_nanos,
                         }),
                     );
+                    row.audit_plan_fingerprint = Some(self.audit_plan_fingerprint.clone());
                     row.analyzed_audit_mode = Some(self.state.audit_mode);
                     row.status = if parse_budget_blocked {
                         FileStatus::Error(blocked_message)

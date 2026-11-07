@@ -12,6 +12,8 @@ impl GuiShell {
             state,
             default_analysis_cache_root(),
             Some(default_plugin_dir_from_state_path(&default_state_path())),
+            app_allowlist_path(std::env::current_exe().ok().as_deref()),
+            user_allowlist_path(&default_state_path()),
         )
     }
 
@@ -23,17 +25,37 @@ impl GuiShell {
         state: PersistedState,
         analysis_cache_root: PathBuf,
     ) -> Self {
-        Self::new_with_state_and_cache_root(menu_bar, window, cx, state, analysis_cache_root, None)
+        Self::new_with_state_and_cache_root(
+            menu_bar,
+            window,
+            cx,
+            state,
+            analysis_cache_root,
+            None,
+            None,
+            None,
+        )
     }
 
-    fn new_with_state_and_cache_root(
+    pub(super) fn new_with_state_and_cache_root(
         menu_bar: TopMenuBar,
         window: &mut Window,
         cx: &mut Context<Self>,
         mut state: PersistedState,
         analysis_cache_root: PathBuf,
         plugin_dir: Option<PathBuf>,
+        app_allowlist_path: Option<PathBuf>,
+        user_allowlist_path: Option<PathBuf>,
     ) -> Self {
+        let loaded = load_allowlists(
+            app_allowlist_path.as_deref(),
+            user_allowlist_path.as_deref(),
+        );
+        let audit_plan = Arc::new(
+            gui_audit_plan(loaded.allowlist.clone())
+                .expect("building an audit plan with no custom rules cannot fail"),
+        );
+        let audit_plan_fingerprint = fingerprint_audit_plan(&audit_plan);
         state.normalize_ignore_folder_settings();
         state.active_tab = ResultTab::Overview;
         let i18n = I18n::new(state.locale.resolve());
@@ -238,6 +260,14 @@ impl GuiShell {
         ];
 
         let mut shell = Self {
+            audit_allowlist: loaded.allowlist,
+            allowlist_load_errors: loaded.errors,
+            audit_plan,
+            audit_plan_fingerprint,
+            app_allowlist_path,
+            user_allowlist_path,
+            audit_show_allowed: false,
+            audit_allowed_total: 0,
             state,
             rows,
             row_id_to_index,

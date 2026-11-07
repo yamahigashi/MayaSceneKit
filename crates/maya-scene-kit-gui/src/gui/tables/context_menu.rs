@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::super::{
-    AuditRowCleanState, AuditTableRow, DirtyKind, ExecutionCleanTarget, PathCollectRewriteMode,
-    PathEditTargets, SceneRow, clean_targets_for_threat_findings,
+    AuditModePreference, AuditRowCleanState, AuditTableRow, DirtyKind, ExecutionCleanTarget,
+    PathCollectRewriteMode, PathEditTargets, SceneRow, clean_targets_for_threat_findings,
     path_edit::{
         absolute_override_value_for_entry, missing_path_entry_file_name,
         path_value_edit_supported_for_entry, resolved_target_file_path_for_entry,
@@ -45,6 +45,7 @@ pub(in crate::gui) struct FileContextMenuState {
 pub(in crate::gui) fn file_context_menu_state(
     rows: &[SceneRow],
     row_id: u64,
+    audit_mode: AuditModePreference,
 ) -> FileContextMenuState {
     let Some(row_indices) = file_context_row_indices(rows, row_id) else {
         return FileContextMenuState {
@@ -60,7 +61,8 @@ pub(in crate::gui) fn file_context_menu_state(
     });
     let can_clean = row_indices.iter().any(|&row_index| {
         rows.get(row_index).is_some_and(|row| {
-            file_context_scene_edit_allowed(row) && file_context_has_available_clean_targets(row)
+            file_context_scene_edit_allowed(row)
+                && file_context_has_available_clean_targets(row, audit_mode)
         })
     });
 
@@ -96,7 +98,13 @@ fn file_context_scene_edit_allowed(row: &SceneRow) -> bool {
         )
 }
 
-fn file_context_has_available_clean_targets(row: &SceneRow) -> bool {
+fn file_context_has_available_clean_targets(
+    row: &SceneRow,
+    audit_mode: AuditModePreference,
+) -> bool {
+    if !row.analysis_current_for(audit_mode) {
+        return false;
+    }
     clean_targets_for_threat_findings(row)
         .into_iter()
         .any(|target| !row.pending_clean_targets.contains(&target))

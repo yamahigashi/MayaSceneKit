@@ -777,6 +777,8 @@ pub(super) fn audit_detail_evidence_text(detail: &AuditDetailViewModel) -> Strin
 pub(super) fn audit_detail_field_label(field: AuditDetailFieldKind, i18n: &I18n) -> String {
     use AuditDetailFieldKind::*;
     i18n.text(match field {
+        Allowed => "label.audit_detail.allowed",
+        AllowHash => "label.audit_detail.allow_hash",
         RuleId => "label.audit_detail.rule_id",
         Sink => "label.audit_detail.sink",
         Node => "label.audit_detail.node",

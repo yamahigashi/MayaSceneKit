@@ -124,22 +124,32 @@ pub mod allowlist {
     struct Entry {
         hash: String,
         codes: Vec<String>,
-        #[serde(default, rename = "label")]
-        _label: Option<String>,
-        #[serde(default, rename = "preview")]
-        _preview: Option<String>,
-        #[serde(default, rename = "reason")]
-        _reason: Option<String>,
-        #[serde(default, rename = "added_at")]
-        _added_at: Option<String>,
-        #[serde(default, rename = "added_by")]
-        _added_by: Option<String>,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        preview: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        added_at: Option<String>,
+        #[serde(default)]
+        added_by: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct AllowlistEntryMetadata {
+        pub label: Option<String>,
+        pub preview: Option<String>,
+        pub reason: Option<String>,
+        pub added_at: Option<String>,
+        pub added_by: Option<String>,
     }
 
     /// Validated, merged exact body/code permissions. Earlier layers retain provenance.
     #[derive(Debug, Clone, Default)]
     pub struct AuditAllowlist {
         entries: BTreeMap<(AllowlistHash, String), AllowlistSource>,
+        metadata: BTreeMap<AllowlistHash, AllowlistEntryMetadata>,
     }
 
     impl AuditAllowlist {
@@ -159,6 +169,16 @@ pub mod allowlist {
                 if entry.codes.is_empty() {
                     return Err(AuditAllowlistError::EmptyCodes { entry_index });
                 }
+                result
+                    .metadata
+                    .entry(hash)
+                    .or_insert(AllowlistEntryMetadata {
+                        label: entry.label,
+                        preview: entry.preview,
+                        reason: entry.reason,
+                        added_at: entry.added_at,
+                        added_by: entry.added_by,
+                    });
                 for code in entry.codes {
                     if code.is_empty() {
                         return Err(AuditAllowlistError::InvalidJson {
@@ -176,11 +196,22 @@ pub mod allowlist {
         pub fn merge(layers: impl IntoIterator<Item = Self>) -> Self {
             let mut result = Self::default();
             for layer in layers {
+                for (hash, metadata) in layer.metadata {
+                    result.metadata.entry(hash).or_insert(metadata);
+                }
                 for (key, source) in layer.entries {
                     result.entries.entry(key).or_insert(source);
                 }
             }
             result
+        }
+
+        pub fn entry_metadata(&self, hash: &AllowlistHash) -> Option<&AllowlistEntryMetadata> {
+            self.metadata.get(hash)
+        }
+
+        pub fn len_entries(&self) -> usize {
+            self.metadata.len()
         }
 
         pub fn is_empty(&self) -> bool {
@@ -258,6 +289,86 @@ mod allowlist_tests {
     fn list(entries: serde_json::Value, source: AllowlistSource) -> AuditAllowlist {
         AuditAllowlist::from_json(&json!({"version":1,"entries":entries}).to_string(), source)
             .unwrap()
+    }
+
+    #[test]
+    fn allowlist_metadata_preserves_first_entry_and_layer_without_affecting_fingerprint() {
+        let h1 = format!("sha256:{}", "11".repeat(32));
+        let h2 = format!("sha256:{}", "22".repeat(32));
+        let h3 = format!("sha256:{}", "33".repeat(32));
+        let app_entry = json!({"hash":h1,"codes":["mel_exec"],"label":"Example",
+            "preview":"Example preview","reason":"Example reason","added_at":"2026-11-07","added_by":"Example"});
+        let user = list(
+            json!([
+                {"hash":h1,"codes":["mel_exec","mel_eval"],"label":"Sample","preview":"Sample",
+                 "reason":"Sample","added_at":"Sample","added_by":"Sample"},
+                {"hash":h2,"codes":["mel_exec"]}
+            ]),
+            AllowlistSource::User,
+        );
+        let merged =
+            AuditAllowlist::merge([list(json!([app_entry]), AllowlistSource::App), user.clone()]);
+        let hash = h1.parse().unwrap();
+        assert_eq!(merged.len_entries(), 2);
+        assert_eq!(
+            merged.entry_metadata(&hash),
+            Some(&AllowlistEntryMetadata {
+                label: Some("Example".into()),
+                preview: Some("Example preview".into()),
+                reason: Some("Example reason".into()),
+                added_at: Some("2026-11-07".into()),
+                added_by: Some("Example".into()),
+            })
+        );
+        assert_eq!(
+            merged.entry_metadata(&h2.parse().unwrap()),
+            Some(&AllowlistEntryMetadata::default())
+        );
+        assert_eq!(merged.entry_metadata(&h3.parse().unwrap()), None);
+        assert_eq!(
+            merged.lookup(&hash, "mel_exec").unwrap().source,
+            AllowlistSource::App
+        );
+        assert_eq!(
+            merged.lookup(&hash, "mel_eval").unwrap().source,
+            AllowlistSource::User
+        );
+        let mut changed = app_entry.clone();
+        for key in ["label", "preview", "reason", "added_at", "added_by"] {
+            changed[key] = json!("Sample");
+        }
+        let changed =
+            AuditAllowlist::merge([list(json!([changed]), AllowlistSource::App), user.clone()]);
+        assert_eq!(merged.canonical_digest(), changed.canonical_digest());
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        assert_eq!(
+            fingerprint_audit_plan(&plan.clone().with_allowlist(merged)),
+            fingerprint_audit_plan(&plan.with_allowlist(changed))
+        );
+        let absent = AuditAllowlist::merge([
+            list(
+                json!([{"hash":h1,"codes":["mel_exec"]}]),
+                AllowlistSource::App,
+            ),
+            user,
+        ]);
+        assert_eq!(
+            absent.entry_metadata(&hash),
+            Some(&AllowlistEntryMetadata::default())
+        );
+        assert_eq!(AuditAllowlist::default().len_entries(), 0);
+        let duplicate = list(
+            json!([
+                {"hash":h1,"codes":["mel_exec"],"reason":"Example"},
+                {"hash":h1,"codes":["mel_eval"],"reason":"Sample"}
+            ]),
+            AllowlistSource::App,
+        );
+        assert_eq!(
+            duplicate.entry_metadata(&hash).unwrap().reason.as_deref(),
+            Some("Example")
+        );
+        assert!(duplicate.lookup(&hash, "mel_eval").is_some());
     }
 
     #[test]

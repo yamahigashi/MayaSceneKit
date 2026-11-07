@@ -21,8 +21,8 @@ use maya_scene_kit_audit::{
         build_script_audit_plan,
     },
     scene::{
-        AuditCacheAccess, AuditCacheStore, AuditOptions, AuditSeverity, AuditedSceneSnapshot,
-        fingerprint_audit_plan,
+        AuditAllowlist, AuditCacheAccess, AuditCacheStore, AuditOptions, AuditSeverity,
+        AuditedSceneSnapshot, fingerprint_audit_plan,
     },
 };
 use maya_scene_kit_edit::scene::{
@@ -209,6 +209,7 @@ fn display_audit_rows(rows: Vec<AuditResultRow>) -> Vec<super::AuditTableRow> {
         ]),
         false,
         false,
+        false,
         "",
         default_audit_sort(),
         SupportedLocale::English,
@@ -224,6 +225,7 @@ fn test_audit_row(
     evidence: &[&str],
 ) -> AuditResultRow {
     AuditResultRow {
+        allowed: None,
         key: AuditResultRowKey {
             row_id,
             item_kind: AuditResultItemKind::Finding,
@@ -638,12 +640,14 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
         staged_source_bytes.clone(),
         AuditModePreference::StrictDefault,
         &LoadOptions::default(),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze staged bytes");
     let staged_paths_report = analyzed.paths_report.expect("staged paths");
     let staged_dump_report = analyzed.dump_report.expect("staged dump");
 
     RowJobResult::SceneEdits {
+        audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
         staged,
         audit_mode: AuditModePreference::StrictDefault,
         staged_audit_report: analyzed.audit_report,
@@ -664,10 +668,15 @@ fn dump_script_audit_fixture() -> (SceneRow, AuditResultRowKey) {
     row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
     row.dump_report = result.dump_report;
 
-    let audit_row = build_audit_result_rows(std::slice::from_ref(&row), &[0])
-        .into_iter()
-        .find(|audit_row| audit_row.key.item_kind == AuditResultItemKind::DumpScriptNode)
-        .expect("dump script row");
+    let audit_row = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    )
+    .into_iter()
+    .find(|audit_row| audit_row.key.item_kind == AuditResultItemKind::DumpScriptNode)
+    .expect("dump script row");
 
     (row, audit_row.key)
 }
@@ -2592,7 +2601,12 @@ fn build_audit_result_rows_prefixes_the_source_file() {
     };
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
 
     assert!(!rows.is_empty());
     assert!(
@@ -2625,6 +2639,7 @@ fn audit_table_columns_use_localized_labels() {
 fn filter_audit_result_rows_keeps_only_selected_severities() {
     let rows = vec![
         AuditResultRow {
+            allowed: None,
             key: AuditResultRowKey {
                 row_id: 1,
                 item_kind: AuditResultItemKind::Finding,
@@ -2654,6 +2669,7 @@ fn filter_audit_result_rows_keeps_only_selected_severities() {
             clean_state: AuditRowCleanState::Unsupported,
         },
         AuditResultRow {
+            allowed: None,
             key: AuditResultRowKey {
                 row_id: 1,
                 item_kind: AuditResultItemKind::Finding,
@@ -2705,6 +2721,7 @@ fn build_audit_table_model_dirty_filter_combines_with_severity_filter() {
         &BTreeSet::from([AuditSeverityFilter::Low]),
         true,
         false,
+        false,
         "",
         default_audit_sort(),
         SupportedLocale::English,
@@ -2726,6 +2743,7 @@ fn build_audit_table_model_dedups_only_exact_matches() {
         &rows,
         &BTreeSet::new(),
         &BTreeSet::from([AuditSeverityFilter::Low]),
+        false,
         false,
         true,
         "",
@@ -2754,6 +2772,7 @@ fn build_audit_table_model_search_matches_deduped_scene_names() {
         &BTreeSet::new(),
         &BTreeSet::from([AuditSeverityFilter::Low]),
         false,
+        false,
         true,
         "beta",
         default_audit_sort(),
@@ -2778,6 +2797,7 @@ fn build_audit_table_model_sorts_by_summary() {
         &rows,
         &BTreeSet::new(),
         &BTreeSet::from([AuditSeverityFilter::Low]),
+        false,
         false,
         false,
         "",
@@ -2819,7 +2839,12 @@ fn build_audit_result_rows_marks_script_node_findings_cleanable() {
     };
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
 
     assert!(
         rows.iter().any(|audit_row| {
@@ -2850,7 +2875,12 @@ fn build_audit_result_rows_marks_pending_clean_targets_as_staged() {
             node_name: "literalPythonReview".to_string(),
         });
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
 
     assert!(
         rows.iter().any(|audit_row| {
@@ -2881,6 +2911,7 @@ fn build_audit_table_model_marks_staged_rows_as_dirty() {
 #[test]
 fn audit_context_menu_state_keeps_clean_action_visible_when_blocked_by_other_dirty() {
     let blocked_row = super::AuditTableRow {
+        allowed: None,
         key: AuditResultRowKey {
             row_id: 1,
             item_kind: AuditResultItemKind::DumpScriptNode,
@@ -2943,7 +2974,12 @@ fn build_audit_result_rows_marks_top_level_command_findings_cleanable() {
     };
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let detail = rows.iter().find_map(|audit_row| {
         matches!(
             audit_row.clean_target,
@@ -3006,8 +3042,11 @@ fn file_context_menu_state_enables_clean_for_selected_finding_backed_row() {
     let mut row = test_row(1, &path);
     row.selected = true;
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    row.paths_report = result.paths_report.clone();
+    row.dump_report = result.dump_report.clone();
+    row.analyzed_audit_mode = Some(result.audit_mode);
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3020,7 +3059,7 @@ fn file_context_menu_state_disables_clean_when_clicked_row_has_no_targets() {
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let row = test_row(1, &path);
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3044,7 +3083,11 @@ fn file_context_menu_state_ignores_other_selected_targets_when_clicked_row_is_un
     selected_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     let clicked_row = test_row(2, &clicked_path);
 
-    let state = file_context_menu_state(&[selected_row, clicked_row], 2);
+    let state = file_context_menu_state(
+        &[selected_row, clicked_row],
+        2,
+        AuditModePreference::StrictDefault,
+    );
 
     assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3060,7 +3103,7 @@ fn file_context_menu_state_enables_clean_for_pending_clean_targets() {
         node_name: "Example".to_string(),
     }]);
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3076,7 +3119,7 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_when_alr
         node_name: "uiConfigurationScriptNode".to_string(),
     }]);
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3096,7 +3139,7 @@ fn file_context_menu_state_enables_delete_ui_configuration_script_node_when_dump
     let mut row = test_row(1, &path);
     row.dump_report = result.dump_report;
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(state.can_delete_ui_configuration_script_node);
 }
@@ -3109,7 +3152,7 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_for_proc
     let mut row = test_row(1, &path);
     row.status = FileStatus::Processing(RowOperation::Analyze);
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(!state.can_delete_ui_configuration_script_node);
 }
@@ -3132,7 +3175,7 @@ fn file_context_menu_state_disables_delete_actions_for_replace_rows() {
     row.path_overrides
         .insert(0, "asset/example/edited.fbx".to_string());
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3154,6 +3197,9 @@ fn file_context_menu_state_keeps_clean_enabled_when_selected_rows_mix_eligible_a
     let mut eligible_row = test_row(1, &eligible_path);
     eligible_row.selected = true;
     eligible_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    eligible_row.paths_report = result.paths_report.clone();
+    eligible_row.dump_report = result.dump_report.clone();
+    eligible_row.analyzed_audit_mode = Some(result.audit_mode);
     let mut blocked_row = test_row(2, &blocked_path);
     blocked_row.selected = true;
     blocked_row.dirty_kind = Some(DirtyKind::Replace);
@@ -3161,7 +3207,11 @@ fn file_context_menu_state_keeps_clean_enabled_when_selected_rows_mix_eligible_a
         .path_overrides
         .insert(0, "asset/example/edited.fbx".to_string());
 
-    let state = file_context_menu_state(&[eligible_row, blocked_row], 1);
+    let state = file_context_menu_state(
+        &[eligible_row, blocked_row],
+        1,
+        AuditModePreference::StrictDefault,
+    );
 
     assert!(state.can_clean);
 }
@@ -3185,7 +3235,11 @@ fn file_context_menu_state_keeps_ui_configuration_delete_enabled_when_selection_
     let mut blocked_row = test_row(2, &blocked_path);
     blocked_row.selected = true;
 
-    let state = file_context_menu_state(&[eligible_row, blocked_row], 1);
+    let state = file_context_menu_state(
+        &[eligible_row, blocked_row],
+        1,
+        AuditModePreference::StrictDefault,
+    );
 
     assert!(state.can_delete_ui_configuration_script_node);
 }
@@ -3207,7 +3261,7 @@ fn file_context_menu_state_disables_delete_actions_for_to_ascii_rows() {
         bytes: b"// ascii".to_vec(),
     });
 
-    let state = file_context_menu_state(&[row], 1);
+    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
     assert!(!state.can_clean);
     assert!(!state.can_delete_ui_configuration_script_node);
@@ -3288,7 +3342,12 @@ fn build_audit_result_rows_marks_file_command_callback_findings_cleanable() {
     };
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let audit_row = rows
         .iter()
         .find(|audit_row| {
@@ -3368,6 +3427,7 @@ fn audit_clean_target_prefers_mb_owner_form_for_script_node_body() {
 #[test]
 fn resolve_audit_detail_view_model_returns_none_for_unknown_row_key() {
     let rows = vec![AuditResultRow {
+        allowed: None,
         key: AuditResultRowKey {
             row_id: 99,
             item_kind: AuditResultItemKind::Finding,
@@ -3422,7 +3482,12 @@ fn resolve_audit_clipboard_payload_uses_detail_preview_and_evidence() {
     };
     row.dump_report = result.dump_report;
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let script_row = rows
         .iter()
         .find(|audit_row| audit_row.key.item_kind == AuditResultItemKind::DumpScriptNode)
@@ -3449,7 +3514,12 @@ fn build_audit_result_rows_show_all_dump_info_rows_for_multi_select() {
     first.dump_report = result.dump_report.clone();
     second.dump_report = result.dump_report;
 
-    let rows = build_audit_result_rows(&[first, second], &[0, 1]);
+    let rows = build_audit_result_rows(
+        &[first, second],
+        &[0, 1],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
 
     assert!(
         rows.iter()
@@ -3474,7 +3544,12 @@ fn dump_rows_include_require_and_script_previews() {
     };
     row.dump_report = result.dump_report;
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let require = rows
         .iter()
         .find(|row| row.key.item_kind == AuditResultItemKind::DumpRequire)
@@ -3517,7 +3592,12 @@ fn dump_script_rows_are_cleanable() {
     };
     row.dump_report = result.dump_report;
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let script_row = rows
         .iter()
         .find(|row| row.key.item_kind == AuditResultItemKind::DumpScriptNode)
@@ -3544,7 +3624,12 @@ fn dump_script_rows_use_mb_owner_form_target_when_audit_provenance_is_available(
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dump_report = result.dump_report;
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let script_row = rows
         .iter()
         .find(|row| row.key.item_kind == AuditResultItemKind::DumpScriptNode)
@@ -3608,7 +3693,12 @@ fn plugin_require_rows_are_cleanable_but_maya_require_rows_are_not() {
     );
     row.dump_report = result.dump_report;
 
-    let rows = build_audit_result_rows(std::slice::from_ref(&row), &[0]);
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let maya_row = rows
         .iter()
         .find(|audit_row| audit_row.summary == "require requires maya \"2026\";")
@@ -4234,6 +4324,7 @@ fn cache_restore_updates_queue_coalesced_refresh_for_visible_rows(cx: &mut TestA
                 audit_snapshot: Some(audit_snapshot),
                 audit_access: None,
             }],
+            &shell.audit_plan_fingerprint.clone(),
             window,
             cx,
         );
@@ -4440,6 +4531,7 @@ fn analyze_row_with_options_budget_exceed_returns_blocked_report() {
         &scene,
         AuditModePreference::StrictDefault,
         &LoadOptions::default().with_max_parse_bytes(1),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze");
 
@@ -4472,6 +4564,7 @@ fn apply_job_result_marks_budget_blocked_rows_as_error(cx: &mut TestAppContext) 
         &scene,
         AuditModePreference::StrictDefault,
         &LoadOptions::default().with_max_parse_bytes(1),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze") else {
         panic!("expected analyze result");
@@ -4509,6 +4602,7 @@ fn analyze_row_with_options_returns_blocked_report_for_mb_budget_exceed() {
         &scene,
         AuditModePreference::StrictDefault,
         &LoadOptions::default().with_max_parse_bytes(1),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze");
 
@@ -4533,6 +4627,7 @@ fn analyze_row_with_options_returns_mb_reports_without_semantic_validation() {
         &scene,
         AuditModePreference::StrictDefault,
         &LoadOptions::default(),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze");
 
@@ -4571,6 +4666,7 @@ fn analyze_row_with_options_keeps_paths_and_audit_after_cp932_prefix_line() {
         &scene,
         AuditModePreference::StrictDefault,
         &LoadOptions::default(),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze") else {
         panic!("expected analyze result");
@@ -4609,6 +4705,7 @@ fn analyze_row_with_options_reports_ma_render_globals_callbacks() {
         &scene,
         AuditModePreference::StrictDefault,
         &LoadOptions::default(),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze") else {
         panic!("expected analyze result");
@@ -4642,6 +4739,7 @@ fn analyze_row_bytes_with_options_reports_ma_render_globals_callbacks() {
         bytes,
         AuditModePreference::StrictDefault,
         &LoadOptions::default(),
+        &build_script_audit_plan(vec![], 64).expect("plan"),
     )
     .expect("analyze bytes");
 
@@ -6335,6 +6433,9 @@ fn file_context_clean_stages_finding_backed_script_node_targets(cx: &mut TestApp
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
+            row.paths_report = result.paths_report.clone();
+            row.dump_report = result.dump_report.clone();
+            row.analyzed_audit_mode = Some(result.audit_mode);
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
 
@@ -6375,6 +6476,9 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
+            row.paths_report = result.paths_report.clone();
+            row.dump_report = result.dump_report.clone();
+            row.analyzed_audit_mode = Some(result.audit_mode);
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
             shell.run_clean(window, cx);
@@ -6396,6 +6500,9 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
+            row.paths_report = result.paths_report.clone();
+            row.dump_report = result.dump_report.clone();
+            row.analyzed_audit_mode = Some(result.audit_mode);
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
             shell.undo_stack.clear();
@@ -6520,6 +6627,9 @@ fn file_context_clean_skips_replace_rows_in_selected_group(cx: &mut TestAppConte
             eligible_row.selected = true;
             eligible_row
                 .set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
+            eligible_row.paths_report = result.paths_report.clone();
+            eligible_row.dump_report = result.dump_report.clone();
+            eligible_row.analyzed_audit_mode = Some(result.audit_mode);
 
             let mut blocked_row = test_row(2, &blocked_scene);
             blocked_row.selected = true;
@@ -9718,7 +9828,10 @@ fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
             finding.code.as_str(),
             finding.sink.as_str(),
             &origin,
-            Some(3)
+            Some(3),
+            None,
+            &AuditAllowlist::default(),
+            &I18n::new(SupportedLocale::English),
         ),
         expected
     );
@@ -9727,7 +9840,15 @@ fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
     optional_origin.attr_name = None;
     optional_origin.source_kind = None;
     assert_eq!(
-        build_audit_detail_fields("Example", "Example", &optional_origin, None),
+        build_audit_detail_fields(
+            "Example",
+            "Example",
+            &optional_origin,
+            None,
+            None,
+            &AuditAllowlist::default(),
+            &I18n::new(SupportedLocale::English),
+        ),
         fields(&[
             (RuleId, "Example"),
             (Sink, "Example"),
@@ -9740,7 +9861,15 @@ fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
     optional_origin.attr_name = Some(String::new());
     optional_origin.source_kind = Some(String::new());
     assert_eq!(
-        build_audit_detail_fields("Example", "Example", &optional_origin, None),
+        build_audit_detail_fields(
+            "Example",
+            "Example",
+            &optional_origin,
+            None,
+            None,
+            &AuditAllowlist::default(),
+            &I18n::new(SupportedLocale::English),
+        ),
         fields(&[
             (RuleId, "Example"),
             (Sink, "Example"),
@@ -9771,7 +9900,12 @@ fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
     let mut scene_row = test_row(1, &path);
     scene_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     scene_row.dump_report = result.dump_report;
-    let rows = build_audit_result_rows(&[scene_row], &[0]);
+    let rows = build_audit_result_rows(
+        &[scene_row],
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
     let finding_row = rows
         .iter()
         .find(|row| {
@@ -9834,6 +9968,7 @@ fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
         &[first, second],
         &BTreeSet::new(),
         &default_audit_severity_filter(),
+        false,
         false,
         true,
         "",
@@ -10155,7 +10290,12 @@ fn prepare_audit_detail_code_test(
     kind: AuditResultItemKind,
 ) -> AuditResultRowKey {
     shell.replace_rows(vec![row]);
-    shell.audit_rows = display_audit_rows(build_audit_result_rows(&shell.rows, &[0]));
+    shell.audit_rows = display_audit_rows(build_audit_result_rows(
+        &shell.rows,
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    ));
     shell
         .audit_rows
         .iter()
@@ -10478,6 +10618,9 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
     let mut row = audit_detail_code_test_row(&path);
     row.dirty_kind = Some(DirtyKind::SceneEdits);
     row.staged_audit_report = row.audit_report.clone();
+    row.staged_audit_plan_fingerprint = Some(fingerprint_audit_plan(
+        &build_script_audit_plan(vec![], 64).expect("plan"),
+    ));
     let saved = format!("{}// Example\n", fs::read_to_string(&path).unwrap());
     fs::write(&path, saved).unwrap();
     let expected = Some(GuiFileState::read(&path).unwrap());
@@ -10531,6 +10674,7 @@ fn audit_detail_fix_cache_restore_records_file_state(cx: &mut TestAppContext) {
                 audit_snapshot: Some(snapshot),
                 audit_access: None,
             }],
+            &shell.audit_plan_fingerprint.clone(),
             window,
             cx,
         );
@@ -10555,9 +10699,15 @@ fn audit_detail_fix_dedup_only_blocks_findings(cx: &mut TestAppContext) {
         let mut severities = default_audit_severity_filter();
         severities.insert(AuditSeverityFilter::Info);
         shell.audit_rows = build_audit_table_model(
-            &build_audit_result_rows(&shell.rows, &[0, 1]),
+            &build_audit_result_rows(
+                &shell.rows,
+                &[0, 1],
+                &AuditAllowlist::default(),
+                &I18n::new(SupportedLocale::English),
+            ),
             &BTreeSet::new(),
             &severities,
+            false,
             false,
             true,
             "",
@@ -10750,4 +10900,759 @@ fn audit_detail_fix_unmatched_results_preserve_preview(cx: &mut TestAppContext) 
             window.close_dialog(cx);
         }
     });
+}
+
+mod allowlist_tests {
+    use super::*;
+    use crate::gui::{
+        AnalyzeRowResult, ScriptAuditPlan, allowlist_error_text, gui_audit_plan,
+        helpers::{build_audit_detail_fields, searchable_text_for_audit_row},
+    };
+    use maya_scene_kit_audit::scene::{
+        AllowlistSource, AuditAllowRef, AuditDisposition, AuditFindingCode, allowlist_surface_hash,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    const SCENE: &str = concat!(
+        "//Maya ASCII 2026 scene\n",
+        "requires maya \"2026\";\n",
+        "createNode script -n \"ExampleScriptNode\";\n",
+        "\tsetAttr \".b\" -type \"string\" \"exec \\\"Example\\\"\";\n",
+        "\tsetAttr \".st\" 1;\n",
+    );
+    const HASH: &str = "sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20";
+
+    fn list_json(reason: &str) -> String {
+        json!({"version":1,"entries":[{
+            "hash":HASH,"codes":["mel_exec"],"label":"Example","reason":reason
+        }]})
+        .to_string()
+    }
+
+    fn example_allowlist() -> AuditAllowlist {
+        AuditAllowlist::from_json(&list_json("Example reason"), AllowlistSource::App).unwrap()
+    }
+
+    fn analyze(path: &Path, plan: &ScriptAuditPlan) -> AnalyzeRowResult {
+        let RowJobResult::Analyze(result) = analyze_row_with_options(
+            path,
+            AuditModePreference::StrictDefault,
+            &LoadOptions::default(),
+            plan,
+        )
+        .unwrap() else {
+            panic!("expected analysis");
+        };
+        result
+    }
+
+    fn current_row(id: u64, path: &Path, plan: &ScriptAuditPlan) -> SceneRow {
+        let result = analyze(path, plan);
+        let mut row = test_row(id, path);
+        row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+        row.audit_plan_fingerprint = Some(result.audit_plan_fingerprint);
+        row.paths_report = result.paths_report;
+        row.dump_report = result.dump_report;
+        row.analyzed_audit_mode = Some(result.audit_mode);
+        row.status = FileStatus::Audited;
+        row.sync_findings_count();
+        row
+    }
+
+    fn model(rows: &[AuditResultRow], show: bool, dedup: bool) -> super::super::AuditTableModel {
+        build_audit_table_model(
+            rows,
+            &BTreeSet::new(),
+            &default_audit_severity_filter(),
+            false,
+            show,
+            dedup,
+            "",
+            default_audit_sort(),
+            SupportedLocale::English,
+        )
+    }
+
+    #[gpui::test]
+    fn allowed_analysis_preserves_disposition_and_counts_only_threats(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let allowlist = example_allowlist();
+        let plan = gui_audit_plan(allowlist.clone()).unwrap();
+        let path_result = analyze(&path, &plan);
+        let bytes_result = analyze_row_bytes_with_options(
+            &path,
+            SceneFormat::Ma,
+            ValidationState::Validated,
+            SCENE.as_bytes().to_vec(),
+            AuditModePreference::StrictDefault,
+            &LoadOptions::default(),
+            &plan,
+        )
+        .unwrap();
+        for result in [&path_result, &bytes_result] {
+            let report = &result.audit_report;
+            assert_eq!(report.finding_count(), 1);
+            assert_eq!(report.allowed_finding_count(), 1);
+            assert_eq!(report.disposition, AuditDisposition::Review);
+            assert_eq!(
+                report.findings[0].allowed_by,
+                Some(AuditAllowRef {
+                    hash: HASH.parse().unwrap(),
+                    source: AllowlistSource::App,
+                })
+            );
+            let origin = &report.surface_for(&report.findings[0]).origin;
+            assert_eq!(origin.lang, ExecutionLanguage::Mel);
+            assert_eq!(origin.surface_kind, ExecutionSurfaceKind::ScriptNodeBody);
+            assert_eq!(origin.attr_name.as_deref(), Some(".b"));
+            assert_eq!(origin.trigger, ExecutionTrigger::FileOpen);
+            assert_eq!(origin.source_kind.as_deref(), Some("scriptType=1"));
+            let observation = Loader::new(LoadOptions::default())
+                .observe_analysis_path(&path)
+                .unwrap();
+            let surfaces = observation.execution_surfaces(64).unwrap();
+            let observed = surfaces
+                .iter()
+                .find(|surface| surface.origin.node_name.as_deref() == Some("ExampleScriptNode"))
+                .unwrap();
+            assert_eq!(observed.text.as_ref(), "exec \"Example\"");
+            assert_eq!(
+                allowlist_surface_hash(origin, "exec \"Example\"").to_string(),
+                HASH
+            );
+            assert_eq!(result.audit_plan_fingerprint, fingerprint_audit_plan(&plan));
+        }
+        let empty = gui_audit_plan(AuditAllowlist::default()).unwrap();
+        let control = analyze(&path, &empty);
+        assert_eq!(control.audit_report.allowed_finding_count(), 0);
+        assert_eq!(control.audit_report.finding_count(), 1);
+        assert_eq!(
+            control.audit_report.disposition,
+            AuditDisposition::DenyMalicious
+        );
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.audit_allowlist = allowlist;
+            shell.audit_plan = Arc::new(plan);
+            shell.audit_plan_fingerprint = fingerprint_audit_plan(&shell.audit_plan);
+            shell.replace_rows(vec![test_row(1, &path)]);
+            for result in [path_result, bytes_result] {
+                shell.apply_job_result(
+                    1,
+                    RowOperation::Analyze,
+                    RowJobResult::Analyze(result),
+                    None,
+                    window,
+                    cx,
+                );
+                assert_eq!(shell.rows[0].findings, 0);
+                assert_eq!(shell.rows[0].effective_findings_count(), 0);
+                assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            }
+            shell.apply_job_result(
+                1,
+                RowOperation::Analyze,
+                RowJobResult::Analyze(control),
+                None,
+                window,
+                cx,
+            );
+            assert_eq!(shell.rows[0].findings, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn allowed_rows_toggle_caps_dedup_and_close_hidden_details(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let allowlist = example_allowlist();
+        let plan = gui_audit_plan(allowlist.clone()).unwrap();
+        let mut row = current_row(1, &path, &plan);
+        row.selected = true;
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            assert!(!shell.audit_show_allowed);
+            shell.audit_allowlist = allowlist;
+            shell.replace_rows(vec![row]);
+            shell.refresh_audit_table(cx);
+            let findings = |shell: &GuiShell| {
+                shell
+                    .audit_rows
+                    .iter()
+                    .filter(|row| row.key.item_kind == AuditResultItemKind::Finding)
+                    .count()
+            };
+            assert_eq!(findings(shell), 0);
+            assert_eq!(shell.audit_allowed_total, 1);
+            assert_eq!(
+                shell.i18n().format(
+                    "audit_table.show_allowed",
+                    &[("count", shell.audit_allowed_total.to_string())]
+                ),
+                "Show allowed (1)"
+            );
+            shell.toggle_audit_show_allowed(cx);
+            assert_eq!(findings(shell), 1);
+            let finding = shell
+                .audit_rows
+                .iter()
+                .find(|row| row.key.item_kind == AuditResultItemKind::Finding)
+                .unwrap()
+                .clone();
+            assert_eq!(finding.allowed, Some(AllowlistSource::App));
+            assert_eq!(finding.key.item_index, 0);
+            shell.selected_audit_keys.insert(finding.key.clone());
+            shell.open_audit_detail_dialog(finding.key, window, cx);
+            assert!(shell.audit_detail_dialog.is_some());
+            shell.toggle_audit_show_allowed(cx);
+            assert!(shell.audit_detail_dialog.is_none());
+            assert!(shell.selected_audit_keys.is_empty());
+            let report = shell.rows[0].audit_report.as_mut().unwrap();
+            let finding = report.findings[0].clone();
+            report.findings = vec![finding; 18];
+            report.findings[17].allowed_by = None;
+            shell.refresh_audit_table(cx);
+            assert_eq!(shell.audit_allowed_total, 17);
+            assert_eq!(
+                shell.i18n().format(
+                    "audit_table.show_allowed",
+                    &[("count", shell.audit_allowed_total.to_string())]
+                ),
+                "Show allowed (17)"
+            );
+            assert_eq!(findings(shell), 1);
+            assert_eq!(
+                shell
+                    .audit_rows
+                    .iter()
+                    .find(|row| row.key.item_kind == AuditResultItemKind::Finding)
+                    .unwrap()
+                    .key
+                    .item_index,
+                17
+            );
+            shell.toggle_audit_show_allowed(cx);
+            let indices = shell
+                .audit_rows
+                .iter()
+                .filter(|row| row.key.item_kind == AuditResultItemKind::Finding)
+                .map(|row| row.key.item_index)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(indices, (0..16).chain([17]).collect());
+        });
+        let first = test_audit_row(1, 0, "TestScene", "Example", &["Example"]);
+        let mut second = first.clone();
+        second.key.item_index = 1;
+        second.allowed = Some(AllowlistSource::App);
+        let mixed = model(&[first.clone(), second.clone()], true, true);
+        assert_eq!(mixed.rows.len(), 2);
+        assert_eq!(mixed.rows[0].summary, mixed.rows[1].summary);
+        assert_eq!(
+            searchable_text_for_audit_row(&mixed.rows[0], SupportedLocale::English),
+            searchable_text_for_audit_row(&mixed.rows[1], SupportedLocale::English)
+        );
+        let clipboard = |row: &super::super::AuditTableRow| {
+            build_audit_clipboard_payload(&row.provenance, &row.preview, &row.evidence)
+        };
+        assert_eq!(clipboard(&mixed.rows[0]), clipboard(&mixed.rows[1]));
+        second.allowed = None;
+        assert_eq!(model(&[first.clone(), second], true, true).rows.len(), 1);
+        let allowed_with = |item_index: usize, hash: &str| {
+            let mut row = first.clone();
+            row.key.item_index = item_index;
+            row.allowed = Some(AllowlistSource::App);
+            row.detail_fields.insert(
+                0,
+                AuditDetailField {
+                    kind: AuditDetailFieldKind::AllowHash,
+                    raw: hash.to_string(),
+                },
+            );
+            row
+        };
+        let h1 = format!("sha256:{}", "11".repeat(32));
+        let h2 = format!("sha256:{}", "22".repeat(32));
+        assert_eq!(
+            model(&[allowed_with(2, &h1), allowed_with(3, &h2)], true, true)
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            model(&[allowed_with(2, &h1), allowed_with(3, &h1)], true, true)
+                .rows
+                .len(),
+            1
+        );
+    }
+
+    #[gpui::test]
+    fn allowed_cleaning_uses_unallowed_targets_and_rejects_stale_files(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let allowlist = example_allowlist();
+        let plan = gui_audit_plan(allowlist.clone()).unwrap();
+        let mut row = current_row(1, &path, &plan);
+        assert!(
+            !file_context_menu_state(
+                std::slice::from_ref(&row),
+                1,
+                AuditModePreference::StrictDefault
+            )
+            .can_clean
+        );
+        let rows = build_audit_result_rows(
+            std::slice::from_ref(&row),
+            &[0],
+            &allowlist,
+            &I18n::new(SupportedLocale::English),
+        );
+        let allowed = model(&rows, true, false)
+            .rows
+            .into_iter()
+            .find(|row| row.key.item_kind == AuditResultItemKind::Finding)
+            .unwrap();
+        assert_eq!(allowed.clean_state, AuditRowCleanState::Available);
+        assert!(audit_context_menu_state(&[allowed]).can_clean);
+        let report = row.audit_report.as_mut().unwrap();
+        let mut surface = report.surface_for(&report.findings[0]).clone();
+        surface.origin.node_name = Some("SampleScriptNode".into());
+        let surface_index = report.surfaces.len();
+        report.surfaces.push(surface);
+        let mut allowed = report.findings[0].clone();
+        allowed.surface_index = surface_index;
+        let mut threat = allowed.clone();
+        threat.allowed_by = None;
+        report.findings.extend([allowed, threat]);
+        assert_eq!(
+            clean_targets_for_threat_findings(&row),
+            vec![ExecutionCleanTarget::ScriptNode {
+                node_name: "SampleScriptNode".into()
+            }]
+        );
+        assert!(
+            file_context_menu_state(
+                std::slice::from_ref(&row),
+                1,
+                AuditModePreference::StrictDefault
+            )
+            .can_clean
+        );
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, _, _| {
+            shell.replace_rows(vec![row]);
+            assert_eq!(shell.file_threat_clean_targets_by_row(vec![0]).len(), 1);
+            shell.rows[0]
+                .pending_clean_targets
+                .insert(ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleScriptNode".into(),
+                });
+            let pending = shell.rows[0].pending_clean_targets.clone();
+            shell.rows[0].mark_analysis_stale();
+            assert!(shell.file_threat_clean_targets_by_row(vec![0]).is_empty());
+            assert!(!file_context_menu_state(&shell.rows, 1, shell.state.audit_mode).can_clean);
+            assert_eq!(shell.rows[0].pending_clean_targets, pending);
+        });
+    }
+
+    fn open_shell_with_allowlist_paths(
+        cx: &mut TestAppContext,
+        app: PathBuf,
+        user: PathBuf,
+        cache: PathBuf,
+    ) -> (Entity<GuiShell>, &mut VisualTestContext) {
+        cx.update(init_gui_app);
+        let slot = Rc::new(RefCell::new(None));
+        let built = slot.clone();
+        let (_, visual_cx) = cx.add_window_view(|window, cx| {
+            let menu_bar = TopMenuBar::new(window, cx);
+            let shell = cx.new(|cx| {
+                GuiShell::new_with_state_and_cache_root(
+                    menu_bar,
+                    window,
+                    cx,
+                    PersistedState::default(),
+                    cache,
+                    None,
+                    Some(app),
+                    Some(user),
+                )
+            });
+            built.replace(Some(shell.clone()));
+            Root::new(shell, window, cx)
+        });
+        let shell = slot.borrow().clone().unwrap();
+        (shell, visual_cx)
+    }
+
+    #[gpui::test]
+    fn allowlist_errors_remain_visible_after_scan_and_analysis(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let app = dir.path().join("ExampleApp/allowlist.json");
+        let user = dir.path().join("ExampleUser/allowlist.json");
+        {
+            let (shell, visual_cx) = open_shell_with_allowlist_paths(
+                cx,
+                app.clone(),
+                user.clone(),
+                dir.path().join("ExampleCache"),
+            );
+            shell.update_in(visual_cx, |shell, _, _| {
+                assert_eq!(shell.audit_allowlist.len_entries(), 0);
+                assert!(shell.allowlist_load_errors.is_empty());
+                assert!(
+                    allowlist_error_text(&shell.allowlist_load_errors, &shell.i18n()).is_none()
+                );
+                assert!(shell.status_message.is_none());
+                assert_eq!(
+                    shell.i18n().format(
+                        "audit_table.show_allowed",
+                        &[("count", shell.audit_allowed_total.to_string())]
+                    ),
+                    "Show allowed (0)"
+                );
+            });
+        }
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::create_dir_all(user.parent().unwrap()).unwrap();
+        let hash = format!("sha256:{}", "11".repeat(32));
+        fs::write(
+            &app,
+            json!({"version":1,"entries":[{"hash":hash,"codes":["mel_exec"],
+            "label":"Example","preview":"Example preview","reason":"Example reason",
+            "added_at":"2026-11-07","added_by":"Example"}]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(&user, "{").unwrap();
+        let root = dir.path().join("ExampleWorkspace");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let error = AuditAllowlist::from_json("{", AllowlistSource::User)
+            .unwrap_err()
+            .to_string();
+        let (shell, visual_cx) =
+            open_shell_with_allowlist_paths(cx, app, user.clone(), dir.path().join("SampleCache"));
+        let check_error = |shell: &GuiShell| {
+            assert_eq!(shell.audit_allowlist.len_entries(), 1);
+            assert_eq!(shell.allowlist_load_errors.len(), 1);
+            let text = allowlist_error_text(&shell.allowlist_load_errors, &shell.i18n()).unwrap();
+            assert!(text.contains(user.to_str().unwrap()));
+            assert!(text.contains(&error));
+        };
+        shell.update_in(visual_cx, |shell, window, cx| {
+            check_error(shell);
+            shell.set_workspace_folder(root, window, cx);
+            assert!(shell.workspace_scan_active());
+            check_error(shell);
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, window, cx| {
+            assert!(!shell.workspace_scan_active());
+            check_error(shell);
+            let id = shell.rows[0].id;
+            let result = analyze(&path, &shell.audit_plan);
+            shell.apply_job_result(
+                id,
+                RowOperation::Analyze,
+                RowJobResult::Analyze(result),
+                None,
+                window,
+                cx,
+            );
+            assert!(matches!(
+                shell.status_message,
+                Some(BannerMessage::AnalyzeCompleted { .. })
+            ));
+            check_error(shell);
+            assert!(shell.rows[0].analysis_current_for(shell.state.audit_mode));
+        });
+    }
+
+    #[gpui::test]
+    fn undo_restoring_a_report_from_another_plan_leaves_the_row_stale(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let old_plan = gui_audit_plan(example_allowlist()).unwrap();
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, _, cx| {
+            shell.state.workspace_auto_analyze = false;
+            shell.state.analysis_cache_enabled = false;
+            let current = current_row(1, &path, &shell.audit_plan);
+            let old = current_row(1, &path, &old_plan);
+            let entry = super::super::GuiEditHistoryEntry {
+                transitions: vec![super::super::RowEditTransition {
+                    row_id: 1,
+                    before: old.edit_state(),
+                    after: current.edit_state(),
+                }],
+            };
+            shell.replace_rows(vec![current]);
+            shell.apply_edit_history_entry(&entry, true, cx);
+            assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            shell.apply_edit_history_entry(&entry, false, cx);
+            assert!(shell.rows[0].audit_report.is_some());
+            assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            assert!(shell.file_threat_clean_targets_by_row(vec![0]).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn reload_preserves_edits_and_rejects_old_job_and_cache_plans(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let list_path = dir.path().join("allowlist.json");
+        let empty_plan = gui_audit_plan(AuditAllowlist::default()).unwrap();
+        let old_fingerprint = fingerprint_audit_plan(&empty_plan);
+        let old_analyze = analyze(&path, &empty_plan);
+        let old_snapshot = old_analyze.audit_snapshot.clone().unwrap();
+        let old_staged = staged_clean_result(&path, "ExampleScriptNode");
+        let mut dirty = current_row(2, &path, &empty_plan);
+        let RowJobResult::SceneEdits {
+            staged,
+            staged_source_bytes,
+            ..
+        } = staged_clean_result(&path, "ExampleScriptNode")
+        else {
+            panic!("expected staged edits");
+        };
+        dirty.dirty_artifact = Some(staged.artifact);
+        dirty.staged_source_bytes = Some(staged_source_bytes);
+        dirty.staged_audit_report = dirty.audit_report.clone();
+        dirty.staged_audit_mode = Some(AuditModePreference::StrictDefault);
+        dirty.staged_audit_plan_fingerprint = Some(old_fingerprint.clone());
+        dirty.dirty_kind = Some(DirtyKind::SceneEdits);
+        dirty
+            .pending_clean_targets
+            .insert(ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleScriptNode".into(),
+            });
+        dirty
+            .path_overrides
+            .insert(0, "asset/example/file.fbx".into());
+        let saved_artifact = dirty.dirty_artifact.clone();
+        let saved_bytes = dirty.staged_source_bytes.clone();
+        let saved_targets = dirty.pending_clean_targets.clone();
+        let saved_overrides = dirty.path_overrides.clone();
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state.workspace_auto_analyze = false;
+            shell.state.analysis_cache_enabled = false;
+            shell.app_allowlist_path = Some(list_path.clone());
+            shell.replace_rows(vec![current_row(1, &path, &empty_plan), dirty, test_row(3, &path)]);
+            fs::write(&list_path, list_json("Example reason")).unwrap();
+            shell.workspace_scan_state.in_flight = true;
+            let generation = shell.cache_restore_generation;
+            let selected_generation = shell.selected_auto_analyze_generation;
+            shell.reload_allowlists(window, cx);
+            assert_eq!(shell.cache_restore_generation, generation);
+            assert_eq!(shell.selected_auto_analyze_generation, selected_generation);
+            assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
+            assert_eq!(shell.rows[1].staged_audit_mode, None);
+            assert_eq!(shell.rows[1].dirty_artifact, saved_artifact);
+            assert_eq!(shell.rows[1].staged_source_bytes, saved_bytes);
+            assert_eq!(shell.rows[1].pending_clean_targets, saved_targets);
+            assert_eq!(shell.rows[1].path_overrides, saved_overrides);
+            assert!(matches!(shell.status_message, Some(BannerMessage::AllowlistsReloaded { count: 1, stale_rows: 2 })));
+            let banner = render_banner_message(&shell.i18n(), shell.status_message.as_ref().unwrap());
+            assert_eq!(banner, "Reloaded allowlists: 1 entries 2 file(s) need re-audit; files with unsaved edits update after saving");
+            shell.workspace_scan_state.in_flight = false;
+            shell.rows[0] = current_row(1, &path, &shell.audit_plan);
+            shell.rows[0].selected = true;
+            shell.audit_show_allowed = true;
+            let fingerprint = shell.audit_plan_fingerprint.clone();
+            shell.reload_allowlists(window, cx);
+            assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            assert_eq!(shell.audit_plan_fingerprint, fingerprint);
+            assert!(matches!(shell.status_message, Some(BannerMessage::AllowlistsReloaded { count: 1, stale_rows: 0 })));
+            fs::write(&list_path, list_json("Sample reason")).unwrap();
+            shell.reload_allowlists(window, cx);
+            assert_eq!(shell.audit_plan_fingerprint, fingerprint);
+            assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            let finding = shell.audit_rows.iter().find(|row| row.key.item_kind == AuditResultItemKind::Finding).unwrap();
+            assert_eq!(finding.detail_fields[0].raw, "Sample reason (Distributed (app))");
+            shell.rows[0].selected = false;
+            shell.file_table_viewport_range = 0..0;
+            shell.apply_job_result(1, RowOperation::Analyze, RowJobResult::Analyze(old_analyze), None, window, cx);
+            assert!(shell.rows[0].audit_report.is_some());
+            assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
+            shell.apply_job_result(2, RowOperation::Clean, old_staged, None, window, cx);
+            assert!(shell.rows[1].dirty_artifact.is_some());
+            assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
+            assert_eq!(shell.rows[1].staged_audit_mode, None);
+            assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
+            let edit_state = shell.rows[1].edit_state();
+            shell.rows[1].apply_edit_state(&edit_state);
+            assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
+            let audit_generation = shell.rows[1].audit_generation;
+            shell.apply_job_result(2, RowOperation::Save, RowJobResult::Save {
+                output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
+            }, None, window, cx);
+            assert_eq!(shell.rows[1].audit_generation, audit_generation);
+            assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
+            assert!(shell.rows[1].dirty_artifact.is_none());
+            assert!(shell.rows[1].staged_audit_plan_fingerprint.is_none());
+            let generation = shell.rows[2].audit_generation;
+            shell.apply_cache_restore_updates(vec![super::super::cache_restore::CacheHydrationUpdate {
+                row_id: 3, observe_snapshot: None, observe_access: None,
+                audit_snapshot: Some(old_snapshot), audit_access: None,
+            }], &old_fingerprint, window, cx);
+            assert_eq!(shell.rows[2].audit_generation, generation);
+            assert!(shell.rows[2].audit_report.is_none());
+            // Reload starts a new cache-restore generation, so the in-flight batch with a cache hit is dropped.
+            let cached = analyze(&path, &shell.audit_plan);
+            AuditCacheStore::new(&shell.audit_cache_root)
+                .save(&cached.audit_snapshot.unwrap()).unwrap();
+            ObserveCacheStore::new(&shell.observe_cache_root)
+                .save(&cached.observe_snapshot.unwrap()).unwrap();
+            shell.state.analysis_cache_enabled = true;
+            shell.start_progressive_cache_restore(window, cx);
+            let generation = shell.cache_restore_generation;
+            fs::write(&list_path, "{\"version\":1,\"entries\":[]}").unwrap();
+            shell.reload_allowlists(window, cx);
+            assert_ne!(shell.cache_restore_generation, generation);
+            shell.cancel_progressive_cache_restore();
+        });
+    }
+
+    #[test]
+    fn allowed_details_preserve_metadata_source_and_localized_fallbacks() {
+        use AuditDetailFieldKind::{AllowHash, Allowed, RuleId};
+        let hash = format!("sha256:{}", "11".repeat(32));
+        let origin = ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            attr_name: Some(".b".into()),
+            trigger: ExecutionTrigger::FileOpen,
+            ..ExecutionOrigin::without_chunk_address()
+        };
+        let list = |reason: Option<&str>, label: Option<&str>, source| {
+            AuditAllowlist::from_json(
+            &json!({"version":1,"entries":[{"hash":hash,"codes":["mel_exec"],"reason":reason,"label":label}]}).to_string(), source,
+        ).unwrap()
+        };
+        let allowed = AuditAllowRef {
+            hash: hash.parse().unwrap(),
+            source: AllowlistSource::App,
+        };
+        for (locale, app_source, user_source) in [
+            (SupportedLocale::English, "Distributed (app)", "User (user)"),
+            (
+                SupportedLocale::Japanese,
+                "管理者配布 (app)",
+                "ユーザー (user)",
+            ),
+            (SupportedLocale::Chinese, "管理员分发 (app)", "用户 (user)"),
+        ] {
+            let i18n = I18n::new(locale);
+            let fields = build_audit_detail_fields(
+                "mel_exec",
+                "mel_exec",
+                &origin,
+                Some(4),
+                Some(&allowed),
+                &list(
+                    Some("Example reason"),
+                    Some("Example"),
+                    AllowlistSource::App,
+                ),
+                &i18n,
+            );
+            assert_eq!(
+                [fields[0].kind, fields[1].kind, fields[2].kind],
+                [Allowed, AllowHash, RuleId]
+            );
+            assert_eq!(fields[0].raw, format!("Example reason ({app_source})"));
+            assert_eq!(fields[1].raw, hash);
+            let user_ref = AuditAllowRef {
+                source: AllowlistSource::User,
+                ..allowed.clone()
+            };
+            for (reason, label, value) in [
+                (None, Some("Example"), "Example"),
+                (None, None, "-"),
+                (Some("  "), Some("Example"), "Example"),
+            ] {
+                let fields = build_audit_detail_fields(
+                    "mel_exec",
+                    "mel_exec",
+                    &origin,
+                    Some(4),
+                    Some(&user_ref),
+                    &list(reason, label, AllowlistSource::User),
+                    &i18n,
+                );
+                assert_eq!(fields[0].raw, format!("{value} ({user_source})"));
+            }
+            let plain = build_audit_detail_fields(
+                "mel_exec",
+                "mel_exec",
+                &origin,
+                Some(4),
+                None,
+                &AuditAllowlist::default(),
+                &i18n,
+            );
+            assert_eq!(&fields[2..], plain);
+        }
+        let merged = AuditAllowlist::merge([
+            list(
+                Some("Example reason"),
+                Some("Example"),
+                AllowlistSource::App,
+            ),
+            AuditAllowlist::from_json(
+                &json!({"version":1,"entries":[{"hash":hash,"codes":["mel_eval"]}]}).to_string(),
+                AllowlistSource::User,
+            )
+            .unwrap(),
+        ]);
+        let user_ref = AuditAllowRef {
+            source: AllowlistSource::User,
+            ..allowed
+        };
+        let fields = build_audit_detail_fields(
+            AuditFindingCode::MelEval.as_str(),
+            "mel_eval",
+            &origin,
+            None,
+            Some(&user_ref),
+            &merged,
+            &I18n::new(SupportedLocale::English),
+        );
+        assert_eq!(fields[0].raw, "Example reason (User (user))");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(&path, SCENE).unwrap();
+        let empty = gui_audit_plan(AuditAllowlist::default()).unwrap();
+        let plain_row = current_row(1, &path, &empty);
+        let allowed_row = current_row(1, &path, &gui_audit_plan(example_allowlist()).unwrap());
+        let i18n = I18n::new(SupportedLocale::English);
+        let plain = build_audit_result_rows(&[plain_row], &[0], &AuditAllowlist::default(), &i18n);
+        let allowed = build_audit_result_rows(&[allowed_row], &[0], &example_allowlist(), &i18n);
+        for (plain, allowed) in plain.iter().zip(&allowed) {
+            assert_eq!(
+                build_audit_clipboard_payload(&plain.provenance, &plain.preview, &plain.evidence),
+                build_audit_clipboard_payload(
+                    &allowed.provenance,
+                    &allowed.preview,
+                    &allowed.evidence
+                )
+            );
+            if plain.key.item_kind != AuditResultItemKind::Finding {
+                assert_eq!(plain.detail_fields, allowed.detail_fields);
+            } else {
+                assert_eq!(plain.detail_fields, allowed.detail_fields[2..]);
+            }
+        }
+    }
 }

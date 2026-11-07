@@ -1,6 +1,12 @@
 use super::{super::*, helpers::normalize_path_edit_targets};
 
 impl GuiShell {
+    pub(in crate::gui) fn toggle_audit_show_allowed(&mut self, cx: &mut Context<Self>) {
+        self.audit_show_allowed = !self.audit_show_allowed;
+        self.refresh_audit_table(cx);
+        cx.notify();
+    }
+
     pub(in crate::gui) fn capture_path_order_snapshot(&self) -> Option<PathOrderSnapshot> {
         let model = self.current_path_table_model();
         let mut order_by_target = BTreeMap::new();
@@ -50,6 +56,7 @@ impl GuiShell {
             &self.selected_audit_keys,
             &self.audit_severity_filter,
             self.audit_dirty_only,
+            self.audit_show_allowed,
             self.audit_table_dedup,
             &self.audit_search_query,
             self.audit_sort,

@@ -4,6 +4,7 @@ use std::{
     fs, io,
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -25,13 +26,13 @@ use gpui_component::{
 };
 use maya_scene_kit_audit::{
     audit::{
-        audit_observation, audit_script_nodes_with_options,
+        ScriptAuditPlan, audit_observation, audit_script_nodes_with_options,
         build_parse_budget_blocked_audit_report, build_script_audit_plan,
     },
     scene::{
-        AuditCacheAccess, AuditCacheStore, AuditEvidence, AuditFindingDetail, AuditOptions,
-        AuditReport, AuditSeverity, AuditedSceneSnapshot, StaticAuditFindingDetail,
-        fingerprint_audit_plan,
+        AllowlistSource, AuditAllowRef, AuditAllowlist, AuditCacheAccess, AuditCacheStore,
+        AuditEvidence, AuditFindingDetail, AuditOptions, AuditReport, AuditSeverity,
+        AuditedSceneSnapshot, StaticAuditFindingDetail, fingerprint_audit_plan,
     },
 };
 use maya_scene_kit_edit::scene::{
@@ -72,7 +73,10 @@ use crate::{
         ResultTab, StatusFilter, SupportedLocale, WorkspaceLayoutPreference, bulk_enabled,
         normalize_ignored_folder_name, save_enabled,
     },
-    persistence::{load_persisted_state, save_persisted_state},
+    persistence::{
+        AllowlistLoadError, app_allowlist_path, load_allowlists, load_persisted_state,
+        save_persisted_state, user_allowlist_path,
+    },
 };
 
 actions!(
@@ -118,6 +122,7 @@ actions!(
         MenuAutoAnalyzeParallelism32,
         MenuToggleAnalysisCache,
         MenuPurgeAnalysisCache,
+        MenuReloadAllowlists,
         MenuEditMaxBytes,
         MenuToggleIgnoreFolderNames,
         MenuEditIgnoredFolderNames
@@ -158,6 +163,14 @@ enum AppIconName {
 }
 
 struct GuiShell {
+    audit_allowlist: AuditAllowlist,
+    audit_plan: Arc<ScriptAuditPlan>,
+    audit_plan_fingerprint: String,
+    app_allowlist_path: Option<PathBuf>,
+    user_allowlist_path: Option<PathBuf>,
+    allowlist_load_errors: Vec<AllowlistLoadError>,
+    audit_show_allowed: bool,
+    audit_allowed_total: usize,
     state: PersistedState,
     rows: Vec<SceneRow>,
     row_id_to_index: HashMap<u64, usize>,
@@ -479,8 +492,10 @@ struct SceneRowEditState {
     dirty_kind: Option<DirtyKind>,
     pending_clean_targets: BTreeSet<ExecutionCleanTarget>,
     pending_path_owner_delete_targets: BTreeSet<PathOwnerDeleteTarget>,
+    audit_plan_fingerprint: Option<String>,
     staged_audit_mode: Option<AuditModePreference>,
     staged_audit_report: Option<AuditReport>,
+    staged_audit_plan_fingerprint: Option<String>,
     staged_paths_report: Option<ScenePathsReport>,
     staged_dump_report: Option<SceneDumpReport>,
     staged_source_bytes: Option<Vec<u8>>,
@@ -538,6 +553,8 @@ enum AuditDetailTab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuditDetailFieldKind {
+    Allowed,
+    AllowHash,
     RuleId,
     Sink,
     Node,
@@ -557,6 +574,7 @@ struct AuditDetailField {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuditResultRow {
+    allowed: Option<AllowlistSource>,
     key: AuditResultRowKey,
     scene_name: String,
     severity: AuditSeverity,
@@ -575,6 +593,7 @@ struct AuditResultRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuditTableRow {
+    allowed: Option<AllowlistSource>,
     key: AuditResultRowKey,
     row_keys: Vec<AuditResultRowKey>,
     selected: bool,
@@ -731,8 +750,10 @@ struct SceneRow {
     dirty_kind: Option<DirtyKind>,
     pending_clean_targets: BTreeSet<ExecutionCleanTarget>,
     pending_path_owner_delete_targets: BTreeSet<PathOwnerDeleteTarget>,
+    audit_plan_fingerprint: Option<String>,
     staged_audit_mode: Option<AuditModePreference>,
     staged_audit_report: Option<AuditReport>,
+    staged_audit_plan_fingerprint: Option<String>,
     staged_paths_report: Option<ScenePathsReport>,
     staged_dump_report: Option<SceneDumpReport>,
     staged_source_bytes: Option<Vec<u8>>,
@@ -967,6 +988,7 @@ enum RowOperation {
 }
 
 enum BannerMessage {
+    AllowlistsReloaded { count: usize, stale_rows: usize },
     PersistFailed(String),
     CachePurged,
     WorkspaceLoaded { count: usize, path: PathBuf },
@@ -975,6 +997,7 @@ enum BannerMessage {
     WorkspaceCleared,
     InlinePathEditFailed(String),
     SelectFilesFirst,
+    SelectedFilesNeedReaudit,
     Raw(String),
     NothingDirtyToSave,
     NothingSelectedDirtyToSave,
@@ -990,6 +1013,7 @@ enum DirtyKind {
 }
 
 struct AnalyzeRowResult {
+    audit_plan_fingerprint: String,
     audit_file_state: Option<GuiFileState>,
     audit_report: AuditReport,
     paths_report: Option<ScenePathsReport>,
@@ -1159,6 +1183,8 @@ impl SceneRow {
             pending_path_owner_delete_targets: BTreeSet::new(),
             staged_audit_mode: None,
             staged_audit_report: None,
+            audit_plan_fingerprint: None,
+            staged_audit_plan_fingerprint: None,
             staged_paths_report: None,
             staged_dump_report: None,
             staged_source_bytes: None,
@@ -1309,11 +1335,11 @@ impl SceneRow {
     fn effective_findings_count(&self) -> usize {
         self.staged_audit_report
             .as_ref()
-            .map(|report| report.findings.len())
+            .map(|report| report.finding_count() - report.allowed_finding_count())
             .or_else(|| {
                 self.audit_report
                     .as_ref()
-                    .map(|report| report.findings.len())
+                    .map(|report| report.finding_count() - report.allowed_finding_count())
             })
             .unwrap_or(self.findings)
     }
@@ -1390,6 +1416,8 @@ impl SceneRow {
             pending_path_owner_delete_targets: self.pending_path_owner_delete_targets.clone(),
             staged_audit_mode: self.staged_audit_mode,
             staged_audit_report: self.staged_audit_report.clone(),
+            audit_plan_fingerprint: self.audit_plan_fingerprint.clone(),
+            staged_audit_plan_fingerprint: self.staged_audit_plan_fingerprint.clone(),
             staged_paths_report: self.staged_paths_report.clone(),
             staged_dump_report: self.staged_dump_report.clone(),
             staged_source_bytes: self.staged_source_bytes.clone(),
@@ -1413,6 +1441,8 @@ impl SceneRow {
         self.pending_path_owner_delete_targets = state.pending_path_owner_delete_targets.clone();
         self.staged_audit_mode = state.staged_audit_mode;
         self.staged_audit_report = state.staged_audit_report.clone();
+        self.audit_plan_fingerprint = state.audit_plan_fingerprint.clone();
+        self.staged_audit_plan_fingerprint = state.staged_audit_plan_fingerprint.clone();
         self.staged_paths_report = state.staged_paths_report.clone();
         self.staged_dump_report = state.staged_dump_report.clone();
         self.staged_source_bytes = state.staged_source_bytes.clone();
@@ -1473,6 +1503,7 @@ enum RowJobResult {
         staged: CompositeSceneEditsStageResult,
         audit_mode: AuditModePreference,
         staged_audit_report: AuditReport,
+        audit_plan_fingerprint: String,
         staged_paths_report: ScenePathsReport,
         staged_dump_report: SceneDumpReport,
         staged_source_bytes: Vec<u8>,

@@ -9,6 +9,62 @@ const APP_DIR: &str = "maya-scene-kit";
 const STATE_FILE: &str = "gui-state.json";
 const ANALYSIS_CACHE_DIR: &str = "analysis-cache";
 
+pub fn app_allowlist_path(exe_path: Option<&Path>) -> Option<PathBuf> {
+    exe_path
+        .and_then(Path::parent)
+        .map(|parent| parent.join("allowlist.json"))
+}
+
+pub fn user_allowlist_path(state_path: &Path) -> Option<PathBuf> {
+    state_path
+        .parent()
+        .map(|parent| parent.join("allowlist.json"))
+}
+
+#[derive(Debug)]
+pub struct AllowlistLoadError {
+    pub path: PathBuf,
+    pub error: String,
+}
+
+pub struct LoadedAllowlists {
+    pub allowlist: maya_scene_kit_audit::scene::AuditAllowlist,
+    pub errors: Vec<AllowlistLoadError>,
+}
+
+pub fn load_allowlists(app_path: Option<&Path>, user_path: Option<&Path>) -> LoadedAllowlists {
+    use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+    let mut errors = Vec::new();
+    let mut load = |path: Option<&Path>, source| {
+        let Some(path) = path else {
+            return AuditAllowlist::default();
+        };
+        let result = match fs::read_to_string(path) {
+            Ok(text) => {
+                AuditAllowlist::from_json(text.strip_prefix('\u{feff}').unwrap_or(&text), source)
+                    .map_err(|error| error.to_string())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return AuditAllowlist::default();
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        result.unwrap_or_else(|error| {
+            errors.push(AllowlistLoadError {
+                path: path.to_path_buf(),
+                error,
+            });
+            AuditAllowlist::default()
+        })
+    };
+    let app = load(app_path, AllowlistSource::App);
+    let user = load(user_path, AllowlistSource::User);
+    LoadedAllowlists {
+        allowlist: AuditAllowlist::merge([app, user]),
+        errors,
+    }
+}
+
 pub fn default_state_path() -> PathBuf {
     if cfg!(windows) {
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -108,6 +164,101 @@ mod tests {
         JobHistoryEntry, LocalePreference, PersistedState, PersistedTableColumnWidth,
         PersistedWorkspaceFile, RecentInput, ResultTab, StatusFilter, WorkspaceLayoutPreference,
     };
+
+    #[test]
+    fn allowlist_paths_are_pure_and_preserve_relative_parents() {
+        use super::{app_allowlist_path, user_allowlist_path};
+        use std::path::Path;
+        assert_eq!(
+            app_allowlist_path(Some(Path::new("Example/bin/ExampleApp"))),
+            Some("Example/bin/allowlist.json".into())
+        );
+        assert_eq!(
+            user_allowlist_path(Path::new("Example/config/gui-state.json")),
+            Some("Example/config/allowlist.json".into())
+        );
+        assert_eq!(app_allowlist_path(None), None);
+        assert_eq!(
+            user_allowlist_path(Path::new("gui-state.json")),
+            Some("allowlist.json".into())
+        );
+    }
+
+    #[test]
+    fn allowlist_loading_is_layered_and_reports_only_failed_layers() {
+        use super::load_allowlists;
+        let dir = tempdir().unwrap();
+        let app = dir.path().join("ExampleApp/allowlist.json");
+        let user = dir.path().join("ExampleUser/allowlist.json");
+        let missing = load_allowlists(Some(&app), Some(&user));
+        assert_eq!(missing.allowlist.len_entries(), 0);
+        assert!(missing.errors.is_empty());
+        let absent = load_allowlists(None, None);
+        assert!(absent.allowlist.is_empty());
+        assert!(absent.errors.is_empty());
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::create_dir_all(user.parent().unwrap()).unwrap();
+        let h1 = format!("sha256:{}", "11".repeat(32));
+        let h2 = format!("sha256:{}", "22".repeat(32));
+        let entry = serde_json::json!({"hash":h1,"codes":["mel_exec"],"label":"Example","preview":"Example preview","reason":"Example reason","added_at":"2026-11-07","added_by":"Example"});
+        let app_json = serde_json::json!({"version":1,"entries":[entry]}).to_string();
+        fs::write(&app, &app_json).unwrap();
+        fs::write(&user, "{").unwrap();
+        let invalid = load_allowlists(Some(&app), Some(&user));
+        assert_eq!(invalid.allowlist.len_entries(), 1);
+        assert_eq!(invalid.errors.len(), 1);
+        assert_eq!(invalid.errors[0].path, user);
+        assert!(invalid.errors[0].error.contains("invalid allowlist JSON"));
+        let user_json = serde_json::json!({"version":1,"entries":[
+            {"hash":h1,"codes":["mel_exec","mel_eval"],"label":"Sample","preview":"Sample","reason":"Sample","added_at":"Sample","added_by":"Sample"},
+            {"hash":h2,"codes":["mel_exec"]}
+        ]}).to_string();
+        fs::write(&user, user_json).unwrap();
+        let valid = load_allowlists(Some(&app), Some(&user));
+        assert_eq!(valid.allowlist.len_entries(), 2);
+        assert!(valid.errors.is_empty());
+        let expected = maya_scene_kit_audit::scene::AuditAllowlist::merge([
+            maya_scene_kit_audit::scene::AuditAllowlist::from_json(
+                &app_json,
+                maya_scene_kit_audit::scene::AllowlistSource::App,
+            )
+            .unwrap(),
+            maya_scene_kit_audit::scene::AuditAllowlist::from_json(
+                &serde_json::json!({"version":1,"entries":[
+                    {"hash":h1,"codes":["mel_eval"]}, {"hash":h2,"codes":["mel_exec"]}
+                ]})
+                .to_string(),
+                maya_scene_kit_audit::scene::AllowlistSource::User,
+            )
+            .unwrap(),
+        ]);
+        let plan = maya_scene_kit_audit::audit::build_script_audit_plan(vec![], 64).unwrap();
+        assert_eq!(
+            maya_scene_kit_audit::scene::fingerprint_audit_plan(
+                &plan.clone().with_allowlist(valid.allowlist.clone())
+            ),
+            maya_scene_kit_audit::scene::fingerprint_audit_plan(&plan.with_allowlist(expected)),
+        );
+        assert_eq!(
+            valid
+                .allowlist
+                .entry_metadata(&h1.parse().unwrap())
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("Example reason")
+        );
+        fs::write(&app, format!("\u{feff}{app_json}")).unwrap();
+        let bom = load_allowlists(Some(&app), None);
+        assert_eq!(bom.allowlist.len_entries(), 1);
+        assert!(bom.errors.is_empty());
+        fs::remove_file(&user).unwrap();
+        fs::create_dir(&user).unwrap();
+        let unreadable = load_allowlists(Some(&app), Some(&user));
+        assert_eq!(unreadable.allowlist.len_entries(), 1);
+        assert_eq!(unreadable.errors.len(), 1);
+        assert_eq!(unreadable.errors[0].path, user);
+    }
 
     #[test]
     fn persistence_round_trips_workspace_state() {

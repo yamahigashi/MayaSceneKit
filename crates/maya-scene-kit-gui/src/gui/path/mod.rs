@@ -1012,6 +1012,7 @@ impl GuiShell {
                 row.dirty_artifact = None;
                 row.staged_audit_mode = None;
                 row.staged_audit_report = None;
+                row.staged_audit_plan_fingerprint = None;
                 row.staged_paths_report = None;
                 row.staged_dump_report = None;
                 row.staged_source_bytes = None;
@@ -1191,6 +1192,7 @@ impl GuiShell {
                 row.pending_path_owner_delete_targets.clear();
                 row.staged_audit_mode = None;
                 row.staged_audit_report = None;
+                row.staged_audit_plan_fingerprint = None;
                 row.staged_paths_report = None;
                 row.staged_dump_report = None;
                 row.staged_source_bytes = None;
@@ -1217,6 +1219,7 @@ impl GuiShell {
                 row.pending_path_owner_delete_targets.clear();
                 row.staged_audit_mode = None;
                 row.staged_audit_report = None;
+                row.staged_audit_plan_fingerprint = None;
                 row.staged_paths_report = None;
                 row.staged_dump_report = None;
                 row.staged_source_bytes = None;
@@ -1272,6 +1275,7 @@ impl GuiShell {
         row.pending_path_owner_delete_targets.clear();
         row.staged_audit_mode = None;
         row.staged_audit_report = None;
+        row.staged_audit_plan_fingerprint = None;
         row.staged_paths_report = None;
         row.staged_dump_report = None;
         row.staged_source_bytes = None;
@@ -1317,9 +1321,10 @@ impl GuiShell {
         }
 
         let row_id = self.rows[row_index].id;
+        let plan = Arc::clone(&self.audit_plan);
         let audit_mode = self.rows[row_index]
             .analyzed_audit_mode
-            .unwrap_or(AuditModePreference::StrictDefault);
+            .unwrap_or(self.state.audit_mode);
         let base_report = self.rows[row_index].display_paths_report().cloned();
         let path_overrides = self.rows[row_index].path_overrides.clone();
         let replace_artifact = self.rows[row_index].dirty_artifact.clone();
@@ -1404,6 +1409,7 @@ impl GuiShell {
                     staged_source_bytes.clone(),
                     audit_mode,
                     &load_options,
+                    &plan,
                 )?;
                 let staged_paths_report = analyzed.paths_report.ok_or_else(|| {
                     "parse budget exceeded while rebuilding path preview".to_string()
@@ -1412,6 +1418,7 @@ impl GuiShell {
                     "parse budget exceeded while rebuilding dump preview".to_string()
                 })?;
                 Ok(RowJobResult::SceneEdits {
+                    audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
                     staged,
                     audit_mode,
                     staged_audit_report: analyzed.audit_report,
@@ -1503,6 +1510,7 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         let rows = vec![AuditTableRow {
+            allowed: None,
             key: row_keys.first().cloned().unwrap_or(AuditResultRowKey {
                 row_id: 0,
                 item_kind: AuditResultItemKind::Finding,
