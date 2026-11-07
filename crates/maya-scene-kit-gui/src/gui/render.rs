@@ -142,6 +142,7 @@ impl Render for GuiShell {
             .on_action(cx.listener(Self::on_menu_toggle_analysis_cache))
             .on_action(cx.listener(Self::on_menu_purge_analysis_cache))
             .on_action(cx.listener(Self::on_menu_reload_allowlists))
+            .on_action(cx.listener(Self::on_menu_manage_allowlists))
             .on_action(cx.listener(Self::on_menu_edit_max_bytes))
             .on_action(cx.listener(Self::on_menu_toggle_ignore_folder_names))
             .on_action(cx.listener(Self::on_menu_edit_ignored_folder_names))

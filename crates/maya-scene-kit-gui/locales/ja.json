@@ -327,5 +327,22 @@
   "banner.allowlist_write_failed": "許可リストに書き込めませんでした: {path}: {error}",
   "banner.allowlist_already_present": "選択した検出コードは既に許可リストにあります",
   "audit_allow.file_changed": "解析後にファイルが変更されました。許可リストには書き込んでいません。再監査してください。",
-  "audit_allow.busy": "このファイルは処理中です。"
+  "audit_allow.busy": "このファイルは処理中です。",
+  "settings.manage_allowlists": "許可リストを管理…",
+  "dialog.allowlist_manager_title": "許可リストの管理",
+  "allowlist_manager.app": "App",
+  "allowlist_manager.user": "ユーザー",
+  "allowlist_manager.path_unavailable": "パスを取得できません",
+  "allowlist_manager.empty": "登録はありません",
+  "allowlist_manager.reason": "理由: {reason}",
+  "allowlist_manager.confirm_remove": "削除を確定",
+  "banner.allowlist_removed": "許可リストから削除しました: {label}",
+  "banner.allowlist_file_changed": "許可リストのファイルが変更されました。一覧を更新しました。",
+  "allowlist_manager.busy": "許可リストへの追加を処理中です。",
+  "allowlist_manager.read_only": "読み取り専用です。アプリケーションとともに配布されます。",
+  "allowlist_manager.open_folder": "フォルダーを開く",
+  "allowlist_manager.also_app_tag": "App にも登録",
+  "allowlist_manager.remove_warning": "この登録を削除すると、他の登録にもある場合を除き、そのコードは許可されなくなります。影響するファイルは再監査されます。",
+  "allowlist_manager.empty_user": "登録はありません。監査詳細の「この脅威を許可…」から追加できます。",
+  "allowlist_manager.copy_hash": "ハッシュをコピー"
 }

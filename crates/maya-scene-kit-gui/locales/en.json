@@ -327,5 +327,22 @@
   "banner.allowlist_write_failed": "Could not write allowlist {path}: {error}",
   "banner.allowlist_already_present": "The selected codes are already in the allowlist",
   "audit_allow.file_changed": "The file changed after analysis. No entry was written; re-audit the file.",
-  "audit_allow.busy": "This file is being processed."
+  "audit_allow.busy": "This file is being processed.",
+  "settings.manage_allowlists": "Manage allowlists…",
+  "dialog.allowlist_manager_title": "Manage allowlists",
+  "allowlist_manager.app": "App",
+  "allowlist_manager.user": "User",
+  "allowlist_manager.path_unavailable": "Path not available",
+  "allowlist_manager.empty": "No entries",
+  "allowlist_manager.reason": "Reason: {reason}",
+  "allowlist_manager.confirm_remove": "Confirm removal",
+  "banner.allowlist_removed": "Removed from the allowlist: {label}",
+  "banner.allowlist_file_changed": "The allowlist file changed. The list was refreshed.",
+  "allowlist_manager.busy": "An allowlist addition is in progress.",
+  "allowlist_manager.read_only": "Read-only. Distributed with the application.",
+  "allowlist_manager.open_folder": "Open folder",
+  "allowlist_manager.also_app_tag": "also app",
+  "allowlist_manager.remove_warning": "Removing this entry stops allowing its codes unless another entry also lists them. Affected files are re-audited.",
+  "allowlist_manager.empty_user": "No entries. Use \"Allow this threat…\" in the audit details to add one.",
+  "allowlist_manager.copy_hash": "Copy hash"
 }

@@ -327,5 +327,22 @@
   "banner.allowlist_write_failed": "无法写入允许列表 {path}: {error}",
   "banner.allowlist_already_present": "所选检测代码已在允许列表中",
   "audit_allow.file_changed": "分析后文件已更改，未写入任何条目，请重新审核。",
-  "audit_allow.busy": "此文件正在处理中。"
+  "audit_allow.busy": "此文件正在处理中。",
+  "settings.manage_allowlists": "管理允许列表…",
+  "dialog.allowlist_manager_title": "管理允许列表",
+  "allowlist_manager.app": "App",
+  "allowlist_manager.user": "用户",
+  "allowlist_manager.path_unavailable": "路径不可用",
+  "allowlist_manager.empty": "没有条目",
+  "allowlist_manager.reason": "原因：{reason}",
+  "allowlist_manager.confirm_remove": "确认删除",
+  "banner.allowlist_removed": "已从允许列表删除：{label}",
+  "banner.allowlist_file_changed": "允许列表文件已更改，列表已刷新。",
+  "allowlist_manager.busy": "正在添加到允许列表。",
+  "allowlist_manager.read_only": "只读。随应用程序分发。",
+  "allowlist_manager.open_folder": "打开文件夹",
+  "allowlist_manager.also_app_tag": "App 中也有",
+  "allowlist_manager.remove_warning": "删除此条目后，除非其他条目也列出这些代码，否则它们将不再被允许。受影响的文件将重新审核。",
+  "allowlist_manager.empty_user": "没有条目。请在审核详情中使用“允许此威胁…”添加。",
+  "allowlist_manager.copy_hash": "复制哈希"
 }

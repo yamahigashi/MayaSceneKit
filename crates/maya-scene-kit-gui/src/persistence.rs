@@ -146,7 +146,14 @@ pub(crate) fn format_allowlist_timestamp(now: std::time::SystemTime) -> String {
 }
 
 pub(crate) fn read_user_allowlist(path: &Path) -> Result<UserAllowlistDocument, String> {
-    use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+    read_allowlist_document(path, maya_scene_kit_audit::scene::AllowlistSource::User)
+}
+
+pub(crate) fn read_allowlist_document(
+    path: &Path,
+    source: maya_scene_kit_audit::scene::AllowlistSource,
+) -> Result<UserAllowlistDocument, String> {
+    use maya_scene_kit_audit::scene::AuditAllowlist;
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -158,7 +165,7 @@ pub(crate) fn read_user_allowlist(path: &Path) -> Result<UserAllowlistDocument, 
         Err(error) => return Err(error.to_string()),
     };
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    AuditAllowlist::from_json(text, AllowlistSource::User).map_err(|error| error.to_string())?;
+    AuditAllowlist::from_json(text, source).map_err(|error| error.to_string())?;
     serde_json::from_str(text).map_err(|error| error.to_string())
 }
 
@@ -166,7 +173,6 @@ pub(crate) fn add_user_allowlist_entry(
     path: &Path,
     entry: &UserAllowlistEntry,
 ) -> Result<usize, String> {
-    use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
     use std::collections::BTreeSet;
     let mut document = read_user_allowlist(path)?;
     let existing_codes: BTreeSet<_> = document
@@ -208,7 +214,16 @@ pub(crate) fn add_user_allowlist_entry(
         entry.codes = new_codes.into_iter().collect();
         document.entries.push(entry);
     }
-    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
+    write_user_allowlist_document(path, &document)?;
+    Ok(count)
+}
+
+fn write_user_allowlist_document(
+    path: &Path,
+    document: &UserAllowlistDocument,
+) -> Result<(), String> {
+    use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+    let mut bytes = serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
     AuditAllowlist::from_json(
         std::str::from_utf8(&bytes).map_err(|error| error.to_string())?,
@@ -216,8 +231,27 @@ pub(crate) fn add_user_allowlist_entry(
     )
     .map_err(|error| error.to_string())?;
     maya_scene_kit_edit::scene::write_output_bytes_atomic(path, &bytes)
-        .map_err(|error| error.to_string())?;
-    Ok(count)
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RemoveAllowlistEntryError {
+    Read(String),
+    FileChanged,
+    Write(String),
+}
+
+pub(crate) fn remove_user_allowlist_entry(
+    path: &Path,
+    index: usize,
+    expected: &UserAllowlistEntry,
+) -> Result<(), RemoveAllowlistEntryError> {
+    let mut document = read_user_allowlist(path).map_err(RemoveAllowlistEntryError::Read)?;
+    if document.entries.get(index) != Some(expected) {
+        return Err(RemoveAllowlistEntryError::FileChanged);
+    }
+    document.entries.remove(index);
+    write_user_allowlist_document(path, &document).map_err(RemoveAllowlistEntryError::Write)
 }
 
 pub fn default_state_path() -> PathBuf {
@@ -319,6 +353,175 @@ mod tests {
         JobHistoryEntry, LocalePreference, PersistedState, PersistedTableColumnWidth,
         PersistedWorkspaceFile, RecentInput, ResultTab, StatusFilter, WorkspaceLayoutPreference,
     };
+
+    const A0: &str = r#"{"hash":"sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20","codes":["mel_exec"],"label":"ExampleApp"}"#;
+    const A1: &str = r#"{"hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","codes":["mel_python"],"label":"Sample"}"#;
+    const U0: &str = r#"{"hash":"sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20","codes":["mel_exec","mel_python"],"label":"ExampleScriptNode","preview":"Example preview\nSample preview","reason":"Example reason","added_at":"2026-11-07T09:30:00Z","added_by":"Example"}"#;
+    const U1: &str = r#"{"hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","codes":["mel_eval"]}"#;
+    const U2: &str = r#"{"hash":"sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20","codes":["mel_python"],"label":"Sample"}"#;
+    const E0: &str = "{\n  \"version\": 1,\n  \"entries\": []\n}\n";
+    const E1: &str = r#"{
+  "version": 1,
+  "entries": [
+    {
+      "hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "codes": [
+        "mel_eval"
+      ]
+    }
+  ]
+}
+"#;
+    const E2: &str = r#"{
+  "version": 1,
+  "entries": [
+    {
+      "hash": "sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20",
+      "codes": [
+        "mel_python"
+      ],
+      "label": "Sample"
+    }
+  ]
+}
+"#;
+
+    fn document_json(records: &[&str]) -> String {
+        format!("{{\"version\":1,\"entries\":[{}]}}\n", records.join(","))
+    }
+
+    #[test]
+    fn allowlist_document_reader_preserves_sources_and_order() {
+        use super::read_allowlist_document;
+        use maya_scene_kit_audit::scene::AllowlistSource;
+        let dir = tempdir().unwrap();
+        for (folder, source, records) in [
+            ("ExampleApp", AllowlistSource::App, [A0, A1]),
+            ("ExampleUser", AllowlistSource::User, [U0, U1]),
+        ] {
+            let path = dir.path().join(folder).join("allowlist.json");
+            let empty = read_allowlist_document(&path, source).unwrap();
+            assert_eq!(empty.version, 1);
+            assert!(empty.entries.is_empty());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, document_json(&records)).unwrap();
+            let document = read_allowlist_document(&path, source).unwrap();
+            assert_eq!(document.version, 1);
+            assert_eq!(
+                document.entries,
+                records.map(
+                    |record| serde_json::from_str::<super::UserAllowlistEntry>(record).unwrap()
+                )
+            );
+            for (invalid, prefix) in [
+                ("{", "invalid allowlist JSON:"),
+                (
+                    r#"{"version":2,"entries":[]}"#,
+                    "unsupported allowlist version: 2",
+                ),
+                (
+                    r#"{"version":1,"entries":[],"Example":true}"#,
+                    "invalid allowlist JSON:",
+                ),
+            ] {
+                fs::write(&path, invalid).unwrap();
+                let error = read_allowlist_document(&path, source).unwrap_err();
+                if prefix.starts_with("unsupported") {
+                    assert_eq!(error, prefix);
+                } else {
+                    assert!(error.starts_with(prefix), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remove_user_allowlist_entry_preserves_other_entries() {
+        use super::{
+            RemoveAllowlistEntryError, UserAllowlistEntry, read_user_allowlist,
+            remove_user_allowlist_entry,
+        };
+        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ExampleUser/allowlist.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let [u0, u1, u2] =
+            [U0, U1, U2].map(|record| serde_json::from_str::<UserAllowlistEntry>(record).unwrap());
+        for (input, expected, bytes, remaining) in [
+            (document_json(&[U0, U1]), &u0, E1, vec![u1.clone()]),
+            (E1.to_string(), &u1, E0, vec![]),
+            (document_json(&[U0, U2]), &u0, E2, vec![u2.clone()]),
+        ] {
+            fs::write(&path, input).unwrap();
+            assert_eq!(remove_user_allowlist_entry(&path, 0, expected), Ok(()));
+            assert!(path.is_file());
+            assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
+            assert_eq!(read_user_allowlist(&path).unwrap().entries, remaining);
+            AuditAllowlist::from_json(bytes, AllowlistSource::User).unwrap();
+        }
+        let input = document_json(&[U0, U1]);
+        fs::write(&path, &input).unwrap();
+        for (index, expected) in [(0, &u2), (2, &u0)] {
+            assert_eq!(
+                remove_user_allowlist_entry(&path, index, expected),
+                Err(RemoveAllowlistEntryError::FileChanged)
+            );
+            assert_eq!(fs::read(&path).unwrap(), input.as_bytes());
+        }
+        for (original, changed) in [
+            ("ExampleScriptNode", "SampleScriptNode"),
+            ("Example reason", "Sample reason"),
+        ] {
+            let changed_entry = U0.replace(original, changed);
+            let changed_file = document_json(&[&changed_entry, U1]);
+            fs::write(&path, &changed_file).unwrap();
+            assert_eq!(
+                remove_user_allowlist_entry(&path, 0, &u0),
+                Err(RemoveAllowlistEntryError::FileChanged)
+            );
+            assert_eq!(fs::read(&path).unwrap(), changed_file.as_bytes());
+        }
+        fs::write(&path, "{").unwrap();
+        assert!(matches!(
+            remove_user_allowlist_entry(&path, 0, &u0),
+            Err(RemoveAllowlistEntryError::Read(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"{");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            remove_user_allowlist_entry(&path, 0, &u0),
+            Err(RemoveAllowlistEntryError::Read(_))
+        ));
+        assert!(fs::read_dir(&path).unwrap().next().is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            struct RestoreMode(PathBuf);
+            impl Drop for RestoreMode {
+                fn drop(&mut self) {
+                    fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+            fs::remove_dir(&path).unwrap();
+            let input = document_json(&[U0]);
+            fs::write(&path, &input).unwrap();
+            let parent = path.parent().unwrap();
+            let _restore = RestoreMode(parent.to_path_buf());
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o555)).unwrap();
+            if tempfile::NamedTempFile::new_in(parent).is_ok() {
+                eprintln!(
+                    "Unix Write case skipped: parent mode 0o555 still permits temporary files"
+                );
+                return;
+            }
+            assert!(matches!(
+                remove_user_allowlist_entry(&path, 0, &u0),
+                Err(RemoveAllowlistEntryError::Write(_))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), input.as_bytes());
+        }
+    }
 
     #[test]
     fn user_name_selection_skips_empty_values() {

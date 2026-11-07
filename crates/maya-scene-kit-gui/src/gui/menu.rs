@@ -8,6 +8,18 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         self.reload_allowlists(window, cx);
+        if self.allowlist_manager.is_some() {
+            self.refresh_allowlist_manager_data(cx);
+        }
+    }
+
+    pub(super) fn on_menu_manage_allowlists(
+        &mut self,
+        _: &MenuManageAllowlists,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_allowlist_manager_dialog(window, cx);
     }
 
     pub(super) fn reload_allowlists(&mut self, window: &mut Window, cx: &mut Context<Self>) {

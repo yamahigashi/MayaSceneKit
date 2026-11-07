@@ -74,8 +74,8 @@ use crate::{
         normalize_ignored_folder_name, save_enabled,
     },
     persistence::{
-        AllowlistLoadError, app_allowlist_path, load_allowlists, load_persisted_state,
-        save_persisted_state, user_allowlist_path,
+        AllowlistLoadError, UserAllowlistDocument, UserAllowlistEntry, app_allowlist_path,
+        load_allowlists, load_persisted_state, save_persisted_state, user_allowlist_path,
     },
 };
 
@@ -123,6 +123,7 @@ actions!(
         MenuToggleAnalysisCache,
         MenuPurgeAnalysisCache,
         MenuReloadAllowlists,
+        MenuManageAllowlists,
         MenuEditMaxBytes,
         MenuToggleIgnoreFolderNames,
         MenuEditIgnoredFolderNames
@@ -162,6 +163,32 @@ enum AppIconName {
     FileQuestionMark,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AllowlistManagerTab {
+    User,
+    App,
+}
+
+#[derive(Clone, Debug)]
+struct AllowlistManagerState {
+    app: AllowlistManagerLayer,
+    user: AllowlistManagerLayer,
+    selected: AllowlistManagerTab,
+    pending_remove: Option<PendingAllowlistRemoval>,
+}
+
+#[derive(Clone, Debug)]
+struct AllowlistManagerLayer {
+    path: Option<PathBuf>,
+    document: Result<UserAllowlistDocument, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingAllowlistRemoval {
+    index: usize,
+    expected: UserAllowlistEntry,
+}
+
 struct GuiShell {
     audit_allowlist: AuditAllowlist,
     audit_plan: Arc<ScriptAuditPlan>,
@@ -169,6 +196,7 @@ struct GuiShell {
     app_allowlist_path: Option<PathBuf>,
     user_allowlist_path: Option<PathBuf>,
     allowlist_load_errors: Vec<AllowlistLoadError>,
+    allowlist_manager: Option<AllowlistManagerState>,
     audit_show_allowed: bool,
     audit_allowed_total: usize,
     state: PersistedState,
@@ -1024,6 +1052,9 @@ enum RowOperation {
 enum BannerMessage {
     AllowlistAdded { count: usize },
     AllowlistAlreadyPresent,
+    AllowlistRemoved { label: String },
+    AllowlistFileChanged,
+    AllowlistReadFailed { path: PathBuf, error: String },
     AllowlistWriteFailed { path: PathBuf, error: String },
     AllowlistsReloaded { count: usize, stale_rows: usize },
     PersistFailed(String),
@@ -1555,6 +1586,7 @@ enum RowJobResult {
     },
 }
 
+mod allowlist_manager_dialog;
 mod audit_detail_dialog;
 mod auto_analyze;
 mod cache_maintenance;

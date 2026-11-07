@@ -262,6 +262,7 @@ impl GuiShell {
         let mut shell = Self {
             audit_allowlist: loaded.allowlist,
             allowlist_load_errors: loaded.errors,
+            allowlist_manager: None,
             audit_plan,
             audit_plan_fingerprint,
             app_allowlist_path,
