@@ -1,6 +1,54 @@
 use super::*;
 
 impl GuiShell {
+    pub(super) fn on_menu_reload_allowlists(
+        &mut self,
+        _: &MenuReloadAllowlists,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_allowlists(window, cx);
+    }
+
+    pub(super) fn reload_allowlists(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let loaded = load_allowlists(
+            self.app_allowlist_path.as_deref(),
+            self.user_allowlist_path.as_deref(),
+        );
+        let plan = Arc::new(
+            gui_audit_plan(loaded.allowlist.clone())
+                .expect("building an audit plan with no custom rules cannot fail"),
+        );
+        let fingerprint = fingerprint_audit_plan(&plan);
+        let changed = fingerprint != self.audit_plan_fingerprint;
+        self.audit_allowlist = loaded.allowlist;
+        self.allowlist_load_errors = loaded.errors;
+        self.audit_plan = plan;
+        self.audit_plan_fingerprint = fingerprint;
+        let mut stale_rows = 0;
+        if changed {
+            for row in &mut self.rows {
+                if row.audit_report.is_some() || row.staged_audit_report.is_some() {
+                    row.mark_analysis_stale();
+                    row.staged_audit_mode = None;
+                    stale_rows += 1;
+                }
+            }
+        }
+        self.refresh_audit_table(cx);
+        if changed && !self.workspace_scan_active() {
+            self.start_progressive_cache_restore(window, cx);
+            self.schedule_selected_auto_analysis(window, cx);
+            self.sync_viewport_auto_analyze(window, cx);
+            self.schedule_workspace_auto_analysis_if_enabled(window, cx);
+        }
+        self.status_message = Some(BannerMessage::AllowlistsReloaded {
+            count: self.audit_allowlist.len_entries(),
+            stale_rows,
+        });
+        cx.notify();
+    }
+
     pub(super) fn on_menu_select_folder(
         &mut self,
         _: &MenuSelectFolder,

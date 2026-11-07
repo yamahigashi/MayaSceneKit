@@ -384,7 +384,8 @@ impl TableDelegate for FileTableDelegate {
         let replace_label = i18n.text("action.replace_path");
         let save_label = i18n.text("action.save");
         let undo_label = i18n.text("action.undo_all_changes");
-        let clean_state = file_context_menu_state(&view.read(cx).rows, row.id);
+        let clean_state =
+            file_context_menu_state(&view.read(cx).rows, row.id, view.read(cx).state.audit_mode);
         let menu = menu.item(PopupMenuItem::new(copy_label).on_click({
             let view = view.clone();
             let row_id = row.id;

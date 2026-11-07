@@ -296,5 +296,16 @@
   "audit_detail.code_load_failed": "Could not load the full text ({error}); showing the preview.",
   "audit_detail.code_unavailable": "Full text is not available for this item; showing the preview.",
   "audit_detail.code_file_changed": "The file changed after analysis; showing the preview.",
-  "audit_detail.code_too_large": "The full text is too large to display; showing the preview."
+  "audit_detail.code_too_large": "The full text is too large to display; showing the preview.",
+  "settings.reload_allowlists": "Reload allowlists",
+  "banner.allowlist_load_failed": "Could not load allowlist {path}: {error}",
+  "banner.allowlists_reloaded": "Reloaded allowlists: {count} entries",
+  "audit_table.show_allowed": "Show allowed ({count})",
+  "label.allowed": "Allowed",
+  "label.audit_detail.allowed": "Allowed",
+  "label.audit_detail.allow_hash": "Allow hash",
+  "audit_value.allowlist_source.app": "Distributed (app)",
+  "audit_value.allowlist_source.user": "User (user)",
+  "banner.allowlists_stale_rows": "{count} file(s) need re-audit; files with unsaved edits update after saving",
+  "banner.selected_files_need_reaudit": "The selected files need re-audit before their threats can be removed"
 }

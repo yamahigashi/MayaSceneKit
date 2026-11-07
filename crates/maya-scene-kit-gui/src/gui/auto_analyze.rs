@@ -382,6 +382,7 @@ impl GuiShell {
         };
         self.rows[index].status = FileStatus::Processing(RowOperation::Analyze);
         let path = self.rows[index].path.clone();
+        let plan = Arc::clone(&self.audit_plan);
         let load_options = self.scene_load_options();
         let view = cx.entity();
 
@@ -390,12 +391,11 @@ impl GuiShell {
                 let executor = cx.background_executor().clone();
                 let mut async_cx = cx.clone();
                 async move {
-                    let result =
-                        executor
-                            .spawn(async move {
-                                analyze_row_with_options(&path, audit_mode, &load_options)
-                            })
-                            .await;
+                    let result = executor
+                        .spawn(async move {
+                            analyze_row_with_options(&path, audit_mode, &load_options, &plan)
+                        })
+                        .await;
                     let _ = async_cx.update_window_entity(
                         &view,
                         |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {

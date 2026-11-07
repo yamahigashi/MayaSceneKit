@@ -25,8 +25,8 @@ pub mod scene {
             AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
         },
         public::allowlist::{
-            AllowlistHash, AllowlistSource, AuditAllowRef, AuditAllowlist, AuditAllowlistError,
-            allowlist_surface_hash,
+            AllowlistEntryMetadata, AllowlistHash, AllowlistSource, AuditAllowRef, AuditAllowlist,
+            AuditAllowlistError, allowlist_surface_hash,
         },
         public::audit::{
             AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,

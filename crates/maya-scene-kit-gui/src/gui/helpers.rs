@@ -5,6 +5,8 @@ use super::{path_edit::normalize_path_edit_targets, *};
 pub(super) fn build_audit_result_rows(
     rows: &[SceneRow],
     selected: &[usize],
+    allowlist: &AuditAllowlist,
+    i18n: &I18n,
 ) -> Vec<AuditResultRow> {
     let mut out = Vec::new();
     for &index in selected {
@@ -12,18 +14,23 @@ pub(super) fn build_audit_result_rows(
             continue;
         };
         if let Some(report) = row.display_audit_report() {
-            for (finding_index, finding) in report
-                .findings
-                .iter()
-                .enumerate()
-                .take(AUDIT_RESULTS_PER_FILE)
-            {
+            let mut counts = [0usize; 2];
+            for (finding_index, finding) in report.findings.iter().enumerate() {
+                let count = &mut counts[usize::from(finding.allowed_by.is_some())];
+                if *count >= AUDIT_RESULTS_PER_FILE {
+                    continue;
+                }
+                *count += 1;
                 let surface = report.surface_for(finding);
                 let clean_target = clean_target_for_execution_origin(&surface.origin);
                 let clean_state = audit_row_clean_state(row, clean_target.as_ref());
                 let dirty = audit_item_dirty(row, clean_target.as_ref());
                 let source_line = audit_source_line(row, &surface.origin);
                 out.push(AuditResultRow {
+                    allowed: finding
+                        .allowed_by
+                        .as_ref()
+                        .map(|reference| reference.source),
                     key: AuditResultRowKey {
                         row_id: row.id,
                         item_kind: AuditResultItemKind::Finding,
@@ -41,6 +48,9 @@ pub(super) fn build_audit_result_rows(
                         finding.sink.as_str(),
                         &surface.origin,
                         source_line,
+                        finding.allowed_by.as_ref(),
+                        allowlist,
+                        i18n,
                     ),
                     source_line,
                     evidence: finding.evidence.iter().map(render_audit_evidence).collect(),
@@ -57,12 +67,42 @@ pub(super) fn build_audit_result_rows(
     out
 }
 
+pub(super) fn count_allowed_findings(rows: &[SceneRow], selected: &[usize]) -> usize {
+    selected
+        .iter()
+        .filter_map(|&index| rows.get(index))
+        .filter_map(SceneRow::display_audit_report)
+        .map(AuditReport::allowed_finding_count)
+        .sum()
+}
+
+pub(super) fn allowlist_error_text(errors: &[AllowlistLoadError], i18n: &I18n) -> Option<String> {
+    (!errors.is_empty()).then(|| {
+        errors
+            .iter()
+            .map(|error| {
+                i18n.format(
+                    "banner.allowlist_load_failed",
+                    &[
+                        ("path", error.path.display().to_string()),
+                        ("error", error.error.clone()),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 pub(super) fn clean_targets_for_threat_findings(row: &SceneRow) -> Vec<ExecutionCleanTarget> {
     let Some(report) = row.display_audit_report() else {
         return Vec::new();
     };
     let mut targets = BTreeSet::<ExecutionCleanTarget>::new();
     for finding in &report.findings {
+        if finding.allowed_by.is_some() {
+            continue;
+        }
         let surface = report.surface_for(finding);
         if let Some(target) = clean_target_for_execution_origin(&surface.origin) {
             targets.insert(target);
@@ -77,6 +117,7 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
         let clean_target = dump_require_clean_target(require);
         let clean_state = audit_row_clean_state(row, clean_target.as_ref());
         rows.push(AuditResultRow {
+            allowed: None,
             key: AuditResultRowKey {
                 row_id: row.id,
                 item_kind: AuditResultItemKind::DumpRequire,
@@ -110,6 +151,7 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
         let clean_target = dump_script_clean_target(row, entry);
         let clean_state = audit_row_clean_state(row, clean_target.as_ref());
         rows.push(AuditResultRow {
+            allowed: None,
             key: AuditResultRowKey {
                 row_id: row.id,
                 item_kind: AuditResultItemKind::DumpScriptNode,
@@ -245,6 +287,9 @@ pub(super) fn build_audit_detail_fields(
     sink: &str,
     origin: &ExecutionOrigin,
     source_line: Option<usize>,
+    allowed_by: Option<&AuditAllowRef>,
+    allowlist: &AuditAllowlist,
+    i18n: &I18n,
 ) -> Vec<AuditDetailField> {
     use AuditDetailFieldKind::*;
     let mut fields = vec![
@@ -257,6 +302,42 @@ pub(super) fn build_audit_detail_fields(
             raw: sink.to_string(),
         },
     ];
+    if let Some(reference) = allowed_by {
+        let metadata = allowlist.entry_metadata(&reference.hash);
+        let value = metadata
+            .and_then(|metadata| {
+                metadata
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        metadata
+                            .label
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
+            })
+            .unwrap_or("-");
+        let source = i18n.text(match reference.source {
+            AllowlistSource::App => "audit_value.allowlist_source.app",
+            AllowlistSource::User => "audit_value.allowlist_source.user",
+        });
+        fields.splice(
+            0..0,
+            [
+                AuditDetailField {
+                    kind: Allowed,
+                    raw: format!("{value} ({source})"),
+                },
+                AuditDetailField {
+                    kind: AllowHash,
+                    raw: reference.hash.to_string(),
+                },
+            ],
+        );
+    }
     for (kind, raw) in [(Node, &origin.node_name), (Attribute, &origin.attr_name)] {
         if let Some(raw) = raw {
             fields.push(AuditDetailField {
@@ -314,6 +395,7 @@ pub(super) fn build_audit_table_model(
     selected_keys: &BTreeSet<AuditResultRowKey>,
     filter: &BTreeSet<AuditSeverityFilter>,
     dirty_only: bool,
+    show_allowed: bool,
     dedup: bool,
     search_query: &str,
     sort: AuditTableSort,
@@ -321,6 +403,8 @@ pub(super) fn build_audit_table_model(
 ) -> AuditTableModel {
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct AuditDedupKey {
+        allowed: Option<AllowlistSource>,
+        allow_hash: Option<String>,
         severity_rank: u8,
         summary: String,
         code: String,
@@ -342,6 +426,7 @@ pub(super) fn build_audit_table_model(
     let filtered = filter_audit_result_rows(rows, filter)
         .into_iter()
         .filter(|row| !dirty_only || row.dirty)
+        .filter(|row| show_allowed || row.allowed.is_none())
         .collect::<Vec<_>>();
     let mut display_rows = Vec::new();
     if dedup {
@@ -349,6 +434,12 @@ pub(super) fn build_audit_table_model(
         let mut group_indices = BTreeMap::<AuditDedupKey, usize>::new();
         for row in filtered {
             let group_key = AuditDedupKey {
+                allowed: row.allowed,
+                allow_hash: row
+                    .detail_fields
+                    .iter()
+                    .find(|field| field.kind == AuditDetailFieldKind::AllowHash)
+                    .map(|field| field.raw.clone()),
                 severity_rank: audit_severity_rank(row.severity),
                 summary: row.summary.clone(),
                 code: row.code.clone(),
@@ -386,6 +477,7 @@ pub(super) fn build_audit_table_model(
                 )
             };
             display_rows.push(AuditTableRow {
+                allowed: group.row.allowed,
                 key: group.row.key.clone(),
                 row_keys: group.row_keys,
                 selected: selected_keys.contains(&group.row.key),
@@ -409,6 +501,7 @@ pub(super) fn build_audit_table_model(
         display_rows = filtered
             .into_iter()
             .map(|row| AuditTableRow {
+                allowed: row.allowed,
                 key: row.key.clone(),
                 row_keys: vec![row.key.clone()],
                 selected: selected_keys.contains(&row.key),
@@ -1738,13 +1831,19 @@ pub(super) fn analyze_row(
     path: &Path,
     audit_mode: AuditModePreference,
 ) -> Result<RowJobResult, String> {
-    analyze_row_with_options(path, audit_mode, &LoadOptions::default())
+    analyze_row_with_options(
+        path,
+        audit_mode,
+        &LoadOptions::default(),
+        &gui_audit_plan(AuditAllowlist::default()).map_err(|err| err.to_string())?,
+    )
 }
 
 pub(super) fn analyze_row_with_options(
     path: &Path,
     audit_mode: AuditModePreference,
     load_options: &LoadOptions,
+    plan: &ScriptAuditPlan,
 ) -> Result<RowJobResult, String> {
     let started_at = Instant::now();
     let audit_file_state = GuiFileState::read(path).ok();
@@ -1755,6 +1854,7 @@ pub(super) fn analyze_row_with_options(
                 audit_mode,
                 load_options,
                 started_at.elapsed(),
+                plan,
             )?;
             result.audit_file_state = audit_file_state;
             Ok(RowJobResult::Analyze(result))
@@ -1763,17 +1863,17 @@ pub(super) fn analyze_row_with_options(
             maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { .. }
             | maya_scene_kit_observe::scene::SceneToolError::MbParseBudgetExceeded { .. },
         ) => {
-            let plan = gui_audit_plan().map_err(|err| err.to_string())?;
             let options = audit_options_from_preference(audit_mode);
-            let audit_report = audit_script_nodes_with_options(path, &plan, load_options, options)
+            let audit_report = audit_script_nodes_with_options(path, plan, load_options, options)
                 .map_err(|err| err.to_string())?;
             let audit_snapshot = AuditedSceneSnapshot::new(
                 audit_report.clone(),
                 options,
-                fingerprint_audit_plan(&plan),
+                fingerprint_audit_plan(plan),
             )
             .map_err(|err| err.to_string())?;
             Ok(RowJobResult::Analyze(AnalyzeRowResult {
+                audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state,
                 audit_report,
                 paths_report: None,
@@ -1795,6 +1895,7 @@ pub(super) fn analyze_row_bytes_with_options(
     bytes: Vec<u8>,
     audit_mode: AuditModePreference,
     load_options: &LoadOptions,
+    plan: &ScriptAuditPlan,
 ) -> Result<AnalyzeRowResult, String> {
     let started_at = Instant::now();
     match Loader::new(load_options.clone()).observe_analysis_bytes(
@@ -1803,29 +1904,33 @@ pub(super) fn analyze_row_bytes_with_options(
         validation_state,
         bytes,
     ) {
-        Ok(observation) => {
-            analyze_observation_result(&observation, audit_mode, load_options, started_at.elapsed())
-        }
+        Ok(observation) => analyze_observation_result(
+            &observation,
+            audit_mode,
+            load_options,
+            started_at.elapsed(),
+            plan,
+        ),
         Err(maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { limit }) => {
-            let plan = gui_audit_plan().map_err(|err| err.to_string())?;
             let options = audit_options_from_preference(audit_mode);
             let audit_report = build_parse_budget_blocked_audit_report(
                 path.to_path_buf(),
                 scene_format,
                 ValidationState::Invalid,
-                &plan,
+                plan,
                 options,
                 limit,
                 None,
             );
             Ok(AnalyzeRowResult {
+                audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state: None,
                 audit_report: audit_report.clone(),
                 paths_report: None,
                 dump_report: None,
                 observe_snapshot: None,
                 audit_snapshot: Some(
-                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(&plan))
+                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(plan))
                         .map_err(|err| err.to_string())?,
                 ),
                 audit_mode,
@@ -1833,25 +1938,25 @@ pub(super) fn analyze_row_bytes_with_options(
             })
         }
         Err(maya_scene_kit_observe::scene::SceneToolError::MbParseBudgetExceeded { limit }) => {
-            let plan = gui_audit_plan().map_err(|err| err.to_string())?;
             let options = audit_options_from_preference(audit_mode);
             let audit_report = build_parse_budget_blocked_audit_report(
                 path.to_path_buf(),
                 scene_format,
                 ValidationState::Invalid,
-                &plan,
+                plan,
                 options,
                 limit,
                 None,
             );
             Ok(AnalyzeRowResult {
+                audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state: None,
                 audit_report: audit_report.clone(),
                 paths_report: None,
                 dump_report: None,
                 observe_snapshot: None,
                 audit_snapshot: Some(
-                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(&plan))
+                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(plan))
                         .map_err(|err| err.to_string())?,
                 ),
                 audit_mode,
@@ -1867,6 +1972,7 @@ fn analyze_observation_result(
     audit_mode: AuditModePreference,
     load_options: &LoadOptions,
     elapsed: Duration,
+    plan: &ScriptAuditPlan,
 ) -> Result<AnalyzeRowResult, String> {
     let observe_snapshot = ObservedSceneSnapshot::from_observation(observation, load_options)
         .map_err(|err| err.to_string())?;
@@ -1881,15 +1987,15 @@ fn analyze_observation_result(
             .scene_paths(PathKind::All)
             .map_err(|err| err.to_string())?,
     };
-    let plan = gui_audit_plan().map_err(|err| err.to_string())?;
     let options = audit_options_from_preference(audit_mode);
     let audit_report =
-        audit_observation(observation, &plan, options).map_err(|err| err.to_string())?;
+        audit_observation(observation, plan, options).map_err(|err| err.to_string())?;
     let audit_snapshot =
-        AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(&plan))
+        AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(plan))
             .map_err(|err| err.to_string())?;
 
     Ok(AnalyzeRowResult {
+        audit_plan_fingerprint: fingerprint_audit_plan(plan),
         audit_file_state: None,
         audit_report,
         paths_report: Some(paths_report),
@@ -1901,11 +2007,13 @@ fn analyze_observation_result(
     })
 }
 
-pub(super) fn gui_audit_plan() -> Result<
+pub(super) fn gui_audit_plan(
+    allowlist: AuditAllowlist,
+) -> Result<
     maya_scene_kit_audit::audit::ScriptAuditPlan,
     maya_scene_kit_observe::scene::SceneToolError,
 > {
-    build_script_audit_plan(vec![], 64)
+    build_script_audit_plan(vec![], 64).map(|plan| plan.with_allowlist(allowlist))
 }
 
 pub(super) fn audit_options_from_preference(audit_mode: AuditModePreference) -> AuditOptions {
@@ -1960,6 +2068,20 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
         BannerMessage::PersistFailed(error) => {
             i18n.format("banner.persist_failed", &[("error", error.clone())])
         }
+        BannerMessage::AllowlistsReloaded { count, stale_rows } => {
+            let mut text = i18n.format(
+                "banner.allowlists_reloaded",
+                &[("count", count.to_string())],
+            );
+            if *stale_rows > 0 {
+                text.push(' ');
+                text.push_str(&i18n.format(
+                    "banner.allowlists_stale_rows",
+                    &[("count", stale_rows.to_string())],
+                ));
+            }
+            text
+        }
         BannerMessage::CachePurged => i18n.text("banner.cache_purged"),
         BannerMessage::WorkspaceLoaded { count, path } => i18n.format(
             "banner.workspace_loaded",
@@ -1988,6 +2110,7 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
             &[("error", error.clone())],
         ),
         BannerMessage::SelectFilesFirst => i18n.text("banner.select_files_first"),
+        BannerMessage::SelectedFilesNeedReaudit => i18n.text("banner.selected_files_need_reaudit"),
         BannerMessage::Raw(message) => message.clone(),
         BannerMessage::NothingDirtyToSave => i18n.text("banner.nothing_dirty_to_save"),
         BannerMessage::NothingSelectedDirtyToSave => {
@@ -2208,6 +2331,10 @@ pub(super) fn build_app_menus(
                 MenuItem::action(
                     i18n.text("settings.purge_analysis_cache"),
                     MenuPurgeAnalysisCache,
+                ),
+                MenuItem::action(
+                    i18n.text("settings.reload_allowlists"),
+                    MenuReloadAllowlists,
                 ),
                 MenuItem::action(edit_max_bytes_label(i18n), MenuEditMaxBytes),
                 checked_menu_item(

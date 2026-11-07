@@ -141,6 +141,7 @@ impl Render for GuiShell {
             .on_action(cx.listener(Self::on_menu_auto_analyze_parallelism_32))
             .on_action(cx.listener(Self::on_menu_toggle_analysis_cache))
             .on_action(cx.listener(Self::on_menu_purge_analysis_cache))
+            .on_action(cx.listener(Self::on_menu_reload_allowlists))
             .on_action(cx.listener(Self::on_menu_edit_max_bytes))
             .on_action(cx.listener(Self::on_menu_toggle_ignore_folder_names))
             .on_action(cx.listener(Self::on_menu_edit_ignored_folder_names))
@@ -238,6 +239,20 @@ impl Render for GuiShell {
                         })
                         .unwrap_or_else(|| i18n.text("banner.default_hint")),
                 ),
+            )
+            .children(
+                allowlist_error_text(&self.allowlist_load_errors, &i18n).map(|text| {
+                    div()
+                        .mx_4()
+                        .mb_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(ERROR_SOFT))
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(text)
+                }),
             )
             .when(self.file_dialog_ui_blocked, |this| {
                 this.child(

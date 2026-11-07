@@ -296,5 +296,16 @@
   "audit_detail.code_load_failed": "全文を読み込めませんでした（{error}）。プレビューを表示しています。",
   "audit_detail.code_unavailable": "この項目は全文を取得できないため、プレビューを表示しています。",
   "audit_detail.code_file_changed": "解析後にファイルが変更されたため、プレビューを表示しています。",
-  "audit_detail.code_too_large": "全文が大きすぎるため、プレビューを表示しています。"
+  "audit_detail.code_too_large": "全文が大きすぎるため、プレビューを表示しています。",
+  "settings.reload_allowlists": "許可リストを再読み込み",
+  "banner.allowlist_load_failed": "許可リストを読み込めませんでした: {path}: {error}",
+  "banner.allowlists_reloaded": "許可リストを再読み込みしました: {count} 件",
+  "audit_table.show_allowed": "許可済みを表示 ({count})",
+  "label.allowed": "許可済み",
+  "label.audit_detail.allowed": "許可",
+  "label.audit_detail.allow_hash": "許可ハッシュ",
+  "audit_value.allowlist_source.app": "管理者配布 (app)",
+  "audit_value.allowlist_source.user": "ユーザー (user)",
+  "banner.allowlists_stale_rows": "{count} 件のファイルは再監査が必要です（未保存の編集があるファイルは保存後に更新されます）",
+  "banner.selected_files_need_reaudit": "選択したファイルは再監査が必要です。再監査の後に脅威を除去できます"
 }

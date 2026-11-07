@@ -206,6 +206,13 @@ impl TableDelegate for AuditTableDelegate {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(row.allowed.is_some(), |this| {
+                        this.child(
+                            div()
+                                .text_color(rgb(MUTED))
+                                .child(I18n::new(self.locale).text("label.allowed")),
+                        )
+                    })
                     .child(file_table_text_cell(row.summary.clone()));
                 if row.dirty {
                     content = content.child(badge(
