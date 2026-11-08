@@ -317,6 +317,7 @@ impl GuiShell {
     }
 
     pub(super) fn clear_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.invalidate_file_list_membership_refresh();
         self.cancel_workspace_scan();
         self.cancel_progressive_cache_restore();
         self.clear_rows();
@@ -363,6 +364,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_file_list_membership_refresh();
         self.cancel_workspace_scan();
         self.cancel_progressive_cache_restore();
         self.cancel_all_auto_analysis();
@@ -755,6 +757,7 @@ impl GuiShell {
     }
 
     pub(super) fn refresh_file_table(&mut self, cx: &mut Context<Self>) {
+        self.auto_analyze_refresh_state.membership_dirty = false;
         self.refresh_visible_rows();
         self.refresh_file_table_from_current_visible_rows(cx);
         self.refresh_audit_table(cx);

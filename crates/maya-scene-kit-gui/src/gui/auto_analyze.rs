@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use super::*;
 
+pub(super) const FILE_LIST_MEMBERSHIP_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const AUTO_ANALYZE_VISIBLE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(33);
 const AUTO_ANALYZE_FULL_REFRESH_DEBOUNCE: Duration = Duration::from_millis(1500);
 const AUTO_ANALYZE_PROGRESS_NOTIFY_INTERVAL: usize = 32;
@@ -71,6 +72,75 @@ fn resolve_path_resolution_refresh_input(
 }
 
 impl GuiShell {
+    pub(super) fn invalidate_file_list_membership_refresh(&mut self) {
+        let state = &mut self.auto_analyze_refresh_state;
+        state.membership_generation = state.membership_generation.wrapping_add(1);
+        state.membership_dirty = false;
+        state.membership_timer_pending = false;
+    }
+
+    pub(super) fn request_file_list_membership_refresh(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_scan_active() {
+            return;
+        }
+        let state = &mut self.auto_analyze_refresh_state;
+        state.membership_dirty = true;
+        if state.membership_timer_pending {
+            return;
+        }
+        state.membership_timer_pending = true;
+        let generation = state.membership_generation;
+        let view = cx.entity();
+        window
+            .spawn(cx, move |cx: &mut AsyncWindowContext| {
+                let executor = cx.background_executor().clone();
+                let mut async_cx = cx.clone();
+                async move {
+                    executor.timer(FILE_LIST_MEMBERSHIP_REFRESH_INTERVAL).await;
+                    let _ =
+                        async_cx.update_window_entity(&view, |shell: &mut GuiShell, window, cx| {
+                            if shell.auto_analyze_refresh_state.membership_generation != generation
+                            {
+                                return;
+                            }
+                            shell.auto_analyze_refresh_state.membership_timer_pending = false;
+                            if shell.auto_analyze_refresh_state.membership_dirty {
+                                shell.refresh_file_list_membership(window, cx);
+                            }
+                        });
+                }
+            })
+            .detach();
+    }
+
+    fn refresh_file_list_membership(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_scan_active() {
+            return;
+        }
+        self.auto_analyze_refresh_state.membership_dirty = false;
+        let visible = compute_visible_row_indices_for(&self.rows, &self.state, self.file_sort);
+        if visible == self.visible_rows {
+            return;
+        }
+        self.visible_rows = visible;
+        self.refresh_file_table_from_current_visible_rows(cx);
+        let end = self
+            .file_table_viewport_range
+            .end
+            .min(self.visible_rows.len());
+        let start = self.file_table_viewport_range.start.min(end);
+        self.file_table_viewport_range = start..end;
+        self.sync_visible_path_resolution_refresh(window, cx);
+        if self.state.workspace_auto_analyze && self.cache_restore_active() {
+            self.sync_viewport_auto_analyze(window, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn toggle_workspace_auto_analyze(
         &mut self,
         window: &mut Window,
@@ -705,6 +775,7 @@ impl GuiShell {
                               cx: &mut Context<GuiShell>| {
                             let mut patched_visible = BTreeSet::new();
                             let mut refresh_paths = false;
+                            let mut membership_changed = false;
                             shell.path_resolution_refresh_state.in_flight = false;
                             for result in results {
                                 let Some(index) = shell.index_of_row_id(result.row_id) else {
@@ -717,17 +788,24 @@ impl GuiShell {
                                 if row.path_resolution_revision != result.revision {
                                     continue;
                                 }
+                                let old_missing = row.missing_path_count();
+                                let old_root = row.scene_workspace_root.clone();
                                 row.set_path_resolution_state(
                                     result.scene_workspace_root,
                                     result.path_resolution_cache,
                                     result.missing_path_count_cache,
                                 );
+                                membership_changed |= old_missing != row.missing_path_count()
+                                    || old_root != row.scene_workspace_root;
                                 if visible {
                                     patched_visible.insert(result.row_id);
                                 }
                                 if selected_paths_active {
                                     refresh_paths = true;
                                 }
+                            }
+                            if membership_changed {
+                                shell.request_file_list_membership_refresh(window, cx);
                             }
                             if !patched_visible.is_empty() {
                                 shell.patch_visible_file_rows(&patched_visible, cx);
@@ -832,6 +910,7 @@ impl GuiShell {
             self.schedule_auto_analyze_visible_refresh(window, cx);
         }
 
+        self.request_file_list_membership_refresh(window, cx);
         self.queue_path_resolution_refresh_for_row_id(row_id, window, cx);
         self.auto_analyze_refresh_state.pending_full_refresh = true;
         self.auto_analyze_refresh_state.pending_completion_count += 1;

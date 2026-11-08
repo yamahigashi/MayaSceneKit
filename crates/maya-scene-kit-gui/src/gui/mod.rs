@@ -362,6 +362,9 @@ struct CacheRestoreRefreshState {
 
 #[derive(Debug, Default)]
 struct AutoAnalyzeRefreshState {
+    membership_dirty: bool,
+    membership_timer_pending: bool,
+    membership_generation: u64,
     visible_generation: u64,
     full_generation: u64,
     pending_visible_row_ids: BTreeSet<u64>,

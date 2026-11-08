@@ -11874,3 +11874,170 @@ fn compute_visible_rows_matches_reference_sort_for_all_columns_and_locales() {
         }
     }
 }
+
+#[gpui::test]
+fn membership_refresh_keeps_fixed_deadline_with_analyze_remaining(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    fs::write(dir.path().join("Example.ma"), "").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.file_list_missing_only = true;
+        shell.rows = vec![test_row(1, &dir.path().join("Example.ma"))];
+        shell.refresh_file_table(cx);
+        shell.rows[0].missing_path_count_cache = Some(1);
+        shell.auto_analyze_queue.in_flight.insert(2);
+        shell.queue_auto_analyze_completion_refresh(1, window, cx);
+        assert!(shell.visible_rows.is_empty());
+    });
+    visual_cx.run_until_parked();
+    let interval = super::auto_analyze::FILE_LIST_MEMBERSHIP_REFRESH_INTERVAL;
+    for step in [interval / 2, interval * 2 / 5] {
+        visual_cx.executor().advance_clock(step);
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, window, cx| {
+            assert!(shell.visible_rows.is_empty());
+            shell.request_file_list_membership_refresh(window, cx);
+        });
+        visual_cx.run_until_parked();
+    }
+    visual_cx.executor().advance_clock(interval / 10);
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert_eq!(shell.visible_rows, vec![0]);
+        assert!(!shell.auto_analyze_refresh_state.membership_timer_pending);
+        assert!(shell.auto_analyze_refresh_state.pending_full_refresh);
+        assert_eq!(shell.auto_analyze_refresh_state.pending_completion_count, 1);
+        shell.rows[0].missing_path_count_cache = Some(0);
+        shell.auto_analyze_refresh_state.membership_dirty = true;
+    });
+    visual_cx.executor().advance_clock(interval * 99 / 100);
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert_eq!(shell.visible_rows, vec![0]);
+    });
+}
+
+#[gpui::test]
+fn membership_refresh_preserves_hidden_selection(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    fs::write(dir.path().join("Example.ma"), "").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.file_list_missing_only = true;
+        shell.rows = vec![test_row(1, &dir.path().join("Example.ma"))];
+        shell.rows[0].selected = true;
+        shell.rows[0].missing_path_count_cache = Some(1);
+        shell.selection_anchor = Some(0);
+        shell.refresh_file_table(cx);
+        shell.file_table_viewport_range = 0..1;
+        shell.rows[0].missing_path_count_cache = Some(0);
+        shell.request_file_list_membership_refresh(window, cx);
+    });
+    visual_cx.run_until_parked();
+    visual_cx.executor().advance_clock(Duration::from_secs(10));
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.visible_rows.is_empty());
+        assert!(shell.rows[0].selected);
+        assert_eq!(shell.selection_anchor, Some(0));
+        assert_eq!(shell.file_table_viewport_range, 0..0);
+    });
+}
+
+#[gpui::test]
+fn membership_refresh_leaves_unchanged_table_rows_untouched(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    fs::write(dir.path().join("Example.ma"), "").expect("write scene");
+    let original = shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.rows = vec![test_row(1, &dir.path().join("Example.ma"))];
+        shell.refresh_file_table(cx);
+        let original = shell.file_table.read(cx).delegate().rows.as_ptr();
+        shell.rows[0].selected = true;
+        shell.request_file_list_membership_refresh(window, cx);
+        original
+    });
+    visual_cx.run_until_parked();
+    visual_cx.executor().advance_clock(Duration::from_secs(10));
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, cx| {
+        let rows = &shell.file_table.read(cx).delegate().rows;
+        assert_eq!(rows.as_ptr(), original);
+        assert!(!rows[0].selected);
+        assert!(!shell.auto_analyze_refresh_state.membership_dirty);
+    });
+}
+
+#[gpui::test]
+fn membership_refresh_after_idle_path_resolution(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    fs::write(dir.path().join("Example.ma"), "").expect("write scene");
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(workspace.join("textures")).expect("mkdir textures");
+    fs::write(workspace.join("workspace.mel"), "// workspace").expect("workspace");
+    let scene = workspace.join("Example.ma");
+    fs::write(
+        &scene,
+        r#"//Maya ASCII 2026 scene
+createNode file -n "file1";
+    setAttr ".ftn" -type "string" "textures/missing.tx";
+"#,
+    )
+    .expect("write scene");
+
+    let analyze_result =
+        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze result");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(workspace.as_path(), "");
+        shell.state.file_list_missing_only = true;
+        shell.rows = vec![test_row(1, &scene)];
+        shell.refresh_file_table(cx);
+        shell.update_file_table_viewport_range(0..0, window, cx);
+        assert!(shell.visible_rows.is_empty());
+
+        shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+        shell.auto_analyze_refresh_state.pending_full_refresh = false;
+        shell.invalidate_file_list_membership_refresh();
+
+        assert!(shell.rows[0].display_paths_report().is_some());
+        assert!(
+            shell
+                .path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .contains(&1)
+        );
+        assert_eq!(shell.rows[0].missing_path_count(), None);
+    });
+
+    visual_cx.run_until_parked();
+    visual_cx
+        .executor()
+        .advance_clock(Duration::from_millis(50));
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, _window, _cx| {
+        assert_eq!(shell.rows[0].missing_path_count(), Some(1));
+        assert_eq!(shell.rows[0].path_resolution_cache.len(), 1);
+        assert!(
+            shell
+                .path_resolution_refresh_state
+                .pending_backlog_row_ids
+                .is_empty()
+        );
+    });
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.visible_rows.is_empty());
+        assert_eq!(shell.auto_analyze_queue.remaining_count(), 0);
+        assert!(!shell.auto_analyze_refresh_state.pending_full_refresh);
+    });
+    visual_cx.executor().advance_clock(Duration::from_secs(10));
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert_eq!(shell.visible_rows, vec![0]);
+    });
+}
