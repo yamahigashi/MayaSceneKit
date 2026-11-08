@@ -407,6 +407,43 @@ pub(in crate::scene) fn decode_reference_edits_data_with_reason_and_registry(
 
 #[cfg(test)]
 mod tests {
+    fn assert_auto_group_counts(expected: &[u32], record_count: usize, counts: &[usize]) {
+        let groups = expected
+            .iter()
+            .enumerate()
+            .map(|(i, &expected_count)| super::RefEditGroup {
+                name: format!("Example{i}"),
+                expected_count,
+                source: super::RefEditGroupSource::HeaderList,
+                first_offset: 0,
+            })
+            .collect();
+        let records = vec![super::RefEditRecord::Op1(vec!["TestScene".into()]); record_count];
+        let (_, assigned) =
+            super::super::refedit_grouping::assign_records_to_groups_with_boundaries(
+                "TestScene",
+                groups,
+                &records,
+                &[],
+            );
+        assert_eq!(assigned.iter().map(Vec::len).collect::<Vec<_>>(), counts);
+    }
+
+    #[test]
+    fn auto_group_skips_zero_count_group() {
+        assert_auto_group_counts(&[1, 0, 2], 3, &[1, 0, 2]);
+    }
+
+    #[test]
+    fn auto_group_overflows_full_group_before_zero_counts() {
+        assert_auto_group_counts(&[1, 0, 0], 3, &[3, 0, 0]);
+    }
+
+    #[test]
+    fn auto_group_all_zero_counts_stays_on_first() {
+        assert_auto_group_counts(&[0, 0], 2, &[2, 0]);
+    }
+
     use std::{fs, path::PathBuf};
 
     use serde::Deserialize;

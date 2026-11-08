@@ -152,23 +152,15 @@ pub(in crate::scene) fn assign_records_to_groups_with_boundaries(
         grouped_records[idx].push(record.clone());
 
         if !groups.is_empty() {
-            let mut auto_idx = idx;
             auto_assigned = auto_assigned.saturating_add(1);
-            loop {
-                let expected = groups[auto_idx].expected_count as usize;
-                if expected == 0 || auto_assigned < expected {
-                    break;
+            let expected = groups[idx].expected_count as usize;
+            if expected > 0 && auto_assigned >= expected {
+                if let Some(next_idx) =
+                    (idx + 1..groups.len()).find(|&i| groups[i].expected_count > 0)
+                {
+                    current_idx = Some(next_idx);
+                    auto_assigned = grouped_records[next_idx].len();
                 }
-                if auto_idx + 1 >= groups.len() {
-                    break;
-                }
-                auto_idx += 1;
-                current_idx = Some(auto_idx);
-                auto_assigned = 0;
-                if groups[auto_idx].expected_count == 0 {
-                    continue;
-                }
-                break;
             }
         }
     }
