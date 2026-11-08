@@ -1240,20 +1240,50 @@ pub(super) fn compute_visible_row_indices_for(
     sort: FileTableSort,
 ) -> Vec<usize> {
     let tokens = tokenize_search_query(&state.search_query);
+    let locale_i18n = I18n::new(state.locale.resolve());
     let mut visible_rows = state_rows
         .iter()
         .enumerate()
         .filter(|(_, row)| {
             row.status.filter_matches(state.status_filter)
                 && file_list_filters_match(row, state)
-                && matches_search_tokens(searchable_text_for_row(row, state), &tokens)
+                && (tokens.is_empty()
+                    || matches_search_tokens(searchable_text_for_row(row, state), &tokens))
         })
-        .map(|(ix, _)| ix)
+        .map(|(ix, row)| {
+            let mut key = (String::new(), false, 0usize, 0u64, (false, None), None);
+            if matches!(sort.direction, ColumnSort::Default) {
+                key.0 = workspace_relative_display_path(&row.path, state);
+            } else {
+                match sort.key {
+                    FileSortKey::Name => key.0 = workspace_relative_display_path(&row.path, state),
+                    FileSortKey::Status => key.0 = row.status.label(&locale_i18n),
+                    FileSortKey::Workspace => key.1 = row.scene_workspace_root.is_none(),
+                    FileSortKey::Findings => key.2 = row.effective_findings_count(),
+                    FileSortKey::Missing => {
+                        (key.1, key.2) = missing_path_count_for_row(row)
+                            .map(|count| (false, count))
+                            .unwrap_or((true, 0));
+                    }
+                    FileSortKey::Size => key.3 = row.size,
+                    FileSortKey::Modified => key.4 = modified_sort_key(row.modified),
+                }
+                if !matches!(sort.key, FileSortKey::Name | FileSortKey::Status) {
+                    key.5 = Some(&row.path);
+                }
+            }
+            (ix, key)
+        })
         .collect::<Vec<_>>();
-    visible_rows.sort_by(|left, right| {
-        compare_rows_for_sort(&state_rows[*left], &state_rows[*right], state, sort)
+    visible_rows.sort_by(|(_, left), (_, right)| {
+        let ordering = left.cmp(right);
+        if matches!(sort.direction, ColumnSort::Descending) {
+            ordering.reverse()
+        } else {
+            ordering
+        }
     });
-    visible_rows
+    visible_rows.into_iter().map(|(ix, _)| ix).collect()
 }
 
 fn file_list_filters_match(row: &SceneRow, state: &PersistedState) -> bool {
@@ -1513,6 +1543,7 @@ pub(super) fn visible_path_selection_targets(
     )
 }
 
+#[cfg(test)]
 pub(super) fn compare_rows_for_sort(
     left: &SceneRow,
     right: &SceneRow,

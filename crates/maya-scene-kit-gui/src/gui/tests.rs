@@ -11810,3 +11810,67 @@ fn check_path_override_failure(cx: &mut TestAppContext, pending: bool) {
         });
     });
 }
+
+#[test]
+fn compute_visible_rows_matches_reference_sort_for_all_columns_and_locales() {
+    let dir = tempdir().expect("tempdir");
+    let mut rows = Vec::new();
+    for (ix, name) in ["SampleB.ma", "SampleA.ma", "SampleA.ma", "TestScene.ma"]
+        .iter()
+        .enumerate()
+    {
+        let path = dir.path().join(name);
+        fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+        let mut row = test_row(ix as u64, &path);
+        row.modified = None;
+        if ix != 0 {
+            row.paths_report = Some(collect_scene_paths(&path, PathKind::All).expect("paths"));
+            row.refresh_path_resolution_cache();
+            row.scene_workspace_root = Some(dir.path().to_path_buf());
+        }
+        rows.push(row);
+    }
+    assert_eq!(missing_path_count_for_row(&rows[0]), None);
+    assert_eq!(missing_path_count_for_row(&rows[1]), Some(0));
+    for locale in [LocalePreference::English, LocalePreference::Japanese] {
+        for query in ["", "SampleA"] {
+            let mut state = test_state(dir.path(), query);
+            state.locale = locale;
+            for key in [
+                FileSortKey::Name,
+                FileSortKey::Workspace,
+                FileSortKey::Status,
+                FileSortKey::Findings,
+                FileSortKey::Missing,
+                FileSortKey::Size,
+                FileSortKey::Modified,
+            ] {
+                for direction in [
+                    ColumnSort::Default,
+                    ColumnSort::Ascending,
+                    ColumnSort::Descending,
+                ] {
+                    let sort = FileTableSort { key, direction };
+                    let mut expected = (0..rows.len())
+                        .filter(|ix| {
+                            query.is_empty()
+                                || rows[*ix].path.file_name().expect("name") == "SampleA.ma"
+                        })
+                        .collect::<Vec<_>>();
+                    expected.sort_by(|left, right| {
+                        super::helpers::compare_rows_for_sort(
+                            &rows[*left],
+                            &rows[*right],
+                            &state,
+                            sort,
+                        )
+                    });
+                    assert_eq!(
+                        compute_visible_row_indices_for(&rows, &state, sort),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+}
