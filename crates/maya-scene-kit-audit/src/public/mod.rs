@@ -268,13 +268,14 @@ pub mod allowlist {
 
 #[cfg(test)]
 mod allowlist_tests {
-    use super::allowlist::*;
-    use crate::{audit::build_script_audit_plan, scene::fingerprint_audit_plan};
     use maya_scene_kit_observe::scene::evidence::{
         ExecutionLanguage, ExecutionOrigin, ExecutionSourceRange, ExecutionSurfaceKind,
         ExecutionTrigger,
     };
     use serde_json::json;
+
+    use super::allowlist::*;
+    use crate::{audit::build_script_audit_plan, scene::fingerprint_audit_plan};
 
     fn origin() -> ExecutionOrigin {
         ExecutionOrigin {

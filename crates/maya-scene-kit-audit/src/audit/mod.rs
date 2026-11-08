@@ -1013,14 +1013,15 @@ fn surface_uncertainty_findings(
 
 #[cfg(test)]
 mod allowlist_disposition_tests {
+    use maya_scene_kit_observe::scene::{
+        evidence::DependencyFactDetail, execution::observe_source_text,
+    };
+
     use super::*;
     use crate::scene::{
         AllowlistSource, AuditAllowlist, AuditReviewCode, AuditReviewDetail, AuditReviewSignal,
         ExecutionOrigin, ExecutionSurfaceKind, ExecutionTrigger, StaticAuditReviewDetail,
         allowlist_surface_hash,
-    };
-    use maya_scene_kit_observe::scene::{
-        evidence::DependencyFactDetail, execution::observe_source_text,
     };
 
     #[test]

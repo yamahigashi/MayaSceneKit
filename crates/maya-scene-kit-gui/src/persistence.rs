@@ -392,8 +392,9 @@ mod tests {
 
     #[test]
     fn allowlist_document_reader_preserves_sources_and_order() {
-        use super::read_allowlist_document;
         use maya_scene_kit_audit::scene::AllowlistSource;
+
+        use super::read_allowlist_document;
         let dir = tempdir().unwrap();
         for (folder, source, records) in [
             ("ExampleApp", AllowlistSource::App, [A0, A1]),
@@ -437,11 +438,12 @@ mod tests {
 
     #[test]
     fn remove_user_allowlist_entry_preserves_other_entries() {
+        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+
         use super::{
             RemoveAllowlistEntryError, UserAllowlistEntry, read_user_allowlist,
             remove_user_allowlist_entry,
         };
-        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
         let dir = tempdir().unwrap();
         let path = dir.path().join("ExampleUser/allowlist.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -545,12 +547,14 @@ mod tests {
 
     #[test]
     fn user_allowlist_entry_writer() {
-        use super::*;
-        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
         use std::{
             collections::BTreeSet,
             time::{Duration, SystemTime},
         };
+
+        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowlist};
+
+        use super::*;
         let dir = tempdir().unwrap();
         let path = dir.path().join("ExampleUser/allowlist.json");
         let hash = "sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20";
@@ -659,8 +663,9 @@ mod tests {
 
     #[test]
     fn allowlist_paths_are_pure_and_preserve_relative_parents() {
-        use super::{app_allowlist_path, user_allowlist_path};
         use std::path::Path;
+
+        use super::{app_allowlist_path, user_allowlist_path};
         assert_eq!(
             app_allowlist_path(Some(Path::new("Example/bin/ExampleApp"))),
             Some("Example/bin/allowlist.json".into())

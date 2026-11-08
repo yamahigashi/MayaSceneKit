@@ -1,5 +1,6 @@
-use maya_mb::ParsedSection;
 use std::{borrow::Cow, collections::HashMap, num::NonZeroUsize};
+
+use maya_mb::ParsedSection;
 
 // MB rewrite helpers intentionally stay chunk-oriented so replacement can preserve
 // binary layout details without becoming the canonical semantic inspection path.

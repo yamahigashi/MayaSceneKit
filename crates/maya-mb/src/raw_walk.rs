@@ -404,8 +404,9 @@ mod tests {
 
     #[test]
     fn typed_layout_walk_preserves_nested_order() {
-        use crate::{ChunkLayout, HeaderFormat, encode_chunk};
         use std::num::NonZeroUsize;
+
+        use crate::{ChunkLayout, HeaderFormat, encode_chunk};
         let four = ChunkLayout::new(NonZeroUsize::new(4).unwrap(), HeaderFormat::FourByte);
         let eight = ChunkLayout::new(NonZeroUsize::new(8).unwrap(), HeaderFormat::EightByte);
         let nested_leaf = encode_chunk(FourCC::new(*b"DATA"), 0x11, b"X", eight).unwrap();

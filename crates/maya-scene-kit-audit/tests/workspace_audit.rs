@@ -2047,11 +2047,12 @@ fn allowlist_report_json_compatibility() {
 }
 
 mod allowlist_contract_tests {
-    use super::*;
     use maya_scene_kit_audit::scene::{
         AllowlistHash, AllowlistSource, AuditAllowlist, AuditFindingCode, allowlist_surface_hash,
     };
     use serde_json::json;
+
+    use super::*;
 
     const BODY: &str = "exec \"Example\"";
 
