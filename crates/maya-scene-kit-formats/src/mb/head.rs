@@ -1,5 +1,6 @@
 use std::{collections::HashSet, num::NonZeroUsize};
 
+use super::MbNameSelection;
 use crate::{
     ma::text::escape_ma_string,
     maya_defaults::DEFAULT_MAYA_VERSION,
@@ -130,8 +131,12 @@ pub fn remove_plugin_requires_from_mb(
     root: &Chunk,
     target_rendered: &[String],
 ) -> (Vec<u8>, Vec<String>) {
-    let (rewritten, _, removed) =
-        remove_root_forms_and_plugin_requires_from_mb(data, root, &[], target_rendered);
+    let (rewritten, _, removed) = remove_root_forms_and_plugin_requires_from_mb(
+        data,
+        root,
+        &[],
+        MbNameSelection::Only(target_rendered),
+    );
     (rewritten, removed)
 }
 
@@ -139,7 +144,7 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
     data: &[u8],
     root: &Chunk,
     target_forms: &[(String, usize)],
-    target_rendered: &[String],
+    selection: MbNameSelection<'_>,
 ) -> (Vec<u8>, Vec<(String, usize)>, Vec<String>) {
     let children = root.children();
     if children.is_empty() {
@@ -150,12 +155,16 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
         .iter()
         .map(|(form, node_offset)| (form.as_str(), *node_offset))
         .collect::<HashSet<_>>();
+    let target_all = matches!(selection, MbNameSelection::All);
+    let target_rendered = match selection {
+        MbNameSelection::All => &[],
+        MbNameSelection::Only(names) => names,
+    };
     let targets = target_rendered
         .iter()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .collect::<HashSet<_>>();
-    let target_all = targets.is_empty();
 
     let mut payload_parts: Vec<u8> = Vec::new();
     payload_parts.extend_from_slice(root.form_type().unwrap_or(FourCC::new(*b"Maya")).as_bytes());
@@ -372,6 +381,60 @@ mod tests {
         out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
         out.extend_from_slice(&payload);
         out
+    }
+
+    #[test]
+    fn explicit_name_selection_distinguishes_all_from_none() {
+        use crate::mb::{
+            MbNameSelection, parse_bytes, paths::locate_raw_script_node_forms_in_mb_by_name,
+        };
+        let bytes = build_root(&[
+            build_form_with_alignment(
+                "HEAD",
+                &[
+                    build_chunk("PLUG", b"ExamplePlugin\x001.0\0"),
+                    build_chunk("PLUG", b"Example\x001.0\0"),
+                ],
+                4,
+            ),
+            build_form_with_alignment("SCRP", &[build_chunk("CREA", b"ExampleScript\0")], 4),
+            build_form_with_alignment("SCRP", &[build_chunk("CREA", b"Example\0")], 4),
+        ]);
+        let mb = parse_bytes(bytes.clone()).unwrap();
+        let blank = vec![String::new(), "   ".to_string()];
+        for names in [&[][..], blank.as_slice()] {
+            let selection = MbNameSelection::Only(names);
+            assert!(
+                locate_raw_script_node_forms_in_mb_by_name(mb.data(), mb.root(), selection)
+                    .0
+                    .is_empty()
+            );
+            let (result, forms, requires) = super::remove_root_forms_and_plugin_requires_from_mb(
+                mb.data(),
+                mb.root(),
+                &[],
+                selection,
+            );
+            assert_eq!(result, bytes);
+            assert!(forms.is_empty());
+            assert!(requires.is_empty());
+        }
+        assert_eq!(
+            locate_raw_script_node_forms_in_mb_by_name(mb.data(), mb.root(), MbNameSelection::All)
+                .0
+                .len(),
+            2
+        );
+        let (result, forms, requires) = super::remove_root_forms_and_plugin_requires_from_mb(
+            mb.data(),
+            mb.root(),
+            &[],
+            MbNameSelection::All,
+        );
+        assert!(forms.is_empty());
+        assert_eq!(requires.len(), 2);
+        let cleaned = parse_bytes(result).unwrap();
+        assert!(extract_head_metadata(&cleaned).requires.is_empty());
     }
 
     fn write_temp_mb(bytes: &[u8], suffix: &str) -> std::path::PathBuf {

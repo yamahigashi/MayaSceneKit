@@ -147,12 +147,16 @@ impl PatchPlanner {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            let (mut owner_form_targets, _) =
+            let mut owner_form_targets = if script_nodes.is_empty() {
+                Vec::new()
+            } else {
                 crate::mb::paths::locate_raw_script_node_forms_in_mb_by_name(
                     mb.data(),
                     mb.root(),
-                    &script_nodes,
-                );
+                    crate::mb::MbNameSelection::Only(&script_nodes),
+                )
+                .0
+            };
             owner_form_targets.extend(normalized.iter().filter_map(|target| match target {
                 ExecutionCleanTarget::MbOwnerForm { form, node_offset } => {
                     Some((form.clone(), *node_offset))
@@ -183,7 +187,7 @@ impl PatchPlanner {
                     mb.data(),
                     mb.root(),
                     &owner_form_targets,
-                    &plugin_requires,
+                    crate::mb::MbNameSelection::Only(&plugin_requires),
                 );
             if cleaned.as_slice() == mb.data()
                 && removed_requires.is_empty()

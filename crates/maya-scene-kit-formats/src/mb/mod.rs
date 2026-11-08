@@ -20,7 +20,7 @@ pub use self::{
         remove_root_forms_and_plugin_requires_from_mb, render_requires_entry,
     },
     paths::{
-        collect_rtft_owner_traces_from_mb, decode_best_effort_script_text,
+        MbNameSelection, collect_rtft_owner_traces_from_mb, decode_best_effort_script_text,
         extract_raw_script_entries_from_mb, remove_raw_script_nodes_from_mb,
         remove_root_forms_from_mb_by_locator, scan_raw_script_nodes_in_mb,
     },

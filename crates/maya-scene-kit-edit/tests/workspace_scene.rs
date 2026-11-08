@@ -1419,3 +1419,60 @@ fn clean_execution_targets_supports_plugin_require_for_mb() {
             .any(|value| value == "requires \"pluginB\" \"2.0\";")
     );
 }
+
+#[test]
+fn mb_execution_clean_preserves_unselected_targets() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("TestScene.mb");
+    let bytes = build_mb_root(&[
+        build_mb_form_with_alignment(
+            "HEAD",
+            &[build_mb_chunk("PLUG", b"ExamplePlugin\x001.0\0")],
+            4,
+        ),
+        build_mb_form_with_alignment("SCRP", &[build_mb_chunk("CREA", b"ExampleScript\0")], 4),
+        build_mb_form_with_alignment("XFRM", &[build_mb_chunk("CREA", b"Example\0")], 4),
+    ]);
+    std::fs::write(&source, &bytes).unwrap();
+    let mb = maya_scene_kit_formats::mb::parse_bytes(bytes).unwrap();
+    let owner = mb
+        .root()
+        .children()
+        .iter()
+        .find(|c| c.form_type().is_some_and(|f| f == "XFRM"))
+        .unwrap();
+    let requires = "requires \"ExamplePlugin\" \"1.0\";";
+    let targets = [
+        ExecutionCleanTarget::MbOwnerForm {
+            form: "XFRM".to_string(),
+            node_offset: owner.offset(),
+        },
+        ExecutionCleanTarget::PluginRequire {
+            rendered: requires.to_string(),
+        },
+        ExecutionCleanTarget::ScriptNode {
+            node_name: "ExampleScript".to_string(),
+        },
+    ];
+    for (index, target) in targets.into_iter().enumerate() {
+        let output = dir.path().join("Example.mb");
+        clean_execution_targets(&source, &output, &[target]).unwrap();
+        let cleaned = maya_scene_kit_formats::mb::parse_file(&output).unwrap();
+        let forms = cleaned
+            .root()
+            .children()
+            .iter()
+            .filter_map(|c| c.form_type().map(|f| f.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(forms.iter().any(|f| f == "XFRM"), index != 0);
+        assert_eq!(forms.iter().any(|f| f == "SCRP"), index != 2);
+        let metadata = maya_scene_kit_formats::mb::extract_head_metadata(&cleaned);
+        assert_eq!(
+            metadata
+                .requires
+                .iter()
+                .any(|r| maya_scene_kit_formats::mb::render_requires_entry(r) == requires),
+            index != 1
+        );
+    }
+}

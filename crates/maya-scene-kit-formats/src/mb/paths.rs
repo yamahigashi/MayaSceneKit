@@ -18,6 +18,12 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, Debug)]
+pub enum MbNameSelection<'a> {
+    All,
+    Only(&'a [String]),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MbScenePathEntry {
     pub node_type: String,
@@ -110,19 +116,24 @@ pub fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, S
 }
 
 pub fn remove_raw_script_nodes_from_mb(data: &[u8], root: &Chunk) -> (Vec<u8>, Vec<String>) {
-    remove_raw_script_nodes_from_mb_by_name(data, root, &[])
+    remove_raw_script_nodes_with_selection(data, root, MbNameSelection::All)
 }
 
 pub fn locate_raw_script_node_forms_in_mb_by_name(
     data: &[u8],
     root: &Chunk,
-    target_names: &[String],
+    selection: MbNameSelection<'_>,
 ) -> (Vec<(String, usize)>, Vec<String>) {
+    let target_all = matches!(selection, MbNameSelection::All);
+    let target_names = match selection {
+        MbNameSelection::All => &[],
+        MbNameSelection::Only(names) => names,
+    };
     let targets = target_names
         .iter()
-        .map(String::as_str)
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
         .collect::<HashSet<_>>();
-    let target_all = targets.is_empty();
     let mut removed_locators = Vec::new();
     let mut removed_names = Vec::new();
 
@@ -212,8 +223,16 @@ pub fn remove_raw_script_nodes_from_mb_by_name(
     root: &Chunk,
     target_names: &[String],
 ) -> (Vec<u8>, Vec<String>) {
+    remove_raw_script_nodes_with_selection(data, root, MbNameSelection::Only(target_names))
+}
+
+fn remove_raw_script_nodes_with_selection(
+    data: &[u8],
+    root: &Chunk,
+    selection: MbNameSelection<'_>,
+) -> (Vec<u8>, Vec<String>) {
     let (removed_locators, removed_names) =
-        locate_raw_script_node_forms_in_mb_by_name(data, root, target_names);
+        locate_raw_script_node_forms_in_mb_by_name(data, root, selection);
     if removed_names.is_empty() {
         return (data.to_vec(), vec![]);
     }
