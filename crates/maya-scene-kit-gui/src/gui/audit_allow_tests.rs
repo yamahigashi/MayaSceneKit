@@ -1,10 +1,11 @@
-use super::*;
-use crate::persistence::{UserAllowlistDocument, read_user_allowlist};
+use std::{cell::RefCell, prelude::v1::test, rc::Rc};
+
 use maya_scene_kit_audit::scene::{AuditDisposition, AuditFindingCode};
 use maya_scene_kit_observe::scene::evidence::{ExecutionLanguage, ExecutionTrigger};
-use std::prelude::v1::test;
-use std::{cell::RefCell, rc::Rc};
 use tempfile::tempdir;
+
+use super::*;
+use crate::persistence::{UserAllowlistDocument, read_user_allowlist};
 
 const SCENE: &str = concat!(
     "//Maya ASCII 2026 scene\n",

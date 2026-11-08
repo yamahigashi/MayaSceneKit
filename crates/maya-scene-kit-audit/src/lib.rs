@@ -24,19 +24,21 @@ pub mod scene {
             AuditCacheAccess, AuditCacheHit, AuditCacheIdentity, AuditCacheMaintenanceStats,
             AuditCacheStore, AuditedSceneSnapshot, fingerprint_audit_plan,
         },
-        public::allowlist::{
-            AllowlistEntryMetadata, AllowlistHash, AllowlistSource, AuditAllowRef, AuditAllowlist,
-            AuditAllowlistError, allowlist_surface_hash,
-        },
-        public::audit::{
-            AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
-            AuditFindingCode, AuditFindingDetail, AuditGraphReport, AuditGraphRoot, AuditHit,
-            AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile, AuditReferenceEdge,
-            AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity,
-            AuditSinkKind, AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue,
-            AuditTraversalIssueKind, DEFAULT_REFERENCE_GRAPH_MAX_DEPTH,
-            DEFAULT_REFERENCE_GRAPH_MAX_SCENES, ReferenceGraphOptions, ScriptAuditReport,
-            StaticAuditFindingDetail, StaticAuditReviewDetail,
+        public::{
+            allowlist::{
+                AllowlistEntryMetadata, AllowlistHash, AllowlistSource, AuditAllowRef,
+                AuditAllowlist, AuditAllowlistError, allowlist_surface_hash,
+            },
+            audit::{
+                AnalysisBudgets, AuditDisposition, AuditEvidence, AuditEvidenceKey, AuditFinding,
+                AuditFindingCode, AuditFindingDetail, AuditGraphReport, AuditGraphRoot, AuditHit,
+                AuditNotice, AuditNoticeCode, AuditOptions, AuditProfile, AuditReferenceEdge,
+                AuditReport, AuditReviewCode, AuditReviewDetail, AuditReviewSignal, AuditSeverity,
+                AuditSinkKind, AuditSurface, AuditSurfaceDerivation, AuditTraversalIssue,
+                AuditTraversalIssueKind, DEFAULT_REFERENCE_GRAPH_MAX_DEPTH,
+                DEFAULT_REFERENCE_GRAPH_MAX_SCENES, ReferenceGraphOptions, ScriptAuditReport,
+                StaticAuditFindingDetail, StaticAuditReviewDetail,
+            },
         },
     };
 

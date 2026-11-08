@@ -1,8 +1,9 @@
+use gpui_component::{ActiveTheme as _, tag::Tag, tooltip::Tooltip};
+
 use super::*;
 use crate::persistence::{
     RemoveAllowlistEntryError, read_allowlist_document, remove_user_allowlist_entry,
 };
-use gpui_component::{ActiveTheme as _, tag::Tag, tooltip::Tooltip};
 
 fn load_allowlist_manager_layer(
     path: Option<&Path>,
@@ -809,12 +810,12 @@ impl RenderOnce for AllowlistRemovalControls {
 
 #[cfg(test)]
 mod tests {
-    use std::prelude::v1::test;
+    use std::{cell::RefCell, prelude::v1::test, rc::Rc};
+
+    use maya_scene_kit_audit::scene::{AuditDisposition, AuditFindingCode};
+    use tempfile::tempdir;
 
     use super::*;
-    use maya_scene_kit_audit::scene::{AuditDisposition, AuditFindingCode};
-    use std::{cell::RefCell, rc::Rc};
-    use tempfile::tempdir;
     const A0: &str = concat!(
         r#"{"hash":"sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20","#,
         r#""codes":["mel_exec"],"#,

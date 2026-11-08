@@ -1,5 +1,6 @@
-use crate::{ChunkLayout, FourCC, HeaderFormat, LayoutHints};
 use std::num::NonZeroUsize;
+
+use crate::{ChunkLayout, FourCC, HeaderFormat, LayoutHints};
 
 pub(crate) const FOUR_BYTE_HEADER_SIZE: usize = 8;
 pub(crate) const EIGHT_BYTE_HEADER_SIZE: usize = 16;
@@ -79,13 +80,14 @@ fn default_group_alignment(chunk_tag: FourCC, form_type: Option<FourCC>) -> NonZ
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::{
         EIGHT_BYTE_HEADER_SIZE, FOUR_BYTE_HEADER_SIZE, default_alignment_for_header_format,
         default_header_format_for_alignment, resolve_parser_group_defaults,
         resolve_section_layout_defaults,
     };
     use crate::{FourCC, HeaderFormat, LayoutHints};
-    use std::num::NonZeroUsize;
 
     #[test]
     fn section_layout_defaults_keep_explicit_hints() {
