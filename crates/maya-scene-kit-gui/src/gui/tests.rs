@@ -12287,3 +12287,22 @@ fn slash_from_paths_table_uses_path_search_and_escape_returns_to_it(cx: &mut Tes
         assert!(shell.read(app).path_table_focus_handle.is_focused(window));
     });
 }
+
+#[gpui::test]
+fn menu_shortcuts_display_platform_modifier(cx: &mut TestAppContext) {
+    let (_shell, visual_cx) = open_test_shell(cx);
+    visual_cx.update(|window, _| {
+        for action in [
+            Box::new(super::MenuSelectFolder) as Box<dyn gpui::Action>,
+            Box::new(super::MenuSaveSelected),
+            Box::new(super::MenuSaveAll),
+        ] {
+            let binding = window
+                .highest_precedence_binding_for_action(action.as_ref())
+                .expect("binding");
+            let modifiers = binding.keystrokes()[0].modifiers();
+            assert_eq!(modifiers.control, !cfg!(target_os = "macos"));
+            assert_eq!(modifiers.platform, cfg!(target_os = "macos"));
+        }
+    });
+}
