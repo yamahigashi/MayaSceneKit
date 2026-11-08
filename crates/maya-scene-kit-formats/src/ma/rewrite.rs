@@ -603,9 +603,10 @@ fn last_quoted_literal_range(command: &str) -> Option<(usize, usize)> {
         };
         let quote_start = cursor + next_quote_rel;
         let (literal, next) = parse_ma_quoted_literal(command, quote_start);
-        if literal.is_some() {
-            last_range = Some((quote_start, next));
+        if literal.is_none() {
+            break;
         }
+        last_range = Some((quote_start, next));
         cursor = next;
     }
     last_range
@@ -620,7 +621,7 @@ pub(crate) fn last_quoted_literal(command: &str) -> Option<String> {
         };
         let quote_start = cursor + next_quote_rel;
         let (literal, next) = parse_ma_quoted_literal(command, quote_start);
-        last = literal.map(|value| unescape_ma_string_literal(&value));
+        last = Some(unescape_ma_string_literal(&literal?));
         cursor = next;
     }
     last
@@ -686,6 +687,47 @@ mod tests {
         replace_raw_scene_paths_in_ma, replace_raw_scene_paths_in_ma_by_index,
     };
     use crate::{PathReplaceMode, PathReplaceRule};
+
+    #[test]
+    fn last_literals_stop_at_unterminated_quote() {
+        let command = "file -r -ns \"Example\" \"asset/example/unfinished";
+        let start = command.find('"').unwrap();
+        assert_eq!(
+            super::last_quoted_literal_range(command),
+            Some((start, start + "\"Example\"".len()))
+        );
+        assert_eq!(super::last_quoted_literal(command), None);
+
+        let command = "file -r \"asset/example/unfinished";
+        assert_eq!(super::last_quoted_literal_range(command), None);
+        assert_eq!(super::last_quoted_literal(command), None);
+    }
+
+    #[test]
+    fn replace_scene_paths_preserves_unterminated_suffix() {
+        let input = b"file -r -ns \"asset/example/Example.ma\" \"asset/example/unfinished\nrequires maya \"2024\";\n";
+        for (from, expected_count) in [
+            ("asset/example/absent.ma", 0),
+            ("asset/example/Example.ma", 1),
+        ] {
+            let rules = vec![PathReplaceRule {
+                from: from.to_string(),
+                to: "asset/example/TestScene.ma".to_string(),
+                mode: PathReplaceMode::Literal,
+            }];
+            let compiled = super::CompiledPathReplaceRules::compile_lossy(&rules);
+            let (output, count) = super::replace_raw_scene_paths_in_ma_with_rules(input, &compiled);
+            assert_eq!(count, expected_count);
+            if expected_count == 0 {
+                assert_eq!(output, input);
+            } else {
+                let suffix = b"\"asset/example/unfinished\nrequires maya \"2024\";\n";
+                assert!(input.ends_with(suffix));
+                assert!(output.ends_with(suffix));
+                assert!(String::from_utf8_lossy(&output).contains("asset/example/TestScene.ma"));
+            }
+        }
+    }
 
     #[test]
     fn replace_scene_paths_rewrites_file_command_and_multiline_setattr() {
