@@ -134,6 +134,7 @@ impl TableDelegate for PathTableDelegate {
         } else {
             PANEL_BG
         }));
+        tr = with_row_state_mark(tr, row.dirty.then_some(RowStateMark::Modified));
 
         if let Some(view) = self.view.clone().filter(|_| !row.edit_targets.is_empty()) {
             let edit_targets = row.edit_targets.clone();
@@ -712,7 +713,10 @@ fn path_table_value_cell(
     let mut cell = path_table_cell(value, value_style, owner_deleted);
     let i18n = I18n::new(locale);
     if dirty {
-        cell = cell.child(badge(&i18n.text("label.dirty"), WARN_SOFT, 0x8a6116));
+        cell = cell.child(state_badge(
+            &i18n.text("label.dirty"),
+            RowStateMark::Modified,
+        ));
     }
     cell
 }

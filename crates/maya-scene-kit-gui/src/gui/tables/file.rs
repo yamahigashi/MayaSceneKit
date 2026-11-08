@@ -202,6 +202,7 @@ impl TableDelegate for FileTableDelegate {
             .id(("row", row_ix))
             .bg(rgb(if row.selected { ACCENT_SOFT } else { row.tone }))
             .when(row.is_processing, |this| this.text_color(rgb(MUTED)));
+        tr = with_row_state_mark(tr, row.state_mark);
 
         if let Some(view) = self.view.clone() {
             let row_id = row.id;
@@ -306,7 +307,10 @@ impl TableDelegate for FileTableDelegate {
                 }
             }
             1 => cell.child(file_table_text_cell(row.name)),
-            2 => cell.child(file_table_text_cell(row.status)),
+            2 => match row.state_mark {
+                Some(mark) => cell.child(state_badge(&row.status, mark)),
+                None => cell.child(file_table_text_cell(row.status)),
+            },
             3 => cell.child(file_table_text_cell(row.findings)),
             4 => cell.child(file_table_text_cell(row.missing)),
             5 => {

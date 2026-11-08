@@ -1366,6 +1366,7 @@ pub(super) fn build_single_file_table_row(
         dirty: row.dirty(),
         is_processing: row.is_processing(),
         tone: row.status.tone(),
+        state_mark: file_row_state_mark(row),
         name: workspace_relative_display_path(&row.path, state),
         has_scene_workspace: row.scene_workspace_root.is_some(),
         status: row.status.label(i18n),
@@ -1376,6 +1377,32 @@ pub(super) fn build_single_file_table_row(
         size: i18n.format_bytes(row.size),
         modified: i18n.format_modified(row.modified),
     }
+}
+
+pub(super) fn file_row_state_mark(row: &SceneRow) -> Option<RowStateMark> {
+    if row.dirty() || matches!(row.status, FileStatus::Dirty) {
+        return Some(RowStateMark::Modified);
+    }
+    match row.status {
+        FileStatus::Error(_) => Some(RowStateMark::Error),
+        FileStatus::Saved => Some(RowStateMark::Saved),
+        _ => None,
+    }
+}
+
+pub(super) fn with_row_state_mark(tr: Stateful<Div>, mark: Option<RowStateMark>) -> Stateful<Div> {
+    let Some(mark) = mark else {
+        return tr;
+    };
+    tr.relative().child(
+        div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(ROW_STATE_MARK_WIDTH))
+            .bg(rgb(mark.strong())),
+    )
 }
 
 pub(super) fn missing_path_count_for_row(row: &SceneRow) -> Option<usize> {

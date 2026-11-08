@@ -12306,3 +12306,36 @@ fn menu_shortcuts_display_platform_modifier(cx: &mut TestAppContext) {
         }
     });
 }
+
+#[test]
+fn file_row_state_mark_survives_selection() {
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("SampleA.ma");
+    fs::write(&scene, "//Maya ASCII 2026 scene\n").expect("write scene");
+    let state = test_state(dir.path(), "");
+    let i18n = I18n::new(SupportedLocale::English);
+
+    let mut row = test_row(1, &scene);
+    row.selected = true;
+    row.dirty_kind = Some(DirtyKind::Replace);
+    row.status = FileStatus::Dirty;
+    let table_row = super::helpers::build_single_file_table_row(&row, &state, &i18n);
+    assert!(table_row.selected);
+    assert_eq!(table_row.state_mark, Some(super::RowStateMark::Modified));
+
+    let cases = [
+        (
+            FileStatus::Error("parse failed".to_string()),
+            Some(super::RowStateMark::Error),
+        ),
+        (FileStatus::Saved, Some(super::RowStateMark::Saved)),
+        (FileStatus::Audited, None),
+        (FileStatus::Idle, None),
+    ];
+    for (status, expected) in cases {
+        let mut row = test_row(1, &scene);
+        row.selected = true;
+        row.status = status;
+        assert_eq!(super::helpers::file_row_state_mark(&row), expected);
+    }
+}

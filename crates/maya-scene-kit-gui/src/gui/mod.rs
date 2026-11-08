@@ -150,6 +150,7 @@ const ACCENT_SOFT: u32 = 0xd8eef0;
 const WARN_SOFT: u32 = 0xf5ead7;
 const ERROR_SOFT: u32 = 0xf3d8d2;
 const SUCCESS_SOFT: u32 = 0xdceee0;
+const ROW_STATE_MARK_WIDTH: f32 = 4.0;
 const AUDIT_RESULTS_PER_FILE: usize = 16;
 const AUTO_ANALYZE_DEBOUNCE: Duration = Duration::from_millis(150);
 const FILE_DIALOG_UI_BLOCK_RELEASE_DELAY: Duration = Duration::from_millis(300);
@@ -865,6 +866,7 @@ struct FileTableRow {
     dirty: bool,
     is_processing: bool,
     tone: u32,
+    state_mark: Option<RowStateMark>,
     name: String,
     has_scene_workspace: bool,
     status: String,
@@ -1641,6 +1643,45 @@ fn badge(text: &str, background: u32, foreground: u32) -> impl IntoElement {
         .bg(rgb(background))
         .text_sm()
         .text_color(rgb(foreground))
+        .whitespace_nowrap()
+        .child(text.to_string())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowStateMark {
+    Modified,
+    Error,
+    Saved,
+}
+
+impl RowStateMark {
+    fn soft(self) -> u32 {
+        match self {
+            Self::Modified => WARN_SOFT,
+            Self::Error => ERROR_SOFT,
+            Self::Saved => SUCCESS_SOFT,
+        }
+    }
+
+    fn strong(self) -> u32 {
+        match self {
+            Self::Modified => 0x8a6116,
+            Self::Error => 0x8a3a32,
+            Self::Saved => 0x256c2c,
+        }
+    }
+}
+
+fn state_badge(text: &str, mark: RowStateMark) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .px_2()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(mark.strong()))
+        .bg(rgb(mark.soft()))
+        .text_sm()
+        .text_color(rgb(mark.strong()))
         .whitespace_nowrap()
         .child(text.to_string())
 }
