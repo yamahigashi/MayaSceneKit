@@ -11757,3 +11757,56 @@ mod allowlist_tests {
         }
     }
 }
+
+#[gpui::test]
+fn path_override_failure_preserves_history(cx: &mut TestAppContext) {
+    check_path_override_failure(cx, false);
+}
+
+#[gpui::test]
+fn path_override_failure_preserves_pending_transaction(cx: &mut TestAppContext) {
+    check_path_override_failure(cx, true);
+}
+
+fn check_path_override_failure(cx: &mut TestAppContext, pending: bool) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut first = SceneRow::new_unloaded_row(1);
+            first.paths_report = Some(super::ScenePathsReport {
+                entries: Vec::new(),
+                scene_path: "asset/example/TestScene.ma".into(),
+                scene_format: maya_scene_kit_observe::scene::SceneFormat::Ma,
+                validation_state: maya_scene_kit_observe::scene::ValidationState::Validated,
+            });
+            first
+                .path_overrides
+                .insert(0, "asset/example/Example.tx".into());
+            first
+                .pending_path_owner_delete_targets
+                .insert(PathOwnerDeleteTarget {
+                    node_type: "file".into(),
+                    node_name: "Example".into(),
+                });
+            shell.rows = vec![first, SceneRow::new_unloaded_row(2)];
+            if pending {
+                shell.begin_edit_transaction(&[1]);
+            }
+            let transactions = shell.pending_edit_transactions.len();
+            let sequence = shell.next_edit_history_sequence;
+            let commit_sequence = shell.next_edit_history_commit_sequence;
+            let undo = shell.undo_stack.len();
+            let redo = shell.redo_stack.len();
+            let overrides = shell.rows[0].path_overrides.clone();
+            let generation = shell.rows[0].replace_generation;
+            shell.undo_path_edit_targets(vec![(1, 0), (2, 0)], window, cx);
+            assert_eq!(shell.rows[0].path_overrides, overrides);
+            assert_eq!(shell.rows[0].replace_generation, generation);
+            assert_eq!(shell.pending_edit_transactions.len(), transactions);
+            assert_eq!(shell.next_edit_history_sequence, sequence);
+            assert_eq!(shell.next_edit_history_commit_sequence, commit_sequence);
+            assert_eq!(shell.undo_stack.len(), undo);
+            assert_eq!(shell.redo_stack.len(), redo);
+        });
+    });
+}

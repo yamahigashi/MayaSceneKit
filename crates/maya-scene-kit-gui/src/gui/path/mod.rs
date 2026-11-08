@@ -950,14 +950,7 @@ impl GuiShell {
                 || !row.pending_clean_targets.is_empty()
                 || !row.pending_path_owner_delete_targets.is_empty()
         });
-        let before =
-            (!requires_scene_edit_restaging).then(|| self.capture_row_edit_states(&row_indices));
-        let edit_sequence = if requires_scene_edit_restaging {
-            self.begin_edit_transaction(&row_indices)
-        } else {
-            None
-        };
-        let mut inline_job_records = Vec::new();
+        let mut prepared_edits = Vec::with_capacity(planned_edits.len());
         for (row_index, next_overrides) in planned_edits {
             let Some(report) = self.rows[row_index].display_paths_report() else {
                 return Err("missing path report for override update".to_string());
@@ -986,6 +979,17 @@ impl GuiShell {
                 )
             };
 
+            prepared_edits.push((row_index, next_overrides, preview));
+        }
+        let before =
+            (!requires_scene_edit_restaging).then(|| self.capture_row_edit_states(&row_indices));
+        let edit_sequence = if requires_scene_edit_restaging {
+            self.begin_edit_transaction(&row_indices)
+        } else {
+            None
+        };
+        let mut inline_job_records = Vec::new();
+        for (row_index, next_overrides, preview) in prepared_edits {
             let row_id = self.rows[row_index].id;
             let row_path = self.rows[row_index].path.clone();
             let mut revision = None;
