@@ -98,8 +98,11 @@ impl ObserveCacheIdentity {
 
     fn blob_name(&self) -> String {
         format!(
-            "{}-{}.{}",
-            self.scene_sha256, self.load_options_fingerprint, BLOB_FILE_EXTENSION
+            "{}-{}-v{}.{}",
+            self.scene_sha256,
+            self.load_options_fingerprint,
+            self.cache_schema_version,
+            BLOB_FILE_EXTENSION
         )
     }
 }
@@ -532,6 +535,7 @@ impl ObserveCacheStore {
                 OBSERVE_CACHE_TTL,
             ) && record.file_state.size == file_state.size
                 && record.file_state.modified_unix_nanos == file_state.modified_unix_nanos
+                && record.identity.cache_schema_version == OBSERVE_CACHE_SCHEMA_VERSION
                 && record.identity.load_options_fingerprint == load_options_fingerprint
         })
     }
@@ -591,11 +595,13 @@ impl ObserveCacheStore {
                 SELECT 1 FROM path_index
                 WHERE scene_sha256 = ?1
                   AND load_options_fingerprint = ?2
-                  AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs >= ?3)
+                  AND cache_schema_version = ?3
+                  AND (last_accessed_unix_secs IS NULL OR last_accessed_unix_secs >= ?4)
             )",
             params![
                 &identity.scene_sha256,
                 &identity.load_options_fingerprint,
+                i64::from(OBSERVE_CACHE_SCHEMA_VERSION),
                 u64_to_sql(now_unix_secs.saturating_sub(OBSERVE_CACHE_TTL.as_secs())).unwrap_or(0)
             ],
             |row| row.get::<_, i64>(0),
@@ -609,6 +615,9 @@ impl ObserveCacheStore {
         conn: &Connection,
         identity: &ObserveCacheIdentity,
     ) -> io::Result<Option<ObservedSceneSnapshot>> {
+        if identity.cache_schema_version != OBSERVE_CACHE_SCHEMA_VERSION {
+            return Ok(None);
+        }
         let row = conn
             .query_row(
                 "SELECT '' as normalized_path, 0 as size, NULL as modified_unix_nanos,
@@ -617,8 +626,13 @@ impl ObserveCacheStore {
                  FROM path_index
                  WHERE scene_sha256 = ?1
                    AND load_options_fingerprint = ?2
+                   AND cache_schema_version = ?3
                  LIMIT 1",
-                params![&identity.scene_sha256, &identity.load_options_fingerprint,],
+                params![
+                    &identity.scene_sha256,
+                    &identity.load_options_fingerprint,
+                    i64::from(OBSERVE_CACHE_SCHEMA_VERSION)
+                ],
                 |row| {
                     Ok((
                         row.get::<_, i64>(3)?,
@@ -838,6 +852,9 @@ impl ObserveCacheStore {
         conn: &Connection,
         record: &ObserveCacheIndexRecord,
     ) -> io::Result<Option<ObservedSceneSnapshot>> {
+        if record.identity.cache_schema_version != OBSERVE_CACHE_SCHEMA_VERSION {
+            return Ok(None);
+        }
         let path = self.blob_path(&record.blob.relative_path);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -1050,6 +1067,115 @@ mod tests {
             ),
         )
         .expect("write sample scene");
+    }
+
+    #[test]
+    fn observe_cache_rejects_old_versions_on_all_read_paths() {
+        let dir = tempdir().expect("tmpdir");
+        let options = LoadOptions::default();
+        let first = dir.path().join("TestSceneA.ma");
+        let second = dir.path().join("TestSceneB.ma");
+        write_sample_scene(&first);
+        write_sample_scene(&second);
+        let mut old = ObservedSceneSnapshot::from_observation(
+            &Loader::new(options.clone())
+                .observe_path(&first)
+                .expect("observe"),
+            &options,
+        )
+        .expect("snapshot");
+        old.identity.cache_schema_version = super::OBSERVE_CACHE_SCHEMA_VERSION - 1;
+        let current = ObservedSceneSnapshot::from_observation(
+            &Loader::new(options.clone())
+                .observe_path(&second)
+                .expect("observe"),
+            &options,
+        )
+        .expect("snapshot");
+        assert_eq!(old.identity.scene_sha256, current.identity.scene_sha256);
+        assert_eq!(
+            old.identity.load_options_fingerprint,
+            current.identity.load_options_fingerprint
+        );
+        let store = ObserveCacheStore::new(dir.path().join("Example"));
+        store.save(&old).expect("save old");
+        store.save(&current).expect("save current");
+        assert!(
+            store
+                .load_by_path_if_fresh(&second, &options)
+                .expect("current path")
+                .is_some()
+        );
+        assert!(
+            store
+                .load_by_path_if_fresh(&first, &options)
+                .expect("old path")
+                .is_none()
+        );
+        let batch = store
+            .load_many_by_path_if_fresh_with_access(&[first.clone(), second.clone()], &options)
+            .expect("batch");
+        assert!(batch[0].as_ref().expect("old result").is_none());
+        assert_eq!(
+            batch[1]
+                .as_ref()
+                .expect("current result")
+                .as_ref()
+                .expect("hit")
+                .snapshot
+                .identity
+                .cache_schema_version,
+            super::OBSERVE_CACHE_SCHEMA_VERSION
+        );
+        let fallback = store
+            .load_by_path_with_hash_fallback(&first, &options)
+            .expect("fallback")
+            .expect("hit");
+        assert_eq!(
+            fallback.identity.cache_schema_version,
+            current.identity.cache_schema_version
+        );
+        let loaded = store
+            .load_by_identity(&current.identity)
+            .expect("identity")
+            .expect("hit");
+        assert_eq!(
+            loaded.identity.cache_schema_version,
+            current.identity.cache_schema_version
+        );
+        assert!(
+            store
+                .load_by_identity(&old.identity)
+                .expect("old identity")
+                .is_none()
+        );
+
+        let old_store = ObserveCacheStore::new(dir.path().join("TestScene"));
+        old_store.save(&old).expect("save old only");
+        assert!(
+            old_store
+                .load_by_path_if_fresh(&first, &options)
+                .expect("path")
+                .is_none()
+        );
+        assert!(
+            old_store
+                .load_by_path_with_hash_fallback(&first, &options)
+                .expect("fallback")
+                .is_none()
+        );
+        assert!(
+            old_store
+                .load_by_identity(&current.identity)
+                .expect("current identity")
+                .is_none()
+        );
+        assert!(
+            old_store
+                .load_by_identity(&old.identity)
+                .expect("old identity")
+                .is_none()
+        );
     }
 
     #[test]
