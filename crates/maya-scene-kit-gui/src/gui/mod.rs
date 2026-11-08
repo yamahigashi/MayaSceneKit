@@ -75,7 +75,8 @@ use crate::{
     },
     persistence::{
         AllowlistLoadError, UserAllowlistDocument, UserAllowlistEntry, app_allowlist_path,
-        load_allowlists, load_persisted_state, save_persisted_state, user_allowlist_path,
+        load_allowlists, load_persisted_state, next_persist_save_sequence, save_persisted_state,
+        user_allowlist_path,
     },
 };
 

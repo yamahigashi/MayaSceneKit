@@ -1,6 +1,10 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::model::PersistedState;
@@ -313,8 +317,15 @@ pub fn load_persisted_state() -> io::Result<PersistedState> {
     }
 }
 
-pub fn save_persisted_state(state: &PersistedState) -> io::Result<()> {
-    save_persisted_state_to(&default_state_path(), state)
+static LAST_SAVED_SEQUENCE: Mutex<u64> = Mutex::new(0);
+static NEXT_SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_persist_save_sequence() -> u64 {
+    NEXT_SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn save_persisted_state(state: &PersistedState, sequence: u64) -> io::Result<()> {
+    save_persisted_state_to(&default_state_path(), state, sequence, &LAST_SAVED_SEQUENCE)
 }
 
 fn load_persisted_state_from(path: &Path) -> io::Result<PersistedState> {
@@ -330,7 +341,18 @@ fn load_persisted_state_from(path: &Path) -> io::Result<PersistedState> {
     }
 }
 
-fn save_persisted_state_to(path: &Path, state: &PersistedState) -> io::Result<()> {
+fn save_persisted_state_to(
+    path: &Path,
+    state: &PersistedState,
+    sequence: u64,
+    last_saved: &Mutex<u64>,
+) -> io::Result<()> {
+    let mut last_saved = last_saved
+        .lock()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if sequence <= *last_saved {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -338,12 +360,17 @@ fn save_persisted_state_to(path: &Path, state: &PersistedState) -> io::Result<()
     normalized.normalize_ignore_folder_settings();
     let payload = serde_json::to_vec_pretty(&normalized)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    fs::write(path, payload)
+    let result = maya_scene_kit_edit::scene::write_output_bytes_atomic(path, &payload)
+        .map_err(|error| io::Error::other(error.to_string()));
+    if result.is_ok() || fs::read(path).is_ok_and(|bytes| bytes == payload) {
+        *last_saved = sequence;
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, path::PathBuf};
+    use std::{fs, io, path::PathBuf, sync::Mutex};
 
     use tempfile::tempdir;
 
@@ -388,6 +415,50 @@ mod tests {
 
     fn document_json(records: &[&str]) -> String {
         format!("{{\"version\":1,\"entries\":[{}]}}\n", records.join(","))
+    }
+
+    #[test]
+    fn older_snapshot_cannot_overwrite_newer_snapshot() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let gate = Mutex::new(0);
+        let state_a = PersistedState::default();
+        let mut state_b = state_a.clone();
+        state_b.last_opened_input = Some(RecentInput {
+            path: "Example.ma".into(),
+            was_directory: false,
+        });
+        save_persisted_state_to(&path, &state_b, 2, &gate).expect("save B");
+        save_persisted_state_to(&path, &state_a, 1, &gate).expect("skip A");
+        assert_eq!(load_persisted_state_from(&path).expect("load B"), state_b);
+    }
+
+    #[test]
+    fn failed_save_allows_retry_with_same_sequence() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        fs::create_dir(&path).expect("create obstruction");
+        let gate = Mutex::new(0);
+        let state = PersistedState::default();
+        assert!(save_persisted_state_to(&path, &state, 1, &gate).is_err());
+        assert_eq!(*gate.lock().expect("lock"), 0);
+        fs::remove_dir(&path).expect("remove obstruction");
+        save_persisted_state_to(&path, &state, 1, &gate).expect("retry");
+        assert_eq!(*gate.lock().expect("lock"), 1);
+        assert_eq!(load_persisted_state_from(&path).expect("load"), state);
+    }
+
+    #[test]
+    fn successful_save_leaves_no_temporary_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        save_persisted_state_to(&path, &PersistedState::default(), 1, &Mutex::new(0))
+            .expect("save");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .expect("read directory")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(entries, vec![path]);
     }
 
     #[test]
@@ -810,7 +881,7 @@ mod tests {
             }],
         };
 
-        save_persisted_state_to(&path, &state).expect("save state");
+        save_persisted_state_to(&path, &state, 1, &Mutex::new(0)).expect("save state");
         let restored = load_persisted_state_from(&path).expect("load state");
         assert_eq!(restored, state);
     }

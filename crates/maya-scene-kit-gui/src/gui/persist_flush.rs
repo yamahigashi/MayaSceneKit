@@ -2,10 +2,21 @@ use super::*;
 
 const PERSIST_FLUSH_DEBOUNCE: Duration = Duration::from_millis(250);
 
+impl PersistFlushState {
+    fn cancel(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("persist generation exhausted");
+        self.in_flight = false;
+        self.dirty = false;
+        self.workspace_paths_dirty = false;
+    }
+}
+
 impl GuiShell {
     pub(super) fn cancel_persist_flush(&mut self) {
-        self.persist_flush_state.generation = self.persist_flush_state.generation.wrapping_add(1);
-        self.persist_flush_state = PersistFlushState::default();
+        self.persist_flush_state.cancel();
     }
 
     pub(super) fn schedule_persist_flush(
@@ -21,7 +32,11 @@ impl GuiShell {
         }
 
         self.persist_flush_state.in_flight = true;
-        self.persist_flush_state.generation = self.persist_flush_state.generation.wrapping_add(1);
+        self.persist_flush_state.generation = self
+            .persist_flush_state
+            .generation
+            .checked_add(1)
+            .expect("persist generation exhausted");
         let generation = self.persist_flush_state.generation;
         let view = cx.entity();
 
@@ -48,18 +63,21 @@ impl GuiShell {
                                     shell.persist_flush_state.workspace_paths_dirty;
                                 shell.persist_flush_state.dirty = false;
                                 shell.persist_flush_state.workspace_paths_dirty = false;
-                                Some(shell.prepared_persisted_state(workspace_paths_dirty))
+                                Some((
+                                    shell.prepared_persisted_state(workspace_paths_dirty),
+                                    next_persist_save_sequence(),
+                                ))
                             },
                         )
                         .ok()
                         .flatten();
 
-                    let Some(persist_state) = persist_state else {
+                    let Some((persist_state, sequence)) = persist_state else {
                         return;
                     };
 
                     let result = executor
-                        .spawn(async move { save_persisted_state(&persist_state) })
+                        .spawn(async move { save_persisted_state(&persist_state, sequence) })
                         .await;
 
                     let _ = async_cx.update_window_entity(
@@ -94,7 +112,8 @@ impl GuiShell {
     pub(super) fn flush_persist_now(&mut self, workspace_paths_dirty: bool) {
         self.cancel_persist_flush();
         let state = self.prepared_persisted_state(workspace_paths_dirty);
-        if let Err(err) = save_persisted_state(&state) {
+        let sequence = next_persist_save_sequence();
+        if let Err(err) = save_persisted_state(&state, sequence) {
             self.status_message = Some(BannerMessage::PersistFailed(err.to_string()));
         }
     }
@@ -107,5 +126,27 @@ impl GuiShell {
             state.replace_workspace_paths(self.rows.iter().map(|row| row.path.clone()));
         }
         state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PersistFlushState;
+
+    #[test]
+    fn cancel_preserves_and_increments_generation() {
+        let mut state = PersistFlushState {
+            generation: 7,
+            in_flight: true,
+            dirty: true,
+            workspace_paths_dirty: true,
+        };
+        state.cancel();
+        assert_eq!(state.generation, 8);
+        assert!(!state.in_flight);
+        assert!(!state.dirty);
+        assert!(!state.workspace_paths_dirty);
+        state.cancel();
+        assert_eq!(state.generation, 9);
     }
 }
