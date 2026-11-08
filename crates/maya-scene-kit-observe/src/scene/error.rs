@@ -90,12 +90,13 @@ impl From<MayaBinaryParseError> for SceneToolError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::mb::LayoutHints;
     use maya_scene_kit_formats::mb::{
         MbParseBudget, parse_bytes, parse_bytes_with_budget,
         walk_group_chunks_with_layout_with_budget,
     };
+
+    use super::*;
+    use crate::mb::LayoutHints;
 
     #[test]
     fn mb_error_conversion_preserves_classification() {

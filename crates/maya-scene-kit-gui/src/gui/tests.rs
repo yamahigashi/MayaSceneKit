@@ -1,5 +1,3 @@
-use super::audit_detail_dialog::OfferInput;
-use super::{AuditDetailCodeState, GuiFileState};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -48,11 +46,11 @@ use maya_scene_kit_observe::scene::{
 use tempfile::tempdir;
 
 use super::{
-    AuditDetailDialogState, AuditDetailField, AuditDetailFieldKind, AuditDetailTab,
-    AuditResultItemKind, AuditResultRow, AuditResultRowKey, AuditRowCleanState,
+    AuditDetailCodeState, AuditDetailDialogState, AuditDetailField, AuditDetailFieldKind,
+    AuditDetailTab, AuditResultItemKind, AuditResultRow, AuditResultRowKey, AuditRowCleanState,
     AuditSeverityFilter, AuditSortKey, AuditTableSort, AutoAnalyzeParallelismPreference,
     AutoAnalyzePriority, AutoAnalyzeQueueState, BackupLocationPreference, BannerMessage, DirtyKind,
-    FileSortKey, FileStatus, FileTableSort, MenuAutoAnalyzeParallelism32,
+    FileSortKey, FileStatus, FileTableSort, GuiFileState, MenuAutoAnalyzeParallelism32,
     MenuEditDeleteUiConfigurationScriptNode, MenuEditRedo, MenuEditUndo, MenuPurgeAnalysisCache,
     MenuToggleAnalysisCache, MenuToggleIgnoreFolderNames, PathCollectRewriteMode,
     PathEditKeyboardOutcome, PathFormFilter, PathOrderSnapshot, PathResolutionBadge, PathSortKey,
@@ -60,16 +58,18 @@ use super::{
     ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState, RowJobResult, RowOperation,
     SceneRow, TableSelectAll, analyze_row, analyze_row_bytes_with_options,
     analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
-    audit_context_menu_state, audit_table_columns, backup_file_name, build_app_menus,
-    build_audit_clipboard_payload, build_audit_result_rows, build_audit_table_model,
-    build_file_copy_payload, build_file_operation_paths, build_file_table_rows,
-    build_job_history_log_lines, build_path_table_model,
-    build_path_table_model_with_order_snapshot, clean_targets_for_threat_findings,
-    collect_scene_files_recursively, compute_visible_row_indices_for,
-    default_audit_severity_filter, default_audit_sort, default_path_form_filter,
-    default_path_resolution_filter, default_path_sort, default_path_type_filter, detect_format,
-    exit_warning_required_for_rows, file_context_menu_state, filter_audit_result_rows,
-    merge_column_widths, missing_path_count_for_row, next_backup_path, path_context_menu_state,
+    audit_context_menu_state,
+    audit_detail_dialog::OfferInput,
+    audit_table_columns, backup_file_name, build_app_menus, build_audit_clipboard_payload,
+    build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
+    build_file_operation_paths, build_file_table_rows, build_job_history_log_lines,
+    build_path_table_model, build_path_table_model_with_order_snapshot,
+    clean_targets_for_threat_findings, collect_scene_files_recursively,
+    compute_visible_row_indices_for, default_audit_severity_filter, default_audit_sort,
+    default_path_form_filter, default_path_resolution_filter, default_path_sort,
+    default_path_type_filter, detect_format, exit_warning_required_for_rows,
+    file_context_menu_state, filter_audit_result_rows, merge_column_widths,
+    missing_path_count_for_row, next_backup_path, path_context_menu_state,
     path_edit::{
         PathCollectPlan, absolute_override_value_for_entry, collect_target_files,
         collected_path_rewrite_value, find_missing_path_file_hits, missing_path_entry_file_name,
@@ -9829,8 +9829,9 @@ fn audit_detail_tabs_select_one_panel_and_reset_on_reopen(cx: &mut TestAppContex
 
 #[test]
 fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
-    use super::helpers::build_audit_detail_fields;
     use AuditDetailFieldKind::*;
+
+    use super::helpers::build_audit_detail_fields;
     let fields = |pairs: &[(AuditDetailFieldKind, &str)]| {
         pairs
             .iter()
@@ -10044,8 +10045,9 @@ fn audit_detail_fields_preserve_origin_order_source_line_and_representative() {
 
 #[test]
 fn audit_detail_values_translate_only_complete_known_values() {
-    use super::audit_detail_dialog::audit_detail_field_display;
     use AuditDetailFieldKind::*;
+
+    use super::audit_detail_dialog::audit_detail_field_display;
     let en = I18n::new(SupportedLocale::English);
     let ja = I18n::new(SupportedLocale::Japanese);
     let surface = vec![AuditDetailField {
@@ -10191,8 +10193,9 @@ fn audit_detail_evidence_filters_entries_without_changing_copy_payload() {
 
 #[test]
 fn audit_detail_header_facts_follow_locale_and_omit_unknown_trigger() {
-    use super::audit_detail_dialog::audit_detail_header_facts;
     use AuditDetailFieldKind::*;
+
+    use super::audit_detail_dialog::audit_detail_header_facts;
     let en = I18n::new(SupportedLocale::English);
     let ja = I18n::new(SupportedLocale::Japanese);
     let node = AuditDetailField {
@@ -10264,8 +10267,9 @@ fn audit_detail_header_facts_follow_locale_and_omit_unknown_trigger() {
 
 #[test]
 fn audit_detail_surface_text_matching_is_unique_and_preserves_origin_identity() {
-    use super::audit_detail_dialog::{AuditSurfaceMatch, match_audit_surface_text};
     use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    use super::audit_detail_dialog::{AuditSurfaceMatch, match_audit_surface_text};
 
     let origin = ExecutionOrigin {
         lang: ExecutionLanguage::Python,
@@ -10463,8 +10467,9 @@ fn audit_detail_code_missing_file_opens_asynchronously_then_fails(cx: &mut TestA
 
 #[gpui::test]
 fn audit_detail_code_drops_results_from_an_old_request(cx: &mut TestAppContext) {
-    use super::audit_detail_dialog::load_audit_surface_text;
     use gpui_component::WindowExt;
+
+    use super::audit_detail_dialog::load_audit_surface_text;
     let dir = tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
     let row = audit_detail_code_test_row(&path);
@@ -10768,8 +10773,9 @@ fn audit_detail_fix_cache_restore_records_file_state(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn audit_detail_fix_dedup_only_blocks_findings(cx: &mut TestAppContext) {
-    use super::audit_detail_dialog::audit_detail_code_note_key;
     use gpui_component::WindowExt;
+
+    use super::audit_detail_dialog::audit_detail_code_note_key;
     let dir = tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
     let row = audit_detail_code_test_row(&path);
@@ -10842,8 +10848,9 @@ fn audit_detail_fix_dedup_only_blocks_findings(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn audit_detail_fix_loading_generation_rejects_old_result(cx: &mut TestAppContext) {
-    use super::audit_detail_dialog::audit_surface_code_result;
     use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    use super::audit_detail_dialog::audit_surface_code_result;
     let dir = tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
     let row = audit_detail_code_test_row(&path);
@@ -10906,8 +10913,9 @@ fn audit_detail_fix_missing_file_state_does_not_load() {
 }
 
 fn audit_detail_fix_assert_too_large(text: String, offers: &OfferInput) {
-    use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
     use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
     let target = super::AuditDetailCodeTarget {
         origin: ExecutionOrigin::without_chunk_address(),
         derived: false,
@@ -10943,9 +10951,10 @@ fn audit_detail_fix_single_line_limit() {
 
 #[gpui::test]
 fn audit_detail_fix_unmatched_results_preserve_preview(cx: &mut TestAppContext) {
-    use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
     use gpui_component::WindowExt;
     use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    use super::audit_detail_dialog::{audit_detail_code_note_key, audit_surface_code_result};
     let dir = tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
     let row = audit_detail_code_test_row(&path);
@@ -10993,16 +11002,18 @@ fn audit_detail_fix_unmatched_results_preserve_preview(cx: &mut TestAppContext) 
 }
 
 mod allowlist_tests {
+    use std::sync::Arc;
+
+    use maya_scene_kit_audit::scene::{
+        AllowlistSource, AuditAllowRef, AuditDisposition, AuditFindingCode, allowlist_surface_hash,
+    };
+    use serde_json::json;
+
     use super::*;
     use crate::gui::{
         AnalyzeRowResult, ScriptAuditPlan, allowlist_error_text, gui_audit_plan,
         helpers::{build_audit_detail_fields, searchable_text_for_audit_row},
     };
-    use maya_scene_kit_audit::scene::{
-        AllowlistSource, AuditAllowRef, AuditDisposition, AuditFindingCode, allowlist_surface_hash,
-    };
-    use serde_json::json;
-    use std::sync::Arc;
 
     const SCENE: &str = concat!(
         "//Maya ASCII 2026 scene\n",

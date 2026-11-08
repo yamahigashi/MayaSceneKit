@@ -1,5 +1,6 @@
-use crate::{Chunk, ChunkLayout, FourCC, HeaderFormat, ParsedSection, SectionChunk};
 use std::collections::HashSet;
+
+use crate::{Chunk, ChunkLayout, FourCC, HeaderFormat, ParsedSection, SectionChunk};
 
 /// A rejected chunk encoding or section rewrite.
 /// Arithmetic overflow concerns `usize` lengths, not allocation failures.
@@ -270,9 +271,10 @@ impl ParsedSection {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::encode_chunk;
     use crate::{ChunkLayout, FourCC, HeaderFormat, parse_bytes};
-    use std::num::NonZeroUsize;
 
     #[test]
     fn encode_chunk_preserves_non_printable_tag_bytes() {
@@ -308,9 +310,9 @@ mod tests {
 
     #[test]
     fn typed_layout_preserves_padding_and_tail() {
-        use crate::section::SectionLayout;
         use crate::{
             ByteSpan, LayoutHints, ParsedSection, SectionChunk, parse_section_chunks_with_hints,
+            section::SectionLayout,
         };
         for (alignment, format, expected) in [
             (

@@ -6,10 +6,13 @@ use std::{
 
 use thiserror::Error;
 
-use crate::layout::{
-    EIGHT_BYTE_HEADER_SIZE, FOUR_BYTE_HEADER_SIZE, is_group_chunk_tag, resolve_parser_group_layout,
+use crate::{
+    ChunkLayout, FourCC, HeaderFormat,
+    layout::{
+        EIGHT_BYTE_HEADER_SIZE, FOUR_BYTE_HEADER_SIZE, is_group_chunk_tag,
+        resolve_parser_group_layout,
+    },
 };
-use crate::{ChunkLayout, FourCC, HeaderFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MbParseBudgetLimit {
@@ -1531,8 +1534,9 @@ mod tests {
 
     #[test]
     fn child_layout_is_set_before_expansion() {
-        use crate::encode_chunk;
         use std::num::NonZeroUsize;
+
+        use crate::encode_chunk;
         for (tag, form, alignment, header) in [
             (*b"FOR4", *b"TEST", 4, HeaderFormat::FourByte),
             (*b"FOR8", *b"Maya", 4, HeaderFormat::EightByte),

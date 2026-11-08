@@ -1,12 +1,14 @@
+use std::sync::Arc;
+
+use gpui_component::checkbox::Checkbox;
+use maya_scene_kit_audit::scene::{AuditSurfaceDerivation, allowlist_surface_hash};
+use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
 use super::*;
 use crate::persistence::{
     AllowlistEntryDraft, UserAllowlistEntry, add_user_allowlist_entry, build_user_allowlist_entry,
     current_user_name,
 };
-use gpui_component::checkbox::Checkbox;
-use maya_scene_kit_audit::scene::{AuditSurfaceDerivation, allowlist_surface_hash};
-use maya_scene_kit_observe::scene::execution::ExecutionSurface;
-use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum AuditSurfaceMatch {

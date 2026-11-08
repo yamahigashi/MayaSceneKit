@@ -587,9 +587,10 @@ impl<'a> MelSinkCalls<'a> {
 
 #[cfg(test)]
 mod allowlist_root_tests {
+    use maya_scene_kit_observe::scene::execution::collect_mel_surface_facts;
+
     use super::*;
     use crate::scene::{AuditSurfaceDerivation, ExecutionOrigin, ExecutionTrigger};
-    use maya_scene_kit_observe::scene::execution::collect_mel_surface_facts;
 
     #[test]
     fn allowlist_root_survives_literal_callback_and_parser_fallback() {

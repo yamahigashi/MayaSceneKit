@@ -1,7 +1,10 @@
-pub(crate) use crate::defaults::{EIGHT_BYTE_HEADER_SIZE, FOUR_BYTE_HEADER_SIZE};
-use crate::defaults::{resolve_parser_group_defaults, resolve_section_layout_defaults};
-use crate::{FourCC, HeaderFormat};
 use std::num::NonZeroUsize;
+
+pub(crate) use crate::defaults::{EIGHT_BYTE_HEADER_SIZE, FOUR_BYTE_HEADER_SIZE};
+use crate::{
+    FourCC, HeaderFormat,
+    defaults::{resolve_parser_group_defaults, resolve_section_layout_defaults},
+};
 
 /// Independent, optional hints for a chunk section.
 /// Unspecified hints leave a section unscanned. FOR8/Maya uses alignment 4
@@ -119,12 +122,13 @@ pub(crate) fn resolve_parser_group_layout(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::{
         EIGHT_BYTE_HEADER_SIZE, FOUR_BYTE_HEADER_SIZE, is_group_chunk_tag,
         resolve_parser_group_layout, resolve_section_layout_hints,
     };
     use crate::{FourCC, HeaderFormat, LayoutHints};
-    use std::num::NonZeroUsize;
 
     #[test]
     fn group_tag_detection_is_explicit() {
