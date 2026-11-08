@@ -7065,6 +7065,66 @@ fn file_context_delete_ui_configuration_script_node_skips_processing_rows(cx: &m
 }
 
 #[gpui::test]
+fn menu_delete_ui_configuration_script_node_skips_rows_without_the_node(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene_with = dir.path().join("SampleWithNode.ma");
+    let scene_without = dir.path().join("SampleWithoutNode.ma");
+    write_ui_configuration_script_node_scene(&scene_with);
+    fs::write(
+        &scene_without,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode transform -n \"Example\";\n",
+        ),
+    )
+    .expect("write scene without node");
+    let analyze = |path: &Path| {
+        let RowJobResult::Analyze(result) =
+            analyze_row(path, AuditModePreference::StrictDefault).expect("analyze row")
+        else {
+            panic!("expected analyze result");
+        };
+        result
+    };
+    let result_with = analyze(&scene_with);
+    let result_without = analyze(&scene_without);
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row_with = test_row(1, &scene_with);
+            row_with.selected = true;
+            row_with.dump_report = result_with.dump_report.clone();
+            let mut row_without = test_row(2, &scene_without);
+            row_without.selected = true;
+            row_without.dump_report = result_without.dump_report.clone();
+            shell.rows = vec![row_with, row_without];
+            shell.rebuild_row_id_index();
+
+            shell.on_menu_edit_delete_ui_configuration_script_node(
+                &MenuEditDeleteUiConfigurationScriptNode,
+                window,
+                cx,
+            );
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].pending_clean_targets,
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "uiConfigurationScriptNode".to_string(),
+            }])
+        );
+        assert!(shell.rows[1].pending_clean_targets.is_empty());
+        assert!(!matches!(shell.rows[1].status, FileStatus::Error(_)));
+    });
+}
+
+#[gpui::test]
 fn menu_delete_ui_configuration_script_node_is_noop_during_workspace_scan(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");

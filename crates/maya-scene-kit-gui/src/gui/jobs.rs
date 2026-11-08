@@ -1040,9 +1040,25 @@ impl GuiShell {
             self.status_message = Some(BannerMessage::SelectFilesFirst);
             return;
         }
+        let row_indices = selected
+            .into_iter()
+            .filter(|&row_index| {
+                self.rows[row_index]
+                    .display_dump_report()
+                    .is_none_or(|report| {
+                        report
+                            .script_entries
+                            .iter()
+                            .any(|entry| entry.name == UI_CONFIGURATION_SCRIPT_NODE_NAME)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if row_indices.is_empty() {
+            return;
+        }
 
         self.stage_script_node_clean_target(
-            selected,
+            row_indices,
             UI_CONFIGURATION_SCRIPT_NODE_NAME,
             ResultTab::Audit,
             window,
