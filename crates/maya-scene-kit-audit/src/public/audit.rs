@@ -51,7 +51,11 @@ pub struct ReferenceGraphOptions {
     pub recursive: bool,
     /// Maximum reference depth to descend when `recursive` is `true`.
     pub max_depth: usize,
-    /// Maximum number of unique scenes to visit when `recursive` is `true`.
+    /// Maximum number of unique scenes admitted when recursive is true, counting roots.
+    /// Roots are always admitted without this check, so they are audited even when
+    /// max_scenes is 0, and multiple roots may exceed the limit. A referenced scene
+    /// is rejected with a scene-limit traversal issue when the number of admitted
+    /// scenes has already reached max_scenes.
     pub max_scenes: usize,
 }
 

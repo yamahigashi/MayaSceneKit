@@ -2407,3 +2407,70 @@ mod allowlist_contract_tests {
         }
     }
 }
+
+#[test]
+fn reference_graph_scene_limit_admits_root_and_child_once() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    write_scene(&dir.path().join("workspace.mel"), "// Example\n");
+    let root = dir.path().join("TestScene.ma");
+    write_reference_scene(&root, "Example.ma", "Example");
+    write_basic_scene(&dir.path().join("Example.ma"));
+
+    let graph = audit_reference_graph_roots_with_traversal_options_and_digests(
+        [&root],
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+        ReferenceGraphOptions {
+            max_scenes: 2,
+            ..ReferenceGraphOptions::default()
+        },
+        false,
+    );
+
+    assert_eq!(graph.reports.len(), 2);
+    assert_eq!(
+        graph
+            .traversal_issues
+            .iter()
+            .filter(|issue| { issue.kind == AuditTraversalIssueKind::SceneLimit })
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn reference_graph_scene_limit_rejects_second_child() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    write_scene(&dir.path().join("workspace.mel"), "// Example\n");
+    let root = dir.path().join("TestScene.ma");
+    write_reference_scene(&root, "Example.ma", "Example");
+    write_basic_scene(&dir.path().join("Example.ma"));
+    let second = dir.path().join("Example2.ma");
+    write_basic_scene(&second);
+    let mut source = std::fs::read_to_string(&root).expect("read scene");
+    source.push_str("file -r -rfn \"Example2\" \"Example2.ma\";\n");
+    write_scene(&root, &source);
+
+    let graph = audit_reference_graph_roots_with_traversal_options_and_digests(
+        [&root],
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+        ReferenceGraphOptions {
+            max_scenes: 2,
+            ..ReferenceGraphOptions::default()
+        },
+        false,
+    );
+
+    assert_eq!(graph.reports.len(), 2);
+    assert_eq!(
+        graph
+            .traversal_issues
+            .iter()
+            .filter(|issue| { issue.kind == AuditTraversalIssueKind::SceneLimit })
+            .count(),
+        1
+    );
+}

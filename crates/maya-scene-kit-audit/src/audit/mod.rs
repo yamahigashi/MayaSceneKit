@@ -501,7 +501,7 @@ struct ReferenceAuditRun<'a> {
     reports: Vec<AuditReport>,
     report_by_identity: HashMap<String, usize>,
     failed_by_identity: HashMap<String, usize>,
-    queued: HashSet<String>,
+    admitted: HashSet<String>,
     visited: HashSet<String>,
     queue: VecDeque<ReferenceQueueEntry>,
     edges: Vec<AuditReferenceEdge>,
@@ -535,7 +535,7 @@ impl<'a> ReferenceAuditRun<'a> {
             reports: Vec::new(),
             report_by_identity: HashMap::new(),
             failed_by_identity: HashMap::new(),
-            queued: HashSet::new(),
+            admitted: HashSet::new(),
             visited: HashSet::new(),
             queue: VecDeque::new(),
             edges: Vec::new(),
@@ -573,7 +573,7 @@ impl<'a> ReferenceAuditRun<'a> {
             report_index: None,
             issue_index: None,
         });
-        if self.queued.insert(identity.key.clone()) {
+        if self.admitted.insert(identity.key.clone()) {
             self.queue.push_back(ReferenceQueueEntry {
                 path: path.to_path_buf(),
                 identity,
@@ -738,9 +738,9 @@ impl<'a> ReferenceAuditRun<'a> {
                         ),
                     }));
                 } else if !self.visited.contains(&child_identity.key)
-                    && !self.queued.contains(&child_identity.key)
+                    && !self.admitted.contains(&child_identity.key)
                 {
-                    if self.visited.len() + self.queued.len() >= self.graph_options.max_scenes {
+                    if self.admitted.len() >= self.graph_options.max_scenes {
                         edge.issue_index = Some(self.push_issue(AuditTraversalIssue {
                             kind: AuditTraversalIssueKind::SceneLimit,
                             scene_path: Some(child_path.to_path_buf()),
@@ -752,7 +752,7 @@ impl<'a> ReferenceAuditRun<'a> {
                             ),
                         }));
                     } else {
-                        self.queued.insert(child_identity.key.clone());
+                        self.admitted.insert(child_identity.key.clone());
                         self.queue.push_back(ReferenceQueueEntry {
                             path: child_path.to_path_buf(),
                             identity: child_identity,
