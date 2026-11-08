@@ -178,6 +178,7 @@ mod tests {
             "action.clean_audit_context",
             "action.clean_file_context",
             "action.delete_ui_configuration_script_node",
+            "action.reload_folder",
             "tab.audit_detail_code",
             "tab.audit_detail_details",
             "action.close",

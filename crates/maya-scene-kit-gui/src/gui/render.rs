@@ -99,6 +99,8 @@ impl Render for GuiShell {
             .bg(rgb(ROOT_BG))
             .text_color(rgb(TEXT))
             .on_action(cx.listener(Self::on_menu_select_folder))
+            .on_action(cx.listener(Self::on_menu_reload_folder))
+            .on_action(cx.listener(Self::on_focus_search))
             .on_action(cx.listener(Self::on_menu_recent_folder_unavailable))
             .on_action(cx.listener(Self::on_menu_recent_folder_0))
             .on_action(cx.listener(Self::on_menu_recent_folder_1))
@@ -456,6 +458,7 @@ fn file_panel_header(
     auto_analyze_enabled: bool,
     view: Entity<GuiShell>,
 ) -> impl IntoElement {
+    let search_view = view.clone();
     div()
         .flex()
         .items_end()
@@ -539,10 +542,19 @@ fn file_panel_header(
                     view,
                 ))
                 .child(
-                    Input::new(search_input)
-                        .small()
-                        .w(px(220.0))
-                        .cleanable(true),
+                    div()
+                        .on_action(move |_: &InputEscape, window, cx| {
+                            search_view.update(cx, |shell, cx| {
+                                shell.on_search_escape(SearchTarget::FileList, window, cx);
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            Input::new(search_input)
+                                .small()
+                                .w(px(220.0))
+                                .cleanable(true),
+                        ),
                 ),
         )
 }

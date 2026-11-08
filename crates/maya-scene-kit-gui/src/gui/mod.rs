@@ -14,7 +14,7 @@ use gpui_component::{
     Disableable, Icon, IconName, IconNamed, Root, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     dialog::Dialog,
-    input::{Input, InputEvent, InputState},
+    input::{Escape as InputEscape, Input, InputEvent, InputState},
     menu::PopupMenuItem,
     radio::{Radio, RadioGroup},
     resizable::{h_resizable, resizable_panel, v_resizable},
@@ -84,6 +84,8 @@ actions!(
     gui_menu,
     [
         MenuSelectFolder,
+        MenuReloadFolder,
+        FocusSearch,
         MenuRecentFolderUnavailable,
         MenuRecentFolder0,
         MenuRecentFolder1,
@@ -1009,6 +1011,12 @@ enum PathSortKey {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchTarget {
+    FileList,
+    Paths,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum AuditSortKey {
     Scene,
     Severity,
@@ -1810,6 +1818,20 @@ fn init_gui_app(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-a", TableSelectAll, Some(TABLE_CONTEXT)),
         KeyBinding::new("cmd-a", TableSelectAll, Some(TABLE_CONTEXT)),
+        KeyBinding::new("ctrl-o", MenuSelectFolder, None),
+        KeyBinding::new("cmd-o", MenuSelectFolder, None),
+        KeyBinding::new("f5", MenuReloadFolder, None),
+        KeyBinding::new("ctrl-s", MenuSaveSelected, None),
+        KeyBinding::new("cmd-s", MenuSaveSelected, None),
+        KeyBinding::new("ctrl-shift-s", MenuSaveAll, None),
+        KeyBinding::new("cmd-shift-s", MenuSaveAll, None),
+        KeyBinding::new("ctrl-z", MenuEditUndo, None),
+        KeyBinding::new("ctrl-y", MenuEditRedo, None),
+        KeyBinding::new("ctrl-shift-z", MenuEditRedo, None),
+        KeyBinding::new("ctrl-f", FocusSearch, None),
+        KeyBinding::new("cmd-f", FocusSearch, None),
+        // Typing "/" inside any text input must still insert the character.
+        KeyBinding::new("/", FocusSearch, Some("!Input")),
     ]);
     cx.set_menus(build_app_menus(
         &PersistedState::default(),

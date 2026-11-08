@@ -92,6 +92,7 @@ pub(super) fn render_paths_filter_bar(
     i18n: &I18n,
     view: Entity<GuiShell>,
 ) -> impl IntoElement {
+    let escape_view = view.clone();
     let dedup_label = if shell.path_table_dedup {
         i18n.text("path_table.show_all")
     } else {
@@ -164,10 +165,19 @@ pub(super) fn render_paths_filter_bar(
             view,
         ))
         .child(
-            Input::new(&shell.path_search_input)
-                .small()
-                .w(px(240.0))
-                .cleanable(true),
+            div()
+                .on_action(move |_: &InputEscape, window, cx| {
+                    escape_view.update(cx, |shell, cx| {
+                        shell.on_search_escape(SearchTarget::Paths, window, cx);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    Input::new(&shell.path_search_input)
+                        .small()
+                        .w(px(240.0))
+                        .cleanable(true),
+                ),
         )
 }
 

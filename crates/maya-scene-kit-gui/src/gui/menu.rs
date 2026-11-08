@@ -70,6 +70,64 @@ impl GuiShell {
         self.add_folder(window, cx);
     }
 
+    pub(super) fn on_menu_reload_folder(
+        &mut self,
+        _: &MenuReloadFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_scan_active() || self.state.workspace_root_path().is_none() {
+            return;
+        }
+        self.rescan_workspace_with_current_settings(window, cx);
+    }
+
+    pub(super) fn on_focus_search(
+        &mut self,
+        _: &FocusSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = if matches!(self.state.active_tab, ResultTab::Paths)
+            && self.path_table_focus_handle.contains_focused(window, cx)
+        {
+            SearchTarget::Paths
+        } else {
+            SearchTarget::FileList
+        };
+        self.search_input_for(target)
+            .clone()
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    pub(super) fn on_search_escape(
+        &mut self,
+        target: SearchTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.search_input_for(target).clone();
+        if input.read(cx).value().is_empty() {
+            match target {
+                SearchTarget::FileList => self.file_table_focus_handle.focus(window),
+                SearchTarget::Paths => self.path_table_focus_handle.focus(window),
+            }
+            return;
+        }
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        match target {
+            SearchTarget::FileList => self.apply_search_query(cx),
+            SearchTarget::Paths => self.apply_path_search_query(cx),
+        }
+    }
+
+    fn search_input_for(&self, target: SearchTarget) -> &Entity<InputState> {
+        match target {
+            SearchTarget::FileList => &self.search_input,
+            SearchTarget::Paths => &self.path_search_input,
+        }
+    }
+
     pub(super) fn on_menu_save_selected(
         &mut self,
         _: &MenuSaveSelected,

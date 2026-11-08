@@ -39,6 +39,7 @@
   "action.return_to_application": "Return to Application",
   "action.select_file": "Select File",
   "action.select_folder": "Select Folder",
+  "action.reload_folder": "Reload Folder",
   "action.show_paths": "Show Paths",
   "action.to_ascii": "To ASCII",
   "action.undo": "Undo",

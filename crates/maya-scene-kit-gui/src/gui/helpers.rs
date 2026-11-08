@@ -2245,6 +2245,7 @@ pub(super) fn build_app_menus(
             name: i18n.text("menu.file").into(),
             items: vec![
                 MenuItem::action(i18n.text("action.select_folder"), MenuSelectFolder),
+                MenuItem::action(i18n.text("action.reload_folder"), MenuReloadFolder),
                 MenuItem::submenu(Menu {
                     name: i18n.text("menu.recent_folder").into(),
                     items: recent_folder_menu_items(state, i18n),

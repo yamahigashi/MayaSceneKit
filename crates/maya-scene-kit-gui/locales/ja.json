@@ -39,6 +39,7 @@
   "action.return_to_application": "アプリに戻る",
   "action.select_file": "ファイル選択",
   "action.select_folder": "フォルダ選択",
+  "action.reload_folder": "フォルダを再読み込み",
   "action.show_paths": "パス表示",
   "action.to_ascii": "ASCII 化",
   "action.undo": "元に戻す",

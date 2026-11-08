@@ -4983,6 +4983,7 @@ fn build_app_menus_adds_exit_application_to_end_of_file_menu() {
         menu_action_names(&file_menu.items),
         vec![
             "Select Folder".to_string(),
+            "Reload Folder".to_string(),
             "Save Selected".to_string(),
             "Save All".to_string(),
             "Exit Application".to_string(),
@@ -12142,5 +12143,147 @@ createNode file -n "file1";
     visual_cx.run_until_parked();
     shell.update_in(visual_cx, |shell, _, _| {
         assert_eq!(shell.visible_rows, vec![0]);
+    });
+}
+
+#[gpui::test]
+fn slash_focuses_file_search_and_types_inside_it(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    visual_cx.run_until_parked();
+
+    visual_cx.simulate_keystrokes("/");
+    visual_cx.update(|window, app| {
+        let focus = shell.read(app).search_input.read(app).focus_handle(app);
+        assert!(focus.is_focused(window));
+    });
+
+    visual_cx.simulate_keystrokes("/");
+    visual_cx.update(|_, app| {
+        assert_eq!(shell.read(app).search_input.read(app).value(), "/");
+    });
+}
+
+#[gpui::test]
+fn escape_in_file_search_clears_then_leaves_search(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    visual_cx.run_until_parked();
+
+    visual_cx.simulate_keystrokes("ctrl-f");
+    visual_cx.simulate_input("Sample");
+    visual_cx.update(|_, app| {
+        assert_eq!(shell.read(app).state.search_query, "Sample");
+    });
+
+    visual_cx.simulate_keystrokes("escape");
+    visual_cx.update(|window, app| {
+        let shell = shell.read(app);
+        assert_eq!(shell.search_input.read(app).value(), "");
+        assert_eq!(shell.state.search_query, "");
+        assert!(
+            shell
+                .search_input
+                .read(app)
+                .focus_handle(app)
+                .is_focused(window)
+        );
+    });
+
+    visual_cx.simulate_keystrokes("escape");
+    visual_cx.update(|window, app| {
+        let shell = shell.read(app);
+        assert!(
+            !shell
+                .search_input
+                .read(app)
+                .focus_handle(app)
+                .is_focused(window)
+        );
+        assert!(shell.file_table_focus_handle.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn f5_rescans_current_workspace_folder(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    fs::write(dir.path().join("TestScene.ma"), "//Maya ASCII 2026 scene\n").expect("write scene");
+    shell.update_in(visual_cx, |shell, _, _| {
+        shell.state = test_state(dir.path(), "");
+        shell
+            .state
+            .set_workspace_root(Some(dir.path().to_path_buf()));
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        assert!(shell.read(app).rows.is_empty());
+    });
+
+    visual_cx.simulate_keystrokes("f5");
+    visual_cx.run_until_parked();
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(shell.rows.len(), 1);
+        assert_eq!(shell.rows[0].name, "TestScene.ma");
+    });
+}
+
+#[gpui::test]
+fn slash_from_paths_table_uses_path_search_and_escape_returns_to_it(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("TestScene.ma");
+    write_path_owner_delete_scene(&scene);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &scene);
+        row.selected = true;
+        row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+        shell.rows = vec![row];
+        shell.rebuild_row_id_index();
+        shell.refresh_file_table(cx);
+        shell.set_tab(ResultTab::Paths, window, cx);
+    });
+    visual_cx.run_until_parked();
+    visual_cx.update(|window, app| {
+        shell.read(app).path_table_focus_handle.focus(window);
+    });
+
+    visual_cx.simulate_keystrokes("/");
+    visual_cx.update(|window, app| {
+        let shell = shell.read(app);
+        assert!(
+            shell
+                .path_search_input
+                .read(app)
+                .focus_handle(app)
+                .is_focused(window)
+        );
+        assert!(
+            !shell
+                .search_input
+                .read(app)
+                .focus_handle(app)
+                .is_focused(window)
+        );
+    });
+
+    visual_cx.simulate_input("Example");
+    visual_cx.simulate_keystrokes("escape");
+    visual_cx.update(|window, app| {
+        let shell = shell.read(app);
+        assert_eq!(shell.path_search_input.read(app).value(), "");
+        assert_eq!(shell.path_search_query, "");
+        assert!(
+            shell
+                .path_search_input
+                .read(app)
+                .focus_handle(app)
+                .is_focused(window)
+        );
+    });
+
+    visual_cx.simulate_keystrokes("escape");
+    visual_cx.update(|window, app| {
+        assert!(shell.read(app).path_table_focus_handle.is_focused(window));
     });
 }

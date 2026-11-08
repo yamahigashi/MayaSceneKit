@@ -39,6 +39,7 @@
   "action.return_to_application": "返回应用程序",
   "action.select_file": "选择文件",
   "action.select_folder": "选择文件夹",
+  "action.reload_folder": "重新加载文件夹",
   "action.show_paths": "显示路径",
   "action.to_ascii": "转换为 ASCII",
   "action.undo": "撤销",
