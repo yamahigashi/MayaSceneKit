@@ -77,7 +77,12 @@ impl PatchPlanner {
         let normalized = normalize_execution_clean_targets(targets)?;
 
         if scene_format == SceneFormat::Ma {
-            let mut bytes = bytes.to_vec();
+            let edits = normalized
+                .iter()
+                .filter_map(ma_range_edit)
+                .collect::<Vec<_>>();
+            let (mut bytes, _) =
+                rewrite::apply_ma_range_edits(bytes, &edits).map_err(ma_range_edit_error)?;
             let script_nodes = normalized
                 .iter()
                 .filter_map(|target| match target {
@@ -104,77 +109,13 @@ impl PatchPlanner {
                 bytes = cleaned;
             }
 
-            let top_level_ranges = normalized
-                .iter()
-                .filter_map(|target| match target {
-                    ExecutionCleanTarget::TopLevelCommand { source_range } => {
-                        Some((source_range.start, source_range.end))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if !top_level_ranges.is_empty() {
-                let (cleaned, _) =
-                    rewrite::remove_top_level_commands_from_ma(&bytes, &top_level_ranges);
-                bytes = cleaned;
-            }
-
-            let callback_ranges = normalized
-                .iter()
-                .filter_map(|target| match target {
-                    ExecutionCleanTarget::FileCommandCallback { source_range } => {
-                        Some((source_range.start, source_range.end))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if !callback_ranges.is_empty() {
-                let (cleaned, _) =
-                    rewrite::remove_file_command_callbacks_from_ma(&bytes, &callback_ranges)
-                        .map_err(|err| SceneToolError::Message(err.to_string()))?;
-                bytes = cleaned;
-            }
-
             return Ok(bytes);
         }
 
         if scene_format == SceneFormat::Mb {
             let mb = crate::mb::parse_bytes(bytes.to_vec())?;
-            let script_nodes = normalized
-                .iter()
-                .filter_map(|target| match target {
-                    ExecutionCleanTarget::ScriptNode { node_name } => Some(node_name.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let mut owner_form_targets = if script_nodes.is_empty() {
-                Vec::new()
-            } else {
-                crate::mb::paths::locate_raw_script_node_forms_in_mb_by_name(
-                    mb.data(),
-                    mb.root(),
-                    crate::mb::MbNameSelection::Only(&script_nodes),
-                )
-                .0
-            };
-            owner_form_targets.extend(normalized.iter().filter_map(|target| match target {
-                ExecutionCleanTarget::MbOwnerForm { form, node_offset } => {
-                    Some((form.clone(), *node_offset))
-                }
-                _ => None,
-            }));
-            let owner_form_targets = owner_form_targets
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let plugin_requires = normalized
-                .iter()
-                .filter_map(|target| match target {
-                    ExecutionCleanTarget::PluginRequire { rendered } => Some(rendered.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+            let (owner_form_targets, plugin_requires) =
+                collect_mb_clean_targets(mb.data(), mb.root(), &normalized);
             if owner_form_targets.is_empty() && plugin_requires.is_empty() {
                 return Err(SceneToolError::Message(format!(
                     "execution clean targets are unsupported for MB scenes: {}",
@@ -227,7 +168,7 @@ pub(super) fn normalize_clean_target_names(
 pub(super) fn normalize_execution_clean_targets(
     targets: &[ExecutionCleanTarget],
 ) -> Result<Vec<ExecutionCleanTarget>, SceneToolError> {
-    let mut normalized = targets
+    let normalized = targets
         .iter()
         .filter_map(|target| match target {
             ExecutionCleanTarget::ScriptNode { node_name } => {
@@ -273,20 +214,6 @@ pub(super) fn normalize_execution_clean_targets(
         ));
     }
 
-    let destructive_ranges = normalized
-        .iter()
-        .filter_map(|target| match target {
-            ExecutionCleanTarget::TopLevelCommand { source_range } => Some(*source_range),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    normalized.retain(|target| match target {
-        ExecutionCleanTarget::FileCommandCallback { source_range } => {
-            !destructive_ranges.contains(source_range)
-        }
-        _ => true,
-    });
-
     Ok(normalized)
 }
 
@@ -314,4 +241,75 @@ pub(super) fn mb_root_form_present(
         let rendered = child.form_type().map(|f| f.to_string());
         child.offset() == node_offset && rendered.as_deref() == Some(form)
     })
+}
+
+pub(super) fn ma_range_edit(target: &ExecutionCleanTarget) -> Option<rewrite::MaRangeEdit> {
+    let (source_range, kind) = match target {
+        ExecutionCleanTarget::TopLevelCommand { source_range } => {
+            (source_range, rewrite::MaRangeEditKind::RemoveCommand)
+        }
+        ExecutionCleanTarget::FileCommandCallback { source_range } => (
+            source_range,
+            rewrite::MaRangeEditKind::StripFileCommandCallback,
+        ),
+        _ => return None,
+    };
+    Some(rewrite::MaRangeEdit {
+        start: source_range.start,
+        end: source_range.end,
+        kind,
+    })
+}
+
+pub(super) fn ma_range_edit_error(error: rewrite::MaRangeEditError) -> SceneToolError {
+    SceneToolError::Message(match error {
+        rewrite::MaRangeEditError::Overlap { first, second } => format!(
+            "execution clean ranges overlap: {}..{} and {}..{}",
+            first.start, first.end, second.start, second.end
+        ),
+        rewrite::MaRangeEditError::CallbackParse(error) => error.to_string(),
+    })
+}
+
+pub(super) fn collect_mb_clean_targets(
+    data: &[u8],
+    root: &crate::mb::Chunk,
+    targets: &[ExecutionCleanTarget],
+) -> (Vec<(String, usize)>, Vec<String>) {
+    let script_nodes = targets
+        .iter()
+        .filter_map(|target| match target {
+            ExecutionCleanTarget::ScriptNode { node_name } => Some(node_name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut owner_form_targets = if script_nodes.is_empty() {
+        Vec::new()
+    } else {
+        crate::mb::paths::locate_raw_script_node_forms_in_mb_by_name(
+            data,
+            root,
+            crate::mb::MbNameSelection::Only(&script_nodes),
+        )
+        .0
+    };
+    owner_form_targets.extend(targets.iter().filter_map(|target| match target {
+        ExecutionCleanTarget::MbOwnerForm { form, node_offset } => {
+            Some((form.clone(), *node_offset))
+        }
+        _ => None,
+    }));
+    let owner_form_targets = owner_form_targets
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let plugin_requires = targets
+        .iter()
+        .filter_map(|target| match target {
+            ExecutionCleanTarget::PluginRequire { rendered } => Some(rendered.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (owner_form_targets, plugin_requires)
 }

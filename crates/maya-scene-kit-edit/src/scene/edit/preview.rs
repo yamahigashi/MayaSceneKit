@@ -219,6 +219,30 @@ impl PatchPlanner {
         bytes: &[u8],
         targets: &[ExecutionCleanTarget],
     ) -> Result<ExecutionCleanPreview, SceneToolError> {
+        let mb = if scene_format == SceneFormat::Mb {
+            Some(crate::mb::parse_bytes(bytes.to_vec())?)
+        } else {
+            None
+        };
+        self.preview_clean_execution_targets_with_root(
+            input_path,
+            scene_format,
+            validation_state,
+            bytes,
+            targets,
+            mb.as_ref().map(|mb| mb.root()),
+        )
+    }
+
+    pub(super) fn preview_clean_execution_targets_with_root(
+        &self,
+        input_path: &Path,
+        scene_format: SceneFormat,
+        validation_state: ValidationState,
+        bytes: &[u8],
+        targets: &[ExecutionCleanTarget],
+        mb_root: Option<&crate::mb::Chunk>,
+    ) -> Result<ExecutionCleanPreview, SceneToolError> {
         self.options.reject_if_not_forensic()?;
         let normalized = super::clean::normalize_execution_clean_targets(targets)?;
         if normalized.is_empty() {
@@ -227,12 +251,6 @@ impl PatchPlanner {
                 input_path.display()
             )));
         }
-
-        let mb = if scene_format == SceneFormat::Mb {
-            Some(crate::mb::parse_bytes(bytes.to_vec())?)
-        } else {
-            None
-        };
 
         let mut cleaned_targets = Vec::new();
         let mut removed_script_nodes = Vec::new();
@@ -247,12 +265,10 @@ impl PatchPlanner {
                             scripts::remove_raw_script_nodes_from_ma_by_name(bytes, &names);
                         removed_names
                     } else if scene_format == SceneFormat::Mb {
-                        let mb = mb.as_ref().expect("mb bytes");
+                        let root = mb_root.expect("mb root");
                         let (_, removed_names) =
                             crate::mb::paths::remove_raw_script_nodes_from_mb_by_name(
-                                mb.data(),
-                                mb.root(),
-                                &names,
+                                bytes, root, &names,
                             );
                         removed_names
                     } else {
@@ -270,9 +286,9 @@ impl PatchPlanner {
                             requires::remove_plugin_requires_from_ma(bytes, &rendered_targets);
                         removed
                     } else if scene_format == SceneFormat::Mb {
-                        let mb = mb.as_ref().expect("mb bytes");
+                        let root = mb_root.expect("mb root");
                         let (_, removed) =
-                            remove_plugin_requires_from_mb(mb.data(), mb.root(), &rendered_targets);
+                            remove_plugin_requires_from_mb(bytes, root, &rendered_targets);
                         removed
                     } else {
                         return Err(unsupported_scene_format(input_path, scene_format));
@@ -318,12 +334,24 @@ impl PatchPlanner {
                             &target,
                         ));
                     }
-                    let mb = mb.as_ref().expect("mb bytes");
-                    if super::clean::mb_root_form_present(mb.root(), form, *node_offset) {
+                    let root = mb_root.expect("mb root");
+                    if super::clean::mb_root_form_present(root, form, *node_offset) {
                         cleaned_targets.push(target.clone());
                     }
                 }
             }
+        }
+
+        if scene_format == SceneFormat::Ma {
+            let edits = cleaned_targets
+                .iter()
+                .filter_map(super::clean::ma_range_edit)
+                .collect::<Vec<_>>();
+            let normalized = rewrite::normalize_ma_range_edits(bytes.len(), &edits)
+                .map_err(super::clean::ma_range_edit_error)?;
+            cleaned_targets.retain(|target| {
+                super::clean::ma_range_edit(target).is_none_or(|edit| normalized.contains(&edit))
+            });
         }
 
         if cleaned_targets.is_empty() {

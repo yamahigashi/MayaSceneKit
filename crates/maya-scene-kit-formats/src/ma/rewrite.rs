@@ -214,73 +214,124 @@ pub fn ma_file_command_callback_present(data: &[u8], start: usize, end: usize) -
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaRangeEdit {
+    pub start: usize,
+    pub end: usize,
+    pub kind: MaRangeEditKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaRangeEditKind {
+    RemoveCommand,
+    StripFileCommandCallback,
+}
+
+#[derive(Debug)]
+pub enum MaRangeEditError {
+    Overlap {
+        first: MaRangeEdit,
+        second: MaRangeEdit,
+    },
+    CallbackParse(crate::ma::error::MaParseError),
+}
+
+pub fn normalize_ma_range_edits(
+    data_len: usize,
+    edits: &[MaRangeEdit],
+) -> Result<Vec<MaRangeEdit>, MaRangeEditError> {
+    let mut normalized = edits
+        .iter()
+        .copied()
+        .filter(|edit| edit.start < edit.end && edit.end <= data_len)
+        .collect::<Vec<_>>();
+    normalized.sort_by_key(|edit| {
+        (
+            edit.start,
+            edit.end,
+            edit.kind != MaRangeEditKind::RemoveCommand,
+        )
+    });
+    normalized.dedup_by_key(|edit| (edit.start, edit.end));
+    let removals = normalized
+        .iter()
+        .copied()
+        .filter(|edit| edit.kind == MaRangeEditKind::RemoveCommand)
+        .collect::<Vec<_>>();
+    normalized.retain(|edit| {
+        !removals.iter().any(|outer| {
+            outer.start <= edit.start
+                && edit.end <= outer.end
+                && (outer.start != edit.start || outer.end != edit.end)
+        })
+    });
+    for (index, first) in normalized.iter().enumerate() {
+        for second in &normalized[index + 1..] {
+            if second.start >= first.end {
+                break;
+            }
+            if first.start < second.end && second.start < first.end {
+                return Err(MaRangeEditError::Overlap {
+                    first: *first,
+                    second: *second,
+                });
+            }
+        }
+    }
+    normalized.reverse();
+    Ok(normalized)
+}
+
+pub fn apply_ma_range_edits(
+    data: &[u8],
+    edits: &[MaRangeEdit],
+) -> Result<(Vec<u8>, usize), MaRangeEditError> {
+    let normalized = normalize_ma_range_edits(data.len(), edits)?;
+    let mut replacements = Vec::new();
+    for edit in normalized {
+        let replacement = match edit.kind {
+            MaRangeEditKind::RemoveCommand => {
+                if !ma_range_has_bytes(data, edit.start, edit.end) {
+                    continue;
+                }
+                Vec::new()
+            }
+            MaRangeEditKind::StripFileCommandCallback => {
+                let original = String::from_utf8_lossy(&data[edit.start..edit.end]);
+                let Some((rewritten, changed)) = file_command_without_callback(&original)
+                    .map_err(MaRangeEditError::CallbackParse)?
+                else {
+                    continue;
+                };
+                if !changed || rewritten == original {
+                    continue;
+                }
+                rewritten.into_bytes()
+            }
+        };
+        replacements.push((edit, replacement));
+    }
+    let count = replacements.len();
+    let mut out = data.to_vec();
+    for (edit, replacement) in replacements {
+        out.splice(edit.start..edit.end, replacement);
+    }
+    Ok((out, count))
+}
+
 pub fn remove_top_level_commands_from_ma(
     data: &[u8],
     ranges: &[(usize, usize)],
 ) -> (Vec<u8>, usize) {
-    if ranges.is_empty() {
-        return (data.to_vec(), 0);
-    }
-
-    let mut out = data.to_vec();
-    let mut normalized = ranges
+    let edits = ranges
         .iter()
-        .copied()
-        .filter(|(start, end)| start < end && *end <= data.len())
+        .map(|&(start, end)| MaRangeEdit {
+            start,
+            end,
+            kind: MaRangeEditKind::RemoveCommand,
+        })
         .collect::<Vec<_>>();
-    normalized.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-
-    let mut removed = 0usize;
-    for (start, end) in normalized {
-        if start >= out.len() || end > out.len() {
-            continue;
-        }
-        if !out[start..end]
-            .iter()
-            .any(|byte| !byte.is_ascii_whitespace())
-        {
-            continue;
-        }
-        out.splice(start..end, std::iter::empty());
-        removed += 1;
-    }
-
-    (out, removed)
-}
-
-pub fn remove_file_command_callbacks_from_ma(
-    data: &[u8],
-    ranges: &[(usize, usize)],
-) -> Result<(Vec<u8>, usize), crate::ma::error::MaParseError> {
-    if ranges.is_empty() {
-        return Ok((data.to_vec(), 0));
-    }
-
-    let mut out = data.to_vec();
-    let mut normalized = ranges
-        .iter()
-        .copied()
-        .filter(|(start, end)| start < end && *end <= data.len())
-        .collect::<Vec<_>>();
-    normalized.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-
-    let mut removed = 0usize;
-    for (start, end) in normalized {
-        if start >= out.len() || end > out.len() {
-            continue;
-        }
-        let original = String::from_utf8_lossy(&out[start..end]).to_string();
-        let Some((rewritten, changed)) = file_command_without_callback(&original)? else {
-            continue;
-        };
-        if !changed {
-            continue;
-        }
-        out.splice(start..end, rewritten.into_bytes());
-        removed += 1;
-    }
-
-    Ok((out, removed))
+    apply_ma_range_edits(data, &edits).unwrap_or_else(|_| (data.to_vec(), 0))
 }
 
 pub fn remove_path_owner_nodes_from_ma(
@@ -682,9 +733,10 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
+        MaRangeEdit, MaRangeEditError, MaRangeEditKind, apply_ma_range_edits,
         command_has_terminating_semicolon, ma_file_command_callback_present,
-        remove_file_command_callbacks_from_ma, remove_top_level_commands_from_ma,
-        replace_raw_scene_paths_in_ma, replace_raw_scene_paths_in_ma_by_index,
+        normalize_ma_range_edits, remove_top_level_commands_from_ma, replace_raw_scene_paths_in_ma,
+        replace_raw_scene_paths_in_ma_by_index,
     };
     use crate::{PathReplaceMode, PathReplaceRule};
 
@@ -900,11 +952,93 @@ file -r "safe.ma";
         let end = input.len();
         assert!(ma_file_command_callback_present(input, 0, end));
 
-        let (rewritten, removed) =
-            remove_file_command_callbacks_from_ma(input, &[(0, end)]).expect("rewrite");
+        let (rewritten, removed) = apply_ma_range_edits(
+            input,
+            &[MaRangeEdit {
+                start: 0,
+                end,
+                kind: MaRangeEditKind::StripFileCommandCallback,
+            }],
+        )
+        .expect("rewrite");
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(removed, 1);
         assert!(!text.contains("-command"));
         assert!(text.contains("file -r -ns \"ref\" \"C:/ref.ma\";"));
+    }
+    #[test]
+    fn range_edits_normalize_conflicts_and_containment() {
+        use MaRangeEditKind::{RemoveCommand, StripFileCommandCallback};
+        let remove = MaRangeEdit {
+            start: 0,
+            end: 20,
+            kind: RemoveCommand,
+        };
+        let callback = MaRangeEdit {
+            kind: StripFileCommandCallback,
+            ..remove
+        };
+        assert_eq!(
+            normalize_ma_range_edits(20, &[callback, remove]).unwrap(),
+            vec![remove]
+        );
+        let inner_callback = MaRangeEdit {
+            start: 5,
+            end: 15,
+            ..callback
+        };
+        assert_eq!(
+            normalize_ma_range_edits(20, &[inner_callback, remove]).unwrap(),
+            vec![remove]
+        );
+        let inner_remove = MaRangeEdit {
+            start: 5,
+            end: 15,
+            ..remove
+        };
+        assert!(
+            matches!(normalize_ma_range_edits(20, &[callback, inner_remove]), Err(MaRangeEditError::Overlap { first, second }) if first == callback && second == inner_remove)
+        );
+        let first = MaRangeEdit { end: 10, ..remove };
+        assert!(
+            matches!(normalize_ma_range_edits(20, &[inner_remove, first]), Err(MaRangeEditError::Overlap { first: a, second: b }) if a == first && b == inner_remove)
+        );
+    }
+
+    #[test]
+    fn range_edits_apply_touching_disjoint_and_duplicate_removals() {
+        let input = b"ExampleExampleExampleExample";
+        let first = MaRangeEdit {
+            start: 0,
+            end: 10,
+            kind: MaRangeEditKind::RemoveCommand,
+        };
+        let touching = MaRangeEdit {
+            start: 10,
+            end: 20,
+            ..first
+        };
+        assert_eq!(
+            apply_ma_range_edits(input, &[first, touching]).unwrap(),
+            (input[20..].to_vec(), 2)
+        );
+        let disjoint = MaRangeEdit {
+            start: 15,
+            end: 20,
+            ..first
+        };
+        let expected = [input[10..15].to_vec(), input[20..].to_vec()].concat();
+        assert_eq!(
+            apply_ma_range_edits(input, &[first, disjoint]).unwrap(),
+            (expected, 2)
+        );
+        assert_eq!(
+            apply_ma_range_edits(input, &[first, first]).unwrap(),
+            (input[10..].to_vec(), 1)
+        );
+        assert_eq!(
+            normalize_ma_range_edits(input.len(), &[first, first]).unwrap(),
+            vec![first]
+        );
     }
 }

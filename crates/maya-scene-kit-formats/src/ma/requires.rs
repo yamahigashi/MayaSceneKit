@@ -99,4 +99,14 @@ mod tests {
         assert!(text.contains("requires -nodeType transform \"pluginB\" \"2.0\";"));
         assert!(text.contains("file -r \"safe.ma\";"));
     }
+    #[test]
+    fn remove_two_plugin_requires() {
+        let first = "requires \"ExamplePlugin\" \"1.0\";";
+        let second = "requires -nodeType transform \"ExamplePlugin\" \"2.0\";";
+        let input = format!("{first}\n{second}\ncurrentUnit -l centimeter;\n");
+        let (output, removed) =
+            remove_plugin_requires_from_ma(input.as_bytes(), &[first.into(), second.into()]);
+        assert_eq!(removed, vec![first.to_string(), second.to_string()]);
+        assert_eq!(output, b"\n\ncurrentUnit -l centimeter;\n");
+    }
 }

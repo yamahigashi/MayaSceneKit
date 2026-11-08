@@ -212,7 +212,7 @@ fn resolve_mb_path_owner_targets(
         .collect()
 }
 
-fn resolve_mb_path_owner_forms(
+pub(super) fn resolve_mb_path_owner_forms(
     report: &ScenePathsReport,
     requested: &[PathOwnerDeleteTarget],
 ) -> Vec<(String, usize)> {

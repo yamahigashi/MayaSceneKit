@@ -1476,3 +1476,176 @@ fn mb_execution_clean_preserves_unselected_targets() {
         );
     }
 }
+
+#[test]
+fn range_clean_requires_before_command() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("TestScene.ma");
+    let requires = "requires \"ExamplePlugin\" \"1.0\";";
+    let kept = "currentUnit -l centimeter;\n";
+    let command = "python(\"print(1)\");\n";
+    let input = format!("//Maya ASCII 2026 scene\n{requires}\n{kept}{command}");
+    std::fs::write(&source, &input).unwrap();
+    let output = dir.path().join("Example.ma");
+    clean_execution_targets(
+        &source,
+        &output,
+        &[
+            ExecutionCleanTarget::PluginRequire {
+                rendered: requires.into(),
+            },
+            ExecutionCleanTarget::TopLevelCommand {
+                source_range: ExecutionSourceRange {
+                    start: "//Maya ASCII 2026 scene\n".len() + requires.len() + 1 + kept.len(),
+                    end: input.len(),
+                },
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(output).unwrap(),
+        format!("//Maya ASCII 2026 scene\n\n{kept}")
+    );
+}
+
+#[test]
+fn range_clean_script_before_callback() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("TestScene.ma");
+    let script = "//Maya ASCII 2026 scene\ncreateNode script -n \"ExampleScript\";\n    setAttr \".b\" -type \"string\" \"print(1)\";\n";
+    let command =
+        "file -r -ns \"Example\" -command \"onLoad\" \"print(1)\" \"asset/example/Example.ma\";\n";
+    let input = format!("{script}{command}");
+    std::fs::write(&source, &input).unwrap();
+    let output = dir.path().join("Example.ma");
+    clean_execution_targets(
+        &source,
+        &output,
+        &[
+            ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleScript".into(),
+            },
+            ExecutionCleanTarget::FileCommandCallback {
+                source_range: ExecutionSourceRange {
+                    start: script.len(),
+                    end: input.len(),
+                },
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(output).unwrap(),
+        "//Maya ASCII 2026 scene\nfile -r -ns \"Example\" \"asset/example/Example.ma\";\n"
+    );
+}
+
+#[test]
+fn range_clean_composite_ma_original_offsets() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("TestScene.ma");
+    let owner = "//Maya ASCII 2026 scene\nfile -r -ns \"Example\" -rfn \"Example\" \"asset/example/Example.ma\";\ncreateNode reference -n \"Example\";\n";
+    let command = "python(\"print(1)\");\n";
+    let kept = "currentUnit -l centimeter;\n";
+    let input = format!("{owner}{command}{kept}");
+    std::fs::write(&source, &input).unwrap();
+    let targets = [ExecutionCleanTarget::TopLevelCommand {
+        source_range: ExecutionSourceRange {
+            start: owner.len(),
+            end: owner.len() + command.len(),
+        },
+    }];
+    let owners = [PathOwnerDeleteTarget {
+        node_type: "reference".into(),
+        node_name: "Example".into(),
+    }];
+    let report = collect_scene_paths(&source, PathKind::All).unwrap();
+    for staged in [
+        stage_scene_edits(&source, &targets, &owners),
+        stage_scene_edits_in_report_with_bytes(&report, input.as_bytes(), &targets, &owners),
+    ] {
+        let staged = staged.unwrap();
+        assert_eq!(
+            staged.artifact.bytes,
+            format!("//Maya ASCII 2026 scene\n{kept}").as_bytes()
+        );
+        assert_eq!(staged.preview.deleted_path_owner_targets, owners);
+    }
+}
+
+#[test]
+fn range_clean_composite_mb_original_offsets() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("TestScene.mb");
+    let kept = build_mb_form_with_alignment(
+        "HEAD",
+        &[build_mb_chunk("PLUG", b"ExamplePlugin\x001.0\0")],
+        4,
+    );
+    let bytes = build_mb_root(&[
+        kept.clone(),
+        build_mb_form_with_alignment(
+            "RTFT",
+            &[
+                build_mb_chunk("CREA", b"Example\0"),
+                build_mb_chunk("STR ", b"ftn\0\x00asset/example/Example.tx\0"),
+            ],
+            4,
+        ),
+        build_mb_form_with_alignment("SCRP", &[build_mb_chunk("CREA", b"ExampleScript\0")], 4),
+    ]);
+    std::fs::write(&source, &bytes).unwrap();
+    let mb = maya_scene_kit_formats::mb::parse_bytes(bytes.clone()).unwrap();
+    let targets = [ExecutionCleanTarget::MbOwnerForm {
+        form: "SCRP".into(),
+        node_offset: mb.root().children()[2].offset(),
+    }];
+    let owners = [PathOwnerDeleteTarget {
+        node_type: "file".into(),
+        node_name: "Example".into(),
+    }];
+    let report = collect_scene_paths(&source, PathKind::All).unwrap();
+    assert_eq!(report.entries.len(), 1);
+    for staged in [
+        stage_scene_edits(&source, &targets, &owners),
+        stage_scene_edits_in_report_with_bytes(&report, &bytes, &targets, &owners),
+    ] {
+        let staged = staged.unwrap();
+        assert_eq!(
+            staged.artifact.bytes,
+            build_mb_root(std::slice::from_ref(&kept))
+        );
+        assert_eq!(staged.preview.deleted_path_owner_targets, owners);
+        assert_eq!(staged.preview.cleaned_targets, targets);
+    }
+}
+
+#[test]
+fn range_clean_overlap_errors_match() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("TestScene.ma");
+    std::fs::write(
+        &source,
+        "//Maya ASCII 2026 scene\ncurrentUnit -l centimeter;\n",
+    )
+    .unwrap();
+    let targets = [
+        ExecutionCleanTarget::TopLevelCommand {
+            source_range: ExecutionSourceRange { start: 0, end: 10 },
+        },
+        ExecutionCleanTarget::TopLevelCommand {
+            source_range: ExecutionSourceRange { start: 5, end: 15 },
+        },
+    ];
+    let preview = preview_clean_execution_targets(&source, &targets)
+        .unwrap_err()
+        .to_string();
+    let materialize = clean_execution_targets(&source, dir.path().join("Example.ma"), &targets)
+        .unwrap_err()
+        .to_string();
+    assert!(preview.contains("overlap"));
+    assert!(preview.contains("0..10"));
+    assert!(preview.contains("5..15"));
+    assert_eq!(preview, materialize);
+}
