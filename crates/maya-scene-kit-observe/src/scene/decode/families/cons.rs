@@ -1,7 +1,7 @@
 use super::shared::make_unknown_event;
 use crate::scene::{
     decode::dispatcher::{ChunkDecodeContext, ChunkDecoder, DecodeAttempt},
-    ir::{ChunkTrace, DecodedEvent},
+    ir::{ChunkTrace, DecodedEvent, SchemaDecodeAttemptResult},
     schema::{
         SchemaLookupContext, decode_fields_with_schema, field_text, field_text_values, field_u8,
         lookup_chunk_schema_with_context_and_registry,
@@ -58,21 +58,26 @@ impl ChunkDecoder for ConsFamilyDecoder {
         let fields = match decode_fields_with_schema(&schema, context.payload) {
             Ok(fields) => fields,
             Err(err) => {
-                return DecodeAttempt::Handled(vec![make_unknown_event(
-                    format!("{} decode failed: {err}", schema.schema_id),
-                    context.payload,
-                    trace,
-                    "cons_decoder",
-                )]);
+                return DecodeAttempt::HandledWithQuality {
+                    events: vec![make_unknown_event(
+                        format!("{} decode failed: {err}", schema.schema_id),
+                        context.payload,
+                        trace,
+                        "cons_decoder",
+                    )],
+                    quality: SchemaDecodeAttemptResult::Failed,
+                };
             }
         };
 
-        DecodeAttempt::Handled(match handler {
+        let mut quality = SchemaDecodeAttemptResult::Exact;
+        let events = match handler {
             "cons.cwfl" => {
                 let mode = field_u8(&fields, "mode").unwrap_or(0);
                 let src = field_text(&fields, "src").unwrap_or_default().to_string();
                 let dst = field_text(&fields, "dst").unwrap_or_default().to_string();
                 if src.is_empty() || dst.is_empty() {
+                    quality = SchemaDecodeAttemptResult::Failed;
                     vec![make_unknown_event(
                         format!("{} missing src/dst", schema.schema_id),
                         context.payload,
@@ -91,6 +96,7 @@ impl ChunkDecoder for ConsFamilyDecoder {
                     .map(str::to_string)
                     .collect::<Vec<_>>();
                 if kind.is_empty() || head.is_empty() || tail.is_empty() {
+                    quality = SchemaDecodeAttemptResult::Failed;
                     vec![make_unknown_event(
                         format!("{} missing relationship fields", schema.schema_id),
                         context.payload,
@@ -105,15 +111,19 @@ impl ChunkDecoder for ConsFamilyDecoder {
                     }]
                 }
             }
-            _ => vec![make_unknown_event(
-                format!(
-                    "{} unsupported in cons decoder (handler={handler})",
-                    schema.schema_id
-                ),
-                context.payload,
-                trace,
-                "cons_decoder",
-            )],
-        })
+            _ => {
+                quality = SchemaDecodeAttemptResult::Partial;
+                vec![make_unknown_event(
+                    format!(
+                        "{} unsupported in cons decoder (handler={handler})",
+                        schema.schema_id
+                    ),
+                    context.payload,
+                    trace,
+                    "cons_decoder",
+                )]
+            }
+        };
+        DecodeAttempt::HandledWithQuality { events, quality }
     }
 }

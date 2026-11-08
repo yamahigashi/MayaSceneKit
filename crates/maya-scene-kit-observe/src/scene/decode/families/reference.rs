@@ -3,7 +3,7 @@ use crate::{
     reference_semantics::{normalize_reference_file_type_token, parse_reference_options_token},
     scene::{
         decode::dispatcher::{ChunkDecodeContext, ChunkDecoder, DecodeAttempt},
-        ir::{ChunkTrace, DecodedEvent},
+        ir::{ChunkTrace, DecodedEvent, SchemaDecodeAttemptResult},
         schema::{
             SchemaLookupContext, decode_fields_with_schema, field_bytes, field_text,
             lookup_chunk_schema_with_context_and_registry,
@@ -65,23 +65,29 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
         let fields = match decode_fields_with_schema(&schema, context.payload) {
             Ok(fields) => fields,
             Err(err) => {
-                return DecodeAttempt::Handled(vec![make_unknown_event(
-                    format!("{} decode failed: {err}", schema.schema_id),
-                    context.payload,
-                    trace,
-                    "reference_decoder",
-                )]);
+                return DecodeAttempt::HandledWithQuality {
+                    events: vec![make_unknown_event(
+                        format!("{} decode failed: {err}", schema.schema_id),
+                        context.payload,
+                        trace,
+                        "reference_decoder",
+                    )],
+                    quality: SchemaDecodeAttemptResult::Failed,
+                };
             }
         };
 
         let path = sanitize_reference_slot(field_text(&fields, "path").unwrap_or_default());
         if path.is_empty() {
-            return DecodeAttempt::Handled(vec![make_unknown_event(
-                format!("{} missing required path", schema.schema_id),
-                context.payload,
-                trace,
-                "reference_decoder",
-            )]);
+            return DecodeAttempt::HandledWithQuality {
+                events: vec![make_unknown_event(
+                    format!("{} missing required path", schema.schema_id),
+                    context.payload,
+                    trace,
+                    "reference_decoder",
+                )],
+                quality: SchemaDecodeAttemptResult::Failed,
+            };
         }
 
         // Canonical FREF slot semantics: [path, namespace, reference_node, ...tail].
@@ -91,12 +97,15 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
             .unwrap_or_default();
         let namespace_slot = sanitize_reference_slot(namespace_slot_raw);
         if namespace_slot.is_empty() {
-            return DecodeAttempt::Handled(vec![make_unknown_event(
-                format!("{} missing required namespace slot", schema.schema_id),
-                context.payload,
-                trace,
-                "reference_decoder",
-            )]);
+            return DecodeAttempt::HandledWithQuality {
+                events: vec![make_unknown_event(
+                    format!("{} missing required namespace slot", schema.schema_id),
+                    context.payload,
+                    trace,
+                    "reference_decoder",
+                )],
+                quality: SchemaDecodeAttemptResult::Failed,
+            };
         }
 
         let reference_node_slot_raw = field_text(&fields, "reference_node")
@@ -114,22 +123,28 @@ impl ChunkDecoder for ReferenceFamilyDecoder {
             match parse_fref_tail_fields(field_bytes(&fields, "tail_raw").unwrap_or_default()) {
                 Ok(tail) => tail,
                 Err(reason) => {
-                    return DecodeAttempt::Handled(vec![make_unknown_event(
-                        format!("{} tail decode failed: {reason}", schema.schema_id),
-                        context.payload,
-                        trace,
-                        "reference_decoder",
-                    )]);
+                    return DecodeAttempt::HandledWithQuality {
+                        events: vec![make_unknown_event(
+                            format!("{} tail decode failed: {reason}", schema.schema_id),
+                            context.payload,
+                            trace,
+                            "reference_decoder",
+                        )],
+                        quality: SchemaDecodeAttemptResult::Failed,
+                    };
                 }
             };
 
-        DecodeAttempt::Handled(vec![DecodedEvent::ReferenceFile {
-            path,
-            reference_node: reference_node.into(),
-            namespace: namespace.map(Into::into),
-            file_type: tail.file_type.map(Into::into),
-            options: tail.options,
-        }])
+        DecodeAttempt::HandledWithQuality {
+            events: vec![DecodedEvent::ReferenceFile {
+                path,
+                reference_node: reference_node.into(),
+                namespace: namespace.map(Into::into),
+                file_type: tail.file_type.map(Into::into),
+                options: tail.options,
+            }],
+            quality: SchemaDecodeAttemptResult::Exact,
+        }
     }
 }
 
@@ -140,13 +155,16 @@ fn decode_frdi_chunk(context: &ChunkDecodeContext<'_>) -> DecodeAttempt {
         };
     };
 
-    DecodeAttempt::Handled(vec![DecodedEvent::ReferenceFile {
-        path: fields.path,
-        reference_node: fields.reference_node.into(),
-        namespace: Some(fields.namespace.into()),
-        file_type: fields.file_type.map(Into::into),
-        options: fields.options,
-    }])
+    DecodeAttempt::HandledWithQuality {
+        events: vec![DecodedEvent::ReferenceFile {
+            path: fields.path,
+            reference_node: fields.reference_node.into(),
+            namespace: Some(fields.namespace.into()),
+            file_type: fields.file_type.map(Into::into),
+            options: fields.options,
+        }],
+        quality: SchemaDecodeAttemptResult::Exact,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -316,10 +334,13 @@ mod tests {
         let decoder = ReferenceFamilyDecoder;
         let payload = b"rig/charA_v001.mb\0charA\0charARN\0mayaBinary\0-op \"v=0\"\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&context(payload)) else {
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&context(payload))
+        else {
             panic!("expected handled");
         };
 
+        assert_eq!(quality, crate::scene::ir::SchemaDecodeAttemptResult::Exact);
         assert_eq!(events.len(), 1);
         let DecodedEvent::ReferenceFile {
             path,
@@ -344,10 +365,13 @@ mod tests {
         let decoder = ReferenceFamilyDecoder;
         let payload = b"rig/charA_v001.mb\0charA\0charARN\0VERS|2026|\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&context(payload)) else {
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&context(payload))
+        else {
             panic!("expected handled");
         };
 
+        assert_eq!(quality, crate::scene::ir::SchemaDecodeAttemptResult::Exact);
         assert_eq!(events.len(), 1);
         let DecodedEvent::ReferenceFile {
             path,
@@ -371,10 +395,13 @@ mod tests {
         let decoder = ReferenceFamilyDecoder;
         let payload = b"assets/example/ExampleAsset.fbx\0Source\0\x01\x01SourceRN\0\0\0\0\0VERS|2020|\0FBX export\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&context(payload)) else {
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&context(payload))
+        else {
             panic!("expected handled");
         };
 
+        assert_eq!(quality, crate::scene::ir::SchemaDecodeAttemptResult::Exact);
         assert_eq!(events.len(), 1);
         let DecodedEvent::ReferenceFile {
             path,
@@ -399,10 +426,13 @@ mod tests {
         let decoder = ReferenceFamilyDecoder;
         let payload = b"\x01\x04\0\x02scenes/TestScene_0000.mb\0Model\0\x01\0Example:ModelRN\0VERS|2020|\0mayaBinary\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&frdi_context(payload)) else {
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&frdi_context(payload))
+        else {
             panic!("expected handled");
         };
 
+        assert_eq!(quality, crate::scene::ir::SchemaDecodeAttemptResult::Exact);
         assert_eq!(events.len(), 1);
         let DecodedEvent::ReferenceFile {
             path,
@@ -427,10 +457,13 @@ mod tests {
         let decoder = ReferenceFamilyDecoder;
         let payload = b"\0\0\0\x02assets/example/ExampleAsset.fbx\0Source\0\x01\0Import_00_Example:SourceRN\0\0\0\0VERS|2020|\0FBX export\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&frdi_context(payload)) else {
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&frdi_context(payload))
+        else {
             panic!("expected handled");
         };
 
+        assert_eq!(quality, crate::scene::ir::SchemaDecodeAttemptResult::Exact);
         assert_eq!(events.len(), 1);
         let DecodedEvent::ReferenceFile {
             path,

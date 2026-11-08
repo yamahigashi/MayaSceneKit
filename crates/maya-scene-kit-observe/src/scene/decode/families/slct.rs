@@ -1,7 +1,7 @@
 use super::shared::make_unknown_event;
 use crate::scene::{
     decode::dispatcher::{ChunkDecodeContext, ChunkDecoder, DecodeAttempt},
-    ir::{ChunkTrace, DecodedEvent},
+    ir::{ChunkTrace, DecodedEvent, SchemaDecodeAttemptResult},
     schema::{
         SchemaLookupContext, decode_fields_with_schema, field_text,
         lookup_chunk_schema_with_context_and_registry,
@@ -58,12 +58,15 @@ impl ChunkDecoder for SlctFamilyDecoder {
         let fields = match decode_fields_with_schema(&schema, context.payload) {
             Ok(fields) => fields,
             Err(err) => {
-                return DecodeAttempt::Handled(vec![make_unknown_event(
-                    format!("{} decode failed: {err}", schema.schema_id),
-                    context.payload,
-                    trace,
-                    "slct_decoder",
-                )]);
+                return DecodeAttempt::HandledWithQuality {
+                    events: vec![make_unknown_event(
+                        format!("{} decode failed: {err}", schema.schema_id),
+                        context.payload,
+                        trace,
+                        "slct_decoder",
+                    )],
+                    quality: SchemaDecodeAttemptResult::Failed,
+                };
             }
         };
         let target = field_text(&fields, "target")
@@ -71,13 +74,19 @@ impl ChunkDecoder for SlctFamilyDecoder {
             .trim()
             .to_string();
         if target.is_empty() {
-            return DecodeAttempt::Handled(vec![make_unknown_event(
-                format!("{} target decode failed", schema.schema_id),
-                context.payload,
-                trace,
-                "slct_decoder",
-            )]);
+            return DecodeAttempt::HandledWithQuality {
+                events: vec![make_unknown_event(
+                    format!("{} target decode failed", schema.schema_id),
+                    context.payload,
+                    trace,
+                    "slct_decoder",
+                )],
+                quality: SchemaDecodeAttemptResult::Failed,
+            };
         }
-        DecodeAttempt::Handled(vec![DecodedEvent::SelectTarget { target }])
+        DecodeAttempt::HandledWithQuality {
+            events: vec![DecodedEvent::SelectTarget { target }],
+            quality: SchemaDecodeAttemptResult::Exact,
+        }
     }
 }

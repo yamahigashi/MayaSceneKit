@@ -90,10 +90,8 @@ fn decode_attr_family_events(
     trace: ChunkTrace,
 ) -> DecodeAttempt {
     if tag == "ATTR" {
-        return DecodeAttempt::HandledWithQuality {
-            events: decode_attr_definition_events(registry, payload, trace),
-            quality: SchemaDecodeAttemptResult::Exact,
-        };
+        let (events, quality) = decode_attr_definition_events(registry, payload, trace);
+        return DecodeAttempt::HandledWithQuality { events, quality };
     }
     if let Some((events, quality)) = decode_attr_value_events_schema(
         registry,
@@ -348,12 +346,14 @@ pub(super) fn decode_attr_definition_events(
     registry: &schema::SchemaRegistry,
     payload: &[u8],
     trace: ChunkTrace,
-) -> Vec<DecodedEvent> {
-    decode_attr_outcome_events(
-        decode_attr_definition_chunk_to_outcome_with_registry(registry, payload),
-        payload,
-        trace,
-    )
+) -> (Vec<DecodedEvent>, SchemaDecodeAttemptResult) {
+    let outcome = decode_attr_definition_chunk_to_outcome_with_registry(registry, payload);
+    let quality = if matches!(outcome, AttrDecodeOutcome::Unsupported { .. }) {
+        SchemaDecodeAttemptResult::Failed
+    } else {
+        SchemaDecodeAttemptResult::Exact
+    };
+    (decode_attr_outcome_events(outcome, payload, trace), quality)
 }
 
 #[cfg(test)]

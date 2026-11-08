@@ -1573,4 +1573,70 @@ mod tests {
                 && surface.origin.source_kind.as_deref() == Some("SCRP:CREA"))
         }));
     }
+    #[test]
+    fn malformed_slct_scene_has_partial_validation() {
+        let bytes = build_mb_root(&[build_mb_form("SLCT", &[build_mb_chunk("SLCT", &[])])]);
+        let session = crate::scene::mb_read_session::MbReadSession::load_raw_bytes(
+            std::path::Path::new("TestScene.mb"),
+            bytes,
+            Some(
+                crate::scene::schema::SchemaContext::from_inputs_cached(
+                    &crate::scene::LoadOptions::default().schema_inputs(),
+                )
+                .expect("schema context"),
+            ),
+            &crate::mb::MbParseBudget::default(),
+        )
+        .expect("session");
+        assert_eq!(
+            session.integrity().expect("integrity").validation_state,
+            crate::scene::ValidationState::Partial
+        );
+    }
+
+    #[test]
+    fn failed_text_chunk_adds_coverage_but_partial_refe_does_not() {
+        let payload = b"Example\0\0Example text payload\0";
+        for (form, tag, quality, count) in [
+            (
+                "ATTR",
+                "ATTR",
+                crate::scene::ir::SchemaDecodeAttemptResult::Failed,
+                1,
+            ),
+            (
+                "REFE",
+                "REFE",
+                crate::scene::ir::SchemaDecodeAttemptResult::Partial,
+                0,
+            ),
+        ] {
+            let dispatcher = crate::scene::decode::dispatcher::DecoderDispatcher::new(
+                std::sync::Arc::new(crate::scene::schema::SchemaRegistry::new(
+                    crate::scene::schema::locator::SchemaPaths::from_defaults(),
+                )),
+            );
+            let result = dispatcher.decode_with_quality(
+                form,
+                tag,
+                payload,
+                0,
+                None,
+                Some(8),
+                Some(16),
+                Some(form),
+                Some("FOR8"),
+            );
+            assert_eq!(result.quality, quality);
+            assert!(matches!(
+                result.events.as_slice(),
+                [crate::scene::ir::DecodedEvent::Unknown(_)]
+            ));
+            let bytes = build_mb_root(&[build_mb_form(form, &[build_mb_chunk(tag, payload)])]);
+            let mb = crate::mb::parse_bytes(bytes).expect("parse synthetic mb");
+            let coverage = collect_execution_coverage_from_mb(&mb).expect("coverage");
+            assert_eq!(coverage.coverage_issues.len(), count, "{form}/{tag}");
+            assert!(coverage.surfaces.is_empty());
+        }
+    }
 }

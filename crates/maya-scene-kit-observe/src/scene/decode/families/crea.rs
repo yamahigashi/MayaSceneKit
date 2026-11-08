@@ -3,7 +3,7 @@ use crate::{
     mb::decode_best_effort_script_text,
     scene::{
         decode::attr::decode_attr_payload,
-        ir::{CreateNodeFlags, DecodedEvent, FlagState},
+        ir::{CreateNodeFlags, DecodedEvent, FlagState, SchemaDecodeAttemptResult},
     },
 };
 
@@ -80,9 +80,12 @@ impl ChunkDecoder for ScriptFamilyDecoder {
                 reason: "SCRP string chunk is not the body attribute",
             };
         }
-        DecodeAttempt::Handled(vec![DecodedEvent::ScriptBody {
-            body: decode_best_effort_script_text(&value),
-        }])
+        DecodeAttempt::HandledWithQuality {
+            events: vec![DecodedEvent::ScriptBody {
+                body: decode_best_effort_script_text(&value),
+            }],
+            quality: SchemaDecodeAttemptResult::Exact,
+        }
     }
 }
 

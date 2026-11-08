@@ -1,7 +1,7 @@
 use super::shared::make_unknown_event;
 use crate::scene::{
     decode::dispatcher::{ChunkDecodeContext, ChunkDecoder, DecodeAttempt},
-    ir::{ChunkTrace, DecodedEvent},
+    ir::{ChunkTrace, DecodedEvent, SchemaDecodeAttemptResult},
     schema::{
         SchemaLookupContext, decode_fields_with_schema, field_bytes, field_text,
         lookup_chunk_schema_with_context_and_registry,
@@ -74,12 +74,15 @@ impl ChunkDecoder for RefeFamilyDecoder {
         let fields = match decode_fields_with_schema(&schema, context.payload) {
             Ok(fields) => fields,
             Err(err) => {
-                return DecodeAttempt::Handled(vec![make_unknown_event(
-                    format!("{} decode failed: {err}", schema.schema_id),
-                    context.payload,
-                    trace,
-                    "refe_decoder",
-                )]);
+                return DecodeAttempt::HandledWithQuality {
+                    events: vec![make_unknown_event(
+                        format!("{} decode failed: {err}", schema.schema_id),
+                        context.payload,
+                        trace,
+                        "refe_decoder",
+                    )],
+                    quality: SchemaDecodeAttemptResult::Failed,
+                };
             }
         };
 
@@ -91,31 +94,39 @@ impl ChunkDecoder for RefeFamilyDecoder {
             .to_vec();
 
         if attr_name == "ed" {
-            return DecodeAttempt::Handled(
-                match decode_reference_edits_data_with_reason_and_registry(
-                    context.registry,
-                    &value_raw,
-                ) {
-                    Ok(data) => vec![DecodedEvent::RefEdit {
+            let (events, quality) = match decode_reference_edits_data_with_reason_and_registry(
+                context.registry,
+                &value_raw,
+            ) {
+                Ok(data) => (
+                    vec![DecodedEvent::RefEdit {
                         attr_name: attr_name.into(),
                         data,
                     }],
-                    Err(err) => vec![make_unknown_event(
+                    SchemaDecodeAttemptResult::Exact,
+                ),
+                Err(err) => (
+                    vec![make_unknown_event(
                         format!("REFE.ed decode failed: {err}"),
                         &value_raw,
                         trace,
                         "refe_decoder",
                     )],
-                },
-            );
+                    SchemaDecodeAttemptResult::Failed,
+                ),
+            };
+            return DecodeAttempt::HandledWithQuality { events, quality };
         }
 
-        DecodeAttempt::Handled(vec![make_unknown_event(
-            format!("REFE attr payload unsupported outside 'ed' (attr={attr_name})"),
-            context.payload,
-            trace,
-            "refe_decoder",
-        )])
+        DecodeAttempt::HandledWithQuality {
+            events: vec![make_unknown_event(
+                format!("REFE attr payload unsupported outside 'ed' (attr={attr_name})"),
+                context.payload,
+                trace,
+                "refe_decoder",
+            )],
+            quality: SchemaDecodeAttemptResult::Partial,
+        }
     }
 }
 
@@ -147,11 +158,16 @@ mod tests {
         let decoder = RefeFamilyDecoder;
         let payload = b"name\0\x00value\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&context("REFE", payload))
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&context("REFE", payload))
         else {
             panic!("expected handled");
         };
 
+        assert_eq!(
+            quality,
+            crate::scene::ir::SchemaDecodeAttemptResult::Partial
+        );
         assert_eq!(events.len(), 1);
         let DecodedEvent::Unknown(unknown) = &events[0] else {
             panic!("expected unknown event");
@@ -164,11 +180,16 @@ mod tests {
         let decoder = RefeFamilyDecoder;
         let payload = b"name\0\x00value\0";
 
-        let DecodeAttempt::Handled(events) = decoder.decode_attempt(&context("REFN", payload))
+        let DecodeAttempt::HandledWithQuality { events, quality } =
+            decoder.decode_attempt(&context("REFN", payload))
         else {
             panic!("expected handled");
         };
 
+        assert_eq!(
+            quality,
+            crate::scene::ir::SchemaDecodeAttemptResult::Partial
+        );
         assert_eq!(events.len(), 1);
         let DecodedEvent::Unknown(unknown) = &events[0] else {
             panic!("expected unknown event");

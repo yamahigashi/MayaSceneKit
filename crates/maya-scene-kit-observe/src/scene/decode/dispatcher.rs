@@ -11,7 +11,6 @@ use crate::scene::{
 };
 
 pub(crate) enum DecodeAttempt {
-    Handled(Vec<DecodedEvent>),
     HandledWithQuality {
         events: Vec<DecodedEvent>,
         quality: SchemaDecodeAttemptResult,
@@ -160,12 +159,6 @@ impl DecoderDispatcher {
                         format!("dispatch via schema handler '{handler}' (selected={selected_id})")
                     };
                     match self.decoders[selected].decode_attempt(&context) {
-                        DecodeAttempt::Handled(events) => {
-                            return DecodeDispatchResult {
-                                events,
-                                quality: SchemaDecodeAttemptResult::Exact,
-                            };
-                        }
                         DecodeAttempt::HandledWithQuality { events, quality } => {
                             return DecodeDispatchResult { events, quality };
                         }
@@ -208,12 +201,6 @@ impl DecoderDispatcher {
                 continue;
             }
             match decoder.decode_attempt(&context) {
-                DecodeAttempt::Handled(events) => {
-                    return DecodeDispatchResult {
-                        events,
-                        quality: SchemaDecodeAttemptResult::Exact,
-                    };
-                }
                 DecodeAttempt::HandledWithQuality { events, quality } => {
                     return DecodeDispatchResult { events, quality };
                 }
@@ -293,9 +280,12 @@ mod tests {
         }
 
         fn decode_attempt(&self, _context: &ChunkDecodeContext<'_>) -> DecodeAttempt {
-            DecodeAttempt::Handled(vec![DecodedEvent::SelectTarget {
-                target: "greedy".to_string(),
-            }])
+            DecodeAttempt::HandledWithQuality {
+                events: vec![DecodedEvent::SelectTarget {
+                    target: "greedy".to_string(),
+                }],
+                quality: SchemaDecodeAttemptResult::Exact,
+            }
         }
     }
 
@@ -314,9 +304,12 @@ mod tests {
         }
 
         fn decode_attempt(&self, _context: &ChunkDecodeContext<'_>) -> DecodeAttempt {
-            DecodeAttempt::Handled(vec![DecodedEvent::SelectTarget {
-                target: self.target.to_string(),
-            }])
+            DecodeAttempt::HandledWithQuality {
+                events: vec![DecodedEvent::SelectTarget {
+                    target: self.target.to_string(),
+                }],
+                quality: SchemaDecodeAttemptResult::Exact,
+            }
         }
     }
 
@@ -385,7 +378,7 @@ mod tests {
             Box::new(GreedyFallbackDecoder),
         ]);
 
-        let events_a = dispatcher_a.decode(
+        let result_a = dispatcher_a.decode_with_quality(
             "SLCT",
             "SLCT",
             b":time1\0",
@@ -396,7 +389,7 @@ mod tests {
             Some("SLCT"),
             Some("FOR8"),
         );
-        let events_b = dispatcher_b.decode(
+        let result_b = dispatcher_b.decode_with_quality(
             "SLCT",
             "SLCT",
             b":time1\0",
@@ -408,11 +401,13 @@ mod tests {
             Some("FOR8"),
         );
 
-        let target_a = match &events_a[0] {
+        assert_eq!(result_a.quality, SchemaDecodeAttemptResult::Exact);
+        assert_eq!(result_b.quality, SchemaDecodeAttemptResult::Exact);
+        let target_a = match &result_a.events[0] {
             DecodedEvent::SelectTarget { target } => target.as_str(),
             other => panic!("unexpected event: {other:?}"),
         };
-        let target_b = match &events_b[0] {
+        let target_b = match &result_b.events[0] {
             DecodedEvent::SelectTarget { target } => target.as_str(),
             other => panic!("unexpected event: {other:?}"),
         };
@@ -433,7 +428,7 @@ mod tests {
             }),
         ]);
 
-        let events = dispatcher.decode(
+        let result = dispatcher.decode_with_quality(
             "SLCT",
             "SLCT",
             b":time1\0",
@@ -444,10 +439,48 @@ mod tests {
             Some("SLCT"),
             Some("FOR8"),
         );
-        let target = match &events[0] {
+        assert_eq!(result.quality, SchemaDecodeAttemptResult::Exact);
+        let target = match &result.events[0] {
             DecodedEvent::SelectTarget { target } => target.as_str(),
             other => panic!("unexpected event: {other:?}"),
         };
         assert_eq!(target, ":a");
+    }
+    #[test]
+    fn malformed_schema_payloads_report_failed_quality() {
+        let dispatcher = dispatcher_for_tests();
+        for (form, tag, payload, reason) in [
+            ("FREF", "FREF", &b""[..], "decode failed:"),
+            ("REFE", "REFE", &b""[..], "decode failed:"),
+            ("SLCT", "SLCT", &b"Example\0Example"[..], "decode failed:"),
+            ("SLCT", "SLCT", &b""[..], "target decode failed"),
+            ("CONS", "CWFL", &b""[..], "decode failed:"),
+            ("ATTR", "ATTR", &b""[..], "decode failed for ATTR"),
+        ] {
+            let result = dispatcher.decode_with_quality(
+                form,
+                tag,
+                payload,
+                0,
+                None,
+                Some(8),
+                Some(16),
+                Some(form),
+                Some("FOR8"),
+            );
+            assert_eq!(
+                result.quality,
+                SchemaDecodeAttemptResult::Failed,
+                "{form}/{tag}"
+            );
+            let [DecodedEvent::Unknown(unknown)] = result.events.as_slice() else {
+                panic!("expected one Unknown event for {form}/{tag}");
+            };
+            assert!(
+                unknown.reason.contains(reason),
+                "{form}/{tag}: {}",
+                unknown.reason
+            );
+        }
     }
 }
