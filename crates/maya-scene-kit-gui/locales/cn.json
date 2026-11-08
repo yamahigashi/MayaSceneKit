@@ -217,7 +217,6 @@
   "table.path": "路径",
   "table.code": "代码",
   "table.severity": "严重性",
-  "table.sink": "汇点",
   "table.summary": "摘要",
   "audit_table.dedup": "合并重复项",
   "audit_table.show_all": "显示全部",

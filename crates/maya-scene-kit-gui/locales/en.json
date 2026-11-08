@@ -217,7 +217,6 @@
   "table.path": "Path",
   "table.code": "Code",
   "table.severity": "Severity",
-  "table.sink": "Sink",
   "table.summary": "Summary",
   "audit_table.dedup": "Show dedup",
   "audit_table.show_all": "Show all",

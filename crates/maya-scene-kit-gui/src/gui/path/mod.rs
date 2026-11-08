@@ -1528,6 +1528,7 @@ impl GuiShell {
             summary: String::new(),
             code: String::new(),
             sink: String::new(),
+            node: String::new(),
             preview: String::new(),
             provenance: Vec::new(),
             detail_fields: Vec::new(),

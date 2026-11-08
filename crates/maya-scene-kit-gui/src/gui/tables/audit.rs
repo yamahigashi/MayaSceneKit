@@ -145,7 +145,7 @@ impl TableDelegate for AuditTableDelegate {
             1 => i18n.text("table.severity"),
             2 => i18n.text("table.summary"),
             3 => i18n.text("table.code"),
-            4 => i18n.text("table.sink"),
+            4 => i18n.text("table.node"),
             _ => String::new(),
         };
         let cell = div()
@@ -247,7 +247,7 @@ impl TableDelegate for AuditTableDelegate {
                 content.child(detail_button).into_any_element()
             }
             3 => audit_table_muted_text_cell(row.code).into_any_element(),
-            4 => audit_table_muted_text_cell(row.sink).into_any_element(),
+            4 => audit_table_muted_text_cell(row.node).into_any_element(),
             _ => audit_table_text_cell(String::new()).into_any_element(),
         }
     }

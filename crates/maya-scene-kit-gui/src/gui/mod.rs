@@ -616,6 +616,7 @@ struct AuditResultRow {
     summary: String,
     code: String,
     sink: String,
+    node: String,
     preview: String,
     provenance: Vec<String>,
     detail_fields: Vec<AuditDetailField>,
@@ -638,6 +639,7 @@ struct AuditTableRow {
     summary: String,
     code: String,
     sink: String,
+    node: String,
     preview: String,
     provenance: Vec<String>,
     detail_fields: Vec<AuditDetailField>,
@@ -1012,7 +1014,7 @@ enum AuditSortKey {
     Severity,
     Summary,
     Code,
-    Sink,
+    Node,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

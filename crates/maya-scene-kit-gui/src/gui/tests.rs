@@ -237,6 +237,7 @@ fn test_audit_row(
         summary: summary.to_string(),
         code: "audit_code".to_string(),
         sink: "py_exec".to_string(),
+        node: String::new(),
         preview: "preview".to_string(),
         provenance: vec!["node: scriptNode1".to_string(), "line: 3".to_string()],
         detail_fields: vec![
@@ -2687,7 +2688,7 @@ fn audit_table_columns_use_localized_labels() {
     assert_eq!(columns[1].name.as_ref(), "Severity");
     assert_eq!(columns[2].name.as_ref(), "Summary");
     assert_eq!(columns[3].name.as_ref(), "Code");
-    assert_eq!(columns[4].name.as_ref(), "Sink");
+    assert_eq!(columns[4].name.as_ref(), "Node");
 }
 
 #[test]
@@ -2705,6 +2706,7 @@ fn filter_audit_result_rows_keeps_only_selected_severities() {
             summary: "info".to_string(),
             code: "info_code".to_string(),
             sink: "none".to_string(),
+            node: String::new(),
             preview: String::new(),
             provenance: Vec::new(),
             detail_fields: vec![
@@ -2735,6 +2737,7 @@ fn filter_audit_result_rows_keeps_only_selected_severities() {
             summary: "high".to_string(),
             code: "high_code".to_string(),
             sink: "py_exec".to_string(),
+            node: String::new(),
             preview: String::new(),
             provenance: Vec::new(),
             detail_fields: vec![
@@ -2914,6 +2917,44 @@ fn build_audit_result_rows_marks_script_node_findings_cleanable() {
 }
 
 #[test]
+fn build_audit_result_rows_fill_node_from_origin_and_dump_entries() {
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("mel_python_literal.ma");
+    write_literal_mel_python_scene(&path);
+    let mut row = test_row(1, &path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
+    else {
+        panic!("expected analyze result");
+    };
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    row.dump_report = result.dump_report;
+
+    let rows = build_audit_result_rows(
+        std::slice::from_ref(&row),
+        &[0],
+        &AuditAllowlist::default(),
+        &I18n::new(SupportedLocale::English),
+    );
+
+    let finding = rows
+        .iter()
+        .find(|audit_row| audit_row.key.item_kind == AuditResultItemKind::Finding)
+        .expect("finding row");
+    assert_eq!(finding.node, "literalPythonReview");
+    let script = rows
+        .iter()
+        .find(|audit_row| audit_row.key.item_kind == AuditResultItemKind::DumpScriptNode)
+        .expect("script row");
+    assert_eq!(script.node, "literalPythonReview");
+    let require = rows
+        .iter()
+        .find(|audit_row| audit_row.key.item_kind == AuditResultItemKind::DumpRequire)
+        .expect("require row");
+    assert_eq!(require.node, "");
+}
+
+#[test]
 fn build_audit_result_rows_marks_pending_clean_targets_as_staged() {
     let dir = tempdir().expect("tmpdir");
     let path = dir.path().join("mel_python_literal.ma");
@@ -2984,6 +3025,7 @@ fn audit_context_menu_state_keeps_clean_action_visible_when_blocked_by_other_dir
         summary: "script scriptNode1".to_string(),
         code: "script_node".to_string(),
         sink: "observe".to_string(),
+        node: String::new(),
         preview: "print".to_string(),
         provenance: vec!["node: scriptNode1".to_string()],
         detail_fields: vec![
@@ -3493,6 +3535,7 @@ fn resolve_audit_detail_view_model_returns_none_for_unknown_row_key() {
         summary: "note".to_string(),
         code: "note".to_string(),
         sink: "none".to_string(),
+        node: String::new(),
         preview: String::new(),
         provenance: Vec::new(),
         detail_fields: vec![

@@ -217,7 +217,6 @@
   "table.path": "パス",
   "table.code": "コード",
   "table.severity": "重大度",
-  "table.sink": "シンク",
   "table.summary": "概要",
   "audit_table.dedup": "重複をまとめる",
   "audit_table.show_all": "全件表示",

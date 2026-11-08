@@ -154,9 +154,9 @@ pub(in crate::gui) fn audit_table_columns(
             } else {
                 ColumnSort::Default
             }),
-        Column::new("sink", i18n.text("table.sink"))
+        Column::new("node", i18n.text("table.node"))
             .width(px(160.0))
-            .sort(if sort.key == AuditSortKey::Sink {
+            .sort(if sort.key == AuditSortKey::Node {
                 sort.direction
             } else {
                 ColumnSort::Default

@@ -41,6 +41,7 @@ pub(super) fn build_audit_result_rows(
                     summary: render_audit_finding_detail(&finding.detail),
                     code: finding.code.as_str().to_string(),
                     sink: finding.sink.as_str().to_string(),
+                    node: surface.origin.node_name.clone().unwrap_or_default(),
                     preview: report.finding_preview(finding).to_string(),
                     provenance: audit_provenance_lines(&surface.origin, source_line),
                     detail_fields: build_audit_detail_fields(
@@ -128,6 +129,7 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
             summary: format!("require {}", require.rendered),
             code: "require".to_string(),
             sink: "observe".to_string(),
+            node: String::new(),
             preview: require.rendered.clone(),
             provenance: Vec::new(),
             detail_fields: vec![
@@ -162,6 +164,7 @@ fn build_dump_info_rows(row: &SceneRow, report: &SceneDumpReport) -> Vec<AuditRe
             summary: format!("script {}", entry.name),
             code: "script_node".to_string(),
             sink: "observe".to_string(),
+            node: entry.name.clone(),
             preview: entry.body.trim_end_matches('\n').to_string(),
             provenance: vec![format!("node: {}", entry.name)],
             detail_fields: vec![
@@ -409,6 +412,7 @@ pub(super) fn build_audit_table_model(
         summary: String,
         code: String,
         sink: String,
+        node: String,
         preview: String,
         provenance: Vec<String>,
         source_line: Option<usize>,
@@ -444,6 +448,7 @@ pub(super) fn build_audit_table_model(
                 summary: row.summary.clone(),
                 code: row.code.clone(),
                 sink: row.sink.clone(),
+                node: row.node.clone(),
                 preview: row.preview.clone(),
                 provenance: row.provenance.clone(),
                 source_line: row.source_line,
@@ -487,6 +492,7 @@ pub(super) fn build_audit_table_model(
                 summary: group.row.summary,
                 code: group.row.code,
                 sink: group.row.sink,
+                node: group.row.node,
                 preview: group.row.preview,
                 provenance: group.row.provenance,
                 detail_fields: group.row.detail_fields,
@@ -511,6 +517,7 @@ pub(super) fn build_audit_table_model(
                 summary: row.summary,
                 code: row.code,
                 sink: row.sink,
+                node: row.node,
                 preview: row.preview,
                 provenance: row.provenance,
                 detail_fields: row.detail_fields,
@@ -1066,12 +1073,13 @@ pub(super) fn searchable_text_for_audit_row(
 ) -> String {
     let i18n = I18n::new(locale);
     format!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {} {}",
         row.scene_names.join(" "),
         severity_label(&i18n, row.severity),
         row.summary,
         row.code,
-        row.sink
+        row.sink,
+        row.node
     )
     .to_ascii_lowercase()
 }
@@ -1433,7 +1441,7 @@ pub(super) fn audit_sort_key_for_col_ix(col_ix: usize) -> Option<AuditSortKey> {
         1 => Some(AuditSortKey::Severity),
         2 => Some(AuditSortKey::Summary),
         3 => Some(AuditSortKey::Code),
-        4 => Some(AuditSortKey::Sink),
+        4 => Some(AuditSortKey::Node),
         _ => None,
     }
 }
@@ -1672,7 +1680,7 @@ pub(super) fn compare_audit_rows_for_sort(
         }
         AuditSortKey::Summary => left.summary.cmp(&right.summary),
         AuditSortKey::Code => left.code.cmp(&right.code),
-        AuditSortKey::Sink => left.sink.cmp(&right.sink),
+        AuditSortKey::Node => left.node.cmp(&right.node),
     }
     .then_with(|| left.key.cmp(&right.key));
 
