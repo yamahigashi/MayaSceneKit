@@ -988,4 +988,15 @@ mod tests {
         );
         assert!(restored.analysis_cache_enabled);
     }
+
+    #[test]
+    fn distributed_app_allowlist_is_valid() {
+        let text = include_str!("../../../dist/allowlist.json");
+        let allowlist = maya_scene_kit_audit::scene::AuditAllowlist::from_json(
+            text,
+            maya_scene_kit_audit::scene::AllowlistSource::App,
+        )
+        .expect("dist/allowlist.json must load as an app allowlist");
+        assert!(allowlist.len_entries() > 0);
+    }
 }

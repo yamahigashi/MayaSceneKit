@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "hash": "sha256:9aefa1ef2048925f2c29d5ea34680e488b29d8f5e241d2089b8f64d030d8b1c1",
+      "codes": ["python_maya_eval_deferred", "python_maya_load_plugin"],
+      "label": "LookdevXUIConfigurationScriptNode .b",
+      "preview": "# LookdevX UI Configuration File.",
+      "reason": "UI configuration script node written by Autodesk LookdevX (Python body, runs on GUI open/close)."
+    }
+  ]
+}

@@ -261,6 +261,11 @@ list the same entry, the earlier file wins) or `audit(..., allowlist_paths=[...]
 - An allowed body that evaluates data at run time (for example `eval` of an
   attribute value) trusts that data, because the hash covers only the body.
 
+Release archives ship a default `allowlist.json` next to the executables
+(source: `dist/allowlist.json`). It allows known Autodesk-generated script
+nodes such as the LookdevX UI configuration node. Administrators can edit or
+replace it; pass it to the CLI with `audit --allowlist <dir>/allowlist.json`.
+
 In the GUI, two allowlist files are merged: `allowlist.json` next to the GUI
 executable (distributed by an administrator) and `allowlist.json` next to the GUI
 state file (the user's own list, for example `%APPDATA%\maya-scene-kit\` on

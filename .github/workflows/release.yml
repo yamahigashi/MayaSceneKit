@@ -54,6 +54,7 @@ jobs:
           cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit "$linux_dir/maya-scene-kit"
           cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit-gui "$linux_dir/maya-scene-kit-gui"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "$linux_dir/"
+          cp dist/allowlist.json "$linux_dir/allowlist.json"
           tar czf release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz -C release "maya-scene-kit-${{ github.ref_name }}-linux"
 
       - name: Upload Linux artifact
@@ -86,6 +87,7 @@ jobs:
           Copy-Item target/release/maya-scene-kit.exe "$windowsDir/maya-scene-kit.exe"
           Copy-Item target/release/maya-scene-kit-gui.exe "$windowsDir/maya-scene-kit-gui.exe"
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $windowsDir
+          Copy-Item dist/allowlist.json "$windowsDir/allowlist.json"
           Compress-Archive -Path $windowsDir -DestinationPath "release/maya-scene-kit-${{ github.ref_name }}-windows.zip" -Force
 
       - name: Upload Windows artifact

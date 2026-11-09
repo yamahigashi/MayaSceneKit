@@ -15,6 +15,10 @@ large workspaces.
   in the report but marked as allowed.
 - Added `--allowlist` to the CLI `audit` command (repeatable; earlier files
   win) and `allowlist_paths` to the Python audit API.
+- Added a default app allowlist (`dist/allowlist.json`) to the release
+  archives, placed next to the executables. It allows the
+  `LookdevXUIConfigurationScriptNode` UI configuration script written by
+  Autodesk LookdevX (`python_maya_eval_deferred`, `python_maya_load_plugin`).
 - Added standalone source auditing for MEL and Python text that is not inside a
   scene file: `audit_source_text` and `observe_source_text` in Rust, and
   `audit_source_text` in Python.
