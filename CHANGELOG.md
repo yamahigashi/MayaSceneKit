@@ -2,6 +2,86 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.0] - 2026-11-09
+
+This release adds allowlist-based review of known scripts across the CLI,
+Python, and GUI, exposes standalone source auditing, extracts the Maya Binary
+chunk layer into the `maya-mb` crate, and makes the GUI faster and clearer on
+large workspaces.
+
+### Added
+
+- Added audit allowlists keyed by script body hash. Matching findings are kept
+  in the report but marked as allowed.
+- Added `--allowlist` to the CLI `audit` command (repeatable; earlier files
+  win) and `allowlist_paths` to the Python audit API.
+- Added standalone source auditing for MEL and Python text that is not inside a
+  scene file: `audit_source_text` and `observe_source_text` in Rust, and
+  `audit_source_text` in Python.
+- Added a non-recursive audit option to the Python API that stops at the root
+  scene instead of walking the reference graph.
+- Added GUI allowlist support: load allowlists, show allowed findings
+  separately, add findings to the user allowlist from the audit detail dialog,
+  and manage user entries in an allowlist manager dialog.
+- Added GUI context-menu plugin actions for the file list and audit table.
+- Added a GUI action to find missing path files on disk and stage the found
+  locations as replacement paths.
+- Added full script text and readable field labels to the GUI audit detail
+  dialog.
+- Added GUI keyboard shortcuts: Ctrl+O (select folder), F5 (reload folder),
+  Ctrl+S / Ctrl+Shift+S (save selected / save all), Ctrl+Z / Ctrl+Y (undo /
+  redo), Ctrl+F or `/` (focus the file-list or paths search box), and Escape in
+  a search box (clear, then leave the box). Added Ctrl+A to select all path
+  rows.
+- Added a File > Reload Folder menu item.
+
+### Changed
+
+- Extracted the Maya Binary IFF chunk reader and encoder from
+  `maya-scene-kit-formats` into the standalone `maya-mb` crate and tightened its
+  API. Rust code that used the moved `formats::mb` modules must switch to
+  `maya-mb`.
+- The GUI file list now refreshes its filtered and sorted rows every second
+  during workspace auto analyze, and also after path resolution finishes, so
+  filters such as missing paths fill in while a scan runs.
+- The GUI audit table shows the origin node instead of the internal sink name.
+  The sink stays available in the detail dialog and search.
+- Selected rows in the GUI file list and paths table keep their state visible
+  through a left-edge mark and an outlined status badge (modified, error,
+  saved).
+- The GUI path replace dialog keeps the previous preview visible while the
+  rules are retyped, shows non-matching candidates in grey instead of hiding
+  them, marks matched rows on the left edge, and renders the candidate list as a
+  virtualized table.
+- Menu shortcuts use the platform modifier, so Windows shows Ctrl instead of
+  Win.
+- Clarified audit gate semantics and coverage limits in the documentation.
+
+### Fixed
+
+- Fixed selective Maya ASCII parsing so reference paths are recovered after
+  long command options.
+- Fixed the quoted-literal scan to stop at an unterminated quote.
+- Fixed Maya Binary execution clean so unselected script nodes and requires are
+  kept.
+- Fixed clean and composite range edits to apply against the original bytes.
+- Fixed the reference graph limit to count each admitted scene once.
+- Fixed observe cache reads to reject rows from other schema versions on every
+  read path.
+- Fixed observe to report failed and unsupported chunk decodes with an explicit
+  quality.
+- Fixed refedit auto-grouping to advance past zero-count groups.
+- Fixed the GUI path edit transaction to open only after previews succeed.
+- Fixed GUI persisted state to save in snapshot order with atomic writes.
+- Fixed the GUI Edit menu `uiConfigurationScriptNode` delete to skip analyzed
+  files that do not contain the node instead of failing.
+
+### Performance
+
+- Precomputed GUI file-list sort keys and skipped building search text when the
+  search box is empty.
+- Stopped cloning the whole path replace dialog state on every frame.
+
 ## [v0.2.4] - 2026-06-11
 
 This release tightens execution-surface detection across Maya ASCII and Maya
