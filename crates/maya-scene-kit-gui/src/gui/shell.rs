@@ -153,6 +153,24 @@ impl GuiShell {
             .col_selectable(false)
             .row_selectable(false)
         });
+        let replace_preview_table = cx.new(|cx| {
+            TableState::new(
+                ReplacePreviewTableDelegate::new(
+                    i18n.locale(),
+                    ReplaceDialogSort {
+                        key: ReplaceDialogSortKey::Before,
+                        direction: ColumnSort::Default,
+                    },
+                ),
+                window,
+                cx,
+            )
+            .col_resizable(true)
+            .sortable(false)
+            .col_movable(false)
+            .col_selectable(false)
+            .row_selectable(false)
+        });
         let path_table_focus_handle = path_table.read(cx).focus_handle(cx);
         let view = cx.entity();
         let close_view = view.clone();
@@ -162,6 +180,15 @@ impl GuiShell {
         let path_edit_view = view.clone();
         let path_table_view = view.clone();
         let subscriptions = vec![
+            cx.subscribe(
+                &replace_preview_table,
+                |_: &mut Self, table, event: &TableEvent, cx| {
+                    if let TableEvent::ColumnWidthsChanged(widths) = event {
+                        let widths = widths.clone();
+                        table.update(cx, |table, _| table.delegate_mut().apply_widths(&widths));
+                    }
+                },
+            ),
             cx.subscribe(&search_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.apply_search_query(cx);
@@ -287,6 +314,7 @@ impl GuiShell {
             path_table_focus_handle,
             path_table_summary: PathTableSummary::default(),
             audit_table,
+            replace_preview_table,
             audit_all_rows: Vec::new(),
             audit_rows: Vec::new(),
             file_sort,
@@ -375,6 +403,10 @@ impl GuiShell {
             table.refresh(cx);
         });
         self.audit_table.update(cx, |table, cx| {
+            table.delegate_mut().set_view(view.clone());
+            table.refresh(cx);
+        });
+        self.replace_preview_table.update(cx, |table, cx| {
             table.delegate_mut().set_view(view);
             table.refresh(cx);
         });

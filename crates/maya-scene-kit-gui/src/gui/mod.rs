@@ -221,6 +221,7 @@ struct GuiShell {
     path_table_focus_handle: FocusHandle,
     path_table_summary: PathTableSummary,
     audit_table: Entity<TableState<AuditTableDelegate>>,
+    replace_preview_table: Entity<TableState<ReplacePreviewTableDelegate>>,
     audit_all_rows: Vec<AuditResultRow>,
     audit_rows: Vec<AuditTableRow>,
     file_sort: FileTableSort,
@@ -909,6 +910,14 @@ struct PathTableDelegate {
     rows: Vec<PathTableRow>,
     show_scene_column: bool,
     sort: PathTableSort,
+    columns: Vec<Column>,
+}
+
+struct ReplacePreviewTableDelegate {
+    view: Option<Entity<GuiShell>>,
+    locale: SupportedLocale,
+    rows: Vec<ReplaceDialogPreviewRow>,
+    sort: ReplaceDialogSort,
     columns: Vec<Column>,
 }
 

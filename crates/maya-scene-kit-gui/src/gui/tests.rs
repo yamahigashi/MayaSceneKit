@@ -12412,3 +12412,109 @@ fn replace_dialog_keeps_previous_preview_while_inputs_change(cx: &mut TestAppCon
         assert!(!dialog.is_previewing);
     });
 }
+
+#[gpui::test]
+fn replace_preview_table_tracks_preview_rows_and_sort(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("TestScene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/old_b.tx\";\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/keep_a.tx\";\n",
+            "createNode file -n \"file3\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/zz_keep_c.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &scene);
+        row.selected = true;
+        row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+        shell.rows = vec![row];
+        shell.open_replace_dialog(window, cx);
+        assert!(
+            shell
+                .replace_preview_table
+                .read(cx)
+                .delegate()
+                .rows()
+                .is_empty()
+        );
+        shell
+            .replace_from_input
+            .update(cx, |input, cx| input.set_value("old", window, cx));
+        shell
+            .replace_to_input
+            .update(cx, |input, cx| input.set_value("new", window, cx));
+        shell.run_replace_preview(window, cx);
+    });
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, _, cx| {
+        let befores = |shell: &GuiShell, cx: &gpui::App| {
+            shell
+                .replace_preview_table
+                .read(cx)
+                .delegate()
+                .rows()
+                .iter()
+                .map(|row| row.before_value.clone())
+                .collect::<Vec<_>>()
+        };
+        let names = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| format!("textures/{value}.tx"))
+                .collect::<Vec<_>>()
+        };
+        let captured = names(&["old_b", "keep_a", "zz_keep_c"]);
+        let ascending = names(&["keep_a", "old_b", "zz_keep_c"]);
+        let descending = names(&["zz_keep_c", "old_b", "keep_a"]);
+        assert_eq!(befores(shell, cx), captured);
+
+        for key in [ReplaceDialogSortKey::Before, ReplaceDialogSortKey::After] {
+            shell.toggle_replace_dialog_preview_sort(key, cx);
+            assert_eq!(befores(shell, cx), ascending, "{key:?} ascending");
+            shell.toggle_replace_dialog_preview_sort(key, cx);
+            assert_eq!(befores(shell, cx), descending, "{key:?} descending");
+            shell.toggle_replace_dialog_preview_sort(key, cx);
+            assert_eq!(befores(shell, cx), captured, "{key:?} captured order");
+        }
+    });
+}
+
+#[gpui::test]
+fn replace_preview_table_keeps_resized_column_widths_across_sync(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("TestScene.ma");
+    fs::write(&scene, "//Maya ASCII 2026 scene\n").expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &scene);
+        row.selected = true;
+        shell.rows = vec![row];
+        shell.open_replace_dialog(window, cx);
+        let table = shell.replace_preview_table.clone();
+        table.update(cx, |_, cx| {
+            cx.emit(gpui_component::table::TableEvent::ColumnWidthsChanged(
+                vec![px(250.0), px(600.0)],
+            ));
+        });
+    });
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, _, cx| {
+        shell.toggle_replace_dialog_preview_sort(ReplaceDialogSortKey::Before, cx);
+        use gpui_component::table::TableDelegate as _;
+        let table = shell.replace_preview_table.read(cx);
+        assert_eq!(table.delegate().column(0, cx).width, px(250.0));
+        assert_eq!(table.delegate().column(1, cx).width, px(600.0));
+    });
+}

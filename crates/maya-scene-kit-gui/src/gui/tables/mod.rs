@@ -3,6 +3,7 @@ mod columns;
 mod context_menu;
 mod file;
 mod path;
+mod replace_preview;
 
 pub(super) use columns::*;
 pub(super) use context_menu::*;

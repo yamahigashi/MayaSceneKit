@@ -486,6 +486,7 @@ impl GuiShell {
         });
         self.refresh_app_menus(window, cx);
         self.refresh_file_table(cx);
+        self.sync_replace_preview_table(cx);
         self.persist();
     }
 

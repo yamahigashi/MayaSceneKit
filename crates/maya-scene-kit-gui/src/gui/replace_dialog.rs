@@ -5,10 +5,7 @@ use super::*;
 const REPLACE_DIALOG_HORIZONTAL_MARGIN: Pixels = px(48.0);
 const REPLACE_DIALOG_VERTICAL_MARGIN: Pixels = px(96.0);
 const REPLACE_DIALOG_PREVIEW_MAX_HEIGHT: Pixels = px(320.0);
-const REPLACE_PREVIEW_HEADER_HEIGHT: Pixels = px(40.0);
-const REPLACE_PREVIEW_ROW_HEIGHT: Pixels = px(34.0);
-const REPLACE_PREVIEW_ROW_HEIGHT_F: f32 = 34.0;
-const REPLACE_PREVIEW_COLUMN_MIN_WIDTH: Pixels = px(180.0);
+const REPLACE_PREVIEW_TABLE_ROW_HEIGHT: Pixels = px(32.0);
 
 struct ReplaceDialogLayout {
     width: Pixels,
@@ -145,6 +142,7 @@ impl GuiShell {
             preview_signature: None,
             preview: None,
         });
+        self.sync_replace_preview_table(cx);
         let view = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
             build_replace_dialog(dialog, view.clone(), window, cx)
@@ -323,6 +321,7 @@ impl GuiShell {
                             dialog.preview_signature = Some(outcome.1.clone());
                             dialog.source_cache.extend(outcome.2.clone());
                             dialog.preview = Some(outcome.3.clone());
+                            shell.sync_replace_preview_table(cx);
                             cx.notify();
                         },
                     );
@@ -476,7 +475,27 @@ impl GuiShell {
                 direction: ColumnSort::Ascending,
             }
         };
+        self.sync_replace_preview_table(cx);
         cx.notify();
+    }
+
+    pub(super) fn sync_replace_preview_table(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.replace_dialog.as_ref() else {
+            return;
+        };
+        let rows = dialog
+            .preview
+            .as_ref()
+            .map(|preview| render_replace_dialog_preview_rows(preview, dialog))
+            .unwrap_or_default();
+        let sort = dialog.preview_sort;
+        let locale = self.i18n().locale();
+        self.replace_preview_table.update(cx, |table, cx| {
+            if table.delegate_mut().sync(rows, locale, sort) {
+                table.refresh(cx);
+            }
+            cx.notify();
+        });
     }
 }
 
@@ -498,16 +517,14 @@ fn build_replace_dialog(
     }
     let shell = view.read(cx);
     let i18n = shell.i18n();
-    let dialog_state = shell.replace_dialog.clone();
+    let dialog_state = shell.replace_dialog.as_ref();
     let selected_count = dialog_state
-        .as_ref()
         .map(|state| state.captured_row_ids.len())
         .unwrap_or_default();
     let layout = replace_dialog_layout(window);
     let preview_refreshing = dialog_state
-        .as_ref()
         .is_some_and(|state| state.preview.is_some() && state.preview_signature.is_none());
-    let summary = if let Some(dialog_state) = dialog_state.as_ref() {
+    let summary = if let Some(dialog_state) = dialog_state {
         if let Some(preview) = dialog_state.preview.as_ref() {
             i18n.format(
                 "dialog.replace_summary",
@@ -638,7 +655,6 @@ fn build_replace_dialog(
                         .into_iter()
                         .map(|filter| {
                             let selected = dialog_state
-                                .as_ref()
                                 .is_some_and(|state| state.path_type_filter.contains(&filter));
                             replace_dialog_path_type_filter_button(
                                 path_type_filter_label(&i18n, filter),
@@ -663,7 +679,7 @@ fn build_replace_dialog(
                     )
                     .child(
                         RadioGroup::horizontal("replace-mode")
-                            .selected_index(dialog_state.as_ref().map(|state| {
+                            .selected_index(dialog_state.map(|state| {
                                 if state.replace_mode == PathReplaceMode::Literal {
                                     0
                                 } else {
@@ -727,11 +743,12 @@ fn build_replace_dialog(
                     }),
             )
             .child(render_replace_dialog_preview(
-                dialog_state.as_ref(),
+                dialog_state,
                 &i18n,
                 selected_count,
                 view.clone(),
                 layout.preview_max_height,
+                cx,
             )),
     );
 
@@ -771,6 +788,7 @@ fn render_replace_dialog_preview(
     selected_count: usize,
     view: Entity<GuiShell>,
     preview_max_height: Pixels,
+    cx: &App,
 ) -> AnyElement {
     let Some(dialog_state) = dialog_state else {
         return div()
@@ -796,8 +814,13 @@ fn render_replace_dialog_preview(
             .into_any_element();
     };
 
-    let rendered_items = render_replace_dialog_preview_rows(preview, dialog_state);
-    let content = if rendered_items.is_empty() {
+    let row_count = view
+        .read(cx)
+        .replace_preview_table
+        .read(cx)
+        .delegate()
+        .row_count();
+    let content = if row_count == 0 {
         div()
             .rounded_md()
             .border_1()
@@ -809,69 +832,19 @@ fn render_replace_dialog_preview(
             .child(i18n.text("dialog.replace_no_matches"))
             .into_any_element()
     } else {
-        let table_content_height = (REPLACE_PREVIEW_HEADER_HEIGHT
-            + px(REPLACE_PREVIEW_ROW_HEIGHT_F * rendered_items.len() as f32))
-        .max(REPLACE_PREVIEW_HEADER_HEIGHT + REPLACE_PREVIEW_ROW_HEIGHT);
-        let before_items = rendered_items.clone();
-        let after_items = rendered_items;
+        // The table virtualizes rows itself; it only needs a bounded height.
+        let table_height = (REPLACE_PREVIEW_TABLE_ROW_HEIGHT * (row_count + 1) as f32 + px(2.0))
+            .min(preview_max_height);
 
         div()
             .rounded_md()
             .border_1()
             .border_color(rgb(BORDER))
             .w_full()
-            .max_h(preview_max_height)
+            .h(table_height)
             .min_h_0()
-            .overflow_y_scrollbar()
-            .child(
-                div().w_full().h(table_content_height).min_h_0().child(
-                    h_resizable("replace-preview-columns")
-                        .child(
-                            resizable_panel()
-                                .size(px(420.0))
-                                .size_range(REPLACE_PREVIEW_COLUMN_MIN_WIDTH..Pixels::MAX)
-                                .child(
-                                    div()
-                                        .size_full()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(replace_preview_column_header(
-                                            i18n.text("label.before"),
-                                            ReplaceDialogSortKey::Before,
-                                            dialog_state.preview_sort,
-                                            view.clone(),
-                                        ))
-                                        .children(before_items.into_iter().map(|item| {
-                                            let matched = item.before_value != item.after_value;
-                                            replace_preview_column_cell(item.before_value, matched)
-                                        })),
-                                ),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(420.0))
-                                .size_range(REPLACE_PREVIEW_COLUMN_MIN_WIDTH..Pixels::MAX)
-                                .child(
-                                    div()
-                                        .size_full()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(replace_preview_column_header(
-                                            i18n.text("label.after"),
-                                            ReplaceDialogSortKey::After,
-                                            dialog_state.preview_sort,
-                                            view.clone(),
-                                        ))
-                                        .children(after_items.into_iter().map(|item| {
-                                            let matched = item.before_value != item.after_value;
-                                            replace_preview_column_cell(item.after_value, matched)
-                                        })),
-                                ),
-                        ),
-                ),
-            )
+            .overflow_hidden()
+            .child(Table::new(&view.read(cx).replace_preview_table).scrollbar_visible(true, true))
             .into_any_element()
     };
 
@@ -964,44 +937,6 @@ fn replace_dialog_path_type_filter_button(
         })
 }
 
-fn replace_preview_column_header(
-    label: String,
-    key: ReplaceDialogSortKey,
-    sort: ReplaceDialogSort,
-    view: Entity<GuiShell>,
-) -> impl IntoElement {
-    div()
-        .h(REPLACE_PREVIEW_HEADER_HEIGHT)
-        .px_3()
-        .border_b_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(PANEL_ALT_BG))
-        .flex()
-        .items_center()
-        .text_sm()
-        .font_weight(FontWeight::BOLD)
-        .child(render_replace_preview_sort_header(label, key, sort, view))
-}
-
-const REPLACE_PREVIEW_UNMATCHED_TEXT: u32 = 0x8f877d;
-
-fn replace_preview_column_cell(text: String, matched: bool) -> impl IntoElement {
-    div()
-        .h(REPLACE_PREVIEW_ROW_HEIGHT)
-        .px_3()
-        .border_b_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .items_center()
-        .text_sm()
-        .text_color(rgb(if matched {
-            TEXT
-        } else {
-            REPLACE_PREVIEW_UNMATCHED_TEXT
-        }))
-        .child(div().flex_1().min_w_0().truncate().child(text))
-}
-
 pub(super) fn render_replace_dialog_preview_rows(
     preview: &ReplaceDialogPreviewState,
     dialog_state: &ReplaceDialogState,
@@ -1032,37 +967,4 @@ pub(super) fn render_replace_dialog_preview_rows(
     }
 
     rows
-}
-
-fn render_replace_preview_sort_header(
-    label: String,
-    key: ReplaceDialogSortKey,
-    sort: ReplaceDialogSort,
-    view: Entity<GuiShell>,
-) -> impl IntoElement {
-    let indicator = if sort.key == key {
-        match sort.direction {
-            ColumnSort::Ascending => " ↑",
-            ColumnSort::Descending => " ↓",
-            ColumnSort::Default => "",
-        }
-    } else {
-        ""
-    };
-
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .gap_1()
-        .cursor_pointer()
-        .child(format!("{label}{indicator}"))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-            view.update(cx, |shell, cx| {
-                shell.toggle_replace_dialog_preview_sort(key, cx)
-            });
-        })
 }
