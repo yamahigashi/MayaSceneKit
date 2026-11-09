@@ -175,7 +175,6 @@ impl GuiShell {
             dialog_state.generation = generation;
             dialog_state.is_previewing = true;
             dialog_state.preview_signature = None;
-            dialog_state.preview = None;
             generation
         };
 
@@ -505,10 +504,11 @@ fn build_replace_dialog(
         .map(|state| state.captured_row_ids.len())
         .unwrap_or_default();
     let layout = replace_dialog_layout(window);
+    let preview_refreshing = dialog_state
+        .as_ref()
+        .is_some_and(|state| state.preview.is_some() && state.preview_signature.is_none());
     let summary = if let Some(dialog_state) = dialog_state.as_ref() {
-        if dialog_state.is_previewing {
-            i18n.text("dialog.replace_previewing")
-        } else if let Some(preview) = dialog_state.preview.as_ref() {
+        if let Some(preview) = dialog_state.preview.as_ref() {
             i18n.format(
                 "dialog.replace_summary",
                 &[
@@ -518,6 +518,8 @@ fn build_replace_dialog(
                     ("failed", preview.failed_files.len().to_string()),
                 ],
             )
+        } else if dialog_state.is_previewing {
+            i18n.text("dialog.replace_previewing")
         } else {
             i18n.format(
                 "dialog.replace_selected_files",
@@ -716,7 +718,13 @@ fn build_replace_dialog(
                     .px_3()
                     .py_2()
                     .text_sm()
-                    .child(summary),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(summary)
+                    .when(preview_refreshing, |this| {
+                        this.child(Spinner::new().with_size(px(12.0)))
+                    }),
             )
             .child(render_replace_dialog_preview(
                 dialog_state.as_ref(),
@@ -771,7 +779,7 @@ fn render_replace_dialog_preview(
             .child(i18n.text("dialog.replace_selected_files_empty"))
             .into_any_element();
     };
-    if dialog_state.is_previewing {
+    if dialog_state.is_previewing && dialog_state.preview.is_none() {
         return div()
             .flex()
             .items_center()
@@ -835,7 +843,8 @@ fn render_replace_dialog_preview(
                                             view.clone(),
                                         ))
                                         .children(before_items.into_iter().map(|item| {
-                                            replace_preview_column_cell(item.before_value)
+                                            let matched = item.before_value != item.after_value;
+                                            replace_preview_column_cell(item.before_value, matched)
                                         })),
                                 ),
                         )
@@ -856,7 +865,8 @@ fn render_replace_dialog_preview(
                                             view.clone(),
                                         ))
                                         .children(after_items.into_iter().map(|item| {
-                                            replace_preview_column_cell(item.after_value)
+                                            let matched = item.before_value != item.after_value;
+                                            replace_preview_column_cell(item.after_value, matched)
                                         })),
                                 ),
                         ),
@@ -973,7 +983,9 @@ fn replace_preview_column_header(
         .child(render_replace_preview_sort_header(label, key, sort, view))
 }
 
-fn replace_preview_column_cell(text: String) -> impl IntoElement {
+const REPLACE_PREVIEW_UNMATCHED_TEXT: u32 = 0x8f877d;
+
+fn replace_preview_column_cell(text: String, matched: bool) -> impl IntoElement {
     div()
         .h(REPLACE_PREVIEW_ROW_HEIGHT)
         .px_3()
@@ -982,6 +994,11 @@ fn replace_preview_column_cell(text: String) -> impl IntoElement {
         .flex()
         .items_center()
         .text_sm()
+        .text_color(rgb(if matched {
+            TEXT
+        } else {
+            REPLACE_PREVIEW_UNMATCHED_TEXT
+        }))
         .child(div().flex_1().min_w_0().truncate().child(text))
 }
 
@@ -989,15 +1006,10 @@ pub(super) fn render_replace_dialog_preview_rows(
     preview: &ReplaceDialogPreviewState,
     dialog_state: &ReplaceDialogState,
 ) -> Vec<ReplaceDialogPreviewRow> {
-    let filter_to_matches_only = dialog_state
-        .preview_signature
-        .as_ref()
-        .is_some_and(|signature| !signature.from_value.trim().is_empty());
     let mut seen = BTreeSet::new();
     let mut rows = preview
         .items
         .iter()
-        .filter(|item| !filter_to_matches_only || item.before_value != item.after_value)
         .filter(|item| seen.insert((item.before_value.clone(), item.after_value.clone())))
         .cloned()
         .collect::<Vec<_>>();

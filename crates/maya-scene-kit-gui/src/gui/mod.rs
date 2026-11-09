@@ -1170,7 +1170,6 @@ impl ReplaceDialogState {
         self.generation = self.generation.saturating_add(1);
         self.is_previewing = false;
         self.preview_signature = None;
-        self.preview = None;
     }
 
     fn can_apply(&self, signature: &ReplaceDialogPreviewSignature) -> bool {

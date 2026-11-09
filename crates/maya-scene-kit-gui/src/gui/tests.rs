@@ -1871,7 +1871,7 @@ fn replace_dialog_state_invalidate_preview_clears_applyability() {
     assert_eq!(state.generation, 8);
     assert!(!state.is_previewing);
     assert!(state.preview_signature.is_none());
-    assert!(state.preview.is_none());
+    assert!(state.preview.is_some());
     assert!(!state.can_apply(&ReplaceDialogPreviewSignature {
         from_value: "old".to_string(),
         to_value: "new".to_string(),
@@ -6136,7 +6136,7 @@ fn path_overrides_from_replace_preview_uses_after_values_by_entry_index() {
 }
 
 #[test]
-fn replace_dialog_preview_rows_show_only_matches_when_query_exists() {
+fn replace_dialog_preview_rows_keep_unmatched_candidates_when_query_exists() {
     let rows = render_replace_dialog_preview_rows(
         &ReplaceDialogPreviewState {
             previewable_row_ids: vec![1],
@@ -6176,9 +6176,11 @@ fn replace_dialog_preview_rows_show_only_matches_when_query_exists() {
         },
     );
 
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].before_value, "match/a.tx");
     assert_eq!(rows[0].after_value, "match/b.tx");
+    assert_eq!(rows[1].before_value, "keep.tx");
+    assert_eq!(rows[1].after_value, "keep.tx");
 }
 
 #[test]
@@ -12338,4 +12340,75 @@ fn file_row_state_mark_survives_selection() {
         row.status = status;
         assert_eq!(super::helpers::file_row_state_mark(&row), expected);
     }
+}
+
+#[gpui::test]
+fn replace_dialog_keeps_previous_preview_while_inputs_change(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("TestScene.ma");
+    fs::write(
+        &scene,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "createNode file -n \"file1\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/old_a.tx\";\n",
+            "createNode file -n \"file2\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"textures/keep_b.tx\";\n",
+        ),
+    )
+    .expect("write scene");
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = test_row(1, &scene);
+        row.selected = true;
+        row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
+        shell.rows = vec![row];
+        shell.open_replace_dialog(window, cx);
+        shell
+            .replace_from_input
+            .update(cx, |input, cx| input.set_value("old", window, cx));
+        shell
+            .replace_to_input
+            .update(cx, |input, cx| input.set_value("new", window, cx));
+        shell.run_replace_preview(window, cx);
+    });
+    visual_cx.run_until_parked();
+
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let dialog = shell.replace_dialog.as_ref().expect("replace dialog");
+        let rows =
+            render_replace_dialog_preview_rows(dialog.preview.as_ref().expect("preview"), dialog);
+        assert_eq!(rows.len(), 2, "unmatched candidates stay in the list");
+        assert!(shell.replace_dialog_can_apply(cx));
+
+        shell
+            .replace_from_input
+            .update(cx, |input, cx| input.set_value("olde", window, cx));
+        shell.on_replace_dialog_inputs_changed(cx);
+        let dialog = shell.replace_dialog.as_ref().expect("replace dialog");
+        assert!(dialog.preview.is_some(), "previous preview stays visible");
+        assert!(!shell.replace_dialog_can_apply(cx));
+
+        shell.run_replace_preview(window, cx);
+        let dialog = shell.replace_dialog.as_ref().expect("replace dialog");
+        assert!(dialog.is_previewing);
+        assert!(dialog.preview.is_some(), "previous preview stays visible");
+        assert!(!shell.replace_dialog_can_apply(cx));
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        let dialog = shell.replace_dialog.as_ref().expect("replace dialog");
+        let preview = dialog.preview.as_ref().expect("preview");
+        assert_eq!(preview.matched_count, 0);
+        assert!(
+            preview
+                .items
+                .iter()
+                .all(|item| item.before_value == item.after_value)
+        );
+        assert!(!dialog.is_previewing);
+    });
 }
