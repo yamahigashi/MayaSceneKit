@@ -210,31 +210,8 @@ pub(crate) fn looks_like_scene_path(s: &str) -> bool {
     looks_like_qualified_scene_file_path(s)
 }
 
-pub(crate) fn parse_setattr_string_line(line: &str) -> Option<(String, String)> {
-    let s = line.trim_start();
-    if !s.starts_with("setAttr ") || !s.contains("-type \"string\"") {
-        return None;
-    }
-
-    let mut cursor = s.find('"')?;
-    let (attr_lit, next) = parse_ma_quoted_literal(s, cursor);
-    let attr = attr_lit?;
-    cursor = next;
-
-    let marker_pos = s[cursor..].find("-type \"string\"")?;
-    cursor += marker_pos + "-type \"string\"".len();
-    while cursor < s.len() && s[cursor..].chars().next().unwrap().is_whitespace() {
-        cursor += s[cursor..].chars().next().unwrap().len_utf8();
-    }
-    if cursor >= s.len() || !s[cursor..].starts_with('"') {
-        return None;
-    }
-    let (value_lit, _) = parse_ma_quoted_literal(s, cursor);
-    let value = unescape_ma_string_literal(&value_lit?);
-    Some((attr, value))
-}
-
-fn parse_setattr_string_value_after_marker(trimmed: &str, mut cursor: usize) -> Option<String> {
+pub(crate) fn parse_setattr_string_value_tail(trimmed: &str) -> Option<String> {
+    let mut cursor = 0;
     while cursor < trimmed.len() {
         let ch = trimmed[cursor..].chars().next().unwrap();
         if ch.is_whitespace() {
@@ -278,43 +255,6 @@ fn parse_setattr_string_value_after_marker(trimmed: &str, mut cursor: usize) -> 
     }
 
     Some(parts.join(""))
-}
-
-pub(crate) fn parse_setattr_string_value_tail(tail: &str) -> Option<String> {
-    parse_setattr_string_value_after_marker(tail, 0)
-}
-
-pub(crate) fn parse_setattr_string_value(command: &str) -> Option<String> {
-    let trimmed = command.trim_start();
-    if !trimmed.starts_with("setAttr ") || !trimmed.contains("-type \"string\"") {
-        return None;
-    }
-    let marker_pos = trimmed.find("-type \"string\"")?;
-    let cursor = marker_pos + "-type \"string\"".len();
-    parse_setattr_string_value_after_marker(trimmed, cursor)
-}
-
-pub(crate) fn parse_setattr_string_command(command: &str) -> Option<(String, String)> {
-    if let Some(parsed) = parse_setattr_string_line(command) {
-        return Some(parsed);
-    }
-
-    let trimmed = command.trim_start();
-    if !trimmed.starts_with("setAttr ") || !trimmed.contains("-type \"string\"") {
-        return None;
-    }
-
-    let mut cursor = trimmed.find('"')?;
-    let (attr_lit, next) = parse_ma_quoted_literal(trimmed, cursor);
-    let attr = attr_lit?;
-    cursor = next;
-
-    let marker_pos = trimmed[cursor..].find("-type \"string\"")?;
-    cursor += marker_pos + "-type \"string\"".len();
-    Some((
-        attr,
-        parse_setattr_string_value_after_marker(trimmed, cursor)?,
-    ))
 }
 
 pub(crate) fn is_create_script_command(line: &[u8]) -> bool {

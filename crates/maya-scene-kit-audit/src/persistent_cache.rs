@@ -15,7 +15,7 @@ use crate::{
     scene::{AuditOptions, AuditReport},
 };
 
-const AUDIT_CACHE_SCHEMA_VERSION: u32 = 15;
+const AUDIT_CACHE_SCHEMA_VERSION: u32 = 16;
 const DB_FILE: &str = "cache.sqlite3";
 const AUDIT_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const AUDIT_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);

@@ -209,6 +209,7 @@ pub(in crate::scene) struct ParsedNodeInfo {
 
 #[derive(Debug, Clone, Default)]
 struct NormalizedNodeInfoEntry {
+    attr_aliases: HashMap<String, (String, String)>,
     display_name: String,
     typeid: Option<u32>,
     angular_attrs: HashMap<String, AngularAttrKind>,
@@ -329,6 +330,30 @@ fn load_parsed_node_info_from_paths(
                     }
                 }
             }
+            let selectors: Vec<_> = ma_capture_attr_selectors
+                .iter()
+                .filter(|selector| {
+                    selector.node_type == node_type
+                        || (node_type.eq_ignore_ascii_case("renderGlobals")
+                            && selector.node_name.as_deref() == Some("defaultRenderGlobals"))
+                })
+                .cloned()
+                .collect();
+            for selector in selectors {
+                if node_type == "script"
+                    && matches!(selector.attr.as_str(), ".b" | ".a" | ".st" | ".stp")
+                {
+                    continue;
+                }
+                for (alias, (short, _)) in &entry.attr_aliases {
+                    if selector.attr == format!(".{short}") {
+                        ma_capture_attr_selectors.insert(RawMaNodeAttrSelector {
+                            attr: format!(".{alias}"),
+                            ..selector.clone()
+                        });
+                    }
+                }
+            }
             profiles_by_node.insert(node_type, entry.execution_profiles);
         }
     }
@@ -350,6 +375,7 @@ fn ma_node_attr_selector(
     attr: &str,
 ) -> RawMaNodeAttrSelector {
     RawMaNodeAttrSelector {
+        canonical_attr: format!(".{attr}"),
         node_type: node_type.to_string(),
         node_name: node_name.map(str::to_string),
         attr: format!(".{attr}"),
@@ -423,6 +449,7 @@ fn parse_external_node_info(
                 typeid: parse_node_typeid(raw_node.typeid.as_ref())?,
                 angular_attrs: attrs,
                 execution_profiles,
+                attr_aliases,
             },
         );
     }
@@ -435,7 +462,7 @@ fn build_attr_aliases(
 ) -> HashMap<String, (String, String)> {
     let mut aliases = HashMap::new();
     for (raw_short, attr) in attrs {
-        let Some(short) = normalize_lookup_token(raw_short) else {
+        let Some(short) = normalize_attr_spelling(raw_short) else {
             continue;
         };
         let display_name = attr
@@ -445,7 +472,7 @@ fn build_attr_aliases(
             .unwrap_or_else(|| raw_short.trim().to_string());
         aliases.insert(short.clone(), (short.clone(), display_name.clone()));
         for alias in &attr.aliases {
-            if let Some(token) = normalize_lookup_token(alias) {
+            if let Some(token) = normalize_attr_spelling(alias) {
                 aliases.insert(token, (short.clone(), display_name.clone()));
             }
         }
@@ -532,7 +559,7 @@ fn normalize_profile_callback_attrs(
     attrs
         .iter()
         .map(|attr| {
-            let key = normalize_lookup_token(attr)
+            let key = normalize_attr_spelling(attr)
                 .ok_or_else(|| format!("{node_type}: empty attr in execution profile"))?;
             let (short_name, display_name) = attr_aliases
                 .get(&key)
@@ -564,7 +591,7 @@ fn normalize_profile_attr(
     attr: &str,
     attr_aliases: &HashMap<String, (String, String)>,
 ) -> Result<String, String> {
-    let key = normalize_lookup_token(attr)
+    let key = normalize_attr_spelling(attr)
         .ok_or_else(|| format!("{node_type}: empty {field} attr in execution profile"))?;
     attr_aliases
         .get(&key)
@@ -640,6 +667,11 @@ fn parse_angular_attr_kind(unit: Option<&str>, kind: Option<&str>) -> Option<Ang
         return Some(AngularAttrKind::Vector3);
     }
     None
+}
+
+fn normalize_attr_spelling(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn normalize_lookup_token(raw: &str) -> Option<String> {

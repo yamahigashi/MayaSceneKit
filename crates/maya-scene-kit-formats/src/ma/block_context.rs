@@ -29,7 +29,8 @@ pub(crate) struct SelectedTarget {
 impl SelectedTarget {
     pub(crate) fn new(name: &str) -> Self {
         Self {
-            is_default: name.starts_with(':') && is_default_node(name.trim_start_matches(':')),
+            is_default: name.trim_start_matches(':') != "defaultRenderGlobals"
+                && is_default_node(name.trim_start_matches(':')),
             name: name.trim_start_matches(':').to_string(),
             node_type: None,
         }
@@ -132,44 +133,51 @@ pub(crate) enum BlockCommand {
 
 pub(crate) struct BlockTracker {
     pub(crate) context: BlockContext,
+    context_is_named_owner: bool,
     pub(crate) reported_unbound: bool,
     pub(crate) reported_selected: bool,
-    node_types: Option<HashMap<String, Option<ContextWord>>>,
+    node_types: HashMap<String, Option<ContextWord>>,
 }
 
 impl Default for BlockTracker {
     fn default() -> Self {
         Self {
             context: BlockContext::None,
+            context_is_named_owner: false,
             reported_unbound: false,
             reported_selected: false,
-            node_types: Some(HashMap::new()),
+            node_types: HashMap::from([(
+                "defaultRenderGlobals".to_string(),
+                Some(ContextWord::Owned("renderGlobals".to_string())),
+            )]),
         }
     }
 }
 
 impl BlockTracker {
-    pub(crate) fn for_source(data: &[u8]) -> Self {
-        // A select head must contain these literal bytes in every supported encoding.
-        let may_select = match std::str::from_utf8(data) {
-            Ok(text) => text.contains("select"),
-            Err(_) => data.windows(6).any(|word| word == b"select"),
-        };
-        Self {
-            node_types: may_select.then(HashMap::new),
-            ..Self::default()
+    pub(crate) fn contains_name(&self, name: &str) -> bool {
+        self.node_types.contains_key(name.trim_start_matches(':'))
+    }
+
+    pub(crate) fn resolve(&self, name: &str, source: LightSourceView<'_>) -> SelectedTarget {
+        let mut target = SelectedTarget::new(name);
+        target.node_type = self
+            .node_types
+            .get(&target.name)
+            .and_then(Option::as_ref)
+            .map(|word| word.value(source).into_owned());
+        target
+    }
+
+    pub(crate) fn invalidate_all_names(&mut self) {
+        for node_type in self.node_types.values_mut() {
+            *node_type = None;
         }
     }
 
     pub(crate) fn invalidate_name(&mut self, name: &str) {
-        if let Some(types) = &mut self.node_types {
-            let name = name.trim_start_matches(':');
-            if let Some(node_type) = types.get_mut(name) {
-                *node_type = None;
-            } else {
-                types.insert(name.to_string(), None);
-            }
-        }
+        self.node_types
+            .insert(name.trim_start_matches(':').to_string(), None);
     }
 
     pub(crate) fn on_command(
@@ -182,14 +190,27 @@ impl BlockTracker {
             BlockCommand::Rename { old, new } => {
                 let old = old.trim_start_matches(':');
                 let new = new.trim_start_matches(':');
-                if let Some(types) = &mut self.node_types {
-                    if let Some(node_type) = types.remove(old) {
-                        types.insert(new.to_string(), node_type);
+                if old == new {
+                    return false;
+                }
+                let collision = self.node_types.contains_key(new);
+                if let Some(node_type) = self.node_types.remove(old)
+                    && !collision
+                {
+                    self.node_types.insert(new.to_string(), node_type);
+                }
+                if collision {
+                    if let BlockContext::Node { name, .. } = &self.context
+                        && name.value(source).trim_start_matches(':') == old
+                    {
+                        self.context_is_named_owner = false;
                     }
+                    return false;
                 }
                 match &mut self.context {
                     BlockContext::Node { name, .. }
-                        if name.value(source).trim_start_matches(':') == old =>
+                        if self.context_is_named_owner
+                            && name.value(source).trim_start_matches(':') == old =>
                     {
                         *name = ContextWord::Owned(new.to_string());
                         return true;
@@ -211,20 +232,17 @@ impl BlockTracker {
                 context,
                 skip_select,
             } => {
-                if let (Some(types), BlockContext::Node { node_type, name }) =
-                    (&mut self.node_types, &context)
-                {
+                if let BlockContext::Node { node_type, name } = &context {
                     let decoded_name = name.value(source);
                     let name = decoded_name.trim_start_matches(':');
                     let value = Some(node_type.clone());
-                    if let Some(node_type) = types.get_mut(name) {
-                        *node_type = value;
-                    } else {
-                        types.insert(name.to_string(), value);
+                    if !skip_select {
+                        self.context_is_named_owner = !self.node_types.contains_key(name);
                     }
+                    self.node_types.entry(name.to_string()).or_insert(value);
                 }
                 if skip_select {
-                    BlockContext::None
+                    return false;
                 } else {
                     context
                 }
@@ -233,6 +251,7 @@ impl BlockTracker {
                 mut targets,
                 accumulate,
             } => {
+                self.context_is_named_owner = true;
                 if !targets.is_empty() && accumulate {
                     match &self.context {
                         BlockContext::Node { node_type, name } => {
@@ -257,11 +276,7 @@ impl BlockTracker {
                     }
                 }
                 for target in &mut targets {
-                    if let Some(node_type) = self
-                        .node_types
-                        .as_ref()
-                        .and_then(|types| types.get(&target.name))
-                    {
+                    if let Some(node_type) = self.node_types.get(&target.name) {
                         target.node_type = node_type
                             .as_ref()
                             .map(|word| word.value(source).into_owned());

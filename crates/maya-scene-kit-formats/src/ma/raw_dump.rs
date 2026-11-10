@@ -55,6 +55,7 @@ impl RawMaScriptEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawMaNodeAttrValue {
     pub start: usize,
+    pub end: usize,
     pub node_type: String,
     pub node_name: String,
     pub attr: String,
@@ -64,6 +65,7 @@ pub struct RawMaNodeAttrValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawMaNodeAttrSelector {
+    pub canonical_attr: String,
     pub node_type: String,
     pub node_name: Option<String>,
     pub attr: String,

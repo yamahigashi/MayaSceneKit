@@ -128,12 +128,14 @@ fn collect_ma_coverage(
     top_level: &mel::MelAuditTopLevelFacts,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
+    let mut assignment_issues = collect_ma_script_assignment_issues(script_nodes);
     let (before, mut attributes): (Vec<_>, Vec<_>) = collect_ma_script_node_surfaces(script_nodes)
         .into_iter()
         .partition(|(_, surface)| surface.origin.attr_name.as_deref() == Some(".b"));
     attributes.extend(collect_ma_profile_node_attr_surfaces(
         node_attr_values,
         execution_semantics,
+        &mut assignment_issues,
     ));
     attributes.sort_by_key(|(start, _)| *start);
     let mut surfaces: Vec<_> = before
@@ -162,7 +164,7 @@ fn collect_ma_coverage(
         .collect::<Vec<_>>();
 
     let mut coverage_issues = coverage_issues;
-    coverage_issues.extend(collect_ma_script_assignment_issues(script_nodes));
+    coverage_issues.extend(assignment_issues);
     for item in &top_level.items {
         match item {
             MelAuditTopLevelItemFact::Command(command) => {
@@ -406,6 +408,7 @@ fn collect_ma_script_assignment_issues(
 fn collect_ma_profile_node_attr_surfaces(
     node_attr_values: &[RawMaNodeAttrValue],
     execution_semantics: &NodeExecutionSemantics,
+    issues: &mut Vec<ExecutionCoverageIssueRecord>,
 ) -> Vec<(usize, ExecutionSurfaceRecord)> {
     let mut surfaces = Vec::new();
     for value in node_attr_values {
@@ -425,6 +428,7 @@ fn collect_ma_profile_node_attr_surfaces(
                         continue;
                     }
                     let Some(body) = value.string_value.as_ref() else {
+                        issues.push(unreadable_ma_node_attr_issue(value));
                         continue;
                     };
                     if body.is_empty() {
@@ -488,6 +492,7 @@ fn collect_ma_profile_node_attr_surfaces(
                 {
                     matched_profile = true;
                     let Some(body) = value.string_value.as_ref() else {
+                        issues.push(unreadable_ma_node_attr_issue(value));
                         continue;
                     };
                     if body.is_empty() {
@@ -524,6 +529,7 @@ fn collect_ma_profile_node_attr_surfaces(
             continue;
         }
         let Some(body) = value.string_value.as_ref() else {
+            issues.push(unreadable_ma_node_attr_issue(value));
             continue;
         };
         if body.is_empty() {
@@ -551,6 +557,28 @@ fn collect_ma_profile_node_attr_surfaces(
         ));
     }
     surfaces
+}
+
+fn unreadable_ma_node_attr_issue(value: &RawMaNodeAttrValue) -> ExecutionCoverageIssueRecord {
+    ExecutionCoverageIssueRecord {
+        kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+        detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+            diagnostic: "cannot read execution attribute assignment".to_string(),
+        },
+        origin: Some(ExecutionOrigin {
+            lang: ExecutionLanguage::Unknown,
+            trigger: ExecutionTrigger::Unknown,
+            surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+            node_name: Some(value.node_name.clone()),
+            attr_name: Some(value.attr.clone()),
+            source_range: Some(ExecutionSourceRange {
+                start: value.start,
+                end: value.end,
+            }),
+            ..ExecutionOrigin::without_chunk_address()
+        }),
+        preview: PreviewWindowSpec::new(Arc::from(""), 0, 0),
+    }
 }
 
 fn is_generic_execution_attr_name(attr_name: &str) -> bool {
@@ -1419,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn script_history_rename_merges_in_source_order() {
+    fn script_history_rename_collision_keeps_source_order() {
         let entries =
             ma::scripts::extract_raw_script_entries_from_ma(b"createNode script -n :Example;");
         assert_eq!(entries[0].name, "Example");
@@ -1428,9 +1456,11 @@ mod tests {
                 r#"createNode script -n Example; setAttr ".b" -type "string" "Example"; createNode script -n Sample; setAttr ".b" -type "string" "Sample"; select Example; rename {flags}:Example :Sample; select :Sample; setAttr ".b" -type "string" "TestAsset"; rename -uid "Example"; setAttr ".a" -type "string" "Example";"#
             );
             let entries = ma::scripts::extract_raw_script_entries_from_ma(input.as_bytes());
-            assert_eq!(entries.len(), 1, "{flags}: {entries:?}");
-            assert_eq!(entries[0].name, "Sample");
-            assert_eq!(entries[0].assignments.len(), 4);
+            assert_eq!(entries.len(), 2, "{flags}: {entries:?}");
+            assert_eq!(entries[0].name, "Example");
+            assert_eq!(entries[1].name, "Sample");
+            assert_eq!(entries[0].assignments.len(), 1);
+            assert_eq!(entries[1].assignments.len(), 3);
             let coverage = script_history_coverage(&input, true);
             assert_eq!(
                 coverage
@@ -1440,7 +1470,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["Example", "Sample", "TestAsset", "Example"]
             );
-            assert!(coverage.surfaces[0].origin.overwritten);
+            assert!(!coverage.surfaces[0].origin.overwritten);
             assert!(coverage.surfaces[1].origin.overwritten);
             assert!(!coverage.surfaces[2].origin.overwritten);
         }

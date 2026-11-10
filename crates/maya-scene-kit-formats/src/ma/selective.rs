@@ -6,11 +6,7 @@ use std::{
 };
 
 use maya_mel::{
-    maya::model::{
-        DefaultMayaSelectiveSetAttrSelector, MayaSelectiveFile, MayaSelectiveItem,
-        MayaSelectiveRequires, MayaSelectiveSetAttr, MayaSelectiveSetAttrSelector,
-        MayaTrackedSetAttrAttr,
-    },
+    maya::model::{MayaSelectiveFile, MayaSelectiveItem, MayaSelectiveRequires},
     parser::{
         LightCommandSurface, LightItem, LightItemSink, LightParseOptions, LightScanSummary,
         LightSourceView, LightWord, SourceEncoding,
@@ -26,11 +22,10 @@ use crate::{
         block_context::{BlockCommand, BlockContext, BlockTracker, ContextWord, SelectedTarget},
         commands::{
             MAYA_COMMAND_REGISTRY, Token, bare_token, create_node_flag, setattr_flag_arity,
-            string_literal_contents, token_text, tokenize_command, unquoted_range_value,
+            token_text, tokenize_command, unquoted_range_value,
         },
         lexer::{
-            is_reference_attr, parse_ma_quoted_literal, parse_setattr_string_command,
-            parse_setattr_string_value, parse_setattr_string_value_tail,
+            is_reference_attr, parse_ma_quoted_literal, parse_setattr_string_value_tail,
             unescape_ma_string_literal,
         },
         parse::validate_string_concat_expression_prefix,
@@ -87,8 +82,11 @@ pub fn extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selector
     node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) -> RawMaSelectiveSections {
     let mut sink = SelectiveScanSink {
-        tracker: BlockTracker::for_source(data),
         selected_node_attr_selectors: node_attr_selectors.clone(),
+        execution_attr_names: node_attr_selectors
+            .iter()
+            .filter_map(|selector| selector.attr.strip_prefix('.').map(str::to_string))
+            .collect(),
         ..SelectiveScanSink::default()
     };
     scan_light_bytes_with_options_and_sink_and_then(
@@ -108,6 +106,7 @@ enum ActiveCreateBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveScriptBlock {
+    entry_index: Option<usize>,
     name: String,
     assignments: Vec<RawMaScriptAssignment>,
 }
@@ -220,6 +219,7 @@ fn start_create_node_block(
             node_name: name.to_string(),
         }),
         "script" => ActiveCreateBlock::Script(ActiveScriptBlock {
+            entry_index: None,
             name: name.to_string(),
             assignments: Vec::new(),
         }),
@@ -230,226 +230,97 @@ fn start_create_node_block(
     })
 }
 
-fn apply_setattr_to_active_block(
-    source: LightSourceView<'_>,
-    block: &mut ActiveCreateBlock,
-    set_attr: &MayaSelectiveSetAttr,
-    tracked_attr: Option<MayaTrackedSetAttrAttr>,
-    command_text: &str,
-    scene_paths: &mut Vec<ScenePathEntry>,
-    seen_paths: &mut HashSet<u64>,
-    node_attr_values: &mut Vec<RawMaNodeAttrValue>,
-    selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
-) {
-    collect_selected_node_attr_value(
-        source,
-        block,
-        set_attr,
-        command_text,
-        node_attr_values,
-        selected_node_attr_selectors,
-    );
-
-    match block {
-        ActiveCreateBlock::Script(script) => {
-            let Some(attr) = selective_setattr_attr_path(source, set_attr) else {
-                return;
-            };
-            if !matches!(attr.as_str(), ".b" | ".a" | ".st" | ".stp") {
-                return;
-            }
-            if !setattr_has_value(command_text, &attr) {
-                return;
-            }
-            let string_value = if matches!(attr.as_str(), ".b" | ".a") {
-                selective_setattr_string_tail(source, set_attr).or_else(|| {
-                    parse_setattr_string_command(command_text)
-                        .and_then(|(name, value)| (name == attr).then_some(value))
-                })
-            } else {
-                None
-            };
-            let u32_value = if matches!(attr.as_str(), ".st" | ".stp") {
-                parse_setattr_scalar_u32_command(command_text)
-                    .and_then(|(name, value)| (name == attr).then_some(value))
-            } else {
-                None
-            };
-            script.assignments.push(RawMaScriptAssignment {
-                attr,
-                string_value,
-                u32_value,
-                start: range_start(set_attr.span) as usize,
-                end: range_end(set_attr.span) as usize,
-            });
-        }
-        ActiveCreateBlock::ScenePath(path_block) => {
-            let Some(attr_name) = selective_scene_path_attr_name(source, set_attr, tracked_attr)
-            else {
-                return;
-            };
-            let value = selective_setattr_string_tail(source, set_attr)
-                .or_else(|| parse_setattr_string_value(command_text));
-            let Some(value) = value else {
-                return;
-            };
-
-            if matches!(
-                classify_scene_path_attr(attr_name.as_str()),
-                Some(ScenePathAttrKind::FileTexturePath)
-            ) {
-                push_path_entry(
-                    scene_paths,
-                    seen_paths,
-                    ScenePathEntry {
-                        node_type: path_block.node_type.clone(),
-                        node_name: path_block.node_name.clone(),
-                        attr: attr_name,
-                        value,
-                        meta: None,
-                    },
-                );
-            } else if path_block.node_type == "reference" && is_reference_attr(&attr_name) {
-                push_path_entry(
-                    scene_paths,
-                    seen_paths,
-                    ScenePathEntry {
-                        node_type: "reference".to_string(),
-                        node_name: path_block.node_name.clone(),
-                        attr: attr_name,
-                        value,
-                        meta: None,
-                    },
-                );
-            }
-        }
-        ActiveCreateBlock::Selected(_) => {}
-    }
-}
-
-fn collect_selected_node_attr_value(
-    source: LightSourceView<'_>,
-    block: &ActiveCreateBlock,
-    set_attr: &MayaSelectiveSetAttr,
-    command_text: &str,
-    node_attr_values: &mut Vec<RawMaNodeAttrValue>,
-    selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
-) {
-    if selected_node_attr_selectors.is_empty() {
-        return;
-    }
-    let Some(attr_path) = selective_setattr_attr_path(source, set_attr) else {
-        return;
-    };
-    let (node_type, node_name) = active_block_node(block);
-    if !node_attr_selector_matches(
-        selected_node_attr_selectors,
-        node_type,
-        node_name,
-        &attr_path,
-    ) {
-        return;
-    }
-    let string_value = selective_setattr_string_tail(source, set_attr)
-        .or_else(|| parse_setattr_string_value(command_text));
-    let u32_value = parse_setattr_scalar_u32_command(command_text)
-        .and_then(|(attr, value)| (attr == attr_path).then_some(value));
-    if string_value.is_none() && u32_value.is_none() {
-        return;
-    }
-    node_attr_values.push(RawMaNodeAttrValue {
-        start: range_start(set_attr.span) as usize,
-        node_type: node_type.to_string(),
-        node_name: node_name.to_string(),
-        attr: attr_path,
-        string_value,
-        u32_value,
-    });
-}
-
-fn node_attr_selector_matches(
-    selectors: &HashSet<RawMaNodeAttrSelector>,
-    node_type: &str,
-    node_name: &str,
-    attr_path: &str,
-) -> bool {
-    selectors.iter().any(|selector| {
-        selector.attr == attr_path
-            && (selector.node_type.is_empty() || selector.node_type.eq_ignore_ascii_case(node_type))
-            && selector
-                .node_name
-                .as_deref()
-                .map(|selected_name| selected_name == node_name)
-                .unwrap_or(true)
-    })
-}
-
-fn active_block_node(block: &ActiveCreateBlock) -> (&str, &str) {
-    match block {
-        ActiveCreateBlock::Script(script) => ("script", script.name.as_str()),
-        ActiveCreateBlock::ScenePath(path_block) => {
-            (path_block.node_type.as_str(), path_block.node_name.as_str())
-        }
-        ActiveCreateBlock::Selected(selected) => ("", selected.node_name.as_str()),
-    }
-}
-
-fn selective_setattr_attr_path(
-    source: LightSourceView<'_>,
-    set_attr: &MayaSelectiveSetAttr,
-) -> Option<String> {
-    let text = source_decoded_string(source, set_attr.attr_path_range?);
-    Some(strip_outer_quotes(&text).to_string())
-}
-
-fn selective_setattr_type_name(
-    source: LightSourceView<'_>,
-    set_attr: &MayaSelectiveSetAttr,
-) -> Option<String> {
-    let range = set_attr.type_name_range?;
-    let text = source_decoded_string(source, range);
-    Some(string_literal_contents(&text).unwrap_or(&text).to_string())
-}
-
-fn selective_setattr_string_tail(
-    source: LightSourceView<'_>,
-    set_attr: &MayaSelectiveSetAttr,
-) -> Option<String> {
-    (selective_setattr_type_name(source, set_attr).as_deref() == Some("string"))
-        .then_some(set_attr.opaque_tail)
-        .flatten()
-        .and_then(|range| {
-            let tail = source_decoded_cow(source, range);
-            parse_setattr_string_value_tail(tail.as_ref())
-        })
-}
-
-fn tracked_scene_path_attr_name(
-    tracked_attr: Option<MayaTrackedSetAttrAttr>,
-) -> Option<&'static str> {
-    match tracked_attr {
-        Some(MayaTrackedSetAttrAttr::Ftn) => Some(".ftn"),
-        Some(MayaTrackedSetAttrAttr::Fn) => Some(".fn"),
-        Some(MayaTrackedSetAttrAttr::F) => Some(".f"),
+fn script_attr(attr: &str) -> Option<&'static str> {
+    match attr {
+        ".b" | ".before" => Some(".b"),
+        ".a" | ".after" => Some(".a"),
+        ".st" | ".scriptType" => Some(".st"),
+        ".stp" | ".sourceType" => Some(".stp"),
         _ => None,
     }
 }
 
-fn selective_scene_path_attr_name(
-    source: LightSourceView<'_>,
-    set_attr: &MayaSelectiveSetAttr,
-    tracked_attr: Option<MayaTrackedSetAttrAttr>,
-) -> Option<String> {
-    if let Some(tracked) = tracked_scene_path_attr_name(tracked_attr) {
-        return Some(tracked.to_string());
+fn active_block_node(block: &ActiveCreateBlock) -> (&str, &str) {
+    match block {
+        ActiveCreateBlock::Script(script) => ("script", &script.name),
+        ActiveCreateBlock::ScenePath(block) => (&block.node_type, &block.node_name),
+        ActiveCreateBlock::Selected(block) => ("", &block.node_name),
     }
-    let text = source_decoded_string(source, set_attr.attr_path_range?);
-    let attr_path = strip_outer_quotes(&text);
-    matches!(
-        classify_scene_path_attr(attr_path),
-        Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
-    )
-    .then(|| attr_path.to_string())
+}
+
+struct ParsedSetAttr {
+    string_value: Option<String>,
+    u32_value: Option<u32>,
+    has_value: bool,
+}
+
+fn parse_setattr(source: LightSourceView<'_>, command: &LightCommandSurface) -> ParsedSetAttr {
+    let mut has_attr = false;
+    let mut type_name = None;
+    let mut values = Vec::new();
+    let mut index = 0;
+    let mut valid = true;
+    while let Some(word) = command.words.get(index) {
+        if let LightWord::Flag { text, .. } = word {
+            let flag = source_ascii_slice(source, *text).unwrap_or("");
+            let Some(arity) = setattr_flag_arity(flag) else {
+                valid = false;
+                break;
+            };
+            if index + arity >= command.words.len() {
+                valid = false;
+                break;
+            }
+            if matches!(flag, "-type" | "-typ") {
+                type_name = command
+                    .words
+                    .get(index + 1)
+                    .map(|word| decoded_range_value(source, word.range()).into_owned());
+            }
+            index += 1 + arity;
+        } else {
+            if !has_attr {
+                has_attr = true;
+            } else {
+                values.push(word.range());
+            }
+            index += 1;
+        }
+    }
+    let has_value =
+        !valid || type_name.is_some() || !values.is_empty() || command.opaque_tail.is_some();
+    let string_value = if valid && type_name.as_deref() == Some("string") {
+        let mut value_text = values
+            .iter()
+            .map(|range| source_decoded_cow(source, *range).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(tail) = command.opaque_tail {
+            if !value_text.is_empty() {
+                value_text.push(' ');
+            }
+            value_text.push_str(&source_decoded_cow(source, tail));
+        }
+        value_text.push(';');
+        parse_setattr_string_value_tail(&value_text)
+    } else {
+        None
+    };
+    let u32_value = if valid && type_name.is_none() && !values.is_empty() {
+        let text = source_decoded_cow(source, values[0]);
+        text.parse::<u32>().ok().or_else(|| {
+            let value = text.parse::<f64>().ok()?;
+            (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
+                .then_some(value as u32)
+        })
+    } else {
+        None
+    };
+    ParsedSetAttr {
+        string_value,
+        u32_value,
+        has_value,
+    }
 }
 
 fn flush_active_block(
@@ -462,8 +333,14 @@ fn flush_active_block(
     };
     if let ActiveCreateBlock::Script(script) = block {
         let key = script.name.trim_start_matches(':').to_string();
-        if let Some(&index) = script_indices.get(&key) {
+        if let Some(index) = script
+            .entry_index
+            .or_else(|| script_indices.get(&key).copied())
+        {
             script_entries[index].assignments.extend(script.assignments);
+            script_entries[index]
+                .assignments
+                .sort_by_key(|value| value.start);
         } else {
             script_indices.insert(key.clone(), script_entries.len());
             script_entries.push(RawMaScriptEntry {
@@ -565,62 +442,6 @@ fn parse_file_command_flag_value(command: &str, flag: &str) -> Option<String> {
     }
     let (literal, _) = parse_ma_quoted_literal(command, cursor);
     literal.map(|s| unescape_ma_string_literal(&s))
-}
-
-fn setattr_has_value(command: &str, attr: &str) -> bool {
-    let Ok(tokens) = tokenize_command(command) else {
-        return true;
-    };
-    let mut index = 1;
-    let mut found_attr = false;
-    while let Some(token) = tokens.get(index) {
-        if let Some(arity) = bare_token(token).and_then(setattr_flag_arity) {
-            index += 1 + arity;
-        } else if !found_attr && token_text(token) == Some(attr) {
-            found_attr = true;
-            index += 1;
-        } else {
-            return true;
-        }
-    }
-    false
-}
-
-fn parse_setattr_scalar_u32_command(command: &str) -> Option<(String, u32)> {
-    let tokens = tokenize_command(command).ok()?;
-    if !matches!(tokens.first().and_then(bare_token), Some("setAttr")) {
-        return None;
-    }
-
-    let attr_index = tokens
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(idx, token)| matches!(token, Token::Quoted(_)).then_some(idx))?;
-    let attr = token_text(tokens.get(attr_index)?)?.to_string();
-
-    let mut idx = attr_index + 1;
-    while idx < tokens.len() {
-        let Some(flag) = bare_token(tokens.get(idx)?) else {
-            break;
-        };
-        if !flag.starts_with('-') {
-            break;
-        }
-        idx += 1 + setattr_flag_arity(flag)?;
-    }
-
-    let value = parse_u32_token(tokens.get(idx)?)?;
-    Some((attr, value))
-}
-
-fn parse_u32_token(token: &Token) -> Option<u32> {
-    let text = bare_token(token)?;
-    if let Ok(value) = text.parse::<u32>() {
-        return Some(value);
-    }
-    let value = text.parse::<f64>().ok()?;
-    (value.is_finite() && value >= 0.0 && value.fract() == 0.0).then_some(value as u32)
 }
 
 fn collect_report_diagnostics(report: &LightScanSummary) -> Vec<MelParseDiagnostic> {
@@ -872,6 +693,7 @@ struct SelectiveScanSink {
     script_indices: HashMap<String, usize>,
     node_attr_values: Vec<RawMaNodeAttrValue>,
     selected_node_attr_selectors: HashSet<RawMaNodeAttrSelector>,
+    execution_attr_names: HashSet<String>,
     audit_items: Vec<MelAuditTopLevelItemFact>,
     audit_head_cache: HashMap<String, bool>,
     selective_diagnostics: Vec<MelParseDiagnostic>,
@@ -927,12 +749,17 @@ impl LightItemSink for SelectiveScanSink {
                 if indented_top_level {
                     self.push_indented_top_level_diagnostic(command.span);
                 }
-                if let Some(item) = selective_item_from_command(
-                    source,
-                    &command,
-                    expression,
-                    &self.selected_node_attr_selectors,
-                ) {
+                if head == Some("setAttr") {
+                    self.collect_setattr(
+                        source,
+                        &command,
+                        !expression
+                            && !unterminated
+                            && self.selective_diagnostics.len() == diagnostic_start,
+                        !unterminated,
+                    );
+                } else if let Some(item) = selective_item_from_command(source, &command, expression)
+                {
                     if is_indented
                         && !expression
                         && !indented_top_level
@@ -942,14 +769,12 @@ impl LightItemSink for SelectiveScanSink {
                     }
                     self.on_selective_item(source, item);
                 }
-                if !expression
+                if (!expression || head == Some("rename"))
                     && !unterminated
                     && self.selective_diagnostics.len() == diagnostic_start
                 {
                     if let Some(message) = context_error {
                         self.push_context_diagnostic(command.span, message);
-                    } else if head == Some("setAttr") {
-                        self.check_attribute_context(source, &command);
                     }
                 }
                 if expression
@@ -963,6 +788,11 @@ impl LightItemSink for SelectiveScanSink {
                 let head = classify_top_level_other(span_text.as_ref());
                 if is_indented {
                     self.push_indented_top_level_diagnostic(span);
+                } else if span_text.split_whitespace().next() == Some("setAttr") {
+                    self.push_context_diagnostic(
+                        span,
+                        "dynamic execution attribute path requires conservative audit coverage",
+                    );
                 }
                 self.push_top_level_statement(span, head);
             }
@@ -979,6 +809,11 @@ impl SelectiveScanSink {
     ) -> Option<&'static str> {
         let head = source_ascii_slice(source, command.head_range).unwrap_or("");
         let mut error = None;
+        let previous_script_index = self.active_block.as_ref().and_then(|block| match block {
+            ActiveCreateBlock::Script(block) => block.entry_index,
+            _ => None,
+        });
+        let mut created_script_index = None;
         let transition = match head {
             "createNode" => {
                 let mut index = 0;
@@ -1018,15 +853,8 @@ impl SelectiveScanSink {
                                 index += 1;
                             }
                         }
-                        if flag.name == "name" {
-                            if let Some(arg) = first_arg {
-                                if let Some(name) = static_context_word(source, command, arg) {
-                                    self.tracker.invalidate_name(&name);
-                                }
-                            }
-                            if name_word.is_none() {
-                                name_word = first_arg;
-                            }
+                        if flag.name == "name" && name_word.is_none() {
+                            name_word = first_arg;
                         }
                         skip_select |= flag.name == "skipSelect";
                     } else if type_word.is_none() {
@@ -1058,6 +886,13 @@ impl SelectiveScanSink {
                     },
                     _ => BlockContext::None,
                 };
+                if error.is_some() {
+                    if let Some(name) =
+                        name_word.and_then(|word| static_context_word(source, command, word))
+                    {
+                        self.tracker.invalidate_name(&name);
+                    }
+                }
                 if skip_select && error.is_none() {
                     error = Some("createNode skipSelect requires conservative audit coverage");
                 }
@@ -1091,7 +926,19 @@ impl SelectiveScanSink {
                             old: old.into_owned(),
                             new: new.into_owned(),
                         },
-                        _ => BlockCommand::Preserve,
+                        _ => {
+                            error =
+                                Some("dynamic rename target requires conservative audit coverage");
+                            if static_context_word(source, command, old).is_none() {
+                                self.tracker.invalidate_all_names();
+                            }
+                            for word in [old, new] {
+                                if let Some(name) = static_context_word(source, command, word) {
+                                    self.tracker.invalidate_name(&name);
+                                }
+                            }
+                            BlockCommand::Preserve
+                        }
                     },
                     _ => BlockCommand::Preserve,
                 }
@@ -1107,45 +954,48 @@ impl SelectiveScanSink {
                 );
                 let old = old.trim_start_matches(':');
                 let new = new.trim_start_matches(':');
-                if let Some(index) = self.script_indices.remove(old) {
-                    if let Some(&target) = self.script_indices.get(new) {
-                        let source = self.script_entries.remove(index);
-                        for position in self.script_indices.values_mut() {
-                            if *position > index {
-                                *position -= 1;
-                            }
-                        }
-                        let target = target - usize::from(target > index);
-                        self.script_entries[target]
-                            .assignments
-                            .extend(source.assignments);
-                        self.script_entries[target]
-                            .assignments
-                            .sort_by_key(|value| value.start);
-                        self.script_entries[target].name = new.to_string();
-                    } else {
-                        self.script_entries[index].name = new.to_string();
-                        self.script_indices.insert(new.to_string(), index);
-                    }
+                if old != new
+                    && let Some(index) = self.script_indices.remove(old)
+                    && !self.tracker.contains_name(new)
+                {
+                    self.script_entries[index].name = new.to_string();
+                    self.script_indices.insert(new.to_string(), index);
                 }
             }
             BlockCommand::Create {
-                context: BlockContext::Node { name, .. },
-                ..
+                context: BlockContext::Node { name, node_type },
+                skip_select,
             } => {
                 flush_active_block(
                     &mut self.active_block,
                     &mut self.script_entries,
                     &mut self.script_indices,
                 );
-                self.script_indices
-                    .remove(name.value(source).trim_start_matches(':'));
+                if node_type.value(source) == "script" {
+                    let name = name.value(source).trim_start_matches(':').to_string();
+                    let index = self.script_entries.len();
+                    self.script_entries.push(RawMaScriptEntry {
+                        name: name.clone(),
+                        assignments: Vec::new(),
+                    });
+                    self.script_indices.entry(name).or_insert(index);
+                    if !skip_select {
+                        created_script_index = Some(index);
+                    }
+                }
             }
             _ => {}
         }
         let renamed = matches!(transition, BlockCommand::Rename { .. });
+        let skipped = matches!(
+            transition,
+            BlockCommand::Create {
+                skip_select: true,
+                ..
+            }
+        );
         let changed = self.tracker.on_command(transition, source);
-        if renamed || changed {
+        if renamed || changed || skipped {
             if !renamed {
                 flush_active_block(
                     &mut self.active_block,
@@ -1158,6 +1008,18 @@ impl SelectiveScanSink {
                 &self.tracker.context,
                 &self.selected_node_attr_selectors,
             );
+            if let Some(ActiveCreateBlock::Script(block)) = self.active_block.as_mut() {
+                block.entry_index = if skipped || renamed {
+                    previous_script_index
+                } else {
+                    created_script_index
+                }
+                .or_else(|| {
+                    self.script_indices
+                        .get(block.name.trim_start_matches(':'))
+                        .copied()
+                });
+            }
         }
         debug_assert_eq!(
             context_binding(
@@ -1180,115 +1042,300 @@ impl SelectiveScanSink {
         });
     }
 
-    fn check_attribute_context(
+    fn collect_setattr(
         &mut self,
         source: LightSourceView<'_>,
         command: &LightCommandSurface,
+        check_attributes: bool,
+        check_plug: bool,
     ) {
-        let Some(range) = first_setattr_attr_path_range(source, &command.words) else {
-            self.push_context_diagnostic(command.span, "setAttr has no attribute path");
-            return;
+        let mut index = 0;
+        let plug_word = loop {
+            let Some(word) = command.words.get(index) else {
+                if check_attributes {
+                    self.push_context_diagnostic(command.span, "setAttr has no attribute path");
+                }
+                return;
+            };
+            if let LightWord::Flag { text, .. } = word {
+                let Some(arity) =
+                    setattr_flag_arity(source_ascii_slice(source, *text).unwrap_or(""))
+                else {
+                    return;
+                };
+                index += 1 + arity;
+            } else {
+                break word;
+            }
         };
-        let attr = decoded_range_value(source, range);
-        if attr.is_empty() {
-            self.push_context_diagnostic(command.span, "setAttr has no attribute path");
+        if !matches!(
+            plug_word,
+            LightWord::QuotedString { .. } | LightWord::BareWord { .. }
+        ) {
+            if check_plug {
+                self.push_context_diagnostic(
+                    command.span,
+                    "dynamic execution attribute path requires conservative audit coverage",
+                );
+            }
             return;
         }
-        let execution_attr = |name: &str| {
-            matches!(
-                name,
-                "b" | "a"
-                    | "st"
-                    | "stp"
-                    | "ixp"
-                    | "before"
-                    | "after"
-                    | "scriptType"
-                    | "sourceType"
-                    | "internalExpression"
+        let plug = decoded_range_value(source, plug_word.range());
+        let Some((owner, path)) = plug.split_once('.') else {
+            if check_attributes {
+                self.push_context_diagnostic(command.span, "setAttr has invalid attribute path");
+            }
+            return;
+        };
+        let attr = &plug[owner.len()..];
+        let last = path
+            .rsplit('.')
+            .next()
+            .unwrap_or(path)
+            .split('[')
+            .next()
+            .unwrap_or(path);
+        let matches_attr = |candidate: &str| candidate.strip_prefix('.') == Some(last);
+        let any_execution = matches!(
+            last,
+            "b" | "before" | "a" | "after" | "st" | "scriptType" | "stp" | "sourceType"
+        ) || matches!(last, "ixp" | "internalExpression" | "e" | "expression")
+            || self.execution_attr_names.contains(last);
+        let path_candidate = owner.is_empty()
+            && matches!(self.active_block, Some(ActiveCreateBlock::ScenePath(_)))
+            && ["fn", "f", "ftn", "fileTextureName", "cs"]
+                .iter()
+                .any(|name| last.eq_ignore_ascii_case(name));
+        if !any_execution && !path_candidate {
+            return;
+        }
+        let (node_type, node_name, is_default) = if owner.is_empty() {
+            let Some((node_type, name)) = context_binding(
+                source,
+                &self.tracker.context,
+                &self.selected_node_attr_selectors,
+            ) else {
+                let relevant_selection = match &self.tracker.context {
+                    BlockContext::Selected { targets } => targets.iter().any(|target| {
+                        if target.is_default {
+                            return false;
+                        }
+                        match target.node_type.as_deref() {
+                            None => any_execution,
+                            Some("script") => matches!(
+                                last,
+                                "b" | "before"
+                                    | "a"
+                                    | "after"
+                                    | "st"
+                                    | "scriptType"
+                                    | "stp"
+                                    | "sourceType"
+                            ),
+                            Some("expression") => {
+                                matches!(last, "e" | "expression" | "ixp" | "internalExpression")
+                            }
+                            Some(node_type) => {
+                                self.selected_node_attr_selectors.iter().any(|selector| {
+                                    matches_attr(&selector.attr)
+                                        && selector.node_type.eq_ignore_ascii_case(node_type)
+                                        && selector
+                                            .node_name
+                                            .as_deref()
+                                            .is_none_or(|name| name == target.name)
+                                })
+                            }
+                        }
+                    }),
+                    _ => any_execution,
+                };
+                if check_attributes && relevant_selection && !self.tracker.reported_unbound {
+                    self.tracker.reported_unbound = true;
+                    let message = if matches!(self.tracker.context, BlockContext::Selected { .. }) {
+                        "selected execution attribute has unresolved node type"
+                    } else {
+                        "relative setAttr has no node context"
+                    };
+                    self.push_context_diagnostic(command.span, message);
+                }
+                return;
+            };
+            let is_default = self.tracker.resolve(&name, source).is_default;
+            (
+                node_type.into_owned(),
+                name.trim_start_matches(':').to_string(),
+                is_default,
+            )
+        } else {
+            let target = self.tracker.resolve(owner, source);
+            (
+                target.node_type.unwrap_or_default(),
+                target.name,
+                target.is_default,
             )
         };
-        if !attr.starts_with('.') {
-            match attr.rsplit_once('.') {
-                Some((node, name)) if !node.is_empty() && !name.is_empty() => {
-                    if execution_attr(name) {
-                        self.push_context_diagnostic(
-                            command.span,
-                            "absolute execution attribute requires conservative audit coverage",
-                        );
-                    }
-                }
-                _ => {
-                    self.push_context_diagnostic(command.span, "setAttr has invalid attribute path")
-                }
-            }
-            return;
-        }
-        match &self.tracker.context {
-            BlockContext::None if !self.tracker.reported_unbound => {
-                self.tracker.reported_unbound = true;
-                self.push_context_diagnostic(command.span, "relative setAttr has no node context");
-            }
-            BlockContext::Node { .. }
-                if matches!(
-                    attr.as_ref(),
-                    ".before" | ".after" | ".scriptType" | ".sourceType" | ".internalExpression"
-                ) =>
+        let selector = self
+            .selected_node_attr_selectors
+            .iter()
+            .filter(|selector| {
+                matches_attr(&selector.attr)
+                    && (selector.node_type.is_empty()
+                        || selector.node_type.eq_ignore_ascii_case(&node_type))
+                    && selector
+                        .node_name
+                        .as_deref()
+                        .is_none_or(|name| name == node_name)
+            })
+            .max_by_key(|selector| (!selector.node_type.is_empty(), selector.node_name.is_some()));
+        let typed_execution = (node_type == "script"
+            && matches!(
+                last,
+                "b" | "before" | "a" | "after" | "st" | "scriptType" | "stp" | "sourceType"
+            ))
+            || (node_type == "expression"
+                && matches!(last, "e" | "expression" | "ixp" | "internalExpression"))
+            || selector.is_some_and(|selector| {
+                !selector.node_type.is_empty() || selector.node_name.is_some()
+            });
+        if !path_candidate && path.contains(['.', '[']) {
+            if check_attributes
+                && (typed_execution || (node_type.is_empty() && !is_default && any_execution))
             {
                 self.push_context_diagnostic(
                     command.span,
-                    "long execution attribute requires conservative audit coverage",
+                    "indexed or compound execution attribute requires conservative audit coverage",
                 );
             }
-            BlockContext::Selected { targets }
-                if !self.tracker.reported_selected
-                    && !targets.iter().all(|target| target.is_default)
-                    && (execution_attr(&attr[1..])
-                        || self
-                            .selected_node_attr_selectors
-                            .iter()
-                            .any(|selector| selector.attr == attr)) =>
+            return;
+        }
+        let canonical = if node_type == "script" {
+            script_attr(attr).map(str::to_string)
+        } else {
+            None
+        }
+        .or_else(|| {
+            selector
+                .filter(|selector| !node_type.is_empty() || selector.node_name.is_some())
+                .map(|selector| selector.canonical_attr.clone())
+        });
+        if node_type.is_empty() && canonical.is_none() {
+            if check_attributes
+                && !is_default
+                && any_execution
+                && (!owner.is_empty() || !self.tracker.reported_selected)
             {
-                let resolved = context_binding(
-                    source,
-                    &self.tracker.context,
-                    &self.selected_node_attr_selectors,
-                )
-                .is_some_and(|(node_type, name)| {
-                    if node_type.is_empty()
-                        || matches!(
-                            attr.as_ref(),
-                            ".before"
-                                | ".after"
-                                | ".scriptType"
-                                | ".sourceType"
-                                | ".internalExpression"
-                        )
-                    {
-                        return false;
-                    }
-
-                    matches!(
-                        (node_type.as_ref(), attr.as_ref()),
-                        ("script", ".b" | ".a" | ".st" | ".stp") | ("expression", ".ixp")
-                    ) || self.selected_node_attr_selectors.iter().any(|selector| {
-                        selector.node_type == node_type
-                            && selector.attr == attr
-                            && selector
-                                .node_name
-                                .as_deref()
-                                .is_none_or(|expected| expected == name)
-                    })
-                });
-                if !resolved {
+                if owner.is_empty() {
                     self.tracker.reported_selected = true;
-                    self.push_context_diagnostic(
-                        command.span,
-                        "selected execution attribute has unresolved node type",
-                    );
+                }
+                let message = if owner.is_empty() {
+                    "selected execution attribute has unresolved node type"
+                } else {
+                    "absolute execution attribute requires conservative audit coverage"
+                };
+                self.push_context_diagnostic(command.span, message);
+            }
+            return;
+        }
+        let collect_path = path_candidate
+            && (matches!(
+                classify_scene_path_attr(attr),
+                Some(ScenePathAttrKind::FileTexturePath)
+            ) || (node_type == "reference" && is_reference_attr(attr)));
+        if canonical.is_none() && !collect_path {
+            return;
+        }
+        let parsed = parse_setattr(source, command);
+        if !parsed.has_value {
+            return;
+        }
+        if node_type == "script"
+            && self.selected_node_attr_selectors.iter().any(|selector| {
+                selector.node_type == "script"
+                    && canonical.as_ref() == Some(&selector.canonical_attr)
+            })
+            && (parsed.string_value.is_some() || parsed.u32_value.is_some())
+        {
+            self.node_attr_values.push(RawMaNodeAttrValue {
+                start: range_start(command.span) as usize,
+                end: range_end(command.span) as usize,
+                node_type: node_type.clone(),
+                node_name: node_name.clone(),
+                attr: canonical.clone().unwrap(),
+                string_value: parsed.string_value.clone(),
+                u32_value: parsed.u32_value,
+            });
+        }
+        if node_type == "script"
+            && canonical
+                .as_deref()
+                .is_some_and(|attr| script_attr(attr).is_some())
+        {
+            let canonical = canonical.unwrap();
+            if check_attributes
+                && command.opaque_tail.is_some()
+                && parsed.string_value.is_some()
+                && canonical == ".b"
+            {
+                self.selective_diagnostics.push(MelParseDiagnostic {
+                    span: mel_span(command.span),
+                    ..tracked_setattr_opaque_tail_diagnostic(".b")
+                });
+            }
+            let assignment = RawMaScriptAssignment {
+                string_value: matches!(canonical.as_str(), ".b" | ".a")
+                    .then_some(parsed.string_value)
+                    .flatten(),
+                u32_value: matches!(canonical.as_str(), ".st" | ".stp")
+                    .then_some(parsed.u32_value)
+                    .flatten(),
+                attr: canonical,
+                start: range_start(command.span) as usize,
+                end: range_end(command.span) as usize,
+            };
+            if let Some(ActiveCreateBlock::Script(block)) = self.active_block.as_mut() {
+                if owner.is_empty()
+                    || self.script_indices.get(&node_name).copied() == block.entry_index
+                {
+                    block.assignments.push(assignment);
+                    return;
                 }
             }
-            _ => {}
+            if let Some(index) = self.script_indices.get(&node_name) {
+                self.script_entries[*index].assignments.push(assignment);
+            }
+            return;
+        }
+        if let Some(attr) = canonical {
+            self.node_attr_values.push(RawMaNodeAttrValue {
+                start: range_start(command.span) as usize,
+                end: range_end(command.span) as usize,
+                node_type: node_type.clone(),
+                node_name: node_name.clone(),
+                attr,
+                string_value: parsed.string_value.clone(),
+                u32_value: parsed.u32_value,
+            });
+        }
+        if let Some(value) = parsed.string_value {
+            if collect_path {
+                push_path_entry(
+                    &mut self.scene_paths,
+                    &mut self.seen_paths,
+                    ScenePathEntry {
+                        node_type,
+                        node_name,
+                        attr: attr.to_string(),
+                        value,
+                        meta: None,
+                    },
+                );
+                if check_attributes && command.opaque_tail.is_some() {
+                    self.selective_diagnostics.push(MelParseDiagnostic {
+                        span: mel_span(command.span),
+                        ..tracked_setattr_opaque_tail_diagnostic(attr)
+                    });
+                }
+            }
         }
     }
 
@@ -1303,8 +1350,12 @@ impl SelectiveScanSink {
             &mut self.script_indices,
         );
 
-        let diagnostics = collect_report_diagnostics(&report);
-        let mut diagnostics = diagnostics;
+        let mut diagnostics = collect_report_diagnostics(&report);
+        self.selective_diagnostics.retain(|candidate| {
+            !diagnostics.iter().any(|earlier| {
+                earlier.span.start < candidate.span.end && candidate.span.start < earlier.span.end
+            })
+        });
         diagnostics.extend(self.selective_diagnostics);
         let source_encoding = map_light_source_encoding(report.source_encoding);
         if let Some(diagnostic) = selective_encoding_diagnostic(source, source_encoding) {
@@ -1416,28 +1467,7 @@ impl SelectiveScanSink {
                 }
             }
             MayaSelectiveItem::CreateNode(_) => {}
-            MayaSelectiveItem::SetAttr(set_attr) => {
-                if let Some(block) = self.active_block.as_mut() {
-                    let command_text = source_decoded_cow(source, set_attr.span);
-                    apply_setattr_to_active_block(
-                        source,
-                        block,
-                        &set_attr,
-                        set_attr.tracked_attr,
-                        command_text.as_ref(),
-                        &mut self.scene_paths,
-                        &mut self.seen_paths,
-                        &mut self.node_attr_values,
-                        &self.selected_node_attr_selectors,
-                    );
-                }
-                if let Some(attr) =
-                    tracked_opaque_tail_attr_name(self.active_block.as_ref(), &set_attr)
-                {
-                    self.selective_diagnostics
-                        .push(tracked_setattr_opaque_tail_diagnostic(attr));
-                }
-            }
+            MayaSelectiveItem::SetAttr(_) => {}
             MayaSelectiveItem::OtherCommand { head_range, span } => {
                 let head = source_ascii_slice(source, head_range);
                 self.push_top_level_statement(span, head);
@@ -1468,7 +1498,6 @@ fn selective_item_from_command(
     source: LightSourceView<'_>,
     command: &LightCommandSurface,
     has_execution_expression: bool,
-    selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) -> Option<MayaSelectiveItem> {
     let other = MayaSelectiveItem::OtherCommand {
         head_range: command.head_range,
@@ -1492,34 +1521,7 @@ fn selective_item_from_command(
             path_range: last_non_flag_range(&command.words),
             span: command.span,
         })),
-        "setAttr" => {
-            let attr_path_range = first_setattr_attr_path_range(source, &command.words);
-            let type_name_range = first_flag_arg_range(source, &command.words, &["type", "typ"]);
-            let attr_path_text = attr_path_range.map(|range| source_decoded_cow(source, range))?;
-            let attr_path = strip_outer_quotes(&attr_path_text);
-            let tracked_attr = DefaultMayaSelectiveSetAttrSelector.classify(attr_path);
-            if !matches!(attr_path, ".b" | ".a" | ".st" | ".stp")
-                && tracked_attr.is_none()
-                && (selected_node_attr_selectors.is_empty()
-                    || !selected_node_attr_selectors
-                        .iter()
-                        .any(|selector| selector.attr == attr_path))
-                && !matches!(
-                    classify_scene_path_attr(attr_path),
-                    Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
-                )
-            {
-                return None;
-            }
-            Some(MayaSelectiveItem::SetAttr(MayaSelectiveSetAttr {
-                head_range: command.head_range,
-                attr_path_range,
-                type_name_range,
-                tracked_attr,
-                opaque_tail: command.opaque_tail,
-                span: command.span,
-            }))
-        }
+        "setAttr" => None,
         _ if is_structural_command_head(head) => None,
         _ => Some(other),
     }
@@ -1605,55 +1607,12 @@ fn collect_non_flag_ranges(words: &[LightWord]) -> Vec<TextRange> {
     words.iter().filter_map(non_flag_range).collect()
 }
 
-fn first_setattr_attr_path_range(
-    source: LightSourceView<'_>,
-    words: &[LightWord],
-) -> Option<TextRange> {
-    let mut index = 0usize;
-    while index < words.len() {
-        match words.get(index)? {
-            LightWord::Flag { text, .. } => {
-                let flag = source_ascii_slice(source, *text)?;
-                index += 1 + setattr_flag_arity(flag).unwrap_or(0);
-            }
-            word => return non_flag_range(word),
-        }
-    }
-    None
-}
-
 fn last_non_flag_range(words: &[LightWord]) -> Option<TextRange> {
     words.iter().rev().find_map(non_flag_range)
 }
 
 fn non_flag_range(word: &LightWord) -> Option<TextRange> {
     (!matches!(word, LightWord::Flag { .. })).then_some(word.range())
-}
-
-fn first_flag_arg_range(
-    source: LightSourceView<'_>,
-    words: &[LightWord],
-    names: &[&str],
-) -> Option<TextRange> {
-    let mut index = 0usize;
-    while index < words.len() {
-        let LightWord::Flag { text, .. } = &words[index] else {
-            index += 1;
-            continue;
-        };
-        let normalized = source_ascii_slice(source, *text)?.trim_start_matches('-');
-        if names.contains(&normalized) {
-            return words.get(index + 1).and_then(non_flag_range);
-        }
-        index += 1;
-    }
-    None
-}
-
-fn strip_outer_quotes(text: &str) -> &str {
-    text.strip_prefix('"')
-        .and_then(|text| text.strip_suffix('"'))
-        .unwrap_or(text)
 }
 
 fn extract_file_command_callback(command: &str) -> Option<String> {
@@ -1710,26 +1669,6 @@ fn file_command_has_flag(command: &str, target_flag: &str) -> bool {
                 .any(|token| bare_token(token) == Some(target_flag))
         })
         .unwrap_or_else(|| command.contains(target_flag))
-}
-
-fn tracked_opaque_tail_attr_name(
-    active_block: Option<&ActiveCreateBlock>,
-    set_attr: &MayaSelectiveSetAttr,
-) -> Option<&'static str> {
-    set_attr.opaque_tail?;
-    match active_block? {
-        ActiveCreateBlock::Script(script) => {
-            if script.assignments.last().is_some_and(|assignment| {
-                assignment.start == range_start(set_attr.span) as usize
-                    && assignment.string_value.is_none()
-            }) {
-                return None;
-            }
-            matches!(set_attr.tracked_attr, Some(MayaTrackedSetAttrAttr::B)).then_some(".b")
-        }
-        ActiveCreateBlock::ScenePath(_) => tracked_scene_path_attr_name(set_attr.tracked_attr),
-        ActiveCreateBlock::Selected(_) => None,
-    }
 }
 
 #[cfg(test)]
@@ -1917,7 +1856,7 @@ mod tests {
             ),
             ("例 \"Example\";", 1, false),
             ("select -ne \x60system \"echo Example\"\x60;", 1, false),
-            ("rename \"Example\" (python(\"print 1\"));", 1, false),
+            ("rename \"Example\" (python(\"print 1\"));", 1, true),
             (
                 "connectAttr (\"Example\" + system(\"echo Example\") + \".tx\") \"Sample.tx\";",
                 1,
@@ -2144,16 +2083,19 @@ mod tests {
         );
         let selected = HashSet::from([
             RawMaNodeAttrSelector {
+                canonical_attr: ".a".to_string(),
                 node_type: "script".to_string(),
                 node_name: None,
                 attr: ".a".to_string(),
             },
             RawMaNodeAttrSelector {
+                canonical_attr: ".st".to_string(),
                 node_type: "script".to_string(),
                 node_name: None,
                 attr: ".st".to_string(),
             },
             RawMaNodeAttrSelector {
+                canonical_attr: ".prm".to_string(),
                 node_type: "renderGlobals".to_string(),
                 node_name: None,
                 attr: ".prm".to_string(),
@@ -3077,7 +3019,10 @@ mod context_regressions {
             } else if input == "setAttr;" {
                 (input, "setAttr has no attribute path")
             } else {
-                ("setAttr \".tx\" 1;", "relative setAttr has no node context")
+                (
+                    "setAttr \".b\" -type \"string\" \"Example\";",
+                    "relative setAttr has no node context",
+                )
             };
             assert_eq!(diagnostic.message, message);
             assert_eq!(
@@ -3119,6 +3064,7 @@ mod resolved_context_regressions {
             );
         }
         let selectors = HashSet::from([RawMaNodeAttrSelector {
+            canonical_attr: ".ixp".into(),
             node_type: "expression".into(),
             node_name: None,
             attr: ".ixp".into(),
@@ -3162,7 +3108,7 @@ mod resolved_context_regressions {
         let cases = [
             (
                 "setAttr \".tx\" 1; select -cl; setAttr \".ty\" 2; createNode transform -n \"Example\"; select -d Example; setAttr \".tx\" 3; setAttr \".ty\" 4;",
-                2,
+                0,
             ),
             (
                 "createNode script -n \"Example\"; createNode $Example; setAttr \".b\" -type \"string\" \"Example\";",
@@ -3175,10 +3121,10 @@ mod resolved_context_regressions {
             ("    createNode;", 1),
             (
                 "createNode; setAttr; setAttr \".tx\" 1; setAttr \".ty\" 2;",
-                3,
+                2,
             ),
-            ("select $Example; setAttr \".tx\" 1;", 2),
-            ("select \x60system \"Example\"\x60; setAttr \".tx\" 1;", 1),
+            ("select $Example; setAttr \".tx\" 1;", 1),
+            ("select \x60system \"Example\"\x60; setAttr \".tx\" 1;", 0),
         ];
         for (input, count) in cases {
             let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
@@ -3299,19 +3245,21 @@ mod selection_fix_regressions {
                 "absolute execution attribute requires conservative audit coverage",
             );
         }
-        for attr in [
-            "before",
-            "after",
-            "scriptType",
-            "sourceType",
-            "internalExpression",
+        for (attr, canonical) in [
+            ("before", ".b"),
+            ("after", ".a"),
+            ("scriptType", ".st"),
+            ("sourceType", ".stp"),
         ] {
-            let statement = format!("setAttr \".{attr}\" 1;");
-            diagnostic(
-                &format!("createNode script -n Example; {statement}"),
-                &statement,
-                "long execution attribute requires conservative audit coverage",
-            );
+            let input = format!("createNode script -n Example; setAttr \".{attr}\" 1;");
+            let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+            let assignment = &sections.dump_sections.script_entries[0].assignments[0];
+            assert_eq!(assignment.attr, canonical);
+            if matches!(canonical, ".b" | ".a") {
+                assert!(assignment.string_value.is_none());
+            } else {
+                assert_eq!(assignment.u32_value, Some(1));
+            }
         }
     }
 
@@ -3370,7 +3318,7 @@ mod selection_fix_regressions {
     }
 
     #[test]
-    fn rename_and_duplicate_names_use_latest_type() {
+    fn rename_and_duplicate_names_keep_first_registered_type() {
         body(
             "createNode script -n Example; createNode transform -n Sample; rename Sample TestAsset; rename Example Sample; select Sample; setAttr \".b\" -type \"string\" \"Example\";",
             "Sample",
@@ -3379,9 +3327,12 @@ mod selection_fix_regressions {
             "createNode script -n Example; rename Example Sample; setAttr \".b\" -type \"string\" \"Example\";",
             "Sample",
         );
-        body(
-            "createNode transform -n Example; createNode script -n Example; select Example; setAttr \".b\" -type \"string\" \"Example\";",
-            "Example",
+        let sections = extract_raw_selective_sections_from_ma(b"createNode transform -n Example; createNode script -n Example; select Example; setAttr \".b\" -type \"string\" \"Example\";");
+        assert_eq!(sections.dump_sections.script_entries.len(), 1);
+        assert!(
+            sections.dump_sections.script_entries[0]
+                .assignments
+                .is_empty()
         );
     }
 
@@ -3403,18 +3354,8 @@ mod selection_fix_regressions {
                 "createNode script -n Example; {statement} setAttr \".b\" -type \"string\" \"Example\";"
             );
             let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
-            assert!(
-                sections
-                    .dump_sections
-                    .script_entries
-                    .iter()
-                    .all(|entry| entry.body().is_empty())
-            );
-            diagnostic(
-                &input,
-                "setAttr \".b\" -type \"string\" \"Example\";",
-                "relative setAttr has no node context",
-            );
+            assert_eq!(sections.dump_sections.script_entries[0].body(), "Example");
+            assert_eq!(sections.audit_top_level.diagnostics.len(), 1);
 
             diagnostic(
                 &format!("createNode script -n Example; {statement}"),
@@ -3426,19 +3367,20 @@ mod selection_fix_regressions {
 
     #[test]
     fn selected_diagnostics_are_once_per_interval() {
-        let input = b"setAttr \".tx\" 1; select -cl Example; setAttr \".ty\" 1; createNode transform -n Example; select -d Example; setAttr \".tz\" 1; select Sample; select; setAttr \".tx\" 2;";
+        let input = b"setAttr \".b\" 1; select -cl Example; setAttr \".a\" 1; createNode transform -n Example; select -d Example; setAttr \".st\" 1; select Sample; select; setAttr \".b\" 2;";
         let sections = extract_raw_selective_sections_from_ma(input);
         assert_eq!(sections.audit_top_level.diagnostics.len(), 3);
         for (d, statement) in sections.audit_top_level.diagnostics.iter().zip([
-            "setAttr \".tx\" 1;",
-            "setAttr \".tz\" 1;",
-            "setAttr \".tx\" 2;",
+            "setAttr \".b\" 1;",
+            "setAttr \".st\" 1;",
+            "setAttr \".b\" 2;",
         ]) {
             assert_eq!(d.stage, MelDiagnosticStage::Parse);
             assert_eq!(d.message, "relative setAttr has no node context");
             assert_eq!(sections.audit_top_level.source_text(d.span), statement);
         }
         let selectors = HashSet::from([RawMaNodeAttrSelector {
+            canonical_attr: ".exampleCallback".into(),
             node_type: "ExampleType".into(),
             node_name: None,
             attr: ".exampleCallback".into(),
@@ -3494,7 +3436,7 @@ mod standalone_ui_regression {
         ];
         for selection in ["select Sample;", "select :time1;", ""] {
             let input = format!(
-                "createNode transform -n Example;\nrename Example Sample;\n{selection}\n{}\n    {}\n    {}\n    {}\n{}\n{}\n{}\n{}\nsetAttr \".tx\" 1;",
+                "createNode transform -n Example;\nrename Example Sample;\n{selection}\n{}\n    {}\n    {}\n    {}\n{}\n{}\n{}\n{}\nsetAttr \".b\" 1;",
                 statements[0],
                 statements[1],
                 statements[2],

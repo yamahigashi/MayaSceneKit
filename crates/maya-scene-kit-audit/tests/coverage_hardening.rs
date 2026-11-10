@@ -264,8 +264,14 @@ fn audit_context_unbound_and_unresolved_attributes_use_coverage_gate() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("Example.ma");
     let plan = audit_plan();
+    write_scene(
+        &source,
+        "//Maya ASCII 2026 scene\nsetAttr \".tx\" 1; setAttr \".ty\" 2;",
+    );
+    let report = audit_script_nodes(&source, &plan).unwrap();
+    assert_eq!(report.disposition, AuditDisposition::Allow);
+    assert!(report.coverage_issues.is_empty());
     for statement in [
-        "setAttr \".tx\" 1; setAttr \".ty\" 2;",
         "setAttr \".b\" -type \"string\" \"Example\";",
         "createNode;",
         "setAttr;",

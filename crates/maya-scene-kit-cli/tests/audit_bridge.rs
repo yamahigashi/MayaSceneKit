@@ -282,7 +282,7 @@ fn audit_cli_context_binding_sets_deny_and_review_exit_codes() {
             "createNode script -n \"Example\"; setAttr \".stp\" 1; setAttr \".b\" -type \"string\" \"exec('print(1)')\";",
             10,
         ),
-        ("setAttr \".tx\" 1;", 20),
+        ("setAttr \".tx\" 1;", 0),
         (
             "select Example; setAttr \".before\" -type \"string\" \"Example\";",
             20,
