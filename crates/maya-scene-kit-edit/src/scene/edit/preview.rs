@@ -8,29 +8,7 @@ impl PatchPlanner {
         rules: &[PathReplaceRule],
     ) -> Result<PathReplacePreview, SceneToolError> {
         let preview = self.preview_replace_scene_path_candidates(input_path, rules)?;
-        let items = preview
-            .items
-            .into_iter()
-            .filter(|item| item.replacement_count > 0)
-            .map(|item| PathReplacePreviewItem {
-                entry_index: item.entry_index,
-                node_type: item.node_type,
-                node_name: item.node_name,
-                attr: item.attr,
-                before_value: item.before_value,
-                after_value: item.after_value,
-                replacement_count: item.replacement_count,
-            })
-            .collect::<Vec<_>>();
-
-        Ok(PathReplacePreview {
-            input_path: preview.input_path,
-            scene_format: preview.scene_format,
-            operation_mode: preview.operation_mode,
-            validation_state: preview.validation_state,
-            matched_count: preview.matched_count,
-            items,
-        })
+        Ok(matched_path_preview(preview))
     }
 
     pub fn preview_replace_scene_path_candidates(
@@ -51,31 +29,51 @@ impl PatchPlanner {
         self.options.reject_if_not_forensic()?;
 
         let compiled_rules = super::replace_rules::CompiledPreviewReplaceRules::compile(rules)?;
-        let mut matched_count = 0usize;
-        let mut items = Vec::with_capacity(report.entries.len());
+        let applied = if report.scene_format == SceneFormat::Ma {
+            Some(self.materialize_replaced_scene_bytes(&report.scene_path, rules)?)
+        } else {
+            None
+        };
+        Ok(self.path_candidate_preview_from_application(report, &compiled_rules, applied.as_ref()))
+    }
 
-        for (entry_index, entry) in report.entries.iter().enumerate() {
-            let (after_value, replacement_count) = compiled_rules.apply(&entry.value);
-            matched_count += replacement_count;
-            items.push(PathReplaceCandidateItem {
-                entry_index,
-                node_type: entry.node_type.clone(),
-                node_name: entry.node_name.clone(),
-                attr: entry.attr.clone(),
-                before_value: entry.value.clone(),
-                after_value,
-                replacement_count,
-            });
-        }
-
-        Ok(PathReplaceCandidatePreview {
+    pub(super) fn path_candidate_preview_from_application(
+        &self,
+        report: &ScenePathsReport,
+        compiled_rules: &super::replace_rules::CompiledPreviewReplaceRules,
+        applied: Option<&super::paths::AppliedPathReplacement>,
+    ) -> PathReplaceCandidatePreview {
+        let mut changes =
+            MaPreviewChanges::new(applied.map_or(&[], |result| result.paths.as_slice()));
+        let items: Vec<_> = report
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(entry_index, entry)| {
+                let (after_value, replacement_count) = if applied.is_some() {
+                    changes.take(entry)
+                } else {
+                    compiled_rules.apply(&entry.value)
+                };
+                PathReplaceCandidateItem {
+                    entry_index,
+                    node_type: entry.node_type.clone(),
+                    node_name: entry.node_name.clone(),
+                    attr: entry.attr.clone(),
+                    before_value: entry.value.clone(),
+                    after_value,
+                    replacement_count,
+                }
+            })
+            .collect();
+        PathReplaceCandidatePreview {
             input_path: report.scene_path.clone(),
             scene_format: report.scene_format,
             operation_mode: self.options.operation_mode,
             validation_state: report.validation_state,
-            matched_count,
+            matched_count: items.iter().map(|item| item.replacement_count).sum(),
             items,
-        })
+        }
     }
 
     pub fn preview_replace_scene_paths_with_overrides(
@@ -96,28 +94,52 @@ impl PatchPlanner {
         self.options.reject_if_not_forensic()?;
 
         let targets = super::replace_rules::resolve_targeted_overrides(report, overrides)?;
-        let mut items = Vec::with_capacity(targets.len());
+        let applied = if report.scene_format == SceneFormat::Ma {
+            Some(self.materialize_replaced_scene_bytes_from_overrides_in_report(report, overrides)?)
+        } else {
+            None
+        };
+        Ok(self.path_override_preview_from_application(report, &targets, applied.as_ref()))
+    }
 
-        for target in &targets {
-            items.push(PathReplacePreviewItem {
-                entry_index: target.entry_index,
-                node_type: target.entry.node_type.clone(),
-                node_name: target.entry.node_name.clone(),
-                attr: target.entry.attr.clone(),
-                before_value: target.entry.value.clone(),
-                after_value: target.after_value.clone(),
-                replacement_count: usize::from(target.entry.value != target.after_value),
-            });
-        }
-
-        Ok(PathReplacePreview {
+    pub(super) fn path_override_preview_from_application(
+        &self,
+        report: &ScenePathsReport,
+        targets: &[super::replace_rules::ResolvedPathOverride],
+        applied: Option<&super::paths::AppliedPathReplacement>,
+    ) -> PathReplacePreview {
+        let mut changes =
+            MaPreviewChanges::new(applied.map_or(&[], |result| result.paths.as_slice()));
+        let items: Vec<_> = targets
+            .iter()
+            .map(|target| {
+                let (after_value, replacement_count) = if applied.is_some() {
+                    changes.take(&target.entry)
+                } else {
+                    (
+                        target.after_value.clone(),
+                        usize::from(target.entry.value != target.after_value),
+                    )
+                };
+                PathReplacePreviewItem {
+                    entry_index: target.entry_index,
+                    node_type: target.entry.node_type.clone(),
+                    node_name: target.entry.node_name.clone(),
+                    attr: target.entry.attr.clone(),
+                    before_value: target.entry.value.clone(),
+                    after_value,
+                    replacement_count,
+                }
+            })
+            .collect();
+        PathReplacePreview {
             input_path: report.scene_path.clone(),
             scene_format: report.scene_format,
             operation_mode: self.options.operation_mode,
             validation_state: report.validation_state,
-            matched_count: items.len(),
+            matched_count: items.iter().map(|item| item.replacement_count).sum(),
             items,
-        })
+        }
     }
 
     pub fn preview_remove_script_nodes(
@@ -374,5 +396,78 @@ impl PatchPlanner {
             removed_script_nodes,
             removed_plugin_requires,
         })
+    }
+}
+
+pub(super) fn matched_path_preview(preview: PathReplaceCandidatePreview) -> PathReplacePreview {
+    let items = preview
+        .items
+        .into_iter()
+        .filter(|item| item.replacement_count > 0)
+        .map(|item| PathReplacePreviewItem {
+            entry_index: item.entry_index,
+            node_type: item.node_type,
+            node_name: item.node_name,
+            attr: item.attr,
+            before_value: item.before_value,
+            after_value: item.after_value,
+            replacement_count: item.replacement_count,
+        })
+        .collect();
+    PathReplacePreview {
+        input_path: preview.input_path,
+        scene_format: preview.scene_format,
+        operation_mode: preview.operation_mode,
+        validation_state: preview.validation_state,
+        matched_count: preview.matched_count,
+        items,
+    }
+}
+
+type PathFingerprint<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+struct MaPreviewChanges<'a> {
+    entries: std::collections::HashMap<
+        PathFingerprint<'a>,
+        std::collections::VecDeque<&'a rewrite::MaPathReplaceChange>,
+    >,
+}
+
+impl<'a> MaPreviewChanges<'a> {
+    fn new(changes: &'a [rewrite::MaPathReplaceChange]) -> Self {
+        let mut entries: std::collections::HashMap<_, std::collections::VecDeque<_>> =
+            std::collections::HashMap::new();
+        for change in changes {
+            if let Some(entry) = &change.entry {
+                entries
+                    .entry((
+                        entry.node_type.as_str(),
+                        entry.node_name.as_str(),
+                        entry.attr.as_str(),
+                        entry.value.as_str(),
+                    ))
+                    .or_default()
+                    .push_back(change);
+            }
+        }
+        Self { entries }
+    }
+
+    fn take(
+        &mut self,
+        entry: &'a maya_scene_kit_observe::scene::paths::ScenePathEntry,
+    ) -> (String, usize) {
+        self.entries
+            .get_mut(&(
+                entry.node_type.as_str(),
+                entry.node_name.as_str(),
+                entry.attr.as_str(),
+                entry.value.as_str(),
+            ))
+            .and_then(std::collections::VecDeque::pop_front)
+            .map_or_else(
+                || (entry.value.clone(), 0),
+                |change| (change.after_value.clone(), change.replacement_count),
+            )
     }
 }

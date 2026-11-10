@@ -12,7 +12,14 @@ pub(super) fn resolve_targeted_overrides(
     overrides: &[PathReplaceOverride],
 ) -> Result<Vec<ResolvedPathOverride>, SceneToolError> {
     let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
     for override_item in overrides {
+        if !seen.insert(override_item.entry_index) {
+            return Err(SceneToolError::Message(format!(
+                "duplicate path override for entry {}",
+                override_item.entry_index
+            )));
+        }
         let Some(entry) = report.entries.get(override_item.entry_index).cloned() else {
             return Err(SceneToolError::Message(format!(
                 "path override entry_index out of range: {}",
@@ -126,4 +133,20 @@ pub(super) fn suggested_path_output(
     } else {
         parent.join(format!("{stem}{suffix}.{ext}"))
     }
+}
+
+pub(super) fn ma_replace_rules(rules: &[PathReplaceRule]) -> Vec<MaPathReplaceRule> {
+    rules
+        .iter()
+        .map(|rule| MaPathReplaceRule {
+            from: rule.from.clone(),
+            to: rule.to.clone(),
+            mode: match rule.mode {
+                PathReplaceMode::Literal => {
+                    maya_scene_kit_formats::ma::types::PathReplaceMode::Literal
+                }
+                PathReplaceMode::Regex => maya_scene_kit_formats::ma::types::PathReplaceMode::Regex,
+            },
+        })
+        .collect()
 }

@@ -34,6 +34,13 @@ pub struct PathReplaceOverride {
     pub after_value: String,
 }
 
+/// Counts produced by applying path replacements to source bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathReplaceChanges {
+    pub replacement_count: usize,
+    pub skipped: Option<maya_scene_kit_formats::ma::rewrite::MaPathReplaceSkips>,
+}
+
 /// Result of rewriting scene paths.
 #[derive(Debug, Clone)]
 pub struct PathReplaceResult {
@@ -49,6 +56,7 @@ pub struct PathReplaceResult {
     pub validation_state: ValidationState,
     /// Number of rewritten paths.
     pub replaced_count: usize,
+    pub skipped: Option<maya_scene_kit_formats::ma::rewrite::MaPathReplaceSkips>,
 }
 
 /// One planned path replacement preview row.
@@ -126,6 +134,7 @@ pub struct PathReplaceCandidatePreview {
 /// Non-destructive staged rewrite result owned by the edit layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathReplaceStageResult {
+    pub changes: PathReplaceChanges,
     /// Expandable before/after details for affected values.
     pub preview: PathReplacePreview,
     /// Staged output bytes that can be saved later.

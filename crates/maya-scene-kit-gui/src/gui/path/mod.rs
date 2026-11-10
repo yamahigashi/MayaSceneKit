@@ -277,12 +277,7 @@ impl GuiShell {
                     let _ = async_cx.update_window_entity(
                         &view,
                         |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
-                            shell.apply_replace_artifact_result(
-                                row_id,
-                                revision,
-                                result.map(|staged| staged.artifact),
-                                cx,
-                            );
+                            shell.apply_replace_artifact_result(row_id, revision, result, cx);
                         },
                     );
                 }
@@ -294,7 +289,7 @@ impl GuiShell {
         &mut self,
         row_id: u64,
         revision: u64,
-        result: Result<StagedSceneArtifact, String>,
+        result: Result<PathReplaceStageResult, String>,
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.index_of_row_id(row_id) else {
@@ -313,12 +308,18 @@ impl GuiShell {
         }
         let row = &mut self.rows[index];
         match result {
-            Ok(artifact) => {
-                row.dirty_artifact = Some(artifact);
+            Ok(staged) => {
+                if let Some(summary) = replace_skip_summary(Some(&staged.changes)) {
+                    self.status_message = Some(BannerMessage::Raw(summary));
+                }
+                row.replace_changes = Some(staged.changes);
+                row.replace_preview = Some(staged.preview);
+                row.dirty_artifact = Some(staged.artifact);
                 row.replace_artifact_generation = Some(revision);
             }
             Err(error) => {
                 row.dirty_artifact = None;
+                row.replace_changes = None;
                 row.replace_artifact_generation = None;
                 self.status_message = Some(BannerMessage::Raw(error));
             }
@@ -1127,6 +1128,7 @@ impl GuiShell {
                     };
                 } else {
                     row.dirty_artifact = None;
+                    row.replace_changes = None;
                     row.staged_audit_mode = None;
                     row.staged_audit_report = None;
                     row.staged_audit_plan_fingerprint = None;
@@ -1346,6 +1348,7 @@ impl GuiShell {
                 let row = &mut self.rows[row_index];
                 row.path_overrides.clear();
                 row.dirty_artifact = None;
+                row.replace_changes = None;
                 row.dirty_kind = None;
                 row.clean_preview = None;
                 row.replace_preview = None;
@@ -1373,6 +1376,7 @@ impl GuiShell {
             } else {
                 let row = &mut self.rows[row_index];
                 row.dirty_artifact = None;
+                row.replace_changes = None;
                 row.dirty_kind = None;
                 row.clean_preview = None;
                 row.replace_preview = None;
@@ -1449,6 +1453,7 @@ impl GuiShell {
 
         let row = &mut self.rows[row_index];
         row.dirty_artifact = None;
+        row.replace_changes = None;
         row.clean_preview = None;
         row.path_owner_delete_preview = None;
         row.pending_clean_targets.clear();
@@ -1518,6 +1523,11 @@ impl GuiShell {
         let base_report = self.rows[row_index].display_paths_report().cloned();
         let path_overrides = self.rows[row_index].path_overrides.clone();
         let replace_artifact = self.rows[row_index].dirty_artifact.clone();
+        let replace_changes = if path_overrides.is_empty() {
+            None
+        } else {
+            self.rows[row_index].replace_changes.clone()
+        };
         let replace_artifact_current = self.rows[row_index].replace_artifact_is_current();
         let clean_targets = clean_targets.into_iter().collect::<Vec<_>>();
         let path_owner_delete_targets = path_owner_delete_targets.into_iter().collect::<Vec<_>>();
@@ -1535,6 +1545,7 @@ impl GuiShell {
             window,
             cx,
             move |path| {
+                let mut replace_changes = replace_changes;
                 let staged = if path_overrides.is_empty() {
                     stage_scene_edits_with_options(
                         &path,
@@ -1557,14 +1568,15 @@ impl GuiShell {
                             })?
                             .bytes
                     } else {
-                        stage_replace_scene_paths_with_overrides_in_report_with_options(
-                            &base_report,
-                            &replace_overrides,
-                            &materialize_options,
-                        )
-                        .map_err(|err| err.to_string())?
-                        .artifact
-                        .bytes
+                        let replaced =
+                            stage_replace_scene_paths_with_overrides_in_report_with_options(
+                                &base_report,
+                                &replace_overrides,
+                                &materialize_options,
+                            )
+                            .map_err(|err| err.to_string())?;
+                        replace_changes = Some(replaced.changes);
+                        replaced.artifact.bytes
                     };
                     let observation = Loader::new(load_options.clone())
                         .observe_bytes(
@@ -1608,6 +1620,7 @@ impl GuiShell {
                     "parse budget exceeded while rebuilding dump preview".to_string()
                 })?;
                 Ok(RowJobResult::SceneEdits {
+                    replace_changes,
                     audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
                     staged,
                     audit_mode,
@@ -1966,4 +1979,23 @@ impl GuiShell {
             }
         });
     }
+}
+
+pub(super) fn replace_skip_summary(changes: Option<&PathReplaceChanges>) -> Option<String> {
+    let skipped = changes?.skipped.as_ref()?;
+    if skipped.total() == 0 {
+        return None;
+    }
+    let offset = skipped
+        .unterminated_tail_from
+        .map_or_else(|| "none".to_string(), |offset| offset.to_string());
+    Some(format!(
+        "skipped non_utf8={} non_canonical_escape={} unrepresentable={} crosses_concat_boundary={} unterminated_tail={} unterminated_tail_from={}",
+        skipped.non_utf8,
+        skipped.non_canonical_escape,
+        skipped.unrepresentable,
+        skipped.crosses_concat_boundary,
+        skipped.unterminated_tail,
+        offset
+    ))
 }

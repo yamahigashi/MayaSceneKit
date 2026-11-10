@@ -738,13 +738,14 @@ impl GuiShell {
         let Some(index) = shell.accept_job_completion(job, operation, edit_sequence) else {
             if row_missing
                 && matches!(operation, RowOperation::Save)
-                && let RowJobResult::Save { output_path, .. } = result
+                && let RowJobResult::Save { output_path, replace_changes, .. } = result
             {
                 shell.record_job(
                     operation_key(operation),
                     output_path.clone(),
                     Some(output_path),
-                    "saved".to_string(),
+                    super::path::replace_skip_summary(replace_changes.as_ref())
+                        .map_or_else(|| "saved".to_string(), |summary| format!("saved; {summary}")),
                     false,
                 );
             }
@@ -813,6 +814,7 @@ impl GuiShell {
                 shell.rows[index].pending_clean_targets.clear();
                 shell.rows[index].path_overrides.clear();
                 shell.rows[index].replace_preview = None;
+                shell.rows[index].replace_changes = None;
                 shell.rows[index].path_owner_delete_preview = None;
                 shell.rows[index].pending_path_owner_delete_targets.clear();
                 shell.rows[index].staged_audit_mode = None;
@@ -850,6 +852,7 @@ impl GuiShell {
                 shell.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
             }
             RowJobResult::SceneEdits {
+                replace_changes,
                 audit_plan_fingerprint,
                 staged,
                 audit_mode,
@@ -858,6 +861,7 @@ impl GuiShell {
                 staged_dump_report,
                 staged_source_bytes,
             } => {
+                shell.rows[index].replace_changes = replace_changes;
                 let cleaned = staged.preview.cleaned_targets.len();
                 let deleted = staged.preview.deleted_path_owner_targets.len();
                 shell.rows[index].findings = staged_audit_report.finding_count()
@@ -908,7 +912,10 @@ impl GuiShell {
                     operation_key(operation),
                     shell.rows[index].path.clone(),
                     None,
-                    format!("{cleaned} clean target(s), {deleted} owner node(s) staged"),
+                    match super::path::replace_skip_summary(shell.rows[index].replace_changes.as_ref()) {
+                        Some(summary) => format!("{cleaned} clean target(s), {deleted} owner node(s) staged; {summary}"),
+                        None => format!("{cleaned} clean target(s), {deleted} owner node(s) staged"),
+                    },
                     false,
                 );
                 if let Some(edit_sequence) = edit_sequence {
@@ -916,6 +923,7 @@ impl GuiShell {
                 }
             }
             RowJobResult::ToAscii { report, artifact } => {
+                shell.rows[index].replace_changes = None;
                 shell.rows[index].dirty_artifact = Some(artifact);
                 shell.rows[index].dirty_kind = Some(DirtyKind::ToAscii);
                 shell.rows[index].ascii_report = Some(report);
@@ -936,11 +944,19 @@ impl GuiShell {
             RowJobResult::Save {
                 output_path,
                 audit_file_state,
+                replace_changes,
+                replace_preview,
             } => {
+                if let Some(changes) = replace_changes { shell.rows[index].replace_changes = Some(changes); }
+                if let Some(preview) = replace_preview { shell.rows[index].replace_preview = Some(preview); }
                 shell.prune_edit_history_for_row_ids(&[row_id]);
                 let dirty_kind = shell.rows[index].dirty_kind;
                 if dirty_kind == Some(DirtyKind::Replace) {
-                    let overrides = shell.rows[index].path_overrides.clone();
+                    let overrides = shell.rows[index].replace_preview.as_ref().map_or_else(
+                        || shell.rows[index].path_overrides.clone(),
+                        |preview| preview.items.iter().filter(|item| item.replacement_count > 0)
+                            .map(|item| (item.entry_index, item.after_value.clone())).collect(),
+                    );
                     if let Some(report) = shell.rows[index].paths_report.as_mut() {
                         apply_path_overrides_to_report(report, &overrides);
                     }
@@ -992,7 +1008,8 @@ impl GuiShell {
                     operation_key(operation),
                     shell.rows[index].path.clone(),
                     Some(output_path),
-                    "saved".to_string(),
+                    super::path::replace_skip_summary(shell.rows[index].replace_changes.as_ref())
+                        .map_or_else(|| "saved".to_string(), |summary| format!("saved; {summary}")),
                     false,
                 );
                 if shell.rows[index].selected {
@@ -1500,6 +1517,8 @@ impl GuiShell {
                     let row = &shell.rows[index];
                     let dirty_kind = row.dirty_kind;
                     let artifact = row.dirty_artifact.clone();
+                    let replace_changes = row.replace_changes.clone();
+                    let replace_preview = row.replace_preview.clone();
                     let artifact_current = row.replace_artifact_is_current();
                     let report = row.paths_report.clone();
                     let overrides = replace_overrides_for_row(row).unwrap_or_default();
@@ -1512,6 +1531,8 @@ impl GuiShell {
                 window,
                 cx,
                 move |_input_path| {
+                    let mut replace_changes = replace_changes;
+                    let mut replace_preview = replace_preview;
                     let artifact = match dirty_kind {
                         Some(DirtyKind::Replace) => {
                             if artifact_current {
@@ -1520,11 +1541,12 @@ impl GuiShell {
                             } else {
                                 let report = report
                                     .ok_or_else(|| "missing path report for save".to_string())?;
-                                stage_replace_scene_paths_with_overrides_in_report_with_options(
+                                let staged = stage_replace_scene_paths_with_overrides_in_report_with_options(
                                     &report, &overrides, &options,
-                                )
-                                .map_err(|err| err.to_string())?
-                                .artifact
+                                ).map_err(|err| err.to_string())?;
+                                replace_changes = Some(staged.changes);
+                                replace_preview = Some(staged.preview);
+                                staged.artifact
                             }
                         }
                         Some(DirtyKind::SceneEdits) | Some(DirtyKind::ToAscii) => artifact
@@ -1534,6 +1556,8 @@ impl GuiShell {
                     save_staged_artifact_with_backup(&artifact, &path, backup_location)
                         .map_err(|err| err.to_string())?;
                     Ok(RowJobResult::Save {
+                        replace_changes,
+                        replace_preview,
                         audit_file_state: GuiFileState::read(&path).ok(),
                         output_path: path,
                     })

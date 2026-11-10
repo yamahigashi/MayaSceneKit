@@ -650,6 +650,7 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
     let staged_dump_report = analyzed.dump_report.expect("staged dump");
 
     RowJobResult::SceneEdits {
+        replace_changes: None,
         audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
         staged,
         audit_mode: AuditModePreference::StrictDefault,
@@ -1030,6 +1031,8 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    replace_changes: None,
+                    replace_preview: None,
                     audit_file_state: None,
                     output_path: scene.clone(),
                 },
@@ -1127,6 +1130,8 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    replace_changes: None,
+                    replace_preview: None,
                     audit_file_state: None,
                     output_path: scene.clone(),
                 },
@@ -1643,6 +1648,8 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    replace_changes: None,
+                    replace_preview: None,
                     audit_file_state: None,
                     output_path: scene_a.clone(),
                 },
@@ -10899,6 +10906,8 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                replace_changes: None,
+                replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: expected,
             },
@@ -11695,6 +11704,7 @@ mod allowlist_tests {
         let old_staged = staged_clean_result(&path, "ExampleScriptNode");
         let mut dirty = current_row(2, &path, &empty_plan);
         let RowJobResult::SceneEdits {
+            replace_changes: None,
             staged,
             staged_source_bytes,
             ..
@@ -11773,6 +11783,8 @@ mod allowlist_tests {
             assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             let audit_generation = shell.rows[1].audit_generation;
             shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save {
+                replace_changes: None,
+                replace_preview: None,
                 output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
             }, None, window, cx);
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
@@ -12625,6 +12637,8 @@ fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                replace_changes: None,
+                replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: None,
             },
@@ -13368,6 +13382,8 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                replace_changes: None,
+                replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: None,
             },
@@ -13380,7 +13396,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.apply_job_result(
             (1, save_job_id),
             RowOperation::Save,
-            RowJobResult::Save { output_path: path.clone(), audit_file_state: None },
+            RowJobResult::Save { replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
             None, window, cx,
         );
         assert!(shell.rows[0].busy == Some((RowOperation::ToAscii, ascii_job_id)));
@@ -13844,5 +13860,124 @@ fn audit_detail_script_history_marker_is_localized() {
         );
         origin.overwritten = false;
         origin.assignment_index = None;
+    }
+}
+
+#[gpui::test]
+fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext) {
+    use maya_scene_kit_edit::scene::stage_replace_scene_paths_with_overrides;
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    fs::write(&input, b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\n    setAttr -l on \".ftn\" -type \"string\" \"old/a\\d.ma\";\r\n").unwrap();
+    let report = collect_scene_paths(&input, PathKind::All).unwrap();
+    let before = report.entries[0].value.clone();
+    let staged = stage_replace_scene_paths_with_overrides(
+        &input,
+        &[PathReplaceOverride {
+            entry_index: 0,
+            before_value: before.clone(),
+            after_value: "asset/Example.ma".into(),
+        }],
+    )
+    .unwrap();
+    let expected = staged.changes.clone();
+    assert_eq!(expected.skipped.as_ref().unwrap().non_canonical_escape, 1);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        let mut row = test_row(1, &input);
+        row.paths_report = Some(report);
+        row.path_overrides.insert(0, "asset/Example.ma".into());
+        row.dirty_kind = Some(DirtyKind::Replace);
+        row.replace_generation = 1;
+        shell.replace_rows(vec![row]);
+        shell.apply_replace_artifact_result(1, 1, Ok(staged), cx);
+        assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
+        assert_eq!(shell.rows[0].replace_preview.as_ref().unwrap().matched_count, 0);
+        let summary = super::path::replace_skip_summary(shell.rows[0].replace_changes.as_ref()).unwrap();
+        assert_eq!(summary, "skipped non_utf8=0 non_canonical_escape=1 unrepresentable=0 crosses_concat_boundary=0 unterminated_tail=0 unterminated_tail_from=none");
+        assert!(matches!(&shell.status_message, Some(BannerMessage::Raw(message)) if message == &summary));
+        let state = shell.rows[0].edit_state();
+        shell.rows[0].replace_changes = None;
+        assert!(shell.rows[0].apply_edit_state(&state).is_ok());
+        assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
+        let preview = shell.rows[0].replace_preview.clone();
+        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save {
+            replace_changes: Some(expected.clone()),
+            replace_preview: preview,
+            output_path: directory.path().join("Sample.ma"),
+            audit_file_state: None,
+        }, None, window, cx);
+        assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
+        assert_eq!(shell.rows[0].paths_report.as_ref().unwrap().entries[0].value, before);
+        assert!(shell.state.job_history[0].summary.contains(&summary));
+    });
+}
+
+#[gpui::test]
+fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext) {
+    use maya_scene_kit_edit::scene::stage_replace_scene_paths_with_overrides;
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    let original = b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\n    setAttr \".ftn\" -type \"string\" \"old/a\\d.ma\";\ncreateNode script -n \"ExampleScript\";\n    setAttr \".b\" -type \"string\" \"print(1)\";\n    setAttr \".st\" 1;\n";
+    fs::write(&input, original).unwrap();
+    let report = collect_scene_paths(&input, PathKind::All).unwrap();
+    let replacement = stage_replace_scene_paths_with_overrides(
+        &input,
+        &[PathReplaceOverride {
+            entry_index: 0,
+            before_value: report.entries[0].value.clone(),
+            after_value: "asset/Example.ma".into(),
+        }],
+    )
+    .unwrap();
+    for cached in [false, true] {
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state = test_state(directory.path(), "");
+            shell.state.workspace_auto_analyze = false;
+            shell.state.analysis_cache_enabled = false;
+            let mut row = test_row(1, &input);
+            row.paths_report = Some(report.clone());
+            row.path_overrides.insert(0, "asset/Example.ma".into());
+            row.dirty_kind = Some(DirtyKind::Replace);
+            row.replace_generation = 1;
+            if cached {
+                row.dirty_artifact = Some(replacement.artifact.clone());
+                row.replace_artifact_generation = Some(1);
+                row.replace_changes = Some(replacement.changes.clone());
+            }
+            shell.replace_rows(vec![row]);
+            shell.stage_scene_edits_for_row(
+                0,
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleScript".into(),
+                }]),
+                BTreeSet::new(),
+                ResultTab::Paths,
+                None,
+                false,
+                window,
+                cx,
+            );
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, _, _| {
+            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+            assert_eq!(
+                shell.rows[0].replace_changes.as_ref(),
+                Some(&replacement.changes)
+            );
+            assert!(
+                shell.state.job_history[0]
+                    .summary
+                    .contains("non_canonical_escape=1")
+            );
+            assert!(
+                !String::from_utf8_lossy(&shell.rows[0].dirty_artifact.as_ref().unwrap().bytes)
+                    .contains("ExampleScript")
+            );
+        });
     }
 }

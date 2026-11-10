@@ -180,6 +180,7 @@ pub(crate) fn path_replace_result(result: &PathReplaceResult) -> Value {
         "operation_mode": result.operation_mode,
         "validation_state": result.validation_state,
         "replaced_count": result.replaced_count,
+        "skipped": result.skipped,
     })
 }
 
@@ -361,4 +362,41 @@ fn decode_quality_distribution_entry(entry: &DecodeQualityDistributionEntry) -> 
         "tag": entry.tag,
         "count": entry.count,
     })
+}
+
+#[cfg(test)]
+mod path_replace_tests {
+    #[test]
+    fn path_replace_json_preserves_skip_counts_and_unknown_binary_detection() {
+        use maya_scene_kit_edit::scene::{PathReplaceMode, PathReplaceRule, replace_scene_paths};
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("Example.ma");
+        let output = directory.path().join("Sample.ma");
+        let prefix = b"//Maya ASCII 2026 scene\n// Codeset: 932\ncreateNode file -n \"Example\";\n    setAttr \".ftn\" -type \"string\" \"old/\x81?Example.ma\";\n";
+        std::fs::write(
+            &input,
+            [prefix.as_slice(), b"file -r \"unfinished"].concat(),
+        )
+        .unwrap();
+        let mut result = replace_scene_paths(
+            &input,
+            &output,
+            &[PathReplaceRule {
+                from: "old/".into(),
+                to: "asset/".into(),
+                mode: PathReplaceMode::Literal,
+            }],
+        )
+        .unwrap();
+        let value = super::path_replace_result(&result);
+        assert_eq!(value["replaced_count"], 0);
+        assert_eq!(value["skipped"]["non_utf8"], 1);
+        assert_eq!(value["skipped"]["non_canonical_escape"], 0);
+        assert_eq!(value["skipped"]["unrepresentable"], 0);
+        assert_eq!(value["skipped"]["crosses_concat_boundary"], 0);
+        assert_eq!(value["skipped"]["unterminated_tail"], 1);
+        assert_eq!(value["skipped"]["unterminated_tail_from"], prefix.len());
+        result.skipped = None;
+        assert!(super::path_replace_result(&result)["skipped"].is_null());
+    }
 }

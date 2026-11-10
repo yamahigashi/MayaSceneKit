@@ -19,7 +19,12 @@ impl PatchPlanner {
             scene_format: staged.preview.scene_format,
             operation_mode: staged.preview.operation_mode,
             validation_state: staged.preview.validation_state,
-            replaced_count: staged.preview.matched_count,
+            replaced_count: if staged.preview.scene_format == SceneFormat::Ma {
+                staged.changes.replacement_count
+            } else {
+                staged.preview.matched_count
+            },
+            skipped: staged.changes.skipped,
         })
     }
 
@@ -28,9 +33,17 @@ impl PatchPlanner {
         input_path: impl AsRef<Path>,
         rules: &[PathReplaceRule],
     ) -> Result<PathReplaceStageResult, SceneToolError> {
-        let preview = self.preview_replace_scene_paths(&input_path, rules)?;
-        let bytes = self.materialize_replaced_scene_bytes(&input_path, rules)?;
+        let report = self.collect_scene_paths_report(input_path.as_ref())?;
+        let compiled = super::replace_rules::CompiledPreviewReplaceRules::compile(rules)?;
+        let applied = self.materialize_replaced_scene_bytes(&input_path, rules)?;
+        let preview =
+            super::preview::matched_path_preview(self.path_candidate_preview_from_application(
+                &report,
+                &compiled,
+                (report.scene_format == SceneFormat::Ma).then_some(&applied),
+            ));
         Ok(PathReplaceStageResult {
+            changes: applied.changes,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(
@@ -41,7 +54,7 @@ impl PatchPlanner {
                 scene_format: preview.scene_format,
                 operation_mode: preview.operation_mode,
                 validation_state: preview.validation_state,
-                bytes,
+                bytes: applied.bytes,
             },
             preview,
         })
@@ -62,11 +75,16 @@ impl PatchPlanner {
         report: &ScenePathsReport,
         overrides: &[PathReplaceOverride],
     ) -> Result<PathReplaceStageResult, SceneToolError> {
-        let preview =
-            self.preview_replace_scene_paths_with_overrides_in_report(report, overrides)?;
-        let bytes =
+        let targets = super::replace_rules::resolve_targeted_overrides(report, overrides)?;
+        let applied =
             self.materialize_replaced_scene_bytes_from_overrides_in_report(report, overrides)?;
+        let preview = self.path_override_preview_from_application(
+            report,
+            &targets,
+            (report.scene_format == SceneFormat::Ma).then_some(&applied),
+        );
         Ok(PathReplaceStageResult {
+            changes: applied.changes,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(
@@ -77,7 +95,7 @@ impl PatchPlanner {
                 scene_format: preview.scene_format,
                 operation_mode: preview.operation_mode,
                 validation_state: preview.validation_state,
-                bytes,
+                bytes: applied.bytes,
             },
             preview,
         })

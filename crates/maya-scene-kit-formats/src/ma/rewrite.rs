@@ -9,11 +9,11 @@ pub(crate) use crate::ma::lexer::command_has_terminating_semicolon;
 use crate::{
     PathReplaceRule, ScenePathEntry,
     ma::{
-        commands::{Token, tokenize_command},
+        commands::{Token, setattr_flag_arity, tokenize_command},
         lexer::{
             extract_script_node_name_from_create, is_reference_attr, is_top_level_command,
-            looks_like_scene_path, parse_ma_quoted_literal, parse_setattr_string_command,
-            parse_setattr_string_line, split_lines_keepends, unescape_ma_string_literal,
+            looks_like_scene_path, parse_ma_quoted_literal, split_lines_keepends,
+            unescape_ma_string_literal,
         },
         paths::extract_raw_scene_paths_from_ma,
         text::escape_ma_string,
@@ -21,177 +21,899 @@ use crate::{
     reference_semantics::{
         ScenePathAttrKind, classify_scene_path_attr, looks_like_scene_file_path,
     },
-    replace_rules::CompiledPathReplaceRules,
 };
 
-pub fn replace_raw_scene_paths_in_ma(data: &[u8], rules: &[PathReplaceRule]) -> (Vec<u8>, usize) {
-    if rules.is_empty() {
-        return (data.to_vec(), 0);
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MaPathReplaceSkips {
+    pub non_utf8: usize,
+    pub non_canonical_escape: usize,
+    pub unrepresentable: usize,
+    pub crosses_concat_boundary: usize,
+    pub unterminated_tail: usize,
+    pub unterminated_tail_from: Option<usize>,
+}
+
+impl MaPathReplaceSkips {
+    pub fn total(&self) -> usize {
+        self.non_utf8
+            + self.non_canonical_escape
+            + self.unrepresentable
+            + self.crosses_concat_boundary
+            + self.unterminated_tail
     }
-    let compiled_rules = CompiledPathReplaceRules::compile_lossy(rules);
-    replace_raw_scene_paths_in_ma_with_rules(data, &compiled_rules)
+}
+
+#[derive(Debug, Clone)]
+pub struct MaPathReplaceChange {
+    pub entry: Option<ScenePathEntry>,
+    pub before_value: String,
+    pub after_value: String,
+    pub replacement_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaPathReplaceResult {
+    pub bytes: Vec<u8>,
+    pub replacement_count: usize,
+    pub skipped: MaPathReplaceSkips,
+    pub paths: Vec<MaPathReplaceChange>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MaPathReplaceError {
+    #[error("CP932 and GBK disagree on Maya ASCII command structure")]
+    AmbiguousEncoding,
+    #[error("path entry {entry_index} identifies multiple source value ranges")]
+    AmbiguousEntry { entry_index: usize },
+    #[error("path entry {entry_index} has no matching source value range")]
+    MissingEntry { entry_index: usize },
+    #[error("duplicate path replacement for entry {entry_index}")]
+    DuplicateEntry { entry_index: usize },
+    #[error("invalid replace regex: {0}")]
+    InvalidRegex(#[from] regex::Error),
+}
+
+use std::ops::Range;
+
+use maya_mel::parser::{
+    LightParseOptions, ParseBudgets, SourceEncoding, scan_light_bytes_with_options_and_sink,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathToken {
+    range: Range<usize>,
+    quoted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathCommand {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PathCommands {
+    commands: Vec<PathCommand>,
+    structure: Vec<(usize, u8)>,
+    unterminated_tail_from: Option<usize>,
+}
+
+fn source_width(data: &[u8], offset: usize, encoding: SourceEncoding) -> usize {
+    let lead = match encoding {
+        SourceEncoding::Utf8 => false,
+        SourceEncoding::Cp932 => matches!(data[offset], 0x81..=0x9f | 0xe0..=0xfc),
+        SourceEncoding::Gbk => matches!(data[offset], 0x81..=0xfe),
+    };
+    let trail = data.get(offset + 1).is_some_and(|byte| match encoding {
+        SourceEncoding::Utf8 => false,
+        SourceEncoding::Cp932 => matches!(byte, 0x40..=0x7e | 0x80..=0xfc),
+        SourceEncoding::Gbk => matches!(byte, 0x40..=0x7e | 0x80..=0xfe),
+    });
+    if lead && trail { 2 } else { 1 }
+}
+
+static PATH_COMMAND_DELIMITER: once_cell::sync::Lazy<regex::bytes::Regex> =
+    once_cell::sync::Lazy::new(|| regex::bytes::Regex::new(r#"[";/\r\n]"#).unwrap());
+
+fn scan_path_commands(
+    data: &[u8],
+    encoding: SourceEncoding,
+    check_structure: bool,
+) -> PathCommands {
+    let mut result = PathCommands {
+        commands: Vec::new(),
+        structure: Vec::new(),
+        unterminated_tail_from: None,
+    };
+    let mut start = None;
+    let mut cursor = usize::from(data.starts_with(&[0xef, 0xbb, 0xbf])) * 3;
+    while cursor < data.len() {
+        if data[cursor..].starts_with(b"/*") {
+            cursor += 2;
+            while cursor < data.len() && !data[cursor..].starts_with(b"*/") {
+                cursor += source_width(data, cursor, encoding);
+            }
+            cursor = (cursor + 2).min(data.len());
+            continue;
+        }
+        if data[cursor..].starts_with(b"//") {
+            while cursor < data.len() && !matches!(data[cursor], b'\r' | b'\n') {
+                cursor += source_width(data, cursor, encoding);
+            }
+            continue;
+        }
+        if data[cursor].is_ascii_whitespace() {
+            let newline = matches!(data[cursor], b'\r' | b'\n');
+            cursor += 1;
+            if newline
+                && cursor < data.len()
+                && !data[cursor].is_ascii_whitespace()
+                && !data[cursor..].starts_with(b"//")
+                && let Some(start) = start.take()
+            {
+                result.commands.push(PathCommand { start, end: cursor });
+            }
+            continue;
+        }
+        if data[cursor] == b';' {
+            if check_structure {
+                result.structure.push((cursor, b';'));
+            }
+            if let Some(start) = start.take() {
+                result.commands.push(PathCommand { start, end: cursor });
+            }
+            cursor += 1;
+            continue;
+        }
+        let command_start = *start.get_or_insert(cursor);
+        if data[cursor] == b'"' {
+            if check_structure {
+                result.structure.push((cursor, b'"'));
+            }
+            cursor += 1;
+            while cursor < data.len() && data[cursor] != b'"' {
+                if data[cursor] == b'\\' {
+                    if check_structure {
+                        result.structure.push((cursor, b'\\'));
+                    }
+                    cursor += 1;
+                    if cursor < data.len() {
+                        cursor += source_width(data, cursor, encoding);
+                    }
+                } else {
+                    cursor += source_width(data, cursor, encoding);
+                }
+            }
+            if cursor == data.len() {
+                result.unterminated_tail_from = Some(command_start);
+                return result;
+            }
+            if check_structure {
+                result.structure.push((cursor, b'"'));
+            }
+            cursor += 1;
+        } else {
+            cursor += 1;
+            cursor += PATH_COMMAND_DELIMITER
+                .find(&data[cursor..])
+                .map_or(data.len() - cursor, |found| found.start());
+        }
+    }
+    if let Some(start) = start {
+        result.commands.push(PathCommand {
+            start,
+            end: data.len(),
+        });
+    }
+    result
+}
+
+fn header_path_encoding(data: &[u8]) -> Option<SourceEncoding> {
+    let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(data);
+    for line in data.split(|byte| matches!(byte, b'\r' | b'\n')) {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let comment = line.strip_prefix(b"//")?;
+        let comment = super::lexer::trim_ascii(comment);
+        let Some(prefix) = comment.get(..8) else {
+            continue;
+        };
+        if !prefix.eq_ignore_ascii_case(b"Codeset:") {
+            continue;
+        }
+        let code = super::lexer::trim_ascii(&comment[8..]);
+        match code {
+            b"932" => return Some(SourceEncoding::Cp932),
+            b"936" => return Some(SourceEncoding::Gbk),
+            b"65001" => return Some(SourceEncoding::Utf8),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn path_source(data: &[u8]) -> Result<(SourceEncoding, PathCommands), MaPathReplaceError> {
+    if std::str::from_utf8(data).is_ok() {
+        return Ok((
+            SourceEncoding::Utf8,
+            scan_path_commands(data, SourceEncoding::Utf8, false),
+        ));
+    }
+    if let Some(encoding) = header_path_encoding(data) {
+        return Ok((encoding, scan_path_commands(data, encoding, false)));
+    }
+    let cp932 = scan_path_commands(data, SourceEncoding::Cp932, true);
+    let gbk = scan_path_commands(data, SourceEncoding::Gbk, true);
+    if cp932 != gbk {
+        return Err(MaPathReplaceError::AmbiguousEncoding);
+    }
+    let detected = scan_light_bytes_with_options_and_sink(
+        data,
+        LightParseOptions {
+            budgets: ParseBudgets {
+                max_bytes: data.len(),
+                ..ParseBudgets::default()
+            },
+            ..LightParseOptions::default()
+        },
+        &mut |_: maya_mel::parser::LightSourceView<'_>, _: maya_mel::parser::LightItem| {},
+    )
+    .source_encoding;
+    Ok((
+        detected,
+        if matches!(detected, SourceEncoding::Gbk) {
+            gbk
+        } else {
+            cp932
+        },
+    ))
+}
+
+#[derive(Clone)]
+struct PathTokens<'a> {
+    data: &'a [u8],
+    cursor: usize,
+    end: usize,
+    encoding: SourceEncoding,
+}
+
+impl Iterator for PathTokens<'_> {
+    type Item = PathToken;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.cursor < self.end {
+            if self.data[self.cursor].is_ascii_whitespace() {
+                self.cursor += 1;
+            } else if self.data[self.cursor..].starts_with(b"//") {
+                while self.cursor < self.end && !matches!(self.data[self.cursor], b'\r' | b'\n') {
+                    self.cursor += source_width(self.data, self.cursor, self.encoding);
+                }
+            } else if self.data[self.cursor..].starts_with(b"/*") {
+                self.cursor += 2;
+                while self.cursor < self.end && !self.data[self.cursor..].starts_with(b"*/") {
+                    self.cursor += source_width(self.data, self.cursor, self.encoding);
+                }
+                self.cursor = (self.cursor + 2).min(self.end);
+            } else {
+                break;
+            }
+        }
+        if self.cursor == self.end {
+            return None;
+        }
+        if self.data[self.cursor] == b'"' {
+            self.cursor += 1;
+            let start = self.cursor;
+            while self.cursor < self.end && self.data[self.cursor] != b'"' {
+                if self.data[self.cursor] == b'\\' {
+                    self.cursor += 1;
+                }
+                if self.cursor < self.end {
+                    self.cursor += source_width(self.data, self.cursor, self.encoding);
+                }
+            }
+            let end = self.cursor;
+            self.cursor = (self.cursor + 1).min(self.end);
+            Some(PathToken {
+                range: start..end,
+                quoted: true,
+            })
+        } else {
+            let start = self.cursor;
+            if matches!(self.data[self.cursor], b'(' | b')' | b'+') {
+                self.cursor += 1;
+            } else {
+                while self.cursor < self.end
+                    && !self.data[self.cursor].is_ascii_whitespace()
+                    && !matches!(self.data[self.cursor], b'"' | b'(' | b')' | b'+')
+                    && !self.data[self.cursor..].starts_with(b"//")
+                    && !self.data[self.cursor..].starts_with(b"/*")
+                {
+                    self.cursor += source_width(self.data, self.cursor, self.encoding);
+                }
+            }
+            Some(PathToken {
+                range: start..self.cursor,
+                quoted: false,
+            })
+        }
+    }
+}
+
+fn path_setattr_prefix(data: &[u8], mut tokens: PathTokens<'_>) -> bool {
+    tokens.next();
+    while let Some(token) = tokens.next() {
+        let raw = &data[token.range];
+        if token.quoted {
+            let Ok(attr) = std::str::from_utf8(raw) else {
+                return false;
+            };
+            if !matches!(
+                classify_scene_path_attr(attr),
+                Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
+            ) {
+                return false;
+            }
+            while let Some(flag) = tokens.next() {
+                let raw = &data[flag.range];
+                if flag.quoted || !raw.starts_with(b"-") {
+                    return false;
+                }
+                if raw == b"-type" {
+                    return tokens
+                        .next()
+                        .is_some_and(|t| t.quoted && &data[t.range] == b"string");
+                }
+                let arity = std::str::from_utf8(raw)
+                    .ok()
+                    .and_then(setattr_flag_arity)
+                    .unwrap_or(1);
+                for _ in 0..arity {
+                    tokens.next();
+                }
+            }
+            return false;
+        }
+        if !raw.starts_with(b"-") {
+            return false;
+        }
+        let arity = std::str::from_utf8(raw)
+            .ok()
+            .and_then(setattr_flag_arity)
+            .unwrap_or(1);
+        for _ in 0..arity {
+            tokens.next();
+        }
+    }
+    false
+}
+
+fn path_codec(encoding: SourceEncoding) -> &'static encoding_rs::Encoding {
+    match encoding {
+        SourceEncoding::Utf8 => encoding_rs::UTF_8,
+        SourceEncoding::Cp932 => encoding_rs::SHIFT_JIS,
+        SourceEncoding::Gbk => encoding_rs::GBK,
+    }
+}
+
+fn encode_path(text: &str, encoding: SourceEncoding) -> Option<Vec<u8>> {
+    let (bytes, _, errors) = path_codec(encoding).encode(text);
+    (!errors).then(|| bytes.into_owned())
+}
+
+fn decode_path(raw: &[u8], encoding: SourceEncoding) -> (String, bool) {
+    let (text, errors) = path_codec(encoding).decode_without_bom_handling(raw);
+    let roundtrips = !errors && encode_path(&text, encoding).as_deref() == Some(raw);
+    (text.into_owned(), roundtrips)
+}
+
+fn token_value(data: &[u8], token: &PathToken, encoding: SourceEncoding) -> String {
+    if token.quoted {
+        let (text, _) = decode_path(&data[token.range.clone()], encoding);
+        unescape_ma_string_literal(&text)
+    } else {
+        std::str::from_utf8(&data[token.range.clone()])
+            .ok()
+            .filter(|text| text.is_ascii())
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
+struct PathCandidate {
+    ranges: Vec<Range<usize>>,
+    entry: Option<ScenePathEntry>,
+}
+
+fn file_path_flag_arity(flag: &str) -> usize {
+    use maya_mel::{
+        maya::MayaCommandRegistry,
+        sema::command_schema::{CommandRegistry, FlagArity},
+    };
+    let registry = MayaCommandRegistry::new();
+    let schema = registry.lookup("file").expect("built-in file schema");
+    let name = flag.trim_start_matches('-');
+    let Some(flag) = schema
+        .flags
+        .iter()
+        .find(|flag| flag.long_name.as_ref() == name || flag.short_name.as_deref() == Some(name))
+    else {
+        return 1;
+    };
+    match flag.arity_by_mode.create {
+        FlagArity::None => 0,
+        FlagArity::Exact(count) => usize::from(count),
+        FlagArity::Range { max, .. } => usize::from(max),
+    }
+}
+
+fn path_candidates(
+    data: &[u8],
+    commands: &[PathCommand],
+    encoding: SourceEncoding,
+) -> Vec<PathCandidate> {
+    let mut candidates = Vec::new();
+    let mut active: Option<ActiveScenePathBlock> = None;
+    for command in commands {
+        let tokens = PathTokens {
+            data,
+            cursor: command.start,
+            end: command.end,
+            encoding,
+        };
+        let Some(first) = tokens.clone().next() else {
+            continue;
+        };
+        let head = &data[first.range];
+        if head == b"setAttr" {
+            if !path_setattr_prefix(data, tokens.clone()) {
+                continue;
+            }
+        } else if !matches!(head, b"createNode" | b"file") {
+            if !matches!(head, b"addAttr" | b"rename" | b"lockNode") {
+                active = None;
+            }
+            continue;
+        }
+        let tokens: Vec<_> = tokens.collect();
+        let values: Vec<_> = tokens
+            .iter()
+            .map(|t| token_value(data, t, encoding))
+            .collect();
+        let head = values[0].as_str();
+        if head == "createNode" {
+            let name = values.iter().enumerate().find_map(|(i, v)| {
+                (!tokens[i].quoted && matches!(v.as_str(), "-n" | "-name"))
+                    .then(|| values.get(i + 1).cloned())
+                    .flatten()
+            });
+            active = values.get(1).map(|node_type| ActiveScenePathBlock {
+                node_type: node_type.clone(),
+                node_name: name.unwrap_or_else(|| {
+                    format!(
+                        "<scriptNode@line{}>",
+                        data[..command.start]
+                            .iter()
+                            .filter(|&&b| b == b'\n')
+                            .count()
+                            + 1
+                    )
+                }),
+            });
+            continue;
+        }
+        if head == "file" {
+            active = None;
+            let mut path = None;
+            let mut node_name = "<fileCmdRef>".to_string();
+            let mut i = 1;
+            while i < tokens.len() {
+                if !tokens[i].quoted && values[i].starts_with('-') {
+                    let flag = values[i].as_str();
+                    let arity = file_path_flag_arity(flag);
+                    if matches!(flag, "-rfn" | "-referenceNode")
+                        && let Some(value) = values.get(i + 1)
+                    {
+                        node_name = value.clone();
+                    }
+                    i += 1 + arity;
+                } else {
+                    if tokens[i].quoted {
+                        path = Some(i);
+                    }
+                    i += 1;
+                }
+            }
+            if let Some(i) = path
+                && (looks_like_scene_path(&values[i]) || looks_like_scene_file_path(&values[i]))
+            {
+                candidates.push(PathCandidate {
+                    ranges: vec![tokens[i].range.clone()],
+                    entry: Some(ScenePathEntry {
+                        node_type: "reference".into(),
+                        node_name,
+                        attr: ".fn".into(),
+                        value: values[i].clone(),
+                        meta: None,
+                    }),
+                });
+            }
+            continue;
+        }
+        if head != "setAttr" {
+            if !matches!(head, "addAttr" | "rename" | "lockNode") {
+                active = None;
+            }
+            continue;
+        }
+        let Some(type_index) = values.iter().enumerate().find_map(|(i, v)| {
+            (!tokens[i].quoted
+                && v == "-type"
+                && tokens.get(i + 1).is_some_and(|t| t.quoted)
+                && values.get(i + 1).is_some_and(|v| v == "string"))
+            .then_some(i)
+        }) else {
+            continue;
+        };
+        let mut attr_index = 1;
+        while attr_index < type_index
+            && !tokens[attr_index].quoted
+            && values[attr_index].starts_with('-')
+        {
+            attr_index += 1 + setattr_flag_arity(&values[attr_index]).unwrap_or(1);
+        }
+        let Some(attr) = values.get(attr_index).filter(|attr| {
+            attr_index < type_index
+                && matches!(
+                    classify_scene_path_attr(attr),
+                    Some(ScenePathAttrKind::FileTexturePath | ScenePathAttrKind::ReferencePath)
+                )
+        }) else {
+            continue;
+        };
+        let mut ranges = Vec::new();
+        let mut i = type_index + 2;
+        let grouped = values.get(i).is_some_and(|v| v == "(") && !tokens[i].quoted;
+        if grouped {
+            i += 1;
+        }
+        while let Some(token) = tokens.get(i) {
+            if !token.quoted {
+                break;
+            }
+            ranges.push(token.range.clone());
+            i += 1;
+            if values.get(i).is_some_and(|v| v == "+") && !tokens[i].quoted {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if ranges.is_empty() {
+            continue;
+        }
+        let value = ranges
+            .iter()
+            .map(|range| {
+                let (raw, _) = decode_path(&data[range.clone()], encoding);
+                unescape_ma_string_literal(&raw)
+            })
+            .collect::<String>();
+        let entry = active
+            .as_ref()
+            .and_then(|block| scene_path_entry_from_setattr(block, attr, &value));
+        candidates.push(PathCandidate { ranges, entry });
+    }
+    candidates
+}
+
+struct ValueRangeEdit {
+    range: Range<usize>,
+    bytes: Vec<u8>,
+}
+
+fn apply_path_value_edits(data: &[u8], mut edits: Vec<ValueRangeEdit>) -> Vec<u8> {
+    edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
+    for edit in &edits {
+        assert!(edit.range.start <= edit.range.end && edit.range.end <= data.len());
+    }
+    for pair in edits.windows(2) {
+        assert!(pair[0].range.end <= pair[1].range.start && pair[0].range != pair[1].range);
+    }
+    let removed: usize = edits.iter().map(|edit| edit.range.len()).sum();
+    let inserted: usize = edits.iter().map(|edit| edit.bytes.len()).sum();
+    let mut bytes = Vec::with_capacity(data.len() - removed + inserted);
+    let mut cursor = 0;
+    for edit in edits {
+        bytes.extend_from_slice(&data[cursor..edit.range.start]);
+        bytes.extend_from_slice(&edit.bytes);
+        cursor = edit.range.end;
+    }
+    bytes.extend_from_slice(&data[cursor..]);
+    bytes
+}
+
+struct PathMatchRule {
+    pattern: regex::Regex,
+    replacement: String,
+    literal: bool,
+}
+
+fn compile_path_matches(
+    rules: &[PathReplaceRule],
+) -> Result<Vec<PathMatchRule>, MaPathReplaceError> {
+    rules
+        .iter()
+        .filter(|rule| !rule.from.is_empty())
+        .map(|rule| {
+            let literal = matches!(rule.mode, crate::PathReplaceMode::Literal);
+            let pattern = if literal {
+                regex::escape(&rule.from)
+            } else {
+                rule.from.clone()
+            };
+            Ok(PathMatchRule {
+                pattern: regex::Regex::new(&pattern)?,
+                replacement: rule.to.clone(),
+                literal,
+            })
+        })
+        .collect()
+}
+
+fn escaped_path_bytes(value: &str, encoding: SourceEncoding) -> Option<Vec<u8>> {
+    let normalized;
+    let value = if matches!(encoding, SourceEncoding::Cp932) {
+        normalized = value.replace('¥', "\\").replace('‾', "~");
+        normalized.as_str()
+    } else {
+        value
+    };
+    encode_path(&escape_ma_string(value), encoding)
+}
+
+fn apply_path_candidate(
+    data: &[u8],
+    encoding: SourceEncoding,
+    candidate: PathCandidate,
+    rules: &[PathMatchRule],
+    override_value: Option<&str>,
+    skipped: &mut MaPathReplaceSkips,
+    edits: &mut Vec<ValueRangeEdit>,
+) -> MaPathReplaceChange {
+    let decoded: Vec<_> = candidate
+        .ranges
+        .iter()
+        .map(|range| decode_path(&data[range.clone()], encoding))
+        .collect();
+    let original: Vec<_> = decoded
+        .iter()
+        .map(|(raw, _)| unescape_ma_string_literal(raw))
+        .collect();
+    let mut values = original.clone();
+    let mut reasons = vec![0u8; values.len()];
+    let mut crossed = vec![false; values.len()];
+    let mut local_match = vec![false; values.len()];
+    let canonical = |i: usize| {
+        encode_path(&escape_ma_string(&original[i]), encoding).as_deref()
+            == Some(&data[candidate.ranges[i].clone()])
+    };
+    let mut accept = |i: usize, next: String, values: &mut Vec<String>| {
+        local_match[i] = true;
+        let reason = if !decoded[i].1 {
+            1
+        } else if !canonical(i) {
+            2
+        } else {
+            0
+        };
+        if reason != 0 {
+            if reasons[i] == 0 || reason < reasons[i] {
+                reasons[i] = reason;
+            }
+        } else {
+            values[i] = next;
+        }
+    };
+    if let Some(value) = override_value {
+        if values.len() == 1 {
+            if value != values[0] {
+                accept(0, value.to_string(), &mut values);
+            }
+        } else if value != values.concat() {
+            crossed.fill(true);
+        }
+    } else {
+        for rule in rules {
+            let joined = values.concat();
+            let mut offsets = vec![0];
+            for value in &values {
+                offsets.push(offsets.last().unwrap() + value.len());
+            }
+            let mut replacements: Vec<Vec<(Range<usize>, String)>> = vec![Vec::new(); values.len()];
+            for captures in rule.pattern.captures_iter(&joined) {
+                let found = captures.get(0).expect("whole regex match");
+                let index = offsets[1..]
+                    .iter()
+                    .position(|&end| found.start() < end)
+                    .unwrap_or(values.len() - 1);
+                if found.end() > offsets[index + 1] {
+                    for j in index..values.len() {
+                        if offsets[j] >= found.end() {
+                            break;
+                        }
+                        crossed[j] = true;
+                    }
+                    continue;
+                }
+                let mut replacement = String::new();
+                if rule.literal {
+                    replacement.push_str(&rule.replacement);
+                } else {
+                    captures.expand(&rule.replacement, &mut replacement);
+                }
+                replacements[index].push((
+                    found.start() - offsets[index]..found.end() - offsets[index],
+                    replacement,
+                ));
+            }
+            for (i, matches) in replacements.into_iter().enumerate() {
+                if matches.is_empty() {
+                    continue;
+                }
+                let mut next = values[i].clone();
+                for (range, replacement) in matches.into_iter().rev() {
+                    next.replace_range(range, &replacement);
+                }
+                if next != values[i] {
+                    accept(i, next, &mut values);
+                }
+            }
+        }
+    }
+    skipped.crosses_concat_boundary += crossed.iter().filter(|&&crossed| crossed).count();
+    let mut count = 0;
+    for i in 0..values.len() {
+        if !decoded[i].1 && (!crossed[i] || local_match[i]) {
+            reasons[i] = 1;
+        }
+        match reasons[i] {
+            1 => skipped.non_utf8 += 1,
+            2 => skipped.non_canonical_escape += 1,
+            _ => {}
+        }
+        if values[i] != original[i] {
+            let Some(bytes) = escaped_path_bytes(&values[i], encoding) else {
+                if reasons[i] == 0 {
+                    skipped.unrepresentable += 1;
+                }
+                values[i].clone_from(&original[i]);
+                continue;
+            };
+            let (raw, _) = decode_path(&bytes, encoding);
+            values[i] = unescape_ma_string_literal(&raw);
+            if bytes != data[candidate.ranges[i].clone()] {
+                count += 1;
+                edits.push(ValueRangeEdit {
+                    range: candidate.ranges[i].clone(),
+                    bytes,
+                });
+            }
+        }
+    }
+    MaPathReplaceChange {
+        entry: candidate.entry,
+        before_value: original.concat(),
+        after_value: values.concat(),
+        replacement_count: count,
+    }
+}
+
+fn empty_path_result(data: &[u8]) -> MaPathReplaceResult {
+    MaPathReplaceResult {
+        bytes: data.to_vec(),
+        replacement_count: 0,
+        skipped: MaPathReplaceSkips::default(),
+        paths: Vec::new(),
+    }
+}
+
+pub fn replace_raw_scene_paths_in_ma(
+    data: &[u8],
+    rules: &[PathReplaceRule],
+) -> Result<MaPathReplaceResult, MaPathReplaceError> {
+    let rules = compile_path_matches(rules)?;
+    if rules.is_empty() {
+        return Ok(empty_path_result(data));
+    }
+    replace_raw_scene_paths_in_ma_with_rules(data, &rules, None)
 }
 
 fn replace_raw_scene_paths_in_ma_with_rules(
     data: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-) -> (Vec<u8>, usize) {
-    let lines = split_lines_keepends(data);
-    let mut out = String::new();
-    let mut total = 0usize;
-    let mut i = 0usize;
-
-    while i < lines.len() {
-        let line_text = String::from_utf8_lossy(lines[i]).to_string();
-        let trimmed = line_text.trim_start();
-
-        if is_top_level_command(lines[i]) && trimmed.starts_with("file ") {
-            let (command, next) = collect_top_level_command_block(&lines, i);
-            let (rewritten, count) = rewrite_ma_file_command_paths(&command, compiled_rules);
-            if count > 0 {
-                total += count;
-                out.push_str(&rewritten);
+    rules: &[PathMatchRule],
+    replacements: Option<&[(usize, String)]>,
+) -> Result<MaPathReplaceResult, MaPathReplaceError> {
+    let (encoding, commands) = path_source(data)?;
+    let candidates = path_candidates(data, &commands.commands, encoding);
+    let mut selected = HashMap::new();
+    if let Some(replacements) = replacements {
+        let entries = extract_raw_scene_paths_from_ma(data);
+        let mut seen = HashSet::new();
+        for (index, value) in replacements {
+            if !seen.insert(*index) {
+                return Err(MaPathReplaceError::DuplicateEntry {
+                    entry_index: *index,
+                });
+            }
+            let Some(entry) = entries.get(*index) else {
+                return Err(MaPathReplaceError::MissingEntry {
+                    entry_index: *index,
+                });
+            };
+            let fingerprint = scene_path_entry_fingerprint(entry);
+            let matching: Vec<_> = candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    candidate
+                        .entry
+                        .as_ref()
+                        .is_some_and(|entry| scene_path_entry_fingerprint(entry) == fingerprint)
+                })
+                .collect();
+            if matching.len() > 1 {
+                return Err(MaPathReplaceError::AmbiguousEntry {
+                    entry_index: *index,
+                });
+            }
+            if let Some((i, _)) = matching.first() {
+                selected.insert(*i, value.as_str());
             } else {
-                out.push_str(&command);
-            }
-            i = next;
-            continue;
-        }
-
-        if trimmed.starts_with("setAttr ") && line_text.contains("-type \"string\"") {
-            let (command, next) = collect_command_until_semicolon(&lines, i);
-            if let Some((attr, value)) = parse_setattr_string_command(&command) {
-                if is_file_texture_attr(&attr) || is_reference_attr(&attr) {
-                    let (new_value, count) = compiled_rules.apply(&value);
-                    if count > 0 {
-                        total += count;
-                        out.push_str(&rewrite_setattr_string_command(
-                            &attr, &new_value, &line_text,
-                        ));
-                        i = next;
-                        continue;
-                    }
-                }
-            }
-            out.push_str(&command);
-            i = next;
-            continue;
-        }
-
-        if let Some((attr, value)) = parse_setattr_string_line(&line_text) {
-            if is_file_texture_attr(&attr) || is_reference_attr(&attr) {
-                let (new_value, count) = compiled_rules.apply(&value);
-                if count > 0 {
-                    total += count;
-                    out.push_str(&rewrite_setattr_string_command(
-                        &attr, &new_value, &line_text,
-                    ));
-                    i += 1;
-                    continue;
-                }
+                return Err(MaPathReplaceError::MissingEntry {
+                    entry_index: *index,
+                });
             }
         }
-
-        out.push_str(&line_text);
-        i += 1;
     }
-
-    (out.into_bytes(), total)
+    let mut result = MaPathReplaceResult {
+        bytes: Vec::new(),
+        replacement_count: 0,
+        skipped: MaPathReplaceSkips::default(),
+        paths: Vec::new(),
+    };
+    result.skipped.unterminated_tail_from = commands.unterminated_tail_from;
+    result.skipped.unterminated_tail = usize::from(commands.unterminated_tail_from.is_some());
+    let mut edits = Vec::new();
+    for (i, candidate) in candidates.into_iter().enumerate() {
+        if replacements.is_some() && !selected.contains_key(&i) {
+            continue;
+        }
+        let change = apply_path_candidate(
+            data,
+            encoding,
+            candidate,
+            rules,
+            selected.get(&i).copied(),
+            &mut result.skipped,
+            &mut edits,
+        );
+        result.replacement_count += change.replacement_count;
+        result.paths.push(change);
+    }
+    result.bytes = apply_path_value_edits(data, edits);
+    Ok(result)
 }
 
 pub fn replace_raw_scene_paths_in_ma_by_index(
     data: &[u8],
     replacements: &[(usize, String)],
-) -> (Vec<u8>, usize) {
+) -> Result<MaPathReplaceResult, MaPathReplaceError> {
     if replacements.is_empty() {
-        return (data.to_vec(), 0);
+        return Ok(empty_path_result(data));
     }
-
-    let entries = extract_raw_scene_paths_from_ma(data);
-    let targets = replacement_targets(&entries, replacements);
-    if targets.is_empty() {
-        return (data.to_vec(), 0);
-    }
-
-    let lines = split_lines_keepends(data);
-    let mut out = String::new();
-    let mut total = 0usize;
-    let mut i = 0usize;
-    let mut line_number = 0usize;
-    let mut active_block: Option<ActiveScenePathBlock> = None;
-
-    while i < lines.len() {
-        let line_text = String::from_utf8_lossy(lines[i]).to_string();
-        let trimmed = line_text.trim_start();
-
-        if is_top_level_command(lines[i]) {
-            active_block = None;
-
-            if trimmed.starts_with("file ") {
-                let (command, next) = collect_top_level_command_block(&lines, i);
-                if let Some(entry) = extract_reference_entry_from_raw_file_command(&command)
-                    && let Some(after_value) = targets.get(&scene_path_entry_fingerprint(&entry))
-                {
-                    let (rewritten, changed) = rewrite_last_quoted_literal(&command, after_value);
-                    if changed {
-                        total += 1;
-                        out.push_str(&rewritten);
-                        i = next;
-                        line_number += command.lines().count().max(1);
-                        continue;
-                    }
-                }
-
-                out.push_str(&command);
-                i = next;
-                line_number += command.lines().count().max(1);
-                continue;
-            }
-
-            if trimmed.starts_with("createNode ") {
-                active_block = start_raw_create_node_block(trimmed.as_bytes(), line_number);
-                out.push_str(&line_text);
-                i += 1;
-                line_number += 1;
-                continue;
-            }
-        }
-
-        if let Some(block) = active_block.as_ref()
-            && trimmed.starts_with("setAttr ")
-        {
-            let (command, next) = collect_command_until_semicolon(&lines, i);
-            if let Some((attr, value)) = parse_setattr_string_command(&command)
-                && let Some(entry) = scene_path_entry_from_setattr(block, &attr, &value)
-                && let Some(after_value) = targets.get(&scene_path_entry_fingerprint(&entry))
-            {
-                total += 1;
-                out.push_str(&rewrite_setattr_string_command(
-                    &attr,
-                    after_value,
-                    &command,
-                ));
-                i = next;
-                line_number += command.lines().count().max(1);
-                continue;
-            }
-
-            out.push_str(&command);
-            i = next;
-            line_number += command.lines().count().max(1);
-            continue;
-        }
-
-        out.push_str(&line_text);
-        i += 1;
-        line_number += 1;
-    }
-
-    if total == 0 {
-        return (data.to_vec(), 0);
-    }
-
-    (out.into_bytes(), total)
+    replace_raw_scene_paths_in_ma_with_rules(data, &[], Some(replacements))
 }
 
 pub fn ma_range_has_bytes(data: &[u8], start: usize, end: usize) -> bool {
@@ -426,16 +1148,6 @@ fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, us
     (command, next)
 }
 
-fn collect_command_until_semicolon(lines: &[&[u8]], start: usize) -> (String, usize) {
-    let mut command = String::from_utf8_lossy(lines[start]).to_string();
-    let mut next = start + 1;
-    while !command_has_terminating_semicolon(&command) && next < lines.len() {
-        command.push_str(&String::from_utf8_lossy(lines[next]));
-        next += 1;
-    }
-    (command, next)
-}
-
 fn file_command_without_callback(
     command: &str,
 ) -> Result<Option<(String, bool)>, crate::ma::error::MaParseError> {
@@ -510,70 +1222,10 @@ fn render_command_tokens(tokens: &[Token]) -> String {
     out
 }
 
-fn rewrite_ma_file_command_paths(
-    command: &str,
-    compiled_rules: &CompiledPathReplaceRules,
-) -> (String, usize) {
-    let mut out = String::new();
-    let mut cursor = 0usize;
-    let mut total = 0usize;
-    let command_path_range = last_quoted_literal_range(command);
-
-    while cursor < command.len() {
-        let Some(next_quote_rel) = command[cursor..].find('"') else {
-            out.push_str(&command[cursor..]);
-            break;
-        };
-        let quote_start = cursor + next_quote_rel;
-        out.push_str(&command[cursor..quote_start]);
-
-        let (literal, next) = parse_ma_quoted_literal(command, quote_start);
-        let Some(raw_literal) = literal else {
-            out.push_str(&command[quote_start..]);
-            break;
-        };
-
-        let literal_slice = &command[quote_start..next];
-        let value = unescape_ma_string_literal(&raw_literal);
-        let is_command_path = command_path_range == Some((quote_start, next));
-        if looks_like_scene_path(&value) || (is_command_path && looks_like_scene_file_path(&value))
-        {
-            let (new_value, count) = compiled_rules.apply(&value);
-            if count > 0 {
-                total += count;
-                out.push('"');
-                out.push_str(&escape_ma_string(&new_value));
-                out.push('"');
-            } else {
-                out.push_str(literal_slice);
-            }
-        } else {
-            out.push_str(literal_slice);
-        }
-        cursor = next;
-    }
-
-    (out, total)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveScenePathBlock {
     node_type: String,
     node_name: String,
-}
-
-fn replacement_targets(
-    entries: &[ScenePathEntry],
-    replacements: &[(usize, String)],
-) -> HashMap<u64, String> {
-    let mut out = HashMap::new();
-    for (index, after_value) in replacements {
-        let Some(entry) = entries.get(*index) else {
-            continue;
-        };
-        out.insert(scene_path_entry_fingerprint(entry), after_value.clone());
-    }
-    out
 }
 
 fn start_raw_create_node_block(trimmed: &[u8], line_number: usize) -> Option<ActiveScenePathBlock> {
@@ -645,6 +1297,7 @@ fn extract_reference_entry_from_raw_file_command(command: &str) -> Option<SceneP
     })
 }
 
+#[cfg(test)]
 fn last_quoted_literal_range(command: &str) -> Option<(usize, usize)> {
     let mut cursor = 0usize;
     let mut last_range = None;
@@ -696,31 +1349,6 @@ fn parse_file_command_flag_value(command: &str, flag: &str) -> Option<String> {
     literal.map(|s| unescape_ma_string_literal(&s))
 }
 
-fn rewrite_last_quoted_literal(command: &str, new_value: &str) -> (String, bool) {
-    let Some((start, end)) = last_quoted_literal_range(command) else {
-        return (command.to_string(), false);
-    };
-
-    let mut out = String::with_capacity(command.len() + new_value.len());
-    out.push_str(&command[..start]);
-    out.push('"');
-    out.push_str(&escape_ma_string(new_value));
-    out.push('"');
-    out.push_str(&command[end..]);
-    (out, true)
-}
-
-fn rewrite_setattr_string_command(attr: &str, new_value: &str, original_line: &str) -> String {
-    let indent = original_line
-        .chars()
-        .take_while(|ch| *ch == ' ' || *ch == '\t')
-        .collect::<String>();
-    format!(
-        "{indent}setAttr \"{attr}\" -type \"string\" \"{}\";\n",
-        escape_ma_string(new_value)
-    )
-}
-
 fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
     let mut hasher = DefaultHasher::new();
     entry.node_type.hash(&mut hasher);
@@ -760,36 +1388,29 @@ mod tests {
         let input = b"file -r -ns \"asset/example/Example.ma\" \"asset/example/unfinished\nrequires maya \"2024\";\n";
         for (from, expected_count) in [
             ("asset/example/absent.ma", 0),
-            ("asset/example/Example.ma", 1),
+            ("asset/example/Example.ma", 0),
         ] {
             let rules = vec![PathReplaceRule {
                 from: from.to_string(),
                 to: "asset/example/TestScene.ma".to_string(),
                 mode: PathReplaceMode::Literal,
             }];
-            let compiled = super::CompiledPathReplaceRules::compile_lossy(&rules);
-            let (output, count) = super::replace_raw_scene_paths_in_ma_with_rules(input, &compiled);
+            let result = replace_raw_scene_paths_in_ma(input, &rules).unwrap();
+            let (output, count) = (result.bytes, result.replacement_count);
             assert_eq!(count, expected_count);
-            if expected_count == 0 {
-                assert_eq!(output, input);
-            } else {
-                let suffix = b"\"asset/example/unfinished\nrequires maya \"2024\";\n";
-                assert!(input.ends_with(suffix));
-                assert!(output.ends_with(suffix));
-                assert!(String::from_utf8_lossy(&output).contains("asset/example/TestScene.ma"));
-            }
+            assert_eq!(output, input);
         }
     }
 
     #[test]
     fn replace_scene_paths_rewrites_file_command_and_multiline_setattr() {
         let input = br#"//Maya ASCII 2026 scene
-file -rdi 1 -ns "charA" -rfn "charARN" -op "VERS|2026|"
-     -typ "mayaBinary" "rig/charA_v001.mb";
+file -rdi 1 -ns "Example" -rfn "ExampleRN" -op "VERS|2026|"
+     -typ "mayaBinary" "rig/Example_v001.mb";
 createNode file -n "file1";
     setAttr ".ftn" -type "string" (
         "rig/" +
-        "charA_v001.mb"
+        "Example_v001.mb"
     );
 "#;
         let rules = vec![PathReplaceRule {
@@ -797,11 +1418,13 @@ createNode file -n "file1";
             to: "asset/".to_string(),
             mode: PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let result = replace_raw_scene_paths_in_ma(input, &rules).unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 2);
-        assert!(text.contains("\"asset/charA_v001.mb\""));
-        assert!(text.contains("setAttr \".ftn\" -type \"string\" \"asset/charA_v001.mb\";"));
+        assert!(text.contains("\"asset/Example_v001.mb\""));
+        assert!(text.contains("\"asset/\" +"));
+        assert!(text.contains("\"Example_v001.mb\""));
     }
 
     #[test]
@@ -814,7 +1437,8 @@ file -r -ns "Example" -rfn "ExampleRN" -op "VERS|2026|" -typ "mayaAscii" "Exampl
             to: "SampleScene.ma".to_string(),
             mode: PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let result = replace_raw_scene_paths_in_ma(input, &rules).unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
         assert!(text.contains("-ns \"Example\""));
@@ -834,7 +1458,8 @@ file -r -ns "Example.ma" -rfn "ExampleRN.ma" -op "VERS|2026|" -typ "mayaAscii" "
             to: "Sample".to_string(),
             mode: PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let result = replace_raw_scene_paths_in_ma(input, &rules).unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
         assert!(text.contains("-ns \"Example.ma\""));
@@ -844,7 +1469,7 @@ file -r -ns "Example.ma" -rfn "ExampleRN.ma" -op "VERS|2026|" -typ "mayaAscii" "
 
     #[test]
     fn command_terminator_ignores_semicolon_inside_quotes() {
-        let command = "file -r -op \"VERS;2026\" \n    -typ \"mayaBinary\" \"rig/charA.mb\"";
+        let command = "file -r -op \"VERS;2026\" \n    -typ \"mayaBinary\" \"rig/Example.mb\"";
         assert!(!command_has_terminating_semicolon(command));
         let terminated = format!("{command};");
         assert!(command_has_terminating_semicolon(&terminated));
@@ -853,36 +1478,40 @@ file -r -ns "Example.ma" -rfn "ExampleRN.ma" -op "VERS|2026|" -typ "mayaAscii" "
     #[test]
     fn replace_scene_paths_keeps_multiline_file_command_with_quoted_semicolon_intact() {
         let input = br#"//Maya ASCII 2026 scene
-file -rdi 1 -ns "charA" -rfn "charARN"
+file -rdi 1 -ns "Example" -rfn "ExampleRN"
      -op "VERS;2026"
-     -typ "mayaBinary" "rig/charA_v001.mb";
+     -typ "mayaBinary" "rig/Example_v001.mb";
 "#;
         let rules = vec![PathReplaceRule {
             from: "rig/".to_string(),
             to: "asset/".to_string(),
             mode: PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let result = replace_raw_scene_paths_in_ma(input, &rules).unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
         assert!(text.contains("-op \"VERS;2026\""));
-        assert!(text.contains("\"asset/charA_v001.mb\""));
+        assert!(text.contains("\"asset/Example_v001.mb\""));
     }
 
     #[test]
     fn replace_scene_paths_by_index_changes_only_targeted_entry() {
-        let input = br#"file -rdi 1 -ns "charA" -rfn "charARN" -typ "mayaBinary" "shared/asset.mb";
+        let input =
+            br#"file -rdi 1 -ns "Example" -rfn "ExampleRN" -typ "mayaBinary" "shared/asset.mb";
 createNode file -n "file1";
     setAttr ".ftn" -type "string" "shared/asset.mb";
 "#;
-        let (rewritten, count) = replace_raw_scene_paths_in_ma_by_index(
+        let result = replace_raw_scene_paths_in_ma_by_index(
             input,
-            &[(1, "textures/hero_diffuse.png".into())],
-        );
+            &[(1, "asset/example/Sample.png".into())],
+        )
+        .unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
         assert!(text.contains("\"shared/asset.mb\""));
-        assert!(text.contains("setAttr \".ftn\" -type \"string\" \"textures/hero_diffuse.png\";"));
+        assert!(text.contains("setAttr \".ftn\" -type \"string\" \"asset/example/Sample.png\";"));
     }
 
     #[test]
@@ -890,10 +1519,12 @@ createNode file -n "file1";
         let input = br#"createNode reference -n "ExampleRN";
     setAttr ".fn[0]" -type "string" "asset/example/ExampleScene.ma";
 "#;
-        let (rewritten, count) = replace_raw_scene_paths_in_ma_by_index(
+        let result = replace_raw_scene_paths_in_ma_by_index(
             input,
             &[(0, "asset/example/SampleScene.ma".into())],
-        );
+        )
+        .unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
         assert!(
@@ -913,7 +1544,8 @@ createNode customPathNode -n "customTex1";
             to: "archive/".to_string(),
             mode: PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_raw_scene_paths_in_ma(input, &rules);
+        let result = replace_raw_scene_paths_in_ma(input, &rules).unwrap();
+        let (rewritten, count) = (result.bytes, result.replacement_count);
         let text = String::from_utf8_lossy(&rewritten);
         assert_eq!(count, 1);
         assert!(

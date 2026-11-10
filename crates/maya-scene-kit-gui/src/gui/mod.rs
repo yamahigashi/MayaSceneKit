@@ -37,10 +37,10 @@ use maya_scene_kit_audit::{
 };
 use maya_scene_kit_edit::scene::{
     CompositeSceneEditsStageResult, ExecutionCleanPreview, ExecutionCleanTarget,
-    MayaAsciiConversionReport, PathOwnerDeletePreview, PathOwnerDeleteTarget, PathReplaceMode,
-    PathReplaceOverride, PathReplacePreview, PathReplaceRule, StagedSceneArtifact,
-    clean_target_for_execution_origin, collect_raw_chunks,
-    preview_replace_scene_path_candidates_in_report_with_options,
+    MayaAsciiConversionReport, PathOwnerDeletePreview, PathOwnerDeleteTarget, PathReplaceChanges,
+    PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplaceRule,
+    PathReplaceStageResult, StagedSceneArtifact, clean_target_for_execution_origin,
+    collect_raw_chunks, preview_replace_scene_path_candidates_in_report_with_options,
     preview_replace_scene_paths_with_overrides_in_report_with_options, save_staged_artifact,
     stage_maya_ascii_with_options, stage_replace_scene_paths_with_overrides_in_report_with_options,
     stage_scene_edits_in_report_with_bytes_with_options, stage_scene_edits_with_options,
@@ -530,6 +530,7 @@ struct SceneRowEditState {
     findings: usize,
     clean_preview: Option<ExecutionCleanPreview>,
     replace_preview: Option<PathReplacePreview>,
+    replace_changes: Option<PathReplaceChanges>,
     ascii_report: Option<MayaAsciiConversionReport>,
     path_owner_delete_preview: Option<PathOwnerDeletePreview>,
     dirty_artifact: Option<StagedSceneArtifact>,
@@ -824,6 +825,7 @@ struct SceneRow {
     analyzed_audit_mode: Option<AuditModePreference>,
     clean_preview: Option<ExecutionCleanPreview>,
     replace_preview: Option<PathReplacePreview>,
+    replace_changes: Option<PathReplaceChanges>,
     ascii_report: Option<MayaAsciiConversionReport>,
     path_owner_delete_preview: Option<PathOwnerDeletePreview>,
     dirty_artifact: Option<StagedSceneArtifact>,
@@ -1327,6 +1329,7 @@ impl SceneRow {
             analyzed_audit_mode: None,
             clean_preview: None,
             replace_preview: None,
+            replace_changes: None,
             ascii_report: None,
             path_owner_delete_preview: None,
             dirty_artifact: None,
@@ -1575,6 +1578,7 @@ impl SceneRow {
             findings: self.findings,
             clean_preview: self.clean_preview.clone(),
             replace_preview: self.replace_preview.clone(),
+            replace_changes: self.replace_changes.clone(),
             ascii_report: self.ascii_report.clone(),
             path_owner_delete_preview: self.path_owner_delete_preview.clone(),
             dirty_artifact: self.dirty_artifact.clone(),
@@ -1601,6 +1605,7 @@ impl SceneRow {
         self.findings = state.findings;
         self.clean_preview = state.clean_preview.clone();
         self.replace_preview = state.replace_preview.clone();
+        self.replace_changes = state.replace_changes.clone();
         self.ascii_report = state.ascii_report.clone();
         self.path_owner_delete_preview = state.path_owner_delete_preview.clone();
         self.dirty_artifact = state.dirty_artifact.clone();
@@ -1629,6 +1634,7 @@ impl SceneRowEditState {
             && self.findings == other.findings
             && self.clean_preview == other.clean_preview
             && self.replace_preview == other.replace_preview
+            && self.replace_changes == other.replace_changes
             && self.path_owner_delete_preview == other.path_owner_delete_preview
             && self.dirty_artifact == other.dirty_artifact
             && self.dirty_kind == other.dirty_kind
@@ -1669,6 +1675,7 @@ fn ascii_report_same(
 enum RowJobResult {
     Analyze(AnalyzeRowResult),
     SceneEdits {
+        replace_changes: Option<PathReplaceChanges>,
         staged: CompositeSceneEditsStageResult,
         audit_mode: AuditModePreference,
         staged_audit_report: AuditReport,
@@ -1682,6 +1689,8 @@ enum RowJobResult {
         artifact: StagedSceneArtifact,
     },
     Save {
+        replace_changes: Option<PathReplaceChanges>,
+        replace_preview: Option<PathReplacePreview>,
         output_path: PathBuf,
         audit_file_state: Option<GuiFileState>,
     },

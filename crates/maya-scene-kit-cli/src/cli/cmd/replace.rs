@@ -93,6 +93,7 @@ pub(crate) fn run_replace_paths(
                         r.validation_state,
                         r.replaced_count
                     );
+                    write_replace_skips(stdout_output, &r);
                     0
                 }
                 Err(SceneToolError::Io(e)) => {
@@ -132,6 +133,7 @@ pub(crate) fn run_replace_paths(
                             r.validation_state,
                             r.replaced_count
                         );
+                        write_replace_skips(stdout_output, &r);
                     }
                     Err(SceneToolError::Io(e)) => {
                         eprintln!("error: {e}");
@@ -146,4 +148,24 @@ pub(crate) fn run_replace_paths(
             0
         }
     })
+}
+
+fn write_replace_skips(output: &mut impl std::io::Write, result: &crate::scene::PathReplaceResult) {
+    if let Some(skipped) = &result.skipped
+        && skipped.total() > 0
+    {
+        let offset = skipped
+            .unterminated_tail_from
+            .map_or_else(|| "none".to_string(), |offset| offset.to_string());
+        let _ = writeln!(
+            output,
+            "skipped non_utf8={} non_canonical_escape={} unrepresentable={} crosses_concat_boundary={} unterminated_tail={} unterminated_tail_from={}",
+            skipped.non_utf8,
+            skipped.non_canonical_escape,
+            skipped.unrepresentable,
+            skipped.crosses_concat_boundary,
+            skipped.unterminated_tail,
+            offset
+        );
+    }
 }
