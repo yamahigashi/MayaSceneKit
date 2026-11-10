@@ -7,8 +7,9 @@ use maya_scene_kit_formats::{
 
 use crate::{
     mb::{
-        FourCC, LayoutHints, MbParseBudget, parse_section_chunks_with_hints,
-        resolve_section_layout_hints, visit_group_chunks_with_layout_with_budget,
+        FourCC, LayoutHints, MbChildren, MbCompleteness, MbParseBudget, MbTruncationReason,
+        parse_section_chunks_with_hints, resolve_section_layout_hints,
+        visit_group_chunks_with_layout_with_budget,
     },
     scene::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
@@ -104,6 +105,7 @@ pub(crate) fn collect_execution_coverage_from_mb(
     .map_err(SceneToolError::Config)?;
     collect_execution_coverage_from_mb_with_budget(
         mb,
+        &mb.completeness(),
         &MbParseBudget::default(),
         registry,
         semantics.as_ref(),
@@ -112,11 +114,12 @@ pub(crate) fn collect_execution_coverage_from_mb(
 
 pub(crate) fn collect_execution_coverage_from_mb_with_budget(
     mb: &crate::mb::MayaBinaryFile,
+    completeness: &MbCompleteness,
     budget: &MbParseBudget,
     registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    collect_mb_coverage(mb, budget, registry, execution_semantics)
+    collect_mb_coverage(mb, completeness, budget, registry, execution_semantics)
 }
 
 fn collect_ma_coverage(
@@ -544,6 +547,7 @@ fn classify_top_level_other(source_text: &str) -> Option<&'static str> {
 
 fn collect_mb_coverage(
     mb: &crate::mb::MayaBinaryFile,
+    completeness: &MbCompleteness,
     budget: &MbParseBudget,
     registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
@@ -658,6 +662,31 @@ fn collect_mb_coverage(
                 preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
             });
         })?;
+    }
+
+    if let MbCompleteness::Truncated { .. } = completeness {
+        let mut reasons = Vec::new();
+        let mut reason_kinds = HashSet::new();
+        for chunk in mb.walk() {
+            let reason = match chunk.children_state() {
+                MbChildren::NotExpanded => &MbTruncationReason::DepthLimit,
+                MbChildren::Truncated { reason, .. } => reason,
+                _ => continue,
+            };
+            if reason_kinds.insert(std::mem::discriminant(reason)) {
+                reasons.push(reason.to_string());
+            }
+        }
+        let reason = format!(
+            "MB chunk tree {completeness}; reasons=[{}]",
+            reasons.join(", ")
+        );
+        coverage_issues.push(ExecutionCoverageIssueRecord {
+            kind: ExecutionCoverageIssueKind::UnexplainedRawMbPayload,
+            preview: PreviewWindowSpec::prefix(Arc::from(reason.as_str())),
+            detail: ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason },
+            origin: None,
+        });
     }
 
     Ok(ExecutionCoverageCollection {
@@ -1700,6 +1729,57 @@ mod tests {
                 && surface.origin.source_kind.as_deref() == Some("SCRP:CREA"))
         }));
     }
+    #[test]
+    fn truncated_groups_keep_preorder_reasons_and_existing_payload_issues() {
+        use crate::{mb::MbParseBudget, scene::ExecutionCoverageIssueDetail};
+        let bytes = build_mb_root(&[
+            build_mb_form(
+                "HEAD",
+                &[
+                    build_mb_chunk("DATA", &[]),
+                    build_mb_chunk("DATA", &[]),
+                    build_mb_chunk("DATA", &[]),
+                    build_mb_chunk("DATA", &[]),
+                ],
+            ),
+            build_mb_form(
+                "XPLT",
+                &[
+                    build_mb_chunk("FOR8", b"HEAD"),
+                    build_mb_chunk("FOR8", b"HEAD"),
+                    build_mb_chunk("DATA", b"system \"asset/example/file.txt\""),
+                ],
+            ),
+        ]);
+        let mb = crate::mb::parse_bytes_with_budget(
+            bytes,
+            &MbParseBudget {
+                max_depth: 2,
+                max_children_per_group: 3,
+                ..MbParseBudget::default()
+            },
+        )
+        .unwrap();
+        let coverage = collect_execution_coverage_from_mb(&mb).unwrap();
+        assert_eq!(coverage.coverage_issues.len(), 2);
+        let issues: Vec<_> = coverage
+            .coverage_issues
+            .iter()
+            .filter(|issue| issue.origin.is_none())
+            .collect();
+        assert_eq!(issues.len(), 1);
+        let ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason } = &issues[0].detail
+        else {
+            panic!("unexpected issue");
+        };
+        assert!(reason.contains("first_reason=ChildLimit"), "{reason}");
+        assert!(reason.contains("truncated_groups=3"), "{reason}");
+        assert!(
+            reason.contains("reasons=[ChildLimit, DepthLimit]"),
+            "{reason}"
+        );
+    }
+
     #[test]
     fn malformed_slct_scene_has_partial_validation() {
         let bytes = build_mb_root(&[build_mb_form("SLCT", &[build_mb_chunk("SLCT", &[])])]);

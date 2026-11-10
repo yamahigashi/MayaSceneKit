@@ -587,6 +587,13 @@ impl ObservationBundle {
                         }
                     },
                 };
+                let validation_state = if validation_state == ValidationState::Validated
+                    && !matches!(session.completeness, crate::mb::MbCompleteness::Complete)
+                {
+                    ValidationState::Partial
+                } else {
+                    validation_state
+                };
                 Ok(Self {
                     scene_path: path.to_path_buf(),
                     scene_format,

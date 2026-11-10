@@ -34,6 +34,7 @@ pub(crate) struct MbSceneFacts {
 
 pub(crate) struct MbReadSession {
     pub(crate) mb: crate::mb::MayaBinaryFile,
+    pub(crate) completeness: crate::mb::MbCompleteness,
     schema_context: Option<Arc<SchemaContext>>,
     budget: MbParseBudget,
     decoded: OnceLock<Result<Arc<MbDecodedArtifacts>, MayaBinaryParseError>>,
@@ -71,8 +72,10 @@ impl MbReadSession {
         schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
+        let completeness = mb.completeness();
         Ok(Self {
             mb,
+            completeness,
             schema_context,
             budget: *budget,
             decoded: OnceLock::new(),
@@ -115,6 +118,7 @@ impl MbReadSession {
         let integrity = Ok(summarize_mb_read_integrity_parts(
             &TypeIdResolverStatus::Provided,
             &decoded.decode_qualities,
+            &self.completeness,
         ));
         let _ = self.integrity.set(integrity);
         map_cached_parse_result(self.integrity.get().expect("mb integrity initialized"))

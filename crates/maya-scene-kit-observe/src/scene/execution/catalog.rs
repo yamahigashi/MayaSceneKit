@@ -85,6 +85,7 @@ pub(crate) fn build_observed_execution_core(
         ObservationData::Mb { session } => {
             surfaces::collect_execution_coverage_from_mb_with_budget(
                 &session.mb,
+                &session.completeness,
                 session.budget(),
                 session.schema_context()?.registry(),
                 session
@@ -1060,6 +1061,51 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::summarize_python_surface;
     use crate::scene::{EffectCertainty, ExecutionEffectClass};
+
+    #[test]
+    fn execution_core_uses_session_completeness() {
+        use super::{ExecutionCoverageIssueDetail, ObservationData, build_observed_execution_core};
+        use crate::scene::{LoadOptions, Loader, SceneFormat, ValidationState};
+
+        let mut bytes = b"FOR4".to_vec();
+        bytes.extend_from_slice(&12u32.to_be_bytes());
+        bytes.extend_from_slice(b"MayaDATA");
+        bytes.extend_from_slice(&100u32.to_be_bytes());
+        let observation = Loader::new(LoadOptions::default())
+            .observe_analysis_bytes(
+                std::path::Path::new("Example.mb"),
+                SceneFormat::Mb,
+                ValidationState::Validated,
+                bytes,
+            )
+            .unwrap();
+        let ObservationData::Mb { session } = &observation.data else {
+            panic!("expected MB");
+        };
+        let expected = session.completeness.to_string();
+        assert!(matches!(
+            session.completeness,
+            crate::mb::MbCompleteness::Truncated { .. }
+        ));
+        let core = build_observed_execution_core(&observation).unwrap();
+        assert_eq!(core.coverage_issues.len(), 1);
+        let ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason } =
+            &core.coverage_issues[0].detail
+        else {
+            panic!("unexpected issue");
+        };
+        assert_eq!(
+            reason,
+            &format!(
+                "MB chunk tree {expected}; reasons=[{}]",
+                match &session.completeness {
+                    crate::mb::MbCompleteness::Truncated { first_reason, .. } =>
+                        first_reason.to_string(),
+                    _ => unreachable!(),
+                }
+            )
+        );
+    }
 
     #[test]
     fn python_summary_uses_compat_normalization_for_python2_print() {
