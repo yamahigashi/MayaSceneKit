@@ -27,19 +27,26 @@ pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str) -> Vec<String>
 
 pub fn normalize_python_compat_source(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
+    let mut scanner = PythonSourceScanner::default();
     for line in source.split_inclusive('\n') {
         let (content, newline) = line
             .strip_suffix('\n')
             .map(|content| (content, "\n"))
             .unwrap_or((line, ""));
-        out.push_str(&normalize_python_compat_line(content));
+        let starts_in_string = scanner.quote.is_some();
+        let comment_start = scanner.scan(line, |_, ch, _| ch == b'#');
+        if starts_in_string || scanner.quote.is_some() {
+            out.push_str(content);
+        } else {
+            let (code, comment) = content.split_at(comment_start.unwrap_or(content.len()));
+            out.push_str(&normalize_python_compat_line(code, comment));
+        }
         out.push_str(newline);
     }
     out
 }
 
-fn normalize_python_compat_line(line: &str) -> String {
-    let (code, comment) = split_code_and_comment(line);
+fn normalize_python_compat_line(code: &str, comment: &str) -> String {
     let indent_len = code.len() - code.trim_start_matches([' ', '\t']).len();
     let indent = &code[..indent_len];
     let trimmed = &code[indent_len..];
@@ -70,33 +77,63 @@ fn normalize_python_compat_line(line: &str) -> String {
         return format!("{indent}{normalized}{comment}");
     }
 
-    line.to_string()
+    format!("{code}{comment}")
 }
 
-fn split_code_and_comment(line: &str) -> (&str, &str) {
-    let mut quote = None;
-    let mut escape = false;
-    for (idx, ch) in line.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match quote {
-            Some(active) => {
-                if ch == '\\' {
-                    escape = true;
-                } else if ch == active {
-                    quote = None;
+#[derive(Default)]
+struct PythonSourceScanner {
+    quote: Option<(u8, bool)>,
+    escape: bool,
+    depth: usize,
+}
+
+impl PythonSourceScanner {
+    fn scan(
+        &mut self,
+        text: &str,
+        mut matches: impl FnMut(usize, u8, usize) -> bool,
+    ) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut idx = 0;
+        while idx < bytes.len() {
+            let ch = bytes[idx];
+            if self.escape {
+                self.escape = false;
+            } else if let Some((quote, triple)) = self.quote {
+                if ch == b'\\' {
+                    self.escape = true;
+                } else if ch == quote && (!triple || bytes.get(idx..idx + 3) == Some(&[quote; 3])) {
+                    self.quote = None;
+                    if triple {
+                        idx += 2;
+                    }
+                }
+            } else {
+                match ch {
+                    b'\'' | b'"' => {
+                        let triple = bytes.get(idx..idx + 3) == Some(&[ch; 3]);
+                        self.quote = Some((ch, triple));
+                        if triple {
+                            idx += 2;
+                        }
+                    }
+                    _ => {
+                        if matches(idx, ch, self.depth) {
+                            return Some(idx);
+                        }
+                        match ch {
+                            b'#' => return None,
+                            b'(' | b'[' | b'{' => self.depth += 1,
+                            b')' | b']' | b'}' => self.depth = self.depth.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
                 }
             }
-            None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '#' => return (&line[..idx], &line[idx..]),
-                _ => {}
-            },
+            idx += 1;
         }
+        None
     }
-    (line, "")
 }
 
 fn normalize_python2_except_clause(trimmed: &str) -> Option<String> {
@@ -143,70 +180,22 @@ fn normalize_python2_exec_args(rest: &str) -> String {
 
 fn split_top_level_commas(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
-    let mut quote = None;
-    let mut escape = false;
-    let mut depth = 0usize;
-    let mut start = 0usize;
-
-    for (idx, ch) in text.char_indices() {
-        if escape {
-            escape = false;
-            continue;
+    let mut start = 0;
+    PythonSourceScanner::default().scan(text, |idx, ch, depth| {
+        if ch == b',' && depth == 0 {
+            parts.push(&text[start..idx]);
+            start = idx + 1;
         }
-        match quote {
-            Some(active) => {
-                if ch == '\\' {
-                    escape = true;
-                } else if ch == active {
-                    quote = None;
-                }
-            }
-            None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                ',' if depth == 0 => {
-                    parts.push(&text[start..idx]);
-                    start = idx + 1;
-                }
-                _ => {}
-            },
-        }
-    }
-
+        false
+    });
     parts.push(&text[start..]);
     parts
 }
 
 fn find_top_level_keyword(text: &str, needle: &str) -> Option<usize> {
-    let mut quote = None;
-    let mut escape = false;
-    let mut depth = 0usize;
-
-    for (idx, ch) in text.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match quote {
-            Some(active) => {
-                if ch == '\\' {
-                    escape = true;
-                } else if ch == active {
-                    quote = None;
-                }
-            }
-            None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                _ if depth == 0 && text[idx..].starts_with(needle) => return Some(idx),
-                _ => {}
-            },
-        }
-    }
-
-    None
+    PythonSourceScanner::default().scan(text, |idx, ch, depth| {
+        depth == 0 && ch == needle.as_bytes()[0] && text[idx..].starts_with(needle)
+    })
 }
 
 #[derive(Default)]
@@ -444,6 +433,17 @@ pub(super) mod tests {
         let mut visitor = super::MayaMelEvalVisitor::default();
         super::walk_suite(&mut visitor, program);
         visitor.payloads
+    }
+
+    #[test]
+    fn preserves_python2_statements_inside_triple_quoted_strings() {
+        for quote in ["\"\"\"", "'''"] {
+            let source =
+                format!("Example = {quote}\nprint x\nexec y\nraise z, Sample\n{quote}\nprint x\n");
+            let expected =
+                format!("Example = {quote}\nprint x\nexec y\nraise z, Sample\n{quote}\nprint(x)\n");
+            assert_eq!(normalize_python_compat_source(&source), expected);
+        }
     }
 
     #[test]
