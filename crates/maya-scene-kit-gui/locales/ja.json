@@ -1,4 +1,5 @@
 {
+  "banner.edit_requires_reanalysis": "この編集を適用するには再解析が必要です。",
   "log.settings_save_skipped": "設定の復旧に失敗し、このセッションでは保存が無効なため、設定の保存をスキップしました。",
   "label.audit_detail.overwritten_assignment": "上書きされた本文（代入位置 {index}）",
   "banner.settings_lenient": "一部の設定を読み取れず、既定値に戻すかスキップしました。元のファイルは {path} に保存しました。",

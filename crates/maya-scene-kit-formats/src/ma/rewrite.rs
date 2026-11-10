@@ -1373,6 +1373,18 @@ pub fn collect_path_owner_ranges_from_ma(
         return Vec::new();
     }
 
+    let encoding = scan_light_bytes_with_options_and_sink(
+        data,
+        LightParseOptions {
+            budgets: ParseBudgets {
+                max_bytes: data.len(),
+                ..ParseBudgets::default()
+            },
+            ..LightParseOptions::default()
+        },
+        &mut |_: maya_mel::parser::LightSourceView<'_>, _: maya_mel::parser::LightItem| {},
+    )
+    .source_encoding;
     let lines = split_lines_keepends(data);
     let mut ranges = Vec::new();
     let mut offsets = vec![0];
@@ -1383,11 +1395,11 @@ pub fn collect_path_owner_ranges_from_ma(
     let mut line_number = 0usize;
 
     while i < lines.len() {
-        let line_text = String::from_utf8_lossy(lines[i]).to_string();
+        let line_text = decode_owner_command_line(lines[i], encoding);
         let trimmed = line_text.trim_start();
 
         if is_top_level_command(lines[i]) && trimmed.starts_with("file ") {
-            let (command, next) = collect_top_level_command_block(&lines, i);
+            let (command, next) = collect_top_level_command_block(&lines, i, encoding);
             if let Some(entry) = extract_reference_entry_from_raw_file_command(&command) {
                 let target = (entry.node_type, entry.node_name);
                 if targets.contains(&target) {
@@ -1403,7 +1415,7 @@ pub fn collect_path_owner_ranges_from_ma(
         }
 
         if is_top_level_command(lines[i]) && trimmed.starts_with("createNode ") {
-            let (command, next) = collect_top_level_command_block(&lines, i);
+            let (command, next) = collect_top_level_command_block(&lines, i, encoding);
             if let Some(block) = start_raw_create_node_block(trimmed.as_bytes(), line_number) {
                 let target = (block.node_type, block.node_name);
                 if targets.contains(&target) {
@@ -1425,19 +1437,33 @@ pub fn collect_path_owner_ranges_from_ma(
     ranges
 }
 
-fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, usize) {
-    let mut command = String::from_utf8_lossy(lines[start]).to_string();
+fn collect_top_level_command_block(
+    lines: &[&[u8]],
+    start: usize,
+    encoding: SourceEncoding,
+) -> (String, usize) {
+    let mut command = decode_owner_command_line(lines[start], encoding);
     let mut next = start + 1;
 
     while !command_has_terminating_semicolon(&command) && next < lines.len() {
         if is_top_level_command(lines[next]) {
             break;
         }
-        command.push_str(&String::from_utf8_lossy(lines[next]));
+        command.push_str(&decode_owner_command_line(lines[next], encoding));
         next += 1;
     }
 
     (command, next)
+}
+
+fn decode_owner_command_line(bytes: &[u8], encoding: SourceEncoding) -> String {
+    maya_mel::parser::LightSourceView::Bytes { bytes, encoding }
+        .decode_slice(maya_mel::syntax::TextRange::new(
+            0.into(),
+            (bytes.len() as u32).into(),
+        ))
+        .text
+        .into_owned()
 }
 
 pub fn file_command_without_callback(

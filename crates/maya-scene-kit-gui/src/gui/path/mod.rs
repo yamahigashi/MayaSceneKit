@@ -1530,6 +1530,14 @@ impl GuiShell {
         let base_report = self.rows[row_index].paths_report.clone();
         let path_overrides = self.rows[row_index].path_overrides.clone();
         let clean_source = self.rows[row_index].clean_source_for_targets(&clean_targets);
+        let named_targets_only = clean_targets.iter().all(|target| {
+            matches!(
+                target,
+                ExecutionCleanTarget::ScriptNode { .. }
+                    | ExecutionCleanTarget::PluginRequire { .. }
+            )
+        });
+        let reanalysis_required = self.i18n().text("banner.edit_requires_reanalysis");
         let clean_targets = clean_targets.into_iter().collect::<Vec<_>>();
         let path_owner_delete_targets = path_owner_delete_targets.into_iter().collect::<Vec<_>>();
         let materialize_options = self.scene_materialize_options(OperationMode::Forensic);
@@ -1546,35 +1554,51 @@ impl GuiShell {
             window,
             cx,
             move |path| {
-                let clean_source = clean_source?;
+                let stale = |reason: &str| format!("{reanalysis_required}: {reason}");
+                let mut clean_source = clean_source.map_err(|reason| stale(&reason))?;
                 let (observation, original_bytes) = Loader::new(load_options.clone())
                     .observe_path_with_bytes(&path)
                     .map_err(|err| err.to_string())?;
                 let base_report = match &base_report {
+                    _ if named_targets_only
+                        && path_overrides.is_empty()
+                        && path_owner_delete_targets.is_empty() =>
+                    {
+                        observation
+                            .scene_paths_report(PathKind::All)
+                            .map_err(|err| err.to_string())?
+                    }
                     Some(report) => report.clone(),
                     None if path_overrides.is_empty() => observation
                         .scene_paths_report(PathKind::All)
                         .map_err(|err| err.to_string())?,
-                    None => return Err("missing original path report for scene edits".into()),
+                    None => return Err(stale("missing original path report for scene edits")),
                 };
                 let acquired_source = observation
                     .source_fingerprint()
                     .map_err(|err| err.to_string())?;
+                if named_targets_only && !clean_targets.is_empty() {
+                    clean_source = Some(acquired_source.clone());
+                }
                 let report_source = base_report
                     .source
                     .as_ref()
-                    .ok_or_else(|| "missing original path observation fingerprint".to_string())?;
+                    .ok_or_else(|| stale("missing original path observation fingerprint"))?;
                 if report_source != &acquired_source {
-                    return Err("path observation does not match the original scene bytes".into());
+                    return Err(stale(
+                        "path observation does not match the original scene bytes",
+                    ));
                 }
                 if !clean_targets.is_empty() && clean_source.is_none() {
-                    return Err("missing original clean observation fingerprint".into());
+                    return Err(stale("missing original clean observation fingerprint"));
                 }
                 if clean_source
                     .as_ref()
                     .is_some_and(|source| source != &acquired_source)
                 {
-                    return Err("clean observation does not match the original scene bytes".into());
+                    return Err(stale(
+                        "clean observation does not match the original scene bytes",
+                    ));
                 }
                 let replace_overrides =
                     replace_overrides_for_row_from_map(&base_report, &path_overrides)?;

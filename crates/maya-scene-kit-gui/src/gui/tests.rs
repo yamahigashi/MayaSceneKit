@@ -413,6 +413,182 @@ fn pending_binary_clean_keeps_its_source_after_reanalysis(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let bytes = b"//Maya ASCII 2026 scene\ncreateNode transform -n \"Example\";\n";
+    fs::write(&path, b"//Maya ASCII 2026 scene\n").unwrap();
+    let mut row = observed_test_row(1, &path);
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: path.clone(),
+        suggested_output_path: path.clone(),
+        operation_mode: OperationMode::Forensic,
+        scene_format: SceneFormat::Ma,
+        validation_state: ValidationState::CopiedUnvalidated,
+        bytes: bytes.to_vec(),
+    });
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.state.max_bytes = Some(1);
+        shell.replace_rows(vec![row]);
+        shell.spawn_save_jobs(vec![0], window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+        assert!(shell.rows[0].paths_report.is_none());
+        assert!(shell.rows[0].analyzed_audit_mode.is_none());
+        assert!(
+            shell
+                .state
+                .job_history
+                .iter()
+                .any(|entry| !entry.failed && entry.summary.contains("observation"))
+        );
+    });
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mut row = observed_test_row(2, &path);
+    row.staged_paths_report = row.paths_report.clone();
+    row.staged_source_bytes = Some(bytes.to_vec());
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: path.clone(),
+        suggested_output_path: path.clone(),
+        operation_mode: OperationMode::Forensic,
+        scene_format: SceneFormat::Ma,
+        validation_state: ValidationState::CopiedUnvalidated,
+        bytes: bytes.to_vec(),
+    });
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![row]);
+        shell.spawn_save_jobs(vec![0], window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+        assert!(
+            shell.rows[0].paths_report.is_some(),
+            "reuse the staged observation despite the reduced parse budget"
+        );
+    });
+}
+
+#[gpui::test]
+fn save_then_clean_named_script_without_auto_analysis(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let source = "//Maya ASCII 2026 scene\nrequires \"ExamplePlugin\" \"1.0\";\ncreateNode script -n \"ExampleScript\";\nsetAttr \".b\" -type \"string\" \"print(1);\";\n";
+    fs::write(&path, source).unwrap();
+    let mut row = observed_test_row(1, &path);
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: path.clone(),
+        suggested_output_path: path.clone(),
+        operation_mode: OperationMode::Forensic,
+        scene_format: SceneFormat::Ma,
+        validation_state: ValidationState::CopiedUnvalidated,
+        bytes: format!("{source}// Example\n").into_bytes(),
+    });
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.replace_rows(vec![row]);
+        shell.spawn_save_jobs(vec![0], window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([
+                ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleScript".into(),
+                },
+                ExecutionCleanTarget::PluginRequire {
+                    rendered: "requires \"ExamplePlugin\" \"1.0\";".into(),
+                },
+            ]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        let bytes = &shell.rows[0].dirty_artifact.as_ref().unwrap().bytes;
+        assert!(!String::from_utf8_lossy(bytes).contains("ExampleScript"));
+        assert!(!String::from_utf8_lossy(bytes).contains("ExamplePlugin"));
+    });
+}
+
+#[gpui::test]
+fn undo_after_external_change_requires_reanalysis(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    fs::write(
+        &path,
+        "//Maya ASCII 2026 scene\npython(\"print('Example')\");\n",
+    )
+    .unwrap();
+    let old = observed_test_row(1, &path);
+    let target = old
+        .audit_report
+        .as_ref()
+        .unwrap()
+        .surfaces
+        .iter()
+        .find_map(|surface| clean_target_for_execution_origin(&surface.origin))
+        .unwrap();
+    fs::write(
+        &path,
+        "//Maya ASCII 2026 scene\npython(\"print('Sample')\");\n",
+    )
+    .unwrap();
+    let current = observed_test_row(1, &path);
+    let entry = super::GuiEditHistoryEntry {
+        transitions: vec![super::RowEditTransition {
+            row_id: 1,
+            before: old.edit_state(),
+            after: current.edit_state(),
+        }],
+    };
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.replace_rows(vec![current]);
+        shell.apply_edit_history_entry(&entry, false, cx);
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([target]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        let banner = super::helpers::render_banner_message(
+            &shell.i18n(),
+            shell.status_message.as_ref().unwrap(),
+        );
+        assert!(banner.contains("Re-analysis is required"), "{banner}");
+        assert!(shell.rows[0].dirty_artifact.is_none());
+    });
+}
+
+#[gpui::test]
 fn replace_save_refreshes_path_source_without_auto_analysis(cx: &mut TestAppContext) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
@@ -1391,6 +1567,7 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    observation_error: None,
                     saved_paths_report: None,
                     replace_changes: None,
                     replace_preview: None,
@@ -1491,7 +1668,8 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
-                    saved_paths_report: None,
+                    observation_error: None,
+                    saved_paths_report: shell.rows[0].staged_paths_report.clone(),
                     replace_changes: None,
                     replace_preview: None,
                     audit_file_state: None,
@@ -2011,6 +2189,7 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    observation_error: None,
                     saved_paths_report: None,
                     replace_changes: None,
                     replace_preview: None,
@@ -11250,6 +11429,7 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                observation_error: None,
                 saved_paths_report: None,
                 replace_changes: None,
                 replace_preview: None,
@@ -12126,7 +12306,7 @@ mod allowlist_tests {
             assert!(shell.rows[1].apply_edit_state(&edit_state).is_ok());
             assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             let audit_generation = shell.rows[1].audit_generation;
-            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { saved_paths_report: None, replace_changes: None, replace_preview: None,
+            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
                 output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
             }, None, window, cx);
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
@@ -12981,6 +13161,7 @@ fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                observation_error: None,
                 saved_paths_report: None,
                 replace_changes: None,
                 replace_preview: None,
@@ -13726,7 +13907,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.deliver_job_result_for_test(
             1,
             RowOperation::Save,
-            RowJobResult::Save { saved_paths_report: None, replace_changes: None, replace_preview: None,
+            RowJobResult::Save { observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: None,
             },
@@ -13739,7 +13920,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.apply_job_result(
             (1, save_job_id),
             RowOperation::Save,
-            RowJobResult::Save { saved_paths_report: None, replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
+            RowJobResult::Save { observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
             None, window, cx,
         );
         assert!(shell.rows[0].busy == Some((RowOperation::ToAscii, ascii_job_id)));
@@ -14143,8 +14324,8 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
         assert!(shell.rows[0].apply_edit_state(&state).is_ok());
         assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
         let preview = shell.rows[0].replace_preview.clone();
-        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save {
-                    saved_paths_report: None,
+        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save { observation_error: None,
+                    saved_paths_report: shell.rows[0].paths_report.clone(),
             replace_changes: Some(expected.clone()),
             replace_preview: preview,
             output_path: directory.path().join("Sample.ma"),

@@ -1587,6 +1587,17 @@ impl SceneRow {
         &self,
         targets: &BTreeSet<ExecutionCleanTarget>,
     ) -> Result<Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>, String> {
+        let targets = targets
+            .iter()
+            .filter(|target| {
+                !matches!(
+                    target,
+                    ExecutionCleanTarget::ScriptNode { .. }
+                        | ExecutionCleanTarget::PluginRequire { .. }
+                )
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if targets.is_empty() {
             return Ok(None);
         }
@@ -1754,6 +1765,7 @@ enum RowJobResult {
         artifact: StagedSceneArtifact,
     },
     Save {
+        observation_error: Option<String>,
         saved_paths_report: Option<ScenePathsReport>,
         replace_changes: Option<PathReplaceChanges>,
         replace_preview: Option<PathReplacePreview>,

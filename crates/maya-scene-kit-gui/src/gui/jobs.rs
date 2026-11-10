@@ -4,6 +4,18 @@ use super::*;
 
 const UI_CONFIGURATION_SCRIPT_NODE_NAME: &str = "uiConfigurationScriptNode";
 
+fn saved_job_summary(
+    changes: Option<&PathReplaceChanges>,
+    observation_error: Option<&str>,
+) -> String {
+    let mut summary = super::path::replace_skip_summary(changes)
+        .map_or_else(|| "saved".to_string(), |skips| format!("saved; {skips}"));
+    if let Some(error) = observation_error {
+        summary.push_str(&format!("; saved path observation failed: {error}"));
+    }
+    summary
+}
+
 impl GuiShell {
     pub(super) fn rebuild_row_id_index(&mut self) {
         self.row_id_to_index = self
@@ -738,14 +750,13 @@ impl GuiShell {
         let Some(index) = shell.accept_job_completion(job, operation, edit_sequence) else {
             if row_missing
                 && matches!(operation, RowOperation::Save)
-                && let RowJobResult::Save { output_path, replace_changes, .. } = result
+                && let RowJobResult::Save { output_path, replace_changes, observation_error, .. } = result
             {
                 shell.record_job(
                     operation_key(operation),
                     output_path.clone(),
                     Some(output_path),
-                    super::path::replace_skip_summary(replace_changes.as_ref())
-                        .map_or_else(|| "saved".to_string(), |summary| format!("saved; {summary}")),
+                    saved_job_summary(replace_changes.as_ref(), observation_error.as_deref()),
                     false,
                 );
             }
@@ -946,6 +957,7 @@ impl GuiShell {
                 }
             }
             RowJobResult::Save {
+                observation_error,
                 saved_paths_report,
                 output_path,
                 audit_file_state,
@@ -978,9 +990,10 @@ impl GuiShell {
                         shell.rows[index].dump_report = Some(report);
                     }
                 }
-                if let Some(report) = saved_paths_report {
-                    shell.rows[index].paths_report = Some(report);
+                if saved_paths_report.is_none() {
+                    shell.rows[index].mark_analysis_stale();
                 }
+                shell.rows[index].paths_report = saved_paths_report;
                 shell.rows[index].dirty_artifact = None;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].dirty_kind = None;
@@ -1008,8 +1021,7 @@ impl GuiShell {
                     operation_key(operation),
                     shell.rows[index].path.clone(),
                     Some(output_path),
-                    super::path::replace_skip_summary(shell.rows[index].replace_changes.as_ref())
-                        .map_or_else(|| "saved".to_string(), |summary| format!("saved; {summary}")),
+                    saved_job_summary(shell.rows[index].replace_changes.as_ref(), observation_error.as_deref()),
                     false,
                 );
                 if shell.rows[index].selected {
@@ -1521,6 +1533,12 @@ impl GuiShell {
                     let replace_preview = row.replace_preview.clone();
                     let artifact_current = row.replace_artifact_is_current();
                     let report = row.paths_report.clone();
+                    let staged_paths_report = row.staged_paths_report.as_ref().filter(|_| {
+                        dirty_kind == Some(DirtyKind::SceneEdits)
+                            && artifact.as_ref().is_some_and(|artifact| {
+                                row.staged_source_bytes.as_deref() == Some(artifact.bytes.as_slice())
+                            })
+                    }).cloned();
                     let overrides = replace_overrides_for_row(row).unwrap_or_default();
                     let options = shell.scene_materialize_options(OperationMode::Forensic);
                     shell.spawn_row_job(
@@ -1553,19 +1571,28 @@ impl GuiShell {
                             .ok_or_else(|| "missing staged artifact for save".to_string())?,
                         None => return Err("missing dirty kind for save".to_string()),
                     };
-                    let saved_paths_report = if dirty_kind == Some(DirtyKind::ToAscii) {
-                        None
-                    } else {
-                        Some(Loader::new(options.load_options().clone())
-                            .observe_bytes(&path, artifact.scene_format,
-                                maya_scene_kit_observe::scene::ValidationState::CopiedUnvalidated,
-                                artifact.bytes.clone())
-                            .and_then(|observation| observation.scene_paths_report(PathKind::All))
-                            .map_err(|error| error.to_string())?)
-                    };
                     save_staged_artifact_with_backup(&artifact, &path, backup_location)
                         .map_err(|err| err.to_string())?;
+                    let saved_paths = if dirty_kind == Some(DirtyKind::ToAscii) {
+                        Ok(None)
+                    } else if let Some(mut report) = staged_paths_report {
+                        report.scene_path = path.clone();
+                        Ok(Some(report))
+                    } else {
+                        Loader::new(options.load_options().clone())
+                            .observe_bytes(&path, artifact.scene_format,
+                                maya_scene_kit_observe::scene::ValidationState::CopiedUnvalidated,
+                                artifact.bytes)
+                            .and_then(|observation| observation.scene_paths_report(PathKind::All))
+                            .map(Some)
+                            .map_err(|error| error.to_string())
+                    };
+                    let (saved_paths_report, observation_error) = match saved_paths {
+                        Ok(report) => (report, None),
+                        Err(error) => (None, Some(error)),
+                    };
                     Ok(RowJobResult::Save {
+                        observation_error,
                         saved_paths_report,
                         replace_changes,
                         replace_preview,

@@ -1009,3 +1009,33 @@ fn plugin_and_path_records_preserve_payloads_in_every_order() {
         }
     }
 }
+
+#[test]
+fn owner_deletion_matches_observed_cp932_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let text = "//Maya ASCII 2026 scene\n//Codeset: 932\ncreateNode file -n \"Exampleサンプル\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\n";
+    let name = b"Example\x83\x54\x83\x93\x83\x76\x83\x8b";
+    let bytes = [
+        b"//Maya ASCII 2026 scene\n//Codeset: 932\ncreateNode file -n \"".as_slice(),
+        name,
+        b"\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\n",
+    ]
+    .concat();
+    std::fs::write(&path, &bytes).unwrap();
+    let (report, _) = observation(&path);
+    let entry = &report.entries[0];
+    assert_eq!(entry.node_name, "Exampleサンプル");
+    let target = PathOwnerDeleteTarget {
+        node_type: entry.node_type.clone(),
+        node_name: entry.node_name.clone(),
+    };
+    let plan = SceneEditPlan {
+        report,
+        clean_source: None,
+        intents: vec![SceneEditIntent::DeleteOwner(target)],
+    };
+    let staged = stage_scene_edit_plan(&plan, &bytes).unwrap();
+    let expected = text.replace("createNode file -n \"Exampleサンプル\";\n", "");
+    assert_eq!(staged.artifact.bytes, expected.as_bytes());
+}
