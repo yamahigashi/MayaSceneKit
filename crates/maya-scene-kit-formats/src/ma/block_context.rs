@@ -1,4 +1,23 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
+
+use maya_mel::{parser::LightSourceView, syntax::TextRange};
+
+use super::commands::unquoted_range_value;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContextWord {
+    Source(TextRange),
+    Owned(String),
+}
+
+impl ContextWord {
+    pub(crate) fn value<'a>(&'a self, source: LightSourceView<'a>) -> Cow<'a, str> {
+        match self {
+            Self::Source(range) => unquoted_range_value(source.decode_slice(*range).text),
+            Self::Owned(value) => Cow::Borrowed(value),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectedTarget {
@@ -49,8 +68,8 @@ pub(crate) enum BlockContext {
     #[default]
     None,
     Node {
-        node_type: String,
-        name: String,
+        node_type: ContextWord,
+        name: ContextWord,
     },
     Selected {
         targets: Vec<SelectedTarget>,
@@ -58,13 +77,20 @@ pub(crate) enum BlockContext {
 }
 
 impl BlockContext {
-    pub(crate) fn binding(&self, execution_type: impl Fn(&str) -> bool) -> Option<(&str, &str)> {
+    pub(crate) fn binding<'a>(
+        &'a self,
+        source: LightSourceView<'a>,
+        execution_type: impl Fn(&str) -> bool,
+    ) -> Option<(Cow<'a, str>, Cow<'a, str>)> {
         match self {
             Self::None => None,
-            Self::Node { node_type, name } => Some((node_type, name)),
+            Self::Node { node_type, name } => Some((node_type.value(source), name.value(source))),
             Self::Selected { targets } => {
                 if let [target] = targets.as_slice() {
-                    return Some((target.node_type.as_deref().unwrap_or(""), &target.name));
+                    return Some((
+                        Cow::Borrowed(target.node_type.as_deref().unwrap_or("")),
+                        Cow::Borrowed(&target.name),
+                    ));
                 }
                 let mut execution = None;
                 for target in targets {
@@ -73,7 +99,10 @@ impl BlockContext {
                             if execution.is_some() {
                                 return None;
                             }
-                            execution = Some((node_type, target.name.as_str()));
+                            execution = Some((
+                                Cow::Borrowed(node_type),
+                                Cow::Borrowed(target.name.as_str()),
+                            ));
                         }
                         None if !target.is_default => return None,
                         _ => {}
@@ -89,7 +118,6 @@ pub(crate) enum BlockCommand {
     Preserve,
     Create {
         context: BlockContext,
-        named: bool,
         skip_select: bool,
     },
     Select {
@@ -106,7 +134,7 @@ pub(crate) struct BlockTracker {
     pub(crate) context: BlockContext,
     pub(crate) reported_unbound: bool,
     pub(crate) reported_selected: bool,
-    node_types: Option<HashMap<String, String>>,
+    node_types: Option<HashMap<String, Option<ContextWord>>>,
 }
 
 impl Default for BlockTracker {
@@ -133,7 +161,22 @@ impl BlockTracker {
         }
     }
 
-    pub(crate) fn on_command(&mut self, command: BlockCommand) -> bool {
+    pub(crate) fn invalidate_name(&mut self, name: &str) {
+        if let Some(types) = &mut self.node_types {
+            let name = name.trim_start_matches(':');
+            if let Some(node_type) = types.get_mut(name) {
+                *node_type = None;
+            } else {
+                types.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    pub(crate) fn on_command(
+        &mut self,
+        command: BlockCommand,
+        source: LightSourceView<'_>,
+    ) -> bool {
         let context = match command {
             BlockCommand::Preserve => return false,
             BlockCommand::Rename { old, new } => {
@@ -145,8 +188,10 @@ impl BlockTracker {
                     }
                 }
                 match &mut self.context {
-                    BlockContext::Node { name, .. } if name.trim_start_matches(':') == old => {
-                        *name = new.to_string();
+                    BlockContext::Node { name, .. }
+                        if name.value(source).trim_start_matches(':') == old =>
+                    {
+                        *name = ContextWord::Owned(new.to_string());
                         return true;
                     }
                     BlockContext::Selected { targets } => {
@@ -164,14 +209,18 @@ impl BlockTracker {
             }
             BlockCommand::Create {
                 context,
-                named,
                 skip_select,
             } => {
-                if named {
-                    if let (Some(types), BlockContext::Node { node_type, name }) =
-                        (&mut self.node_types, &context)
-                    {
-                        types.insert(name.trim_start_matches(':').to_string(), node_type.clone());
+                if let (Some(types), BlockContext::Node { node_type, name }) =
+                    (&mut self.node_types, &context)
+                {
+                    let decoded_name = name.value(source);
+                    let name = decoded_name.trim_start_matches(':');
+                    let value = Some(node_type.clone());
+                    if let Some(node_type) = types.get_mut(name) {
+                        *node_type = value;
+                    } else {
+                        types.insert(name.to_string(), value);
                     }
                 }
                 if skip_select {
@@ -187,11 +236,12 @@ impl BlockTracker {
                 if !targets.is_empty() && accumulate {
                     match &self.context {
                         BlockContext::Node { node_type, name } => {
-                            let name = name.trim_start_matches(':');
+                            let decoded_name = name.value(source);
+                            let name = decoded_name.trim_start_matches(':');
                             if !targets.iter().any(|target| target.name == name) {
                                 targets.push(SelectedTarget {
                                     name: name.to_string(),
-                                    node_type: Some(node_type.clone()),
+                                    node_type: Some(node_type.value(source).into_owned()),
                                     is_default: false,
                                 });
                             }
@@ -212,7 +262,9 @@ impl BlockTracker {
                         .as_ref()
                         .and_then(|types| types.get(&target.name))
                     {
-                        target.node_type = Some(node_type.clone());
+                        target.node_type = node_type
+                            .as_ref()
+                            .map(|word| word.value(source).into_owned());
                         target.is_default = false;
                     }
                 }

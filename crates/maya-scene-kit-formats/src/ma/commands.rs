@@ -1,11 +1,13 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
 
 use maya_mel::{
     maya::MayaCommandRegistry,
     sema::command_schema::{CommandRegistry, FlagArity},
 };
 
-use crate::ma::error::MaParseError;
+use crate::ma::{error::MaParseError, lexer::unescape_ma_string_literal};
+
+pub(crate) static MAYA_COMMAND_REGISTRY: MayaCommandRegistry = MayaCommandRegistry::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
@@ -114,11 +116,45 @@ pub fn bare_token(token: &Token) -> Option<&str> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CreateNodeFlag {
+    pub(crate) name: &'static str,
+    pub(crate) arity: usize,
+    pub(crate) allows_multiple: bool,
+}
+
+pub(crate) fn create_node_flag(flag: &str) -> Option<CreateNodeFlag> {
+    static FLAGS: LazyLock<HashMap<&'static str, CreateNodeFlag>> = LazyLock::new(|| {
+        let mut flags = HashMap::new();
+        if let Some(schema) = MAYA_COMMAND_REGISTRY.lookup("createNode") {
+            for flag in schema.flags.iter() {
+                let arity = match flag.arity_by_mode.create {
+                    FlagArity::None => 0,
+                    FlagArity::Exact(count) => usize::from(count),
+                    FlagArity::Range { .. } => continue,
+                };
+                let metadata = CreateNodeFlag {
+                    name: flag.long_name.as_ref(),
+                    arity,
+                    allows_multiple: flag.allows_multiple,
+                };
+                flags.insert(flag.long_name.as_ref(), metadata);
+                if let Some(short) = &flag.short_name {
+                    flags.insert(short.as_ref(), metadata);
+                }
+            }
+        }
+        flags
+    });
+    FLAGS.get(flag.strip_prefix('-')?).copied()
+}
+
 pub(crate) fn setattr_flag_arity(flag: &str) -> Option<usize> {
     static FLAGS: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
-        let registry = MayaCommandRegistry::new();
-        let schema = registry.lookup("setAttr").expect("built-in setAttr schema");
         let mut flags = HashMap::new();
+        let Some(schema) = MAYA_COMMAND_REGISTRY.lookup("setAttr") else {
+            return flags;
+        };
         for flag in schema.flags.iter() {
             let arity = match flag.arity_by_mode.create {
                 FlagArity::None => 0,
@@ -133,6 +169,26 @@ pub(crate) fn setattr_flag_arity(flag: &str) -> Option<usize> {
         flags
     });
     FLAGS.get(flag.trim_start_matches('-')).copied()
+}
+
+pub(crate) fn unquoted_range_value(text: Cow<'_, str>) -> Cow<'_, str> {
+    match text {
+        Cow::Borrowed(text) => match string_literal_contents(text) {
+            Some(contents) if contents.contains('\\') => {
+                Cow::Owned(unescape_ma_string_literal(contents))
+            }
+            Some(contents) => Cow::Borrowed(contents),
+            None => Cow::Borrowed(text),
+        },
+        Cow::Owned(text) => match string_literal_contents(&text) {
+            Some(contents) => Cow::Owned(unescape_ma_string_literal(contents)),
+            None => Cow::Owned(text),
+        },
+    }
+}
+
+pub(crate) fn string_literal_contents(text: &str) -> Option<&str> {
+    text.strip_prefix('"')?.strip_suffix('"')
 }
 
 #[cfg(test)]
