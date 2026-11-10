@@ -4,20 +4,10 @@ pub(super) struct MelSinkWordHits {
 }
 
 impl MelSinkWordHits {
-    const PYTHON: u8 = 1 << 0;
-    const EVAL_DEFERRED: u8 = 1 << 1;
-    const EVAL: u8 = 1 << 2;
-    const SCRIPT_JOB: u8 = 1 << 3;
-    const COMMAND_PORT: u8 = 1 << 4;
-    const ALL: u8 =
-        Self::PYTHON | Self::EVAL_DEFERRED | Self::EVAL | Self::SCRIPT_JOB | Self::COMMAND_PORT;
+    const COMMAND_PORT: u8 = 1;
 
     pub(super) fn insert(&mut self, sink_name: &str) {
         self.bits |= match sink_name {
-            "python" => Self::PYTHON,
-            "evalDeferred" => Self::EVAL_DEFERRED,
-            "eval" => Self::EVAL,
-            "scriptJob" => Self::SCRIPT_JOB,
             "commandPort" => Self::COMMAND_PORT,
             _ => 0,
         };
@@ -25,10 +15,6 @@ impl MelSinkWordHits {
 
     pub(super) fn contains(self, sink_name: &str) -> bool {
         let bit = match sink_name {
-            "python" => Self::PYTHON,
-            "evalDeferred" => Self::EVAL_DEFERRED,
-            "eval" => Self::EVAL,
-            "scriptJob" => Self::SCRIPT_JOB,
             "commandPort" => Self::COMMAND_PORT,
             _ => 0,
         };
@@ -36,7 +22,7 @@ impl MelSinkWordHits {
     }
 
     fn is_complete(self) -> bool {
-        self.bits == Self::ALL
+        self.bits == Self::COMMAND_PORT
     }
 }
 
@@ -176,15 +162,7 @@ fn scan_mel_text(text: &str) -> MelTextScanResult {
             idx += 1;
         }
         let word = &text[start..idx];
-        if word.eq_ignore_ascii_case("python") {
-            result.sink_word_hits.insert("python");
-        } else if word.eq_ignore_ascii_case("evalDeferred") {
-            result.sink_word_hits.insert("evalDeferred");
-        } else if word.eq_ignore_ascii_case("eval") {
-            result.sink_word_hits.insert("eval");
-        } else if word.eq_ignore_ascii_case("scriptJob") {
-            result.sink_word_hits.insert("scriptJob");
-        } else if word.eq_ignore_ascii_case("commandPort") {
+        if word.eq_ignore_ascii_case("commandPort") {
             result.sink_word_hits.insert("commandPort");
         }
 

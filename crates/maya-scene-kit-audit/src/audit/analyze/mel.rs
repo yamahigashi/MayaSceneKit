@@ -5,7 +5,8 @@ use std::{
 };
 
 use maya_scene_kit_observe::scene::execution::{
-    MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind,
+    MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind, MelSurfaceNormalizedCommand,
+    MelSurfaceNormalizedItem,
 };
 
 use super::{
@@ -44,6 +45,7 @@ pub(super) fn analyze_mel_surface_impl(
         .unwrap_or_default();
 
     if let Some(mel) = &surface.mel {
+        analyze_dangerous_commands(surface_index, surface, mel, &mut analysis);
         let callback_analysis = analyze_callback_flags(
             surface_index,
             surface,
@@ -175,6 +177,228 @@ pub(super) fn analyze_mel_surface_impl(
     }
 
     analysis
+}
+
+fn analyze_dangerous_commands(
+    surface_index: usize,
+    surface: &AnalysisSurface,
+    facts: &MelSurfaceFacts,
+    analysis: &mut SurfaceAnalysis,
+) {
+    let mut seen = HashSet::new();
+    for call in &facts.calls {
+        let name = call.name.to_ascii_lowercase();
+        let (code, sink, severity) = match name.as_str() {
+            "system" => ("mel_system", AuditSinkKind::MelSystem, AuditSeverity::High),
+            "popen" => ("mel_popen", AuditSinkKind::MelPopen, AuditSeverity::High),
+            "fopen" => (
+                "mel_file_open",
+                AuditSinkKind::MelFileOpen,
+                AuditSeverity::Critical,
+            ),
+            "fprint" | "fwrite" => (
+                "mel_file_write",
+                AuditSinkKind::MelFileWrite,
+                AuditSeverity::Critical,
+            ),
+            "evalecho" => (
+                "mel_evalecho",
+                AuditSinkKind::MelEvalEcho,
+                AuditSeverity::Critical,
+            ),
+            "callpython" => (
+                "mel_callpython",
+                AuditSinkKind::MelCallPython,
+                AuditSeverity::Critical,
+            ),
+            "source" => ("mel_source", AuditSinkKind::MelSource, AuditSeverity::High),
+            "loadplugin" => (
+                "mel_loadplugin",
+                AuditSinkKind::MelLoadPlugin,
+                AuditSeverity::High,
+            ),
+            "sysfile" => (
+                "mel_sysfile",
+                AuditSinkKind::MelSysFile,
+                AuditSeverity::Critical,
+            ),
+            _ => continue,
+        };
+        if !seen.insert((call.span_start, call.span_end, name.clone())) {
+            continue;
+        }
+        if name == "fopen" || name == "sysfile" {
+            let command = facts.normalized_commands.iter().find(|command| {
+                command.span_start == call.span_start
+                    && command.schema_name.eq_ignore_ascii_case(&name)
+            });
+            let args = command
+                .map(normalized_arguments)
+                .unwrap_or_else(|| function_arguments(surface, call));
+            if name == "fopen" && matches!(args.get(1), Some(Some("r" | "rb"))) {
+                continue;
+            }
+            if name == "sysfile" && !sysfile_may_modify(command, &args, surface.text.as_ref()) {
+                continue;
+            }
+        }
+        analysis.findings.push(build_finding(
+            surface_index,
+            surface,
+            code,
+            severity_for_trigger(severity, surface.origin.trigger),
+            sink,
+            None,
+            "MEL capability detected",
+            vec![AuditEvidence::KeyValue {
+                key: AuditEvidenceKey::Command,
+                value: call.name.to_string(),
+            }],
+            surface
+                .text
+                .get(call.span_start..call.span_end)
+                .map(super::builders::snippet),
+        ));
+    }
+}
+
+fn normalized_arguments(command: &MelSurfaceNormalizedCommand) -> Vec<Option<&str>> {
+    command
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            MelSurfaceNormalizedItem::Positional(arg) => Some(arg.literal.as_deref()),
+            MelSurfaceNormalizedItem::Flag(_) => None,
+        })
+        .collect()
+}
+
+fn sysfile_may_modify(
+    command: Option<&MelSurfaceNormalizedCommand>,
+    args: &[Option<&str>],
+    source: &str,
+) -> bool {
+    let mut flags = Vec::new();
+    if let Some(command) = command {
+        for item in &command.items {
+            if let MelSurfaceNormalizedItem::Flag(flag) = item {
+                flags.push(Some(flag.preferred_name(source).trim_start_matches('-')));
+            }
+        }
+    } else {
+        for arg in args {
+            match arg {
+                Some(value) if value.starts_with('-') => {
+                    flags.push(Some(value.trim_start_matches('-')))
+                }
+                None => flags.push(None),
+                _ => {}
+            }
+        }
+    }
+    if flags.is_empty() {
+        return true;
+    }
+    flags
+        .into_iter()
+        .any(|flag| !matches!(flag, Some("exists" | "ex" | "query" | "q")))
+}
+
+// Function-call facts expose only the first argument. Inspect remaining literal
+// arguments within the proven call span; expressions stay unresolved.
+fn function_arguments<'a>(
+    surface: &'a AnalysisSurface,
+    call: &MelSurfaceCall,
+) -> Vec<Option<&'a str>> {
+    let Some(text) = surface.text.get(call.span_start..call.span_end) else {
+        return Vec::new();
+    };
+    let Some(tail) = text.get(call.name.len()..) else {
+        return Vec::new();
+    };
+    let tail = trim_mel_trivia(tail);
+    if !tail.starts_with('(') {
+        return Vec::new();
+    }
+    let open = text.len() - tail.len();
+    let bytes = text.as_bytes();
+    let mut args = Vec::new();
+    let mut start = open + 1;
+    let mut index = start;
+    let mut depth = 0usize;
+    let mut quote = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+        } else if bytes[index..].starts_with(b"//") {
+            index += bytes[index..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .unwrap_or(bytes.len() - index);
+            continue;
+        } else if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            while index + 1 < bytes.len() && !bytes[index..].starts_with(b"*/") {
+                index += 1;
+            }
+            index += 2;
+            continue;
+        } else if matches!(byte, b'(' | b'[' | b'{') {
+            depth += 1;
+        } else if matches!(byte, b')' | b']' | b'}') {
+            if depth == 0 {
+                args.push(plain_literal(&text[start..index]));
+                break;
+            }
+            depth -= 1;
+        } else if byte == b',' && depth == 0 {
+            args.push(plain_literal(&text[start..index]));
+            start = index + 1;
+        }
+        index += 1;
+    }
+    args
+}
+
+fn trim_mel_trivia(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        if text.starts_with("//") {
+            text = text.find('\n').map_or("", |end| &text[end + 1..]);
+        } else if let Some(comment) = text.strip_prefix("/*") {
+            let Some(end) = comment.find("*/") else {
+                return text;
+            };
+            text = &comment[end + 2..];
+        } else {
+            return text;
+        }
+    }
+}
+
+fn plain_literal(text: &str) -> Option<&str> {
+    let text = trim_mel_trivia(text);
+    let quote = *text.as_bytes().first()?;
+    if !matches!(quote, b'"' | b'\'') {
+        return None;
+    }
+    let end = text[1..]
+        .bytes()
+        .position(|byte| byte == quote || byte == b'\\')?
+        + 1;
+    if text.as_bytes()[end] != quote || !trim_mel_trivia(&text[end + 1..]).is_empty() {
+        return None;
+    }
+    Some(&text[1..end])
 }
 
 fn mel_exec_finding(

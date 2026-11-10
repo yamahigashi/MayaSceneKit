@@ -284,7 +284,13 @@ fn source_dependencies_are_reported_without_loading_files() {
         dependency.origin.as_ref().expect("origin").surface_kind,
         ExecutionSurfaceKind::RawChunkText
     );
-    assert_eq!(report.disposition, AuditDisposition::Review);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.code.as_str() == "mel_source")
+    );
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
 }
 
 #[test]

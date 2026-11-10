@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- MEL audit now emits mel_system, mel_popen, mel_file_open, mel_file_write,
+  mel_evalecho, mel_callpython, mel_source, mel_loadplugin, and mel_sysfile
+  finding codes in JSON for dangerous command and function calls. Read-only
+  fopen modes and query-only sysFile calls are excluded. Existing allowlist
+  entries for other finding codes do not cover these new codes.
+
 - Breaking: audit now returns exit code 20 for an unreadable scene passed alone
   or in a directory, including runs where every scene fails to load. JSON mode
   emits the graph traversal issues and summary; text mode uses the same exit

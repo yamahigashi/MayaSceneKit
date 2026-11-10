@@ -14,16 +14,11 @@ use crate::scene::{
 };
 
 #[test]
-fn sink_word_scan_tracks_whole_word_hits_without_overlap() {
-    let hits = scan_mel_sink_word_hits(
-        "python(\"ok\"); evalDeferred(\"later\"); reevaluateNode; scriptJob -e \"x\"; commandPort -n \"y\";",
+fn sink_word_scan_tracks_whole_command_port_word() {
+    assert!(
+        !scan_mel_sink_word_hits("ExamplecommandPort; commandPortExample;").contains("commandPort")
     );
-
-    assert!(hits.contains("python"));
-    assert!(hits.contains("evalDeferred"));
-    assert!(!hits.contains("eval"));
-    assert!(hits.contains("scriptJob"));
-    assert!(hits.contains("commandPort"));
+    assert!(scan_mel_sink_word_hits("commandPort -n \"Example\";").contains("commandPort"));
 }
 
 #[test]
@@ -752,4 +747,343 @@ fn repeated_literal_bodies_share_text_and_keep_positions() {
             );
         }
     }
+}
+
+fn dangerous_command_analysis(text: &str, trigger: ExecutionTrigger) -> super::SurfaceAnalysis {
+    let surface = AnalysisSurface {
+        root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
+        text: Arc::from(text),
+        preview: text.into(),
+        origin: ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            ..ExecutionOrigin::without_chunk_address()
+        },
+        derivation: AuditSurfaceDerivation::Observed,
+        mel: Some(Arc::new(collect_mel_surface_facts(text))),
+    };
+    analyze_mel_surface(0, &surface, &mut std::collections::HashMap::new())
+}
+
+macro_rules! dangerous_command_test {
+    ($name:ident, $text:expr, $code:literal, $severity:ident) => {
+        #[test]
+        fn $name() {
+            use crate::scene::AuditSeverity;
+            for trigger in [ExecutionTrigger::Manual, ExecutionTrigger::FileOpen] {
+                let analysis = dangerous_command_analysis($text, trigger);
+                let findings = analysis
+                    .findings
+                    .iter()
+                    .filter(|f| f.code.as_str() == $code)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    findings.len(),
+                    1,
+                    "{:#?}\n{:#?}",
+                    analysis.findings,
+                    collect_mel_surface_facts($text)
+                );
+                let expected = if trigger == ExecutionTrigger::FileOpen {
+                    AuditSeverity::Critical
+                } else {
+                    AuditSeverity::$severity
+                };
+                assert_eq!(findings[0].severity, expected);
+                let json = serde_json::to_value(findings[0]).unwrap();
+                assert_eq!(json["code"], $code);
+                let repeated = dangerous_command_analysis(&format!("{} {}", $text, $text), trigger);
+                assert_eq!(
+                    repeated
+                        .findings
+                        .iter()
+                        .filter(|f| f.code.as_str() == $code)
+                        .count(),
+                    2
+                );
+                for inert in [
+                    format!("// {}", $text),
+                    format!("/* {} */", $text),
+                    format!(
+                        "string $Example = {};",
+                        serde_json::to_string($text).unwrap()
+                    ),
+                ] {
+                    let inert = dangerous_command_analysis(&inert, trigger);
+                    assert!(!inert.findings.iter().any(|f| f.code.as_str() == $code));
+                }
+            }
+        }
+    };
+}
+
+dangerous_command_test!(
+    system_command_finding,
+    r#"system "echo Example";"#,
+    "mel_system",
+    High
+);
+
+dangerous_command_test!(
+    system_function_finding,
+    r#"system("echo Example");"#,
+    "mel_system",
+    High
+);
+
+dangerous_command_test!(
+    popen_command_finding,
+    r#"popen "echo Example" "r";"#,
+    "mel_popen",
+    High
+);
+
+dangerous_command_test!(
+    popen_function_finding,
+    r#"popen("echo Example", "r");"#,
+    "mel_popen",
+    High
+);
+
+dangerous_command_test!(
+    fopen_command_finding,
+    r#"fopen "asset/example/file.txt" "w";"#,
+    "mel_file_open",
+    Critical
+);
+
+dangerous_command_test!(
+    fopen_function_finding,
+    r#"fopen("asset/example/file.txt", "w");"#,
+    "mel_file_open",
+    Critical
+);
+
+dangerous_command_test!(
+    fprint_command_finding,
+    r#"fprint $Example "Sample";"#,
+    "mel_file_write",
+    Critical
+);
+
+dangerous_command_test!(
+    fprint_function_finding,
+    r#"fprint($Example, "Sample");"#,
+    "mel_file_write",
+    Critical
+);
+
+dangerous_command_test!(
+    fwrite_command_finding,
+    r#"fwrite $Example "Sample";"#,
+    "mel_file_write",
+    Critical
+);
+
+dangerous_command_test!(
+    fwrite_function_finding,
+    r#"fwrite($Example, "Sample");"#,
+    "mel_file_write",
+    Critical
+);
+
+dangerous_command_test!(
+    evalecho_command_finding,
+    r#"evalEcho "print(1)";"#,
+    "mel_evalecho",
+    Critical
+);
+
+dangerous_command_test!(
+    evalecho_function_finding,
+    r#"evalEcho("print(1)");"#,
+    "mel_evalecho",
+    Critical
+);
+
+dangerous_command_test!(
+    callpython_command_finding,
+    r#"callPython "Example" "Sample";"#,
+    "mel_callpython",
+    Critical
+);
+
+dangerous_command_test!(
+    callpython_function_finding,
+    r#"callPython("Example", "Sample");"#,
+    "mel_callpython",
+    Critical
+);
+
+dangerous_command_test!(
+    source_command_finding,
+    r#"source "Example.mel";"#,
+    "mel_source",
+    High
+);
+
+dangerous_command_test!(
+    source_function_finding,
+    r#"source("Example.mel");"#,
+    "mel_source",
+    High
+);
+
+dangerous_command_test!(
+    loadplugin_command_finding,
+    r#"loadPlugin "ExamplePlugin";"#,
+    "mel_loadplugin",
+    High
+);
+
+dangerous_command_test!(
+    loadplugin_function_finding,
+    r#"loadPlugin("ExamplePlugin");"#,
+    "mel_loadplugin",
+    High
+);
+
+dangerous_command_test!(
+    sysfile_command_finding,
+    r#"sysFile -delete "asset/example/file.txt";"#,
+    "mel_sysfile",
+    Critical
+);
+
+dangerous_command_test!(
+    sysfile_function_finding,
+    r#"sysFile("asset/example/file.txt", "-delete");"#,
+    "mel_sysfile",
+    Critical
+);
+
+#[test]
+fn file_commands_distinguish_read_modes_and_independent_handles() {
+    for text in [
+        r#"int $Example = fopen("asset/example/file.txt", "w"); fprint $Sample "Example";"#,
+        r#"int $Example = fopen("asset/example/file.txt", "w"); fwrite($Sample, "Example");"#,
+    ] {
+        let analysis = dangerous_command_analysis(text, ExecutionTrigger::Manual);
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .any(|f| f.code.as_str() == "mel_file_open")
+        );
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .any(|f| f.code.as_str() == "mel_file_write")
+        );
+    }
+    for mode in [
+        "r", "rb", "w", "a", "r+", "wb", "ab", "w+", "a+", "$Example",
+    ] {
+        let argument = if mode.starts_with('$') {
+            mode.to_string()
+        } else {
+            format!("\"{mode}\"")
+        };
+        for text in [
+            format!("fopen \"asset/example/file.txt\" {argument};"),
+            format!("fopen(\"asset/example/file.txt\", {argument});"),
+        ] {
+            let analysis = dangerous_command_analysis(&text, ExecutionTrigger::Manual);
+            assert_eq!(
+                analysis
+                    .findings
+                    .iter()
+                    .any(|f| f.code.as_str() == "mel_file_open"),
+                !matches!(mode, "r" | "rb"),
+                "{text}"
+            );
+        }
+    }
+    for text in [
+        r#"fopen /* Example ( */ ("asset/example/file.txt", /* Sample */ "r" /* Example */);"#,
+        r#"fopen("asset/example/file.txt", "rb");"#,
+    ] {
+        assert!(
+            !dangerous_command_analysis(text, ExecutionTrigger::Manual)
+                .findings
+                .iter()
+                .any(|f| f.code.as_str() == "mel_file_open")
+        );
+    }
+}
+
+#[test]
+fn sysfile_mutations_and_queries_are_distinguished() {
+    for flag in [
+        "delete",
+        "del",
+        "rename",
+        "ren",
+        "move",
+        "mov",
+        "copy",
+        "cp",
+        "makeDir",
+        "md",
+        "removeEmptyDir",
+        "red",
+        "exists",
+        "ex",
+    ] {
+        for text in [
+            format!("sysFile -{flag} \"asset/example/file.txt\";"),
+            format!("sysFile(\"asset/example/file.txt\", \"-{flag}\");"),
+        ] {
+            let analysis = dangerous_command_analysis(&text, ExecutionTrigger::Manual);
+            assert_eq!(
+                analysis
+                    .findings
+                    .iter()
+                    .any(|f| f.code.as_str() == "mel_sysfile"),
+                !matches!(flag, "exists" | "ex"),
+                "{text}"
+            );
+        }
+    }
+    for text in [
+        r#"sysFile $Example;"#,
+        r#"sysFile("asset/example/file.txt", $Example);"#,
+    ] {
+        assert!(
+            dangerous_command_analysis(text, ExecutionTrigger::Manual)
+                .findings
+                .iter()
+                .any(|f| f.code.as_str() == "mel_sysfile")
+        );
+    }
+    for text in [
+        r#"sysFile("-query", "asset/example/file.txt");"#,
+        r#"sysFile -q "asset/example/file.txt";"#,
+    ] {
+        assert!(
+            !dangerous_command_analysis(text, ExecutionTrigger::Manual)
+                .findings
+                .iter()
+                .any(|f| f.code.as_str() == "mel_sysfile")
+        );
+    }
+}
+
+#[test]
+fn literal_eval_reaches_system_finding() {
+    let analysis = dangerous_command_analysis(
+        r#"eval("system(\"echo Example\")");"#,
+        ExecutionTrigger::Manual,
+    );
+    let body = &analysis.derived_surfaces[0].text;
+    assert!(
+        dangerous_command_analysis(body, ExecutionTrigger::Manual)
+            .findings
+            .iter()
+            .any(|f| f.code.as_str() == "mel_system")
+    );
 }

@@ -184,6 +184,20 @@ pub enum AuditFindingCode {
     MelEval,
     MelEvalDeferred,
     MelExec,
+    MelSystem,
+    MelPopen,
+    MelFileOpen,
+    MelFileWrite,
+    #[serde(rename = "mel_evalecho")]
+    MelEvalEcho,
+    #[serde(rename = "mel_callpython")]
+    MelCallPython,
+    MelSource,
+    #[serde(rename = "mel_loadplugin")]
+    MelLoadPlugin,
+    #[serde(rename = "mel_sysfile")]
+    MelSysFile,
+
     MelParseDiagnostics,
     MelPython,
     MelScriptjob,
@@ -221,6 +235,16 @@ impl AuditFindingCode {
             Self::MelEval => "mel_eval",
             Self::MelEvalDeferred => "mel_evaldeferred",
             Self::MelExec => "mel_exec",
+            Self::MelSystem => "mel_system",
+            Self::MelPopen => "mel_popen",
+            Self::MelFileOpen => "mel_file_open",
+            Self::MelFileWrite => "mel_file_write",
+            Self::MelEvalEcho => "mel_evalecho",
+            Self::MelCallPython => "mel_callpython",
+            Self::MelSource => "mel_source",
+            Self::MelLoadPlugin => "mel_loadplugin",
+            Self::MelSysFile => "mel_sysfile",
+
             Self::MelParseDiagnostics => "mel_parse_diagnostics",
             Self::MelPython => "mel_python",
             Self::MelScriptjob => "mel_scriptjob",
@@ -333,6 +357,16 @@ pub enum StaticAuditFindingDetail {
     EvalFixedLiteralBodyDetected,
     EvalDeferredFixedLiteralBodyDetected,
     MelExecCommandDetected,
+    MelSystemDetected,
+    MelPopenDetected,
+    MelFileOpenDetected,
+    MelFileWriteDetected,
+    MelEvalEchoDetected,
+    MelCallPythonDetected,
+    MelSourceDetected,
+    MelLoadPluginDetected,
+    MelSysFileDetected,
+
     MelParseDiagnosticsPresent,
     PythonBodyAssemblyMarkersDetected,
     PythonMayaFileDetected,
@@ -381,6 +415,16 @@ impl StaticAuditFindingDetail {
                 "evalDeferred fixed-literal body detected"
             }
             Self::MelExecCommandDetected => "MEL exec command detected",
+            Self::MelSystemDetected => "MEL system capability detected",
+            Self::MelPopenDetected => "MEL popen capability detected",
+            Self::MelFileOpenDetected => "MEL file open capability detected",
+            Self::MelFileWriteDetected => "MEL file write capability detected",
+            Self::MelEvalEchoDetected => "MEL evalEcho capability detected",
+            Self::MelCallPythonDetected => "MEL callPython capability detected",
+            Self::MelSourceDetected => "MEL source capability detected",
+            Self::MelLoadPluginDetected => "MEL loadPlugin capability detected",
+            Self::MelSysFileDetected => "MEL sysFile capability detected",
+
             Self::MelParseDiagnosticsPresent => {
                 "MEL parse diagnostics present; audit blocked on unresolved MEL semantics"
             }
@@ -782,6 +826,14 @@ pub enum AuditSinkKind {
     MelEvalDeferred,
     /// MEL `exec`.
     MelExec,
+    MelSystem,
+    MelPopen,
+    MelFileOpen,
+    MelFileWrite,
+    MelEvalEcho,
+    MelCallPython,
+    MelSysFile,
+
     /// MEL `scriptJob`.
     MelScriptJob,
     /// MEL `source`.
@@ -834,6 +886,14 @@ impl AuditSinkKind {
             Self::MelEval => "mel_eval",
             Self::MelEvalDeferred => "mel_eval_deferred",
             Self::MelExec => "mel_exec",
+            Self::MelSystem => "mel_system",
+            Self::MelPopen => "mel_popen",
+            Self::MelFileOpen => "mel_file_open",
+            Self::MelFileWrite => "mel_file_write",
+            Self::MelEvalEcho => "mel_eval_echo",
+            Self::MelCallPython => "mel_call_python",
+            Self::MelSysFile => "mel_sys_file",
+
             Self::MelScriptJob => "mel_script_job",
             Self::MelSource => "mel_source",
             Self::MelCommandPort => "mel_command_port",

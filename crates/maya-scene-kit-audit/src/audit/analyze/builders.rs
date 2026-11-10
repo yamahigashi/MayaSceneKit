@@ -125,6 +125,16 @@ fn audit_finding_code(finding_id: &str) -> AuditFindingCode {
         "mel_eval" => AuditFindingCode::MelEval,
         "mel_evaldeferred" => AuditFindingCode::MelEvalDeferred,
         "mel_exec" => AuditFindingCode::MelExec,
+        "mel_system" => AuditFindingCode::MelSystem,
+        "mel_popen" => AuditFindingCode::MelPopen,
+        "mel_file_open" => AuditFindingCode::MelFileOpen,
+        "mel_file_write" => AuditFindingCode::MelFileWrite,
+        "mel_evalecho" => AuditFindingCode::MelEvalEcho,
+        "mel_callpython" => AuditFindingCode::MelCallPython,
+        "mel_source" => AuditFindingCode::MelSource,
+        "mel_loadplugin" => AuditFindingCode::MelLoadPlugin,
+        "mel_sysfile" => AuditFindingCode::MelSysFile,
+
         "mel_parse_diagnostics" => AuditFindingCode::MelParseDiagnostics,
         "mel_python" => AuditFindingCode::MelPython,
         "mel_scriptjob" => AuditFindingCode::MelScriptjob,
@@ -183,6 +193,16 @@ fn audit_finding_detail(finding_id: &str, message: &str) -> AuditFindingDetail {
             Some(StaticAuditFindingDetail::DynamicOrAssembledEvalDeferredBodyDetected)
         }
         "mel_exec" => Some(StaticAuditFindingDetail::MelExecCommandDetected),
+        "mel_system" => Some(StaticAuditFindingDetail::MelSystemDetected),
+        "mel_popen" => Some(StaticAuditFindingDetail::MelPopenDetected),
+        "mel_file_open" => Some(StaticAuditFindingDetail::MelFileOpenDetected),
+        "mel_file_write" => Some(StaticAuditFindingDetail::MelFileWriteDetected),
+        "mel_evalecho" => Some(StaticAuditFindingDetail::MelEvalEchoDetected),
+        "mel_callpython" => Some(StaticAuditFindingDetail::MelCallPythonDetected),
+        "mel_source" => Some(StaticAuditFindingDetail::MelSourceDetected),
+        "mel_loadplugin" => Some(StaticAuditFindingDetail::MelLoadPluginDetected),
+        "mel_sysfile" => Some(StaticAuditFindingDetail::MelSysFileDetected),
+
         "mel_parse_diagnostics" => Some(StaticAuditFindingDetail::MelParseDiagnosticsPresent),
         "mel_python"
             if message == "MEL -> python(...) fixed-literal bridge is not auto-allowed" =>
