@@ -196,6 +196,9 @@ fn parse_section_chunks_with_layout(data: &[u8], layout: ChunkLayout) -> ParsedS
             break;
         }
         if next_cursor > data_len {
+            if payload_end != data_len {
+                break;
+            }
             next_cursor = payload_end;
         }
 

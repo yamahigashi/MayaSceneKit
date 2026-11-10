@@ -183,3 +183,31 @@ fn preserves_prefix_reasons_and_subtree_counts() {
         );
     }
 }
+
+#[test]
+fn parent_child_limit_precedes_descendant_malformed_reason() {
+    let mut children = group(b"DATA\0\0\0\x20");
+    children.extend_from_slice(b"TEST\0\0\0\0");
+    let parsed = parse_bytes_with_budget(
+        group(&children),
+        &MbParseBudget {
+            max_children_per_group: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        parsed.root().children()[0].children_state(),
+        MbChildren::Truncated {
+            reason: MbTruncationReason::Malformed(MayaBinaryParseError::PayloadOutOfBounds { .. }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        parsed.completeness(),
+        MbCompleteness::Truncated {
+            first_reason: MbTruncationReason::ChildLimit,
+            truncated_groups: 2
+        }
+    ));
+}

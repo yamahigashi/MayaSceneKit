@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- MbChildren, MbTruncationReason, and MbCompleteness are now non-exhaustive.
+  MbInspectReport adds a public completeness field (excluded from serialization).
+  Inspect text starts with a completeness= line, including --at-offset output.
+  Formats exposes MbRootFormsAndRequiresRemoval and MbRootFormRemoval type aliases
+  and require_complete_mb_tree. Rewrites now refuse scenes exceeding the default
+  parse budget of 100 000 children per group or 1 000 000 chunks.
+
 - Maya Binary chunk parsing now exposes MbChildren, MbTruncationReason, and
   MbCompleteness through maya-mb and the formats MB module. A malformed child
   preserves its successfully parsed siblings and the original error. Successful

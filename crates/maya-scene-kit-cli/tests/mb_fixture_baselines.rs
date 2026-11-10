@@ -5,12 +5,14 @@ use sha2::{Digest, Sha256};
 #[test]
 fn complete_mb_fixtures_preserve_paths_and_audit_results() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (fixture, inspect_hash, paths_hash, disposition, findings) in [
+    for (fixture, inspect_hash, paths_hash, disposition, findings, surfaces, owners) in [
         (
             "tests/01/skin.mb",
             "788307e01cad3724b88ea7e5c9f800ad8eb00b963f47ad90c7f2b116c2a76dae",
             "90a6c47a0d7d0c39f6bd611cf434b164ccc2153afc0dbb26616927584296765a",
             "allow_with_notice",
+            0,
+            1,
             0,
         ),
         (
@@ -19,6 +21,8 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
             "f294ef47718493c569389d393fc2f65835de79f23ff766297dc4452e1d36d7ce",
             "review",
             0,
+            2,
+            0,
         ),
         (
             "tests/fixtures/mb/owner_delete/connected_file_owner_delete.mb",
@@ -26,6 +30,8 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
             "d44735d5a0ed059cb9b608e6a97e606f27ea0d52d80d1ba1a1c254d4f94345c9",
             "allow_with_notice",
             0,
+            2,
+            2,
         ),
         (
             "tests/fixtures/mb/owner_delete/file_owner_delete.mb",
@@ -33,6 +39,8 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
             "82a5e47cced33c5bd3f1bf0df74d22f1d015f41ee8b77cee7fd6735d46e2f9d9",
             "allow_with_notice",
             0,
+            2,
+            2,
         ),
     ] {
         let run = |command: &str, json: bool| {
@@ -61,6 +69,41 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
             paths_hash,
             "paths {fixture}"
         );
+        let report = maya_scene_kit_observe::scene::collect_scene_paths(
+            root.join(fixture),
+            maya_scene_kit_observe::scene::paths::PathKind::All,
+        )
+        .unwrap();
+        let targets = report
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.trace_form.as_deref() == Some("RTFT"))
+            })
+            .map(|entry| maya_scene_kit_edit::scene::PathOwnerDeleteTarget {
+                node_type: entry.node_type.clone(),
+                node_name: entry.node_name.clone(),
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), owners, "owner candidates {fixture}");
+        if !targets.is_empty() {
+            let planner = maya_scene_kit_edit::scene::PatchPlanner::new(
+                maya_scene_kit_edit::scene::MaterializeOptions::default()
+                    .with_operation_mode(maya_scene_kit_edit::scene::OperationMode::Forensic),
+            );
+            let preview = planner
+                .preview_delete_path_owner_nodes_in_report(&report, &targets)
+                .unwrap();
+            assert_eq!(
+                preview.deleted_targets, targets,
+                "owner candidates {fixture}"
+            );
+        }
         let audit = run("audit", true);
         assert_eq!(
             audit.status.code(),
@@ -70,6 +113,10 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
         assert_eq!(
             value["files"][0]["disposition"], disposition,
             "audit {fixture}"
+        );
+        assert_eq!(
+            value["files"][0]["surface_count"], surfaces,
+            "surfaces {fixture}"
         );
         assert_eq!(
             value["files"][0]["finding_count"], findings,

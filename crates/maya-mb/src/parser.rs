@@ -326,6 +326,7 @@ impl Default for MbParseBudget {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MbChildren {
     Leaf,
     NotExpanded,
@@ -337,6 +338,7 @@ pub enum MbChildren {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MbTruncationReason {
     ChildLimit,
     ChunkBudget,
@@ -356,6 +358,7 @@ impl std::fmt::Display for MbTruncationReason {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MbCompleteness {
     Complete,
     Truncated {
@@ -549,10 +552,11 @@ impl MayaBinaryFile {
     }
 
     pub fn not_expanded_groups(&self) -> usize {
-        self.walk()
-            .into_iter()
-            .filter(|chunk| matches!(chunk.children_state(), MbChildren::NotExpanded))
-            .count()
+        fn count(chunk: &Chunk) -> usize {
+            usize::from(matches!(chunk.children_state(), MbChildren::NotExpanded))
+                + chunk.children().iter().map(count).sum::<usize>()
+        }
+        count(&self.root)
     }
 
     pub fn walk(&self) -> Vec<&Chunk> {
