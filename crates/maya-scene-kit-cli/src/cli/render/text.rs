@@ -11,7 +11,7 @@ pub(in crate::cli) fn render_unit_summary_text(
     scene_path: &str,
     summary: &ExecutionUnitSummary,
 ) -> String {
-    format!(
+    let mut text = format!(
         "- unit path={} trigger={} lang={} effect={} semantic_class={} certainty={} reason=\"{}\"",
         scene_path,
         summary.origin.trigger.as_str(),
@@ -20,7 +20,14 @@ pub(in crate::cli) fn render_unit_summary_text(
         summary.semantic_class.as_str(),
         summary.certainty.as_str(),
         summarize_unit_reason(summary),
-    )
+    );
+    if summary.origin.overwritten {
+        text.push_str(&format!(
+            " overwritten assignment_index={}",
+            summary.origin.assignment_index.unwrap_or_default()
+        ));
+    }
+    text
 }
 
 pub(in crate::cli) fn summarize_unit_reason(summary: &ExecutionUnitSummary) -> String {
@@ -80,6 +87,12 @@ pub(in crate::cli) fn render_grouped_audit_hit_text(
             surface.origin.attr_name.as_deref().unwrap_or("-")
         ),
     ]);
+    if surface.origin.overwritten {
+        parts.push(format!(
+            "overwritten assignment_index={}",
+            surface.origin.assignment_index.unwrap_or_default()
+        ));
+    }
     parts.extend(render_chunk_address_fields(&surface.origin));
     parts.push(format!(
         "msg=\"{}\"",
@@ -124,6 +137,12 @@ pub(in crate::cli) fn render_grouped_review_signal_text(
             surface.origin.attr_name.as_deref().unwrap_or("-")
         ),
     ]);
+    if surface.origin.overwritten {
+        parts.push(format!(
+            "overwritten assignment_index={}",
+            surface.origin.assignment_index.unwrap_or_default()
+        ));
+    }
     parts.extend(render_chunk_address_fields(&surface.origin));
     parts.push(format!(
         "msg=\"{}\"",
@@ -205,6 +224,8 @@ pub(in crate::cli) fn group_audit_hit_indexes(report: &AuditReport) -> Vec<(usiz
                 .iter()
                 .map(render_audit_evidence)
                 .collect::<Vec<_>>(),
+            overwritten: surface.origin.overwritten,
+            assignment_index: surface.origin.assignment_index,
             lang: surface.origin.lang.as_str(),
             trigger: surface.origin.trigger.as_str(),
             surface_kind: surface.origin.surface_kind.as_str(),
@@ -243,6 +264,8 @@ pub(in crate::cli) fn group_review_signal_indexes(report: &AuditReport) -> Vec<(
                 .iter()
                 .map(render_audit_evidence)
                 .collect::<Vec<_>>(),
+            overwritten: surface.origin.overwritten,
+            assignment_index: surface.origin.assignment_index,
             lang: surface.origin.lang.as_str(),
             trigger: surface.origin.trigger.as_str(),
             surface_kind: surface.origin.surface_kind.as_str(),
@@ -524,6 +547,8 @@ struct GroupedAuditHitKey<'a> {
     sink: &'a str,
     message: String,
     evidence: Vec<String>,
+    overwritten: bool,
+    assignment_index: Option<usize>,
     lang: &'a str,
     trigger: &'a str,
     surface_kind: &'a str,
@@ -542,6 +567,8 @@ struct GroupedReviewSignalKey<'a> {
     review_id: &'a str,
     message: String,
     evidence: Vec<String>,
+    overwritten: bool,
+    assignment_index: Option<usize>,
     lang: &'a str,
     trigger: &'a str,
     surface_kind: &'a str,

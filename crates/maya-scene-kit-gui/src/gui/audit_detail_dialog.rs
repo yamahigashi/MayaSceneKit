@@ -86,6 +86,8 @@ pub(super) fn match_audit_surface_text(
         let ExecutionOrigin {
             lang: _,
             source_kind: _,
+            overwritten,
+            assignment_index,
             trigger,
             surface_kind,
             node_name,
@@ -100,7 +102,9 @@ pub(super) fn match_audit_surface_text(
             chunk_child_alignment,
             chunk_child_header_size,
         } = origin;
-        trigger == &target.trigger
+        overwritten == &target.overwritten
+            && assignment_index == &target.assignment_index
+            && trigger == &target.trigger
             && surface_kind == &target.surface_kind
             && node_name == &target.node_name
             && attr_name == &target.attr_name
@@ -1143,6 +1147,13 @@ fn render_audit_detail_dialog_body(
                             badge_fg,
                         )),
                 )
+                .children(
+                    dialog_state
+                        .code_target
+                        .as_ref()
+                        .and_then(|target| audit_detail_assignment_note(&target.origin, i18n))
+                        .map(|note| div().text_sm().child(note)),
+                )
                 .children(facts.map(|facts| {
                     // Text truncation caches its first measurement, so the line must sit in a row
                     // where the measured width is the final one (same layout as the summary).
@@ -1499,6 +1510,23 @@ pub(super) fn audit_detail_field_display(
         _ => None,
     };
     translated.map_or_else(|| raw.clone(), |translated| format!("{translated} ({raw})"))
+}
+
+pub(super) fn audit_detail_assignment_note(
+    origin: &ExecutionOrigin,
+    i18n: &I18n,
+) -> Option<String> {
+    origin.overwritten.then(|| {
+        i18n.format(
+            "label.audit_detail.overwritten_assignment",
+            &[(
+                "index",
+                origin
+                    .assignment_index
+                    .map_or_else(|| "-".to_string(), |index| index.to_string()),
+            )],
+        )
+    })
 }
 
 pub(super) fn audit_detail_header_facts(

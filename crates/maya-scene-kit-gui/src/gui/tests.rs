@@ -13787,3 +13787,62 @@ fn startup_settings_recovery_and_unavailable_root_are_reported(cx: &mut TestAppC
         });
     }
 }
+
+#[test]
+fn audit_detail_derived_script_history_matching_preserves_assignment_identity() {
+    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    use super::audit_detail_dialog::{AuditSurfaceMatch, match_audit_surface_text};
+
+    let origin = ExecutionOrigin {
+        lang: ExecutionLanguage::Mel,
+        surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+        node_name: Some("ExampleScript".to_string()),
+        overwritten: true,
+        assignment_index: Some(0),
+        ..ExecutionOrigin::without_chunk_address()
+    };
+    let surfaces: Vec<_> = [Some(0), Some(1), None]
+        .into_iter()
+        .map(|index| ExecutionSurface {
+            origin: ExecutionOrigin {
+                overwritten: index.is_some(),
+                assignment_index: index,
+                ..origin.clone()
+            },
+            text: "print('Example')".into(),
+            preview: String::new(),
+        })
+        .collect();
+    let target = ExecutionOrigin {
+        lang: ExecutionLanguage::Python,
+        ..origin
+    };
+    let AuditSurfaceMatch::Found(found) = match_audit_surface_text(&target, true, &surfaces) else {
+        panic!("expected unique assignment");
+    };
+    assert_eq!(found.catalog_index, 0);
+    assert_eq!(found.origin.assignment_index, Some(0));
+}
+
+#[test]
+fn audit_detail_script_history_marker_is_localized() {
+    use super::audit_detail_dialog::audit_detail_assignment_note;
+    let mut origin = ExecutionOrigin::without_chunk_address();
+    for (locale, expected) in [
+        (SupportedLocale::English, "Overwritten body (assignment 2)"),
+        (SupportedLocale::Japanese, "上書きされた本文（代入位置 2）"),
+        (SupportedLocale::Chinese, "已覆盖的脚本正文（赋值位置 2）"),
+    ] {
+        let i18n = I18n::new(locale);
+        assert_eq!(audit_detail_assignment_note(&origin, &i18n), None);
+        origin.overwritten = true;
+        origin.assignment_index = Some(2);
+        assert_eq!(
+            audit_detail_assignment_note(&origin, &i18n).as_deref(),
+            Some(expected)
+        );
+        origin.overwritten = false;
+        origin.assignment_index = None;
+    }
+}

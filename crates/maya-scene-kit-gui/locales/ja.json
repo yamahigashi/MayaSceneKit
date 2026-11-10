@@ -1,4 +1,5 @@
 {
+  "label.audit_detail.overwritten_assignment": "上書きされた本文（代入位置 {index}）",
   "banner.settings_lenient": "一部の設定を読み取れず、既定値に戻すかスキップしました。元のファイルは {path} に保存しました。",
   "banner.workspace_unavailable": "ワークスペースフォルダーを利用できません: {path}。設定は保持しています。",
   "banner.settings_recovered": "設定を読み込めませんでした。既定値を使用しています。元のファイルは {path} に退避しました。",

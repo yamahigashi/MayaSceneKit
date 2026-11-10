@@ -1,4 +1,5 @@
 {
+  "label.audit_detail.overwritten_assignment": "已覆盖的脚本正文（赋值位置 {index}）",
   "banner.settings_lenient": "部分设置无法解码，已恢复默认值或跳过。原始文件已保存在 {path}。",
   "banner.workspace_unavailable": "工作区文件夹不可用：{path}。已保留此设置。",
   "banner.settings_recovered": "无法读取设置。正在使用默认值，原文件已保留在 {path}。",

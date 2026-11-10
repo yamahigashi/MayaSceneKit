@@ -128,11 +128,19 @@ fn collect_ma_coverage(
     top_level: &mel::MelAuditTopLevelFacts,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    let mut surfaces = collect_ma_script_node_surfaces(script_nodes);
-    surfaces.extend(collect_ma_profile_node_attr_surfaces(
+    let (before, mut attributes): (Vec<_>, Vec<_>) = collect_ma_script_node_surfaces(script_nodes)
+        .into_iter()
+        .partition(|(_, surface)| surface.origin.attr_name.as_deref() == Some(".b"));
+    attributes.extend(collect_ma_profile_node_attr_surfaces(
         node_attr_values,
         execution_semantics,
     ));
+    attributes.sort_by_key(|(start, _)| *start);
+    let mut surfaces: Vec<_> = before
+        .into_iter()
+        .chain(attributes)
+        .map(|(_, surface)| surface)
+        .collect();
     let coverage_issues = top_level
         .diagnostics
         .iter()
@@ -154,6 +162,7 @@ fn collect_ma_coverage(
         .collect::<Vec<_>>();
 
     let mut coverage_issues = coverage_issues;
+    coverage_issues.extend(collect_ma_script_assignment_issues(script_nodes));
     for item in &top_level.items {
         match item {
             MelAuditTopLevelItemFact::Command(command) => {
@@ -279,55 +288,125 @@ fn collect_ma_coverage(
 
 fn collect_ma_script_node_surfaces(
     script_nodes: &[RawMaScriptEntry],
-) -> Vec<ExecutionSurfaceRecord> {
-    let mut surfaces = Vec::with_capacity(script_nodes.len());
-
-    for node in script_nodes {
-        if node.body.is_empty() {
-            continue;
-        }
-        let trigger = node
-            .script_type
-            .map(script_type_to_trigger)
-            .unwrap_or(ExecutionTrigger::Manual);
-        let lang = node
-            .source_type
-            .map(script_source_type_to_language)
-            .unwrap_or(ExecutionLanguage::Mel);
-        let source_kind = match (node.script_type, node.source_type) {
-            (Some(script_type), Some(source_type)) => {
-                Some(format!("scriptType={script_type},sourceType={source_type}"))
+) -> Vec<(usize, ExecutionSurfaceRecord)> {
+    let mut surfaces = Vec::new();
+    for attr in [".b", ".a"] {
+        for node in script_nodes {
+            let (trigger, lang) = ma_script_execution_context(node);
+            let source_kind = script_node_source_kind(node.script_type(), node.source_type())
+                .or_else(|| (attr == ".a").then(|| "a".to_string()));
+            let last = node
+                .assignments
+                .iter()
+                .rposition(|value| value.attr == attr);
+            for (index, assignment) in node.assignments.iter().enumerate() {
+                if assignment.attr != attr {
+                    continue;
+                }
+                let Some(body) = assignment
+                    .string_value
+                    .as_deref()
+                    .filter(|body| !body.is_empty())
+                else {
+                    continue;
+                };
+                let overwritten = Some(index) != last;
+                surfaces.push((
+                    assignment.start,
+                    ExecutionSurfaceRecord {
+                        text: Arc::from(body),
+                        origin: ExecutionOrigin {
+                            lang,
+                            trigger,
+                            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+                            node_name: Some(node.name.clone()),
+                            attr_name: Some(attr.to_string()),
+                            source_kind: source_kind.clone(),
+                            overwritten,
+                            assignment_index: overwritten.then_some(index),
+                            ..ExecutionOrigin::without_chunk_address()
+                        },
+                        requires_mel_modeling: true,
+                    },
+                ));
             }
-            (Some(script_type), None) => Some(format!("scriptType={script_type}")),
-            (None, Some(source_type)) => Some(format!("sourceType={source_type}")),
-            (None, None) => None,
-        };
-        surfaces.push(ExecutionSurfaceRecord {
-            text: Arc::<str>::from(node.body.as_str()),
-            origin: ExecutionOrigin {
-                lang,
-                trigger,
-                surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
-                node_name: Some(node.name.clone()),
-                attr_name: Some(".b".to_string()),
-                source_range: None,
-                source_kind,
-                chunk_form: None,
-                chunk_tag: None,
-                chunk_node_offset: None,
-                ..ExecutionOrigin::without_chunk_address()
-            },
-            requires_mel_modeling: true,
-        });
+        }
     }
-
     surfaces
+}
+
+fn ma_script_execution_context(node: &RawMaScriptEntry) -> (ExecutionTrigger, ExecutionLanguage) {
+    let trigger = match node.last_assignment(".st") {
+        None => ExecutionTrigger::Manual,
+        Some(value) => value
+            .u32_value
+            .map(script_type_to_trigger)
+            .unwrap_or(ExecutionTrigger::Unknown),
+    };
+    let lang = match node.last_assignment(".stp") {
+        None => ExecutionLanguage::Mel,
+        Some(value) => value
+            .u32_value
+            .map(script_source_type_to_language)
+            .unwrap_or(ExecutionLanguage::Unknown),
+    };
+    (trigger, lang)
+}
+
+fn collect_ma_script_assignment_issues(
+    script_nodes: &[RawMaScriptEntry],
+) -> Vec<ExecutionCoverageIssueRecord> {
+    let mut issues = Vec::new();
+    for node in script_nodes {
+        let (trigger, lang) = ma_script_execution_context(node);
+        let origin = ExecutionOrigin {
+            trigger,
+            lang,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            node_name: Some(node.name.clone()),
+            ..ExecutionOrigin::without_chunk_address()
+        };
+        if [".st", ".stp"].iter().any(|attr| {
+            node.last_assignment(attr)
+                .is_some_and(|value| value.u32_value.is_none())
+        }) {
+            issues.push(ExecutionCoverageIssueRecord {
+                kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+                detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+                    diagnostic: "cannot determine trigger / language".to_string(),
+                },
+                origin: Some(origin.clone()),
+                preview: PreviewWindowSpec::new(Arc::from(""), 0, 0),
+            });
+        }
+        for assignment in &node.assignments {
+            if matches!(assignment.attr.as_str(), ".b" | ".a") && assignment.string_value.is_none()
+            {
+                issues.push(ExecutionCoverageIssueRecord {
+                    kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+                    detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+                        diagnostic: "cannot read script body assignment".to_string(),
+                    },
+                    origin: Some(ExecutionOrigin {
+                        attr_name: Some(assignment.attr.clone()),
+                        source_range: Some(crate::scene::evidence::ExecutionSourceRange {
+                            start: assignment.start,
+                            end: assignment.end,
+                        }),
+                        ..origin.clone()
+                    }),
+                    preview: PreviewWindowSpec::new(Arc::from(""), 0, 0),
+                });
+            }
+        }
+    }
+    issues
 }
 
 fn collect_ma_profile_node_attr_surfaces(
     node_attr_values: &[RawMaNodeAttrValue],
     execution_semantics: &NodeExecutionSemantics,
-) -> Vec<ExecutionSurfaceRecord> {
+) -> Vec<(usize, ExecutionSurfaceRecord)> {
     let mut surfaces = Vec::new();
     for value in node_attr_values {
         let node_type = ma_node_attr_effective_node_type(value);
@@ -342,7 +421,7 @@ fn collect_ma_profile_node_attr_surfaces(
                     if profile.body_attrs.iter().any(|attr| attr == attr_name) =>
                 {
                     matched_profile = true;
-                    if value.node_type == "script" && attr_name == "b" {
+                    if value.node_type == "script" && matches!(attr_name, "b" | "a") {
                         continue;
                     }
                     let Some(body) = value.string_value.as_ref() else {
@@ -379,24 +458,27 @@ fn collect_ma_profile_node_attr_surfaces(
                             .unwrap_or(ExecutionLanguage::Mel),
                         _ => ExecutionLanguage::Mel,
                     };
-                    surfaces.push(ExecutionSurfaceRecord {
-                        text: Arc::<str>::from(body.as_str()),
-                        origin: ExecutionOrigin {
-                            lang,
-                            trigger,
-                            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
-                            node_name: Some(value.node_name.clone()),
-                            attr_name: Some(value.attr.clone()),
-                            source_range: None,
-                            source_kind: script_node_source_kind(script_type, source_type)
-                                .or_else(|| Some(attr_name.to_string())),
-                            chunk_form: None,
-                            chunk_tag: None,
-                            chunk_node_offset: None,
-                            ..ExecutionOrigin::without_chunk_address()
+                    surfaces.push((
+                        value.start,
+                        ExecutionSurfaceRecord {
+                            text: Arc::<str>::from(body.as_str()),
+                            origin: ExecutionOrigin {
+                                lang,
+                                trigger,
+                                surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+                                node_name: Some(value.node_name.clone()),
+                                attr_name: Some(value.attr.clone()),
+                                source_range: None,
+                                source_kind: script_node_source_kind(script_type, source_type)
+                                    .or_else(|| Some(attr_name.to_string())),
+                                chunk_form: None,
+                                chunk_tag: None,
+                                chunk_node_offset: None,
+                                ..ExecutionOrigin::without_chunk_address()
+                            },
+                            requires_mel_modeling: true,
                         },
-                        requires_mel_modeling: true,
-                    });
+                    ));
                 }
                 NodeExecutionProfileKind::AttrCallbacks(profile)
                     if profile
@@ -411,26 +493,29 @@ fn collect_ma_profile_node_attr_surfaces(
                     if body.is_empty() {
                         continue;
                     }
-                    surfaces.push(ExecutionSurfaceRecord {
-                        text: Arc::<str>::from(body.as_str()),
-                        origin: ExecutionOrigin {
-                            lang: profile.default_language,
-                            trigger: profile.default_trigger,
-                            surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
-                            node_name: Some(value.node_name.clone()),
-                            attr_name: Some(value.attr.clone()),
-                            source_range: None,
-                            source_kind: execution_semantics
-                                .source_label(node_type, attr_name)
-                                .map(str::to_string)
-                                .or_else(|| Some(attr_name.to_string())),
-                            chunk_form: None,
-                            chunk_tag: None,
-                            chunk_node_offset: None,
-                            ..ExecutionOrigin::without_chunk_address()
+                    surfaces.push((
+                        value.start,
+                        ExecutionSurfaceRecord {
+                            text: Arc::<str>::from(body.as_str()),
+                            origin: ExecutionOrigin {
+                                lang: profile.default_language,
+                                trigger: profile.default_trigger,
+                                surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+                                node_name: Some(value.node_name.clone()),
+                                attr_name: Some(value.attr.clone()),
+                                source_range: None,
+                                source_kind: execution_semantics
+                                    .source_label(node_type, attr_name)
+                                    .map(str::to_string)
+                                    .or_else(|| Some(attr_name.to_string())),
+                                chunk_form: None,
+                                chunk_tag: None,
+                                chunk_node_offset: None,
+                                ..ExecutionOrigin::without_chunk_address()
+                            },
+                            requires_mel_modeling: true,
                         },
-                        requires_mel_modeling: true,
-                    });
+                    ));
                 }
                 _ => {}
             }
@@ -444,23 +529,26 @@ fn collect_ma_profile_node_attr_surfaces(
         if body.is_empty() {
             continue;
         }
-        surfaces.push(ExecutionSurfaceRecord {
-            text: Arc::<str>::from(body.as_str()),
-            origin: ExecutionOrigin {
-                lang: ExecutionLanguage::Mel,
-                trigger: generic_execution_attr_trigger(attr_name),
-                surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
-                node_name: Some(value.node_name.clone()),
-                attr_name: Some(value.attr.clone()),
-                source_range: None,
-                source_kind: Some(attr_name.to_string()),
-                chunk_form: None,
-                chunk_tag: None,
-                chunk_node_offset: None,
-                ..ExecutionOrigin::without_chunk_address()
+        surfaces.push((
+            value.start,
+            ExecutionSurfaceRecord {
+                text: Arc::<str>::from(body.as_str()),
+                origin: ExecutionOrigin {
+                    lang: ExecutionLanguage::Mel,
+                    trigger: generic_execution_attr_trigger(attr_name),
+                    surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+                    node_name: Some(value.node_name.clone()),
+                    attr_name: Some(value.attr.clone()),
+                    source_range: None,
+                    source_kind: Some(attr_name.to_string()),
+                    chunk_form: None,
+                    chunk_tag: None,
+                    chunk_node_offset: None,
+                    ..ExecutionOrigin::without_chunk_address()
+                },
+                requires_mel_modeling: true,
             },
-            requires_mel_modeling: true,
-        });
+        ));
     }
     surfaces
 }
@@ -658,6 +746,8 @@ fn collect_mb_coverage(
                     chunk_payload_size: Some(raw.payload_span.len()),
                     chunk_child_alignment: raw.chunk_ref.child_alignment,
                     chunk_child_header_size: raw.chunk_ref.child_header_size,
+                    overwritten: false,
+                    assignment_index: None,
                 }),
                 preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
             });
@@ -695,12 +785,42 @@ fn collect_mb_coverage(
     })
 }
 
+fn collect_mb_script_body_assignments<'a>(
+    body_attrs: &'a [String],
+    attr_values: &[(String, Vec<u8>, String, usize)],
+    owner_offset: usize,
+    seen_offsets: &mut HashSet<(usize, usize)>,
+) -> Vec<(bool, usize, &'a str, String)> {
+    let mut bodies = Vec::new();
+    for body_attr in body_attrs {
+        let last = attr_values
+            .iter()
+            .rposition(|(attr, _, tag, _)| attr == body_attr && tag != "FLGS");
+        for (index, (_, value, _, offset)) in attr_values
+            .iter()
+            .enumerate()
+            .filter(|(_, (attr, _, tag, _))| attr == body_attr && tag != "FLGS")
+        {
+            let body = crate::mb::decode_best_effort_script_text(value);
+            if body.is_empty() || !seen_offsets.insert((owner_offset, *offset)) {
+                continue;
+            }
+            bodies.push((Some(index) != last, index, body_attr.as_str(), body));
+        }
+    }
+    bodies.sort_by_key(|(overwritten, index, _, _)| {
+        (*overwritten, if *overwritten { *index } else { 0 })
+    });
+    bodies
+}
+
 fn collect_mb_native_script_surfaces(
     mb: &crate::mb::MayaBinaryFile,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Vec<ExecutionSurfaceRecord> {
     let mut surfaces = Vec::new();
     let mut seen = HashSet::new();
+    let mut script_offsets = HashSet::new();
 
     for child in mb.root().children() {
         let Some(form_type) = child.form_type().map(|f| f.to_string()) else {
@@ -763,10 +883,10 @@ fn collect_mb_native_script_surfaces(
         }
         let mut script_type = None;
         let mut source_type = None;
-        let mut attr_values = Vec::<(String, Vec<u8>)>::new();
+        let mut attr_values = Vec::<(String, Vec<u8>, String, usize)>::new();
 
         for chunk in parsed.into_chunks() {
-            if chunk.tag() == "CREA" {
+            if chunk.tag() == "CREA" || (form_type == "SCRP" && chunk.tag() == "FLGS") {
                 continue;
             }
 
@@ -774,7 +894,12 @@ fn collect_mb_native_script_surfaces(
             else {
                 continue;
             };
-            attr_values.push((attr_name, value));
+            attr_values.push((
+                attr_name,
+                value,
+                chunk.tag().to_string(),
+                chunk.chunk_start(),
+            ));
         }
 
         for profile in profiles {
@@ -782,14 +907,16 @@ fn collect_mb_native_script_surfaces(
                 if let Some(trigger_attr) = &profile.trigger_attr {
                     script_type = attr_values
                         .iter()
-                        .find(|(attr, _)| attr == trigger_attr)
-                        .and_then(|(_, value)| raw_u32_prefix(value));
+                        .rev()
+                        .find(|(attr, _, _, _)| attr == trigger_attr)
+                        .and_then(|(_, value, tag, _)| mb_script_number(tag, value));
                 }
                 if let Some(language_attr) = &profile.language_attr {
                     source_type = attr_values
                         .iter()
-                        .find(|(attr, _)| attr == language_attr)
-                        .and_then(|(_, value)| raw_u32_prefix(value));
+                        .rev()
+                        .find(|(attr, _, _, _)| attr == language_attr)
+                        .and_then(|(_, value, tag, _)| mb_script_number(tag, value));
                 }
                 let trigger = match profile.trigger_decoder {
                     Some(ExecutionDecoder::MayaScriptNodeScriptType) => script_type
@@ -804,47 +931,37 @@ fn collect_mb_native_script_surfaces(
                     _ => ExecutionLanguage::Mel,
                 };
                 let source_kind = script_node_source_kind(script_type, source_type);
-                for body_attr in &profile.body_attrs {
-                    for (_, value) in attr_values.iter().filter(|(attr, _)| attr == body_attr) {
-                        let body = crate::mb::decode_best_effort_script_text(value);
-                        if body.is_empty() {
-                            continue;
-                        }
-                        let key = (
-                            node_name.clone(),
-                            format!("{body_attr}:{body}"),
-                            lang.as_str(),
-                            trigger.as_str(),
-                            child.offset(),
-                        );
-                        if !seen.insert(key) {
-                            continue;
-                        }
-                        surfaces.push(ExecutionSurfaceRecord {
-                            text: Arc::<str>::from(body),
-                            origin: ExecutionOrigin {
-                                lang,
-                                trigger,
-                                surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
-                                node_name: Some(node_name.clone()),
-                                attr_name: Some(format!(".{body_attr}")),
-                                source_range: None,
-                                source_kind: source_kind.clone(),
-                                chunk_form: Some(form_type.to_string()),
-                                chunk_tag: Some("STR ".to_string()),
-                                chunk_node_offset: Some(child.offset()),
-                                ..ExecutionOrigin::without_chunk_address()
-                            },
-                            requires_mel_modeling: true,
-                        });
-                    }
+                for (overwritten, index, body_attr, body) in collect_mb_script_body_assignments(
+                    &profile.body_attrs,
+                    &attr_values,
+                    child.offset(),
+                    &mut script_offsets,
+                ) {
+                    surfaces.push(ExecutionSurfaceRecord {
+                        text: Arc::from(body),
+                        origin: ExecutionOrigin {
+                            lang,
+                            trigger,
+                            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+                            node_name: Some(node_name.clone()),
+                            attr_name: Some(format!(".{body_attr}")),
+                            source_kind: source_kind.clone(),
+                            chunk_form: Some(form_type.to_string()),
+                            chunk_tag: Some("STR ".to_string()),
+                            chunk_node_offset: Some(child.offset()),
+                            overwritten,
+                            assignment_index: overwritten.then_some(index),
+                            ..ExecutionOrigin::without_chunk_address()
+                        },
+                        requires_mel_modeling: true,
+                    });
                 }
             }
             if let NodeExecutionProfileKind::AttrCallbacks(profile) = &profile.kind {
                 for callback_attr in &profile.attrs {
-                    for (_, value) in attr_values
+                    for (_, value, _, _) in attr_values
                         .iter()
-                        .filter(|(attr, _)| attr == &callback_attr.short_name)
+                        .filter(|(attr, _, _, _)| attr == &callback_attr.short_name)
                     {
                         let body = crate::mb::decode_best_effort_script_text(value);
                         if body.is_empty() {
@@ -881,7 +998,7 @@ fn collect_mb_native_script_surfaces(
                 }
             }
         }
-        for (attr_name, value) in &attr_values {
+        for (attr_name, value, _, _) in &attr_values {
             if profile_matches_attr(profiles, attr_name)
                 || !is_generic_execution_attr_name(attr_name.as_str())
             {
@@ -1152,6 +1269,12 @@ fn contains_standalone_token(text: &str, needle: &str) -> bool {
     false
 }
 
+fn mb_script_number(tag: &str, value: &[u8]) -> Option<u32> {
+    matches!(tag, "DBLE" | "FLT " | "LONG" | "SHRT" | "BOOL")
+        .then(|| raw_u32_prefix(value))
+        .flatten()
+}
+
 fn raw_u32_prefix(value: &[u8]) -> Option<u32> {
     if let Some(bytes) = value.get(..8) {
         let raw = u64::from_be_bytes(bytes.try_into().ok()?);
@@ -1200,12 +1323,14 @@ mod tests {
     use maya_scene_kit_formats::{ma, mb::FourCC, mel};
 
     use super::{
-        MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES, collect_execution_coverage_from_ma_parts,
-        collect_execution_coverage_from_mb, contains_any_audit_marker, decode_raw_chunk_text,
-        first_payload_audit_marker, raw_chunk_tag_may_contain_execution_text,
+        ExecutionCoverageCollection, MAX_GENERIC_RAW_TEXT_PAYLOAD_BYTES,
+        collect_execution_coverage_from_ma_parts, collect_execution_coverage_from_mb,
+        contains_any_audit_marker, decode_raw_chunk_text, first_payload_audit_marker,
+        raw_chunk_tag_may_contain_execution_text,
     };
     use crate::scene::{
         ExecutionSurfaceKind,
+        evidence::{ExecutionCoverageIssueDetail, ExecutionLanguage, ExecutionTrigger},
         schema::{default_schema_registry, node_semantics::node_execution_semantics_with_registry},
     };
 
@@ -1252,6 +1377,344 @@ mod tests {
         out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
         out.extend_from_slice(&payload);
         out
+    }
+
+    fn script_history_coverage(input: &str, capture: bool) -> ExecutionCoverageCollection {
+        let semantics = node_execution_semantics_with_registry(default_schema_registry()).unwrap();
+        let sections = ma::selective::extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+            input.as_bytes(),
+            &maya_scene_kit_formats::mel::MelParseBudget::default(),
+            semantics.ma_capture_attr_selectors(),
+        );
+        collect_execution_coverage_from_ma_parts(
+            &sections.dump_sections.script_entries,
+            if capture {
+                &sections.node_attr_values
+            } else {
+                &[]
+            },
+            &sections.audit_top_level,
+            &semantics,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn script_history_flags_are_not_assignments() {
+        let input = r#"createNode script -n Example; setAttr ".st" 1; setAttr ".stp" 1; setAttr ".b" -type "string" "Example"; setAttr ".a" -type "string" "Sample"; setAttr -l on ".b"; setAttr ".a" -k off; setAttr -k off ".st"; setAttr ".stp" -l on;"#;
+        let coverage = script_history_coverage(input, true);
+        assert!(
+            coverage.coverage_issues.is_empty(),
+            "{:?}",
+            coverage.coverage_issues
+        );
+        assert_eq!(coverage.surfaces.len(), 2);
+        for surface in coverage.surfaces {
+            assert!(!surface.origin.overwritten);
+            assert_eq!(surface.origin.trigger, ExecutionTrigger::FileOpen);
+            assert_eq!(surface.origin.lang, ExecutionLanguage::Python);
+        }
+        let entries = ma::scripts::extract_raw_script_entries_from_ma(input.as_bytes());
+        assert_eq!(entries[0].assignments.len(), 4);
+    }
+
+    #[test]
+    fn script_history_rename_merges_in_source_order() {
+        let entries =
+            ma::scripts::extract_raw_script_entries_from_ma(b"createNode script -n :Example;");
+        assert_eq!(entries[0].name, "Example");
+        for flags in ["", "-ignoreShape "] {
+            let input = format!(
+                r#"createNode script -n Example; setAttr ".b" -type "string" "Example"; createNode script -n Sample; setAttr ".b" -type "string" "Sample"; select Example; rename {flags}:Example :Sample; select :Sample; setAttr ".b" -type "string" "TestAsset"; rename -uid "Example"; setAttr ".a" -type "string" "Example";"#
+            );
+            let entries = ma::scripts::extract_raw_script_entries_from_ma(input.as_bytes());
+            assert_eq!(entries.len(), 1, "{flags}: {entries:?}");
+            assert_eq!(entries[0].name, "Sample");
+            assert_eq!(entries[0].assignments.len(), 4);
+            let coverage = script_history_coverage(&input, true);
+            assert_eq!(
+                coverage
+                    .surfaces
+                    .iter()
+                    .map(|s| s.text.as_ref())
+                    .collect::<Vec<_>>(),
+                ["Example", "Sample", "TestAsset", "Example"]
+            );
+            assert!(coverage.surfaces[0].origin.overwritten);
+            assert!(coverage.surfaces[1].origin.overwritten);
+            assert!(!coverage.surfaces[2].origin.overwritten);
+        }
+    }
+
+    #[test]
+    fn mb_script_history_accepts_body_tags_and_rejects_string_numbers() {
+        let chunk = |tag: &str, attr: &str, value: &[u8]| {
+            let mut payload = format!("{attr}\0\0").into_bytes();
+            payload.extend_from_slice(value);
+            build_mb_chunk(tag, &payload)
+        };
+        let bytes = build_mb_root(&[build_mb_form(
+            "SCRP",
+            &[
+                build_mb_chunk("CREA", b"ExampleScript\0"),
+                chunk("DBLE", "st", &1.0f64.to_be_bytes()),
+                chunk("STR ", "st", &1.0f64.to_be_bytes()),
+                chunk("TEXT", "b", b"Example"),
+                chunk("FLGS", "b", b"Sample"),
+            ],
+        )]);
+        let mb = crate::mb::parse_bytes(bytes).unwrap();
+        let coverage = collect_execution_coverage_from_mb(&mb).unwrap();
+        let surfaces: Vec<_> = coverage
+            .surfaces
+            .iter()
+            .filter(|s| s.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody)
+            .collect();
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].text.as_ref(), "Example");
+        assert_eq!(surfaces[0].origin.trigger, ExecutionTrigger::Manual);
+        assert!(!surfaces[0].origin.overwritten);
+    }
+
+    #[test]
+    fn script_history_unreadable_body_has_one_diagnostic() {
+        let input = format!(
+            r#"createNode script -n Example; setAttr ".b" -type "string" {};"#,
+            "7 ".repeat(600)
+        );
+        let coverage = script_history_coverage(&input, true);
+        assert_eq!(
+            coverage.coverage_issues.len(),
+            1,
+            "{:?}",
+            coverage.coverage_issues
+        );
+        assert!(coverage.surfaces.is_empty());
+    }
+
+    #[test]
+    fn script_history_surfaces_keep_each_body_and_effective_context() {
+        for bodies in [
+            vec!["", "Example"],
+            vec!["Sample", "Example"],
+            vec!["Example", "Sample"],
+            vec!["Example", ""],
+            vec!["Example", "Example"],
+        ] {
+            for (numeric, language, trigger) in [
+                (
+                    "setAttr \".st\" 0; setAttr \".st\" 1; setAttr \".stp\" 0; setAttr \".stp\" 1;",
+                    ExecutionLanguage::Python,
+                    ExecutionTrigger::FileOpen,
+                ),
+                (
+                    "setAttr \".st\" 1; setAttr \".st\" 0; setAttr \".stp\" 1; setAttr \".stp\" 0;",
+                    ExecutionLanguage::Mel,
+                    ExecutionTrigger::Manual,
+                ),
+            ] {
+                let mut input = String::from("createNode script -n ExampleScript;\n");
+                for body in &bodies {
+                    input.push_str(&format!("setAttr \".b\" -type \"string\" \"{body}\";\n"));
+                }
+                input.push_str(numeric);
+                let captured = script_history_coverage(&input, true);
+                let uncaptured = script_history_coverage(&input, false);
+                let expected: Vec<_> = bodies
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, body)| !body.is_empty())
+                    .collect();
+                assert_eq!(captured.surfaces.len(), expected.len());
+                assert_eq!(captured.surfaces.len(), uncaptured.surfaces.len());
+                for ((surface, other), (index, body)) in captured
+                    .surfaces
+                    .iter()
+                    .zip(&uncaptured.surfaces)
+                    .zip(expected)
+                {
+                    assert_eq!(surface.text.as_ref(), *body);
+                    assert_eq!(surface.origin, other.origin);
+                    assert_eq!(surface.origin.lang, language);
+                    assert_eq!(surface.origin.trigger, trigger);
+                    assert_eq!(surface.origin.overwritten, index + 1 != bodies.len());
+                    assert_eq!(
+                        surface.origin.assignment_index,
+                        (index + 1 != bodies.len()).then_some(index)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn script_history_preserves_node_identity_and_after_body_order() {
+        let input = concat!(
+            "createNode script -n :Example; setAttr \".b\" -type \"string\" \"Example\";",
+            "setAttr \".a\" -type \"string\" \"Sample\";",
+            "createNode renderGlobals -n SampleGlobals; setAttr \".prm\" -type \"string\" \"print 1;\";",
+            "rename :Example SampleScript; select -ne SampleScript;",
+            "setAttr \".b\" -type \"string\" \"Sample\";",
+            "setAttr \".a\" -type \"string\" \"Example\";",
+            "setAttr \".st\" 1; setAttr \".stp\" 1;"
+        );
+        let coverage = script_history_coverage(input, true);
+        assert_eq!(coverage.surfaces.len(), 5);
+        assert_eq!(
+            coverage
+                .surfaces
+                .iter()
+                .map(|s| s.text.as_ref())
+                .collect::<Vec<_>>(),
+            ["Example", "Sample", "Sample", "print 1;", "Example"]
+        );
+        for surface in coverage
+            .surfaces
+            .iter()
+            .filter(|s| s.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody)
+        {
+            assert_eq!(surface.origin.node_name.as_deref(), Some("SampleScript"));
+            assert_eq!(surface.origin.trigger, ExecutionTrigger::FileOpen);
+            assert_eq!(surface.origin.lang, ExecutionLanguage::Python);
+        }
+        assert!(coverage.surfaces[0].origin.overwritten);
+        assert!(coverage.surfaces[2].origin.overwritten);
+        assert!(!coverage.surfaces[1].origin.overwritten);
+        assert!(!coverage.surfaces[4].origin.overwritten);
+        let input = "createNode script -n Example; setAttr \".a\" -type \"string\" \"Sample\"; setAttr \".b\" -type \"string\" \"Example\";";
+        let coverage = script_history_coverage(input, true);
+        assert_eq!(
+            coverage
+                .surfaces
+                .iter()
+                .map(|s| s.origin.attr_name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some(".b"), Some(".a")]
+        );
+        assert_eq!(coverage.surfaces[0].origin.source_kind, None);
+        assert_eq!(
+            coverage.surfaces[1].origin.source_kind.as_deref(),
+            Some("a")
+        );
+        for surface in coverage.surfaces {
+            let json = serde_json::to_value(&surface.origin).unwrap();
+            assert!(json.get("overwritten").is_none());
+            assert!(json.get("assignment_index").is_none());
+        }
+    }
+
+    #[test]
+    fn script_history_reports_unreadable_final_values_and_body_positions() {
+        for invalid in ["-1", "\"1\""] {
+            let input = format!(
+                "createNode script -n Example; setAttr \".st\" 1; setAttr \".stp\" 1; setAttr \".b\" -type \"string\" \"Example\"; setAttr \".st\" {invalid}; setAttr \".stp\" {invalid}; setAttr \".b\" -type \"string\" 7;"
+            );
+            let coverage = script_history_coverage(&input, true);
+            assert_eq!(coverage.surfaces.len(), 1);
+            let surface = &coverage.surfaces[0];
+            assert!(surface.origin.overwritten);
+            assert_eq!(surface.origin.lang, ExecutionLanguage::Unknown);
+            assert_eq!(surface.origin.trigger, ExecutionTrigger::Unknown);
+            assert_eq!(coverage.coverage_issues.iter().filter(|issue| matches!(&issue.detail, ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } if diagnostic == "cannot determine trigger / language")).count(), 1);
+            let body_issue = coverage
+                .coverage_issues
+                .iter()
+                .find(|issue| {
+                    issue
+                        .origin
+                        .as_ref()
+                        .and_then(|origin| origin.attr_name.as_deref())
+                        == Some(".b")
+                })
+                .unwrap();
+            let range = body_issue.origin.as_ref().unwrap().source_range.unwrap();
+            assert_eq!(
+                &input[range.start..range.end],
+                "setAttr \".b\" -type \"string\" 7;"
+            );
+        }
+    }
+
+    #[test]
+    fn mb_script_history_keeps_repeated_bodies_and_final_numeric_values() {
+        for second in ["Example", "Sample", ""] {
+            let body = |attr: &str, text: &str| {
+                let mut payload = format!("{attr}\0\0").into_bytes();
+                payload.extend_from_slice(text.as_bytes());
+                build_mb_chunk("STR ", &payload)
+            };
+            let number = |tag: &str, attr: &str, value: f64| {
+                let mut payload = format!("{attr}\0\0").into_bytes();
+                payload.extend_from_slice(&value.to_be_bytes());
+                build_mb_chunk(tag, &payload)
+            };
+            let bytes = build_mb_root(&[build_mb_form(
+                "SCRP",
+                &[
+                    build_mb_chunk("CREA", b"ExampleScript\0"),
+                    number("DBLE", "st", 0.0),
+                    number("DBLE", "stp", 0.0),
+                    body("b", "Example"),
+                    body("a", "Sample"),
+                    body("b", second),
+                    body("a", "Example"),
+                    number("DBLE", "st", 1.0),
+                    number("DBLE", "stp", 1.0),
+                    number("FLGS", "st", 0.0),
+                    number("FLGS", "stp", 0.0),
+                ],
+            )]);
+            let mb = crate::mb::parse_bytes(bytes).unwrap();
+            let coverage = collect_execution_coverage_from_mb(&mb).unwrap();
+            let surfaces: Vec<_> = coverage
+                .surfaces
+                .iter()
+                .filter(|surface| {
+                    surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                })
+                .collect();
+            let expected = if second.is_empty() {
+                vec![
+                    (".a", "Example", false),
+                    (".b", "Example", true),
+                    (".a", "Sample", true),
+                ]
+            } else {
+                vec![
+                    (".a", "Example", false),
+                    (".b", second, false),
+                    (".b", "Example", true),
+                    (".a", "Sample", true),
+                ]
+            };
+            assert_eq!(surfaces.len(), expected.len());
+            for (surface, (attr, text, overwritten)) in surfaces.iter().zip(expected) {
+                assert_eq!(surface.origin.attr_name.as_deref(), Some(attr));
+                assert_eq!(surface.text.as_ref(), text);
+                assert_eq!(surface.origin.overwritten, overwritten);
+                assert_eq!(surface.origin.assignment_index.is_some(), overwritten);
+                assert_eq!(surface.origin.lang, ExecutionLanguage::Python);
+                assert_eq!(surface.origin.trigger, ExecutionTrigger::FileOpen);
+            }
+            let overwritten: Vec<_> = surfaces
+                .iter()
+                .filter(|s| s.origin.overwritten)
+                .map(|s| s.origin.assignment_index.unwrap())
+                .collect();
+            assert_eq!(overwritten, [2, 3]);
+        }
+        let attrs = vec!["b".to_string()];
+        let values = vec![
+            ("b".to_string(), b"Example".to_vec(), "STR ".to_string(), 8),
+            ("b".to_string(), b"Example".to_vec(), "STR ".to_string(), 32),
+        ];
+        let mut offsets = std::collections::HashSet::new();
+        let first_profile =
+            super::collect_mb_script_body_assignments(&attrs, &values, 16, &mut offsets);
+        let second_profile =
+            super::collect_mb_script_body_assignments(&attrs, &values, 16, &mut offsets);
+        assert_eq!(first_profile.len(), 2);
+        assert!(second_profile.is_empty());
     }
 
     #[test]

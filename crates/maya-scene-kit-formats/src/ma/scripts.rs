@@ -109,9 +109,9 @@ mod tests {
         let entries = extract_raw_script_entries_from_ma(input.as_bytes());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "scriptNode1");
-        assert_eq!(entries[0].body, "python(\"print\" )");
-        assert_eq!(entries[0].script_type, Some(1));
-        assert_eq!(entries[0].source_type, Some(1));
+        assert_eq!(entries[0].body(), "python(\"print\" )");
+        assert_eq!(entries[0].script_type(), Some(1));
+        assert_eq!(entries[0].source_type(), Some(1));
     }
 
     #[test]
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(names, vec!["scriptNode1".to_string()]);
 
         let entries = extract_raw_script_entries_from_ma(input.as_bytes());
-        assert_eq!(entries[0].body, "");
-        assert_eq!(entries[0].script_type, Some(2));
+        assert_eq!(entries[0].body(), "");
+        assert_eq!(entries[0].script_type(), Some(2));
     }
 }

@@ -10,7 +10,10 @@ use super::super::{
     fs::collect_scene_files,
     output_contracts::JSON_CONTRACT_VERSION,
     render::{
-        json::{render_audit_hit_json, render_audit_notice_json, render_review_signal_json},
+        json::{
+            render_audit_hit_json, render_audit_notice_json, render_execution_origin_json,
+            render_review_signal_json,
+        },
         text::{
             group_audit_hit_indexes, group_review_signal_indexes, render_audit_notice_text,
             render_coverage_issue_detail, render_dependency_fact_detail, render_execution_reason,
@@ -206,22 +209,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "certainty": summary.certainty.as_str(),
                                 "preview": summary.preview,
                                 "reasons": summary.reasons.iter().map(render_execution_reason).collect::<Vec<_>>(),
-                                "origin": {
-                                    "lang": summary.origin.lang.as_str(),
-                                    "trigger": summary.origin.trigger.as_str(),
-                                    "surface_kind": summary.origin.surface_kind.as_str(),
-                                    "node_name": summary.origin.node_name.clone(),
-                                    "attr_name": summary.origin.attr_name.clone(),
-                                    "source_kind": summary.origin.source_kind.clone(),
-                                    "chunk_form": summary.origin.chunk_form.clone(),
-                                    "chunk_tag": summary.origin.chunk_tag.clone(),
-                                    "chunk_node_offset": summary.origin.chunk_node_offset,
-                                    "chunk_aux": summary.origin.chunk_aux,
-                                    "chunk_payload_offset": summary.origin.chunk_payload_offset,
-                                    "chunk_payload_size": summary.origin.chunk_payload_size,
-                                    "chunk_child_alignment": summary.origin.chunk_child_alignment,
-                                    "chunk_child_header_size": summary.origin.chunk_child_header_size,
-                                }
+                                "origin": render_execution_origin_json(&summary.origin)
                             })
                         })
                     })
@@ -237,22 +225,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "risk": fact.risk.as_str(),
                                 "target": fact.target,
                                 "message": render_dependency_fact_detail(&fact.detail),
-                                "origin": fact.origin.as_ref().map(|origin| json!({
-                                    "lang": origin.lang.as_str(),
-                                    "trigger": origin.trigger.as_str(),
-                                    "surface_kind": origin.surface_kind.as_str(),
-                                    "node_name": origin.node_name.clone(),
-                                    "attr_name": origin.attr_name.clone(),
-                                    "source_kind": origin.source_kind.clone(),
-                                    "chunk_form": origin.chunk_form.clone(),
-                                    "chunk_tag": origin.chunk_tag.clone(),
-                                    "chunk_node_offset": origin.chunk_node_offset,
-                                    "chunk_aux": origin.chunk_aux,
-                                    "chunk_payload_offset": origin.chunk_payload_offset,
-                                    "chunk_payload_size": origin.chunk_payload_size,
-                                    "chunk_child_alignment": origin.chunk_child_alignment,
-                                    "chunk_child_header_size": origin.chunk_child_header_size,
-                                })),
+                                "origin": fact.origin.as_ref().map(render_execution_origin_json),
                             })
                         })
                     })
@@ -306,22 +279,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "kind": issue.kind.as_str(),
                                 "message": render_coverage_issue_detail(&issue.detail),
                                 "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
-                                "origin": issue.origin.as_ref().map(|origin| json!({
-                                    "lang": origin.lang.as_str(),
-                                    "trigger": origin.trigger.as_str(),
-                                    "surface_kind": origin.surface_kind.as_str(),
-                                    "node_name": origin.node_name.clone(),
-                                    "attr_name": origin.attr_name.clone(),
-                                    "source_kind": origin.source_kind.clone(),
-                                    "chunk_form": origin.chunk_form.clone(),
-                                    "chunk_tag": origin.chunk_tag.clone(),
-                                    "chunk_node_offset": origin.chunk_node_offset,
-                                    "chunk_aux": origin.chunk_aux,
-                                    "chunk_payload_offset": origin.chunk_payload_offset,
-                                    "chunk_payload_size": origin.chunk_payload_size,
-                                    "chunk_child_alignment": origin.chunk_child_alignment,
-                                    "chunk_child_header_size": origin.chunk_child_header_size,
-                                })),
+                                "origin": issue.origin.as_ref().map(render_execution_origin_json),
                             })
                         })
                     })
@@ -340,22 +298,11 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                                 "message": group.message,
                                 "count": group.count,
                                 "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
-                                "origin": issue.origin.as_ref().map(|origin| json!({
-                                    "lang": origin.lang.as_str(),
-                                    "trigger": origin.trigger.as_str(),
-                                    "surface_kind": origin.surface_kind.as_str(),
-                                    "node_name": null,
-                                    "attr_name": origin.attr_name.clone(),
-                                    "source_kind": origin.source_kind.clone(),
-                                    "chunk_form": origin.chunk_form.clone(),
-                                    "chunk_tag": origin.chunk_tag.clone(),
-                                    "chunk_node_offset": origin.chunk_node_offset,
-                                    "chunk_aux": origin.chunk_aux,
-                                    "chunk_payload_offset": origin.chunk_payload_offset,
-                                    "chunk_payload_size": origin.chunk_payload_size,
-                                    "chunk_child_alignment": origin.chunk_child_alignment,
-                                    "chunk_child_header_size": origin.chunk_child_header_size,
-                                })),
+                                "origin": issue.origin.as_ref().map(|origin| {
+                                    let mut value = render_execution_origin_json(origin);
+                                    value["node_name"] = json!(null);
+                                    value
+                                }),
                             })
                         })
                     })

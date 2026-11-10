@@ -120,7 +120,7 @@ pub(crate) fn collect_ma_script_entries(entries: &[RawMaScriptEntry]) -> Vec<Scr
         .iter()
         .map(|entry| ScriptNodeEntry {
             name: entry.name.clone(),
-            body: entry.body.clone(),
+            body: entry.body().to_string(),
         })
         .collect()
 }

@@ -9,6 +9,10 @@ pub struct ExecutionSourceRange {
 /// Provenance for a single observed execution surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionOrigin {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overwritten: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_index: Option<usize>,
     /// Language associated with the extracted surface.
     pub lang: ExecutionLanguage,
     /// Lifecycle trigger associated with the extracted surface.
@@ -44,6 +48,8 @@ pub struct ExecutionOrigin {
 impl ExecutionOrigin {
     pub fn without_chunk_address() -> Self {
         Self {
+            overwritten: false,
+            assignment_index: None,
             lang: ExecutionLanguage::Unknown,
             trigger: ExecutionTrigger::Unknown,
             surface_kind: ExecutionSurfaceKind::RawChunkText,

@@ -1,4 +1,5 @@
 {
+  "label.audit_detail.overwritten_assignment": "Overwritten body (assignment {index})",
   "banner.settings_lenient": "Some settings could not be decoded and were reset or skipped. The original was kept at {path}.",
   "banner.workspace_unavailable": "The workspace folder is unavailable: {path}. The setting has been kept.",
   "banner.settings_recovered": "Settings could not be read. Defaults are in use; the original was kept at {path}.",

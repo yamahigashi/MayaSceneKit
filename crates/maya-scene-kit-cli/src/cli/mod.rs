@@ -438,6 +438,8 @@ mod tests {
                     chunk_payload_size: Some(0xFF),
                     chunk_child_alignment: Some(8),
                     chunk_child_header_size: Some(16),
+                    overwritten: false,
+                    assignment_index: None,
                 },
                 preview: "Source".to_string(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,

@@ -36,7 +36,7 @@ use crate::{
         parse::validate_string_concat_expression_prefix,
         raw_dump::{
             RawMaDumpSections, RawMaNodeAttrSelector, RawMaNodeAttrValue, RawMaRequireEntry,
-            RawMaRequireKind, RawMaScriptEntry,
+            RawMaRequireKind, RawMaScriptAssignment, RawMaScriptEntry,
         },
         rewrite::last_quoted_literal,
     },
@@ -109,9 +109,7 @@ enum ActiveCreateBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveScriptBlock {
     name: String,
-    body: Option<String>,
-    script_type: Option<u32>,
-    source_type: Option<u32>,
+    assignments: Vec<RawMaScriptAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,9 +225,7 @@ fn start_create_node_block(
         }),
         "script" => ActiveCreateBlock::Script(ActiveScriptBlock {
             name: name.to_string(),
-            body: None,
-            script_type: None,
-            source_type: None,
+            assignments: Vec::new(),
         }),
         _ => ActiveCreateBlock::ScenePath(ActiveScenePathBlock {
             node_type: node_type.to_string(),
@@ -260,29 +256,36 @@ fn apply_setattr_to_active_block(
 
     match block {
         ActiveCreateBlock::Script(script) => {
-            if matches!(tracked_attr, Some(MayaTrackedSetAttrAttr::B))
-                && script.body.is_none()
-                && selective_setattr_type_name(source, set_attr).as_deref() == Some("string")
-            {
-                if let Some(value) = selective_setattr_string_tail(source, set_attr) {
-                    script.body = Some(value);
-                    return;
-                }
-            }
-            if let Some((attr, value)) = parse_setattr_string_command(command_text) {
-                if attr == ".b" && script.body.is_none() {
-                    script.body = Some(value);
-                }
+            let Some(attr) = selective_setattr_attr_path(source, set_attr) else {
+                return;
+            };
+            if !matches!(attr.as_str(), ".b" | ".a" | ".st" | ".stp") {
                 return;
             }
-
-            if let Some((attr, value)) = parse_setattr_scalar_u32_command(command_text) {
-                match attr.as_str() {
-                    ".st" if script.script_type.is_none() => script.script_type = Some(value),
-                    ".stp" if script.source_type.is_none() => script.source_type = Some(value),
-                    _ => {}
-                }
+            if !setattr_has_value(command_text, &attr) {
+                return;
             }
+            let string_value = if matches!(attr.as_str(), ".b" | ".a") {
+                selective_setattr_string_tail(source, set_attr).or_else(|| {
+                    parse_setattr_string_command(command_text)
+                        .and_then(|(name, value)| (name == attr).then_some(value))
+                })
+            } else {
+                None
+            };
+            let u32_value = if matches!(attr.as_str(), ".st" | ".stp") {
+                parse_setattr_scalar_u32_command(command_text)
+                    .and_then(|(name, value)| (name == attr).then_some(value))
+            } else {
+                None
+            };
+            script.assignments.push(RawMaScriptAssignment {
+                attr,
+                string_value,
+                u32_value,
+                start: range_start(set_attr.span) as usize,
+                end: range_end(set_attr.span) as usize,
+            });
         }
         ActiveCreateBlock::ScenePath(path_block) => {
             let Some(attr_name) = selective_scene_path_attr_name(source, set_attr, tracked_attr)
@@ -359,6 +362,7 @@ fn collect_selected_node_attr_value(
         return;
     }
     node_attr_values.push(RawMaNodeAttrValue {
+        start: range_start(set_attr.span) as usize,
         node_type: node_type.to_string(),
         node_name: node_name.to_string(),
         attr: attr_path,
@@ -455,17 +459,22 @@ fn selective_scene_path_attr_name(
 fn flush_active_block(
     active_block: &mut Option<ActiveCreateBlock>,
     script_entries: &mut Vec<RawMaScriptEntry>,
+    script_indices: &mut HashMap<String, usize>,
 ) {
     let Some(block) = active_block.take() else {
         return;
     };
     if let ActiveCreateBlock::Script(script) = block {
-        script_entries.push(RawMaScriptEntry {
-            name: script.name,
-            body: script.body.unwrap_or_default(),
-            script_type: script.script_type,
-            source_type: script.source_type,
-        });
+        let key = script.name.trim_start_matches(':').to_string();
+        if let Some(&index) = script_indices.get(&key) {
+            script_entries[index].assignments.extend(script.assignments);
+        } else {
+            script_indices.insert(key.clone(), script_entries.len());
+            script_entries.push(RawMaScriptEntry {
+                name: key,
+                assignments: script.assignments,
+            });
+        }
     }
 }
 
@@ -582,6 +591,25 @@ fn parse_file_command_flag_value(command: &str, flag: &str) -> Option<String> {
     literal.map(|s| unescape_ma_string_literal(&s))
 }
 
+fn setattr_has_value(command: &str, attr: &str) -> bool {
+    let Ok(tokens) = tokenize_command(command) else {
+        return true;
+    };
+    let mut index = 1;
+    let mut found_attr = false;
+    while let Some(token) = tokens.get(index) {
+        if let Some(arity) = bare_token(token).and_then(setattr_flag_arity) {
+            index += 1 + arity;
+        } else if !found_attr && token_text(token) == Some(attr) {
+            found_attr = true;
+            index += 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_setattr_scalar_u32_command(command: &str) -> Option<(String, u32)> {
     let tokens = tokenize_command(command).ok()?;
     if !matches!(tokens.first().and_then(bare_token), Some("setAttr")) {
@@ -611,7 +639,7 @@ fn parse_setattr_scalar_u32_command(command: &str) -> Option<(String, u32)> {
 }
 
 fn parse_u32_token(token: &Token) -> Option<u32> {
-    let text = token_text(token)?;
+    let text = bare_token(token)?;
     if let Ok(value) = text.parse::<u32>() {
         return Some(value);
     }
@@ -867,6 +895,7 @@ struct SelectiveScanSink {
     scene_paths: Vec<ScenePathEntry>,
     seen_paths: HashSet<u64>,
     script_entries: Vec<RawMaScriptEntry>,
+    script_indices: HashMap<String, usize>,
     node_attr_values: Vec<RawMaNodeAttrValue>,
     selected_node_attr_selectors: HashSet<RawMaNodeAttrSelector>,
     audit_items: Vec<MelAuditTopLevelItemFact>,
@@ -1041,13 +1070,13 @@ impl SelectiveScanSink {
                     }
                 }
             },
-            "rename"
-                if !command
+            "rename" => {
+                let names: Vec<_> = command
                     .words
                     .iter()
-                    .any(|word| matches!(word, LightWord::Flag { .. })) =>
-            {
-                match command.words.as_slice() {
+                    .filter(|word| !matches!(word, LightWord::Flag { .. }))
+                    .collect();
+                match names.as_slice() {
                     [old, new] => match (
                         static_context_word(source, command, old),
                         static_context_word(source, command, new),
@@ -1063,25 +1092,62 @@ impl SelectiveScanSink {
             }
             _ => BlockCommand::Preserve,
         };
-        if self.tracker.on_command(transition) {
-            if head == "rename" {
-                if let (Some((_, name)), Some(block)) = (
-                    context_binding(&self.tracker.context, &self.selected_node_attr_selectors),
+        match &transition {
+            BlockCommand::Rename { old, new } => {
+                flush_active_block(
                     &mut self.active_block,
-                ) {
-                    match block {
-                        ActiveCreateBlock::Script(block) => block.name = name.to_string(),
-                        ActiveCreateBlock::ScenePath(block) => block.node_name = name.to_string(),
-                        ActiveCreateBlock::Selected(block) => block.node_name = name.to_string(),
+                    &mut self.script_entries,
+                    &mut self.script_indices,
+                );
+                let old = old.trim_start_matches(':');
+                let new = new.trim_start_matches(':');
+                if let Some(index) = self.script_indices.remove(old) {
+                    if let Some(&target) = self.script_indices.get(new) {
+                        let source = self.script_entries.remove(index);
+                        for position in self.script_indices.values_mut() {
+                            if *position > index {
+                                *position -= 1;
+                            }
+                        }
+                        let target = target - usize::from(target > index);
+                        self.script_entries[target]
+                            .assignments
+                            .extend(source.assignments);
+                        self.script_entries[target]
+                            .assignments
+                            .sort_by_key(|value| value.start);
+                        self.script_entries[target].name = new.to_string();
+                    } else {
+                        self.script_entries[index].name = new.to_string();
+                        self.script_indices.insert(new.to_string(), index);
                     }
                 }
-            } else {
-                flush_active_block(&mut self.active_block, &mut self.script_entries);
-                self.active_block = start_create_node_block(
-                    &self.tracker.context,
-                    &self.selected_node_attr_selectors,
+            }
+            BlockCommand::Create {
+                context: BlockContext::Node { name, .. },
+                ..
+            } => {
+                flush_active_block(
+                    &mut self.active_block,
+                    &mut self.script_entries,
+                    &mut self.script_indices,
+                );
+                self.script_indices.remove(name.trim_start_matches(':'));
+            }
+            _ => {}
+        }
+        let renamed = matches!(transition, BlockCommand::Rename { .. });
+        let changed = self.tracker.on_command(transition);
+        if renamed || changed {
+            if !renamed {
+                flush_active_block(
+                    &mut self.active_block,
+                    &mut self.script_entries,
+                    &mut self.script_indices,
                 );
             }
+            self.active_block =
+                start_create_node_block(&self.tracker.context, &self.selected_node_attr_selectors);
         }
         debug_assert_eq!(
             context_binding(&self.tracker.context, &self.selected_node_attr_selectors),
@@ -1212,7 +1278,11 @@ impl SelectiveScanSink {
         source: LightSourceView<'_>,
         report: LightScanSummary,
     ) -> RawMaSelectiveSections {
-        flush_active_block(&mut self.active_block, &mut self.script_entries);
+        flush_active_block(
+            &mut self.active_block,
+            &mut self.script_entries,
+            &mut self.script_indices,
+        );
 
         let diagnostics = collect_report_diagnostics(&report);
         let mut diagnostics = diagnostics;
@@ -1328,12 +1398,6 @@ impl SelectiveScanSink {
             }
             MayaSelectiveItem::CreateNode(_) => {}
             MayaSelectiveItem::SetAttr(set_attr) => {
-                if let Some(attr) =
-                    tracked_opaque_tail_attr_name(self.active_block.as_ref(), &set_attr)
-                {
-                    self.selective_diagnostics
-                        .push(tracked_setattr_opaque_tail_diagnostic(attr));
-                }
                 if let Some(block) = self.active_block.as_mut() {
                     let command_text = source_decoded_cow(source, set_attr.span);
                     apply_setattr_to_active_block(
@@ -1347,6 +1411,12 @@ impl SelectiveScanSink {
                         &mut self.node_attr_values,
                         &self.selected_node_attr_selectors,
                     );
+                }
+                if let Some(attr) =
+                    tracked_opaque_tail_attr_name(self.active_block.as_ref(), &set_attr)
+                {
+                    self.selective_diagnostics
+                        .push(tracked_setattr_opaque_tail_diagnostic(attr));
                 }
             }
             MayaSelectiveItem::OtherCommand { head_range, span } => {
@@ -1409,7 +1479,7 @@ fn selective_item_from_command(
             let attr_path_text = attr_path_range.map(|range| source_decoded_cow(source, range))?;
             let attr_path = strip_outer_quotes(&attr_path_text);
             let tracked_attr = DefaultMayaSelectiveSetAttrSelector.classify(attr_path);
-            if !matches!(attr_path, ".b" | ".st" | ".stp")
+            if !matches!(attr_path, ".b" | ".a" | ".st" | ".stp")
                 && tracked_attr.is_none()
                 && (selected_node_attr_selectors.is_empty()
                     || !selected_node_attr_selectors
@@ -1629,7 +1699,13 @@ fn tracked_opaque_tail_attr_name(
 ) -> Option<&'static str> {
     set_attr.opaque_tail?;
     match active_block? {
-        ActiveCreateBlock::Script(_) => {
+        ActiveCreateBlock::Script(script) => {
+            if script.assignments.last().is_some_and(|assignment| {
+                assignment.start == range_start(set_attr.span) as usize
+                    && assignment.string_value.is_none()
+            }) {
+                return None;
+            }
             matches!(set_attr.tracked_attr, Some(MayaTrackedSetAttrAttr::B)).then_some(".b")
         }
         ActiveCreateBlock::ScenePath(_) => tracked_scene_path_attr_name(set_attr.tracked_attr),
@@ -1729,7 +1805,7 @@ mod tests {
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
         assert_eq!(sections.dump_sections.require_entries.len(), 1);
         assert_eq!(sections.scene_paths.len(), 1);
-        assert_eq!(sections.dump_sections.script_entries[0].body, "print 1;");
+        assert_eq!(sections.dump_sections.script_entries[0].body(), "print 1;");
         assert!(sections.audit_top_level.items.iter().any(|item| matches!(item, MelAuditTopLevelItemFact::Command(command) if command.file_command_callback.is_some())));
         assert_eq!(
             sections
@@ -2022,15 +2098,15 @@ mod tests {
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(sections.dump_sections.script_entries[0].name, "scriptNode1");
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "print \"ok\";"
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].script_type,
+            sections.dump_sections.script_entries[0].script_type(),
             Some(1)
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].source_type,
+            sections.dump_sections.script_entries[0].source_type(),
             Some(1)
         );
         assert_eq!(sections.scene_paths.len(), 3);
@@ -2100,7 +2176,7 @@ mod tests {
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "print('Example');"
         );
     }
@@ -2123,15 +2199,15 @@ mod tests {
             "scrambledScript"
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "print(\"semantic fixture\")"
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].script_type,
+            sections.dump_sections.script_entries[0].script_type(),
             Some(0)
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].source_type,
+            sections.dump_sections.script_entries[0].source_type(),
             Some(0)
         );
     }
@@ -2279,7 +2355,7 @@ mod tests {
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
 
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
-        assert_eq!(sections.dump_sections.script_entries[0].body, body);
+        assert_eq!(sections.dump_sections.script_entries[0].body(), body);
         assert!(sections.audit_top_level.diagnostics.iter().any(|diagnostic| {
             diagnostic
                 .message
@@ -2391,7 +2467,7 @@ mod tests {
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(sections.dump_sections.script_entries[0].name, "scriptNode1");
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "python(\"print(1)\")"
         );
     }
@@ -2425,9 +2501,9 @@ mod tests {
 
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
-        assert_eq!(sections.dump_sections.script_entries[0].body, script_body);
+        assert_eq!(sections.dump_sections.script_entries[0].body(), script_body);
         assert_eq!(
-            sections.dump_sections.script_entries[0].script_type,
+            sections.dump_sections.script_entries[0].script_type(),
             Some(1234)
         );
         assert_eq!(sections.scene_paths.len(), 1);
@@ -2454,7 +2530,7 @@ mod tests {
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "print \"ok\";"
         );
         assert_eq!(sections.scene_paths.len(), 2);
@@ -2534,15 +2610,15 @@ mod tests {
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(sections.dump_sections.script_entries[0].name, "scriptNode1");
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "print \"ok\";"
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].script_type,
+            sections.dump_sections.script_entries[0].script_type(),
             Some(1)
         );
         assert_eq!(
-            sections.dump_sections.script_entries[0].source_type,
+            sections.dump_sections.script_entries[0].source_type(),
             Some(1)
         );
     }
@@ -2563,7 +2639,7 @@ mod tests {
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "print(\"ok\")"
         );
         assert_eq!(sections.scene_paths.len(), 1);
@@ -2619,7 +2695,7 @@ mod tests {
         assert_eq!(sections.dump_sections.script_entries.len(), 2);
         assert_eq!(sections.scene_paths.len(), 2);
         assert_eq!(
-            sections.dump_sections.script_entries[0].body,
+            sections.dump_sections.script_entries[0].body(),
             "string $panelName = `sceneUIReplacement -getNextPanel \"outlinerPanel\" (localizedPanelLabel(\"アウトライナ プラス\")) `;\nif (\"\" != $panelName) {\n    print $panelName;\n}\n"
         );
     }
@@ -2671,7 +2747,8 @@ mod context_regressions {
             let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
             assert_eq!(sections.dump_sections.script_entries[0].name, "Example");
             assert_eq!(
-                sections.dump_sections.script_entries[0].body, "print('Example')",
+                sections.dump_sections.script_entries[0].body(),
+                "print('Example')",
                 "{separator}"
             );
         }
@@ -2679,13 +2756,13 @@ mod context_regressions {
         let sections = extract_raw_selective_sections_from_ma(
             b"createNode script -n \"Example\"; createNode transform -n \"Sample\"; setAttr \".b\" -type \"string\" \"Example\";");
         assert_eq!(sections.dump_sections.script_entries[0].name, "Example");
-        assert_eq!(sections.dump_sections.script_entries[0].body, "");
+        assert_eq!(sections.dump_sections.script_entries[0].body(), "");
         assert!(sections.audit_top_level.diagnostics.is_empty());
         let sections = extract_raw_selective_sections_from_ma(
             b"    requires \"Example\" \"1\";\n    file -r -command \"Example\" \"print 1\" \"asset/example/file.ma\";\n    createNode script -n \"Example\";\n    setAttr \".b\" -type \"string\" \"Example\";");
         assert_eq!(sections.dump_sections.require_entries.len(), 1);
         assert_eq!(sections.scene_paths[0].value, "asset/example/file.ma");
-        assert_eq!(sections.dump_sections.script_entries[0].body, "Example");
+        assert_eq!(sections.dump_sections.script_entries[0].body(), "Example");
         assert!(sections.audit_top_level.items.iter().any(|item| matches!(item, MelAuditTopLevelItemFact::Command(command) if command.file_command_callback.is_some())));
         assert_eq!(
             sections
@@ -2756,7 +2833,7 @@ mod resolved_context_regressions {
                     .dump_sections
                     .script_entries
                     .iter()
-                    .any(|entry| entry.name == "Example" && entry.body == "print('Example')"),
+                    .any(|entry| entry.name == "Example" && entry.body() == "print('Example')"),
                 "{selection}"
             );
             assert!(
@@ -2795,7 +2872,7 @@ mod resolved_context_regressions {
             );
         }
         let sections = extract_raw_selective_sections_from_ma(b"createNode script -n \"Example\" (system(\"Example\")); setAttr \".b\" -type \"string\" \"Example\";");
-        assert_eq!(sections.dump_sections.script_entries[0].body, "Example");
+        assert_eq!(sections.dump_sections.script_entries[0].body(), "Example");
         assert_eq!(sections.audit_top_level.items.len(), 1);
         assert!(matches!(
             sections.audit_top_level.items[0],
@@ -2841,7 +2918,7 @@ mod resolved_context_regressions {
                     .dump_sections
                     .script_entries
                     .iter()
-                    .all(|entry| entry.body.is_empty()),
+                    .all(|entry| entry.body().is_empty()),
                 "{input}"
             );
         }
@@ -2872,7 +2949,7 @@ mod selection_fix_regressions {
                 .dump_sections
                 .script_entries
                 .iter()
-                .any(|entry| entry.name == owner && entry.body == "Example"),
+                .any(|entry| entry.name == owner && entry.body() == "Example"),
             "{input}"
         );
         assert!(
@@ -3054,7 +3131,7 @@ mod selection_fix_regressions {
                     .dump_sections
                     .script_entries
                     .iter()
-                    .all(|entry| entry.body.is_empty())
+                    .all(|entry| entry.body().is_empty())
             );
             diagnostic(
                 &input,
