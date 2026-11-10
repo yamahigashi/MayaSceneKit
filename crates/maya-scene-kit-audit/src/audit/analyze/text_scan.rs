@@ -70,27 +70,92 @@ pub(super) fn scan_mel_sink_word_hits(text: &str) -> MelSinkWordHits {
     scan_mel_text(text).sink_word_hits
 }
 
-pub(crate) fn scan_hard_python_obfuscation_markers(text: &str) -> Vec<String> {
-    let mut markers = Vec::new();
-    let patterns = [
-        ("base64", "base64"),
-        ("hex", "hex"),
-        ("chr(", "chr("),
-        (".decode(", ".decode("),
-        ("__import__", "__import__"),
-        ("builtins", "builtins"),
-        ("__builtins__", "__builtins__"),
-        ("globals(", "globals("),
-        ("locals(", "locals("),
-        ("vars(", "vars("),
-    ];
+pub(crate) struct PythonTextMarker {
+    pub offset: usize,
+    pub label: String,
+}
 
-    for (needle, label) in patterns {
-        if contains_ascii_case_insensitive(text, needle) {
-            markers.push(label.to_string());
+pub(crate) fn scan_hard_python_obfuscation_markers(
+    text: &str,
+    parsed: bool,
+) -> Vec<PythonTextMarker> {
+    let mut markers = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some((delimiter, width)) = quote {
+            if byte == b'\\' {
+                index += 1;
+                if index < bytes.len() && (bytes[index] == delimiter || bytes[index] == b'\\') {
+                    index += 1;
+                }
+                continue;
+            }
+            if bytes[index..].starts_with(&[delimiter; 3][..width]) {
+                quote = None;
+                index += width;
+                continue;
+            }
+        } else if byte == b'#' && parsed {
+            index += bytes[index..]
+                .iter()
+                .position(|&value| value == b'\n')
+                .unwrap_or(bytes.len() - index);
+            continue;
+        } else if matches!(byte, b'\'' | b'"') {
+            let width = if bytes[index..].starts_with(&[byte; 3]) {
+                3
+            } else {
+                1
+            };
+            quote = Some((byte, width));
+            index += width;
+            continue;
+        }
+        let character = text[index..].chars().next().expect("character boundary");
+        if character.is_alphanumeric() || character == '_' {
+            let start = index;
+            index += character.len_utf8();
+            while index < bytes.len() {
+                let character = text[index..].chars().next().expect("character boundary");
+                if !character.is_alphanumeric() && character != '_' {
+                    break;
+                }
+                index += character.len_utf8();
+            }
+            let word = &text[start..index];
+            for label in ["builtins", "__builtins__", "__import__"] {
+                if word.eq_ignore_ascii_case(label) {
+                    markers.push(PythonTextMarker {
+                        offset: start,
+                        label: label.to_string(),
+                    });
+                }
+            }
+        } else {
+            index += character.len_utf8();
         }
     }
-
+    if !parsed {
+        for (needle, label) in [
+            ("base64", "base64"),
+            ("hex", "hex"),
+            ("chr(", "chr("),
+            (".decode(", ".decode("),
+            ("globals(", "globals("),
+            ("locals(", "locals("),
+            ("vars(", "vars("),
+        ] {
+            if contains_ascii_case_insensitive(text, needle) {
+                markers.push(PythonTextMarker {
+                    offset: 0,
+                    label: label.to_string(),
+                });
+            }
+        }
+    }
     markers
 }
 

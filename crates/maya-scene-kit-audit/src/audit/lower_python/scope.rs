@@ -17,12 +17,16 @@ pub(super) struct Binding {
     pub capabilities: Vec<PythonCapabilityKind>,
     pub strings: Vec<PythonBodyArgKind>,
     pub known_safe: bool,
+    pub statically_named: bool,
+    pub local_class: bool,
     pub unbound_local: bool,
 }
 
 impl Binding {
     pub fn extend(&mut self, other: Self) {
         self.known_safe &= other.known_safe;
+        self.statically_named &= other.statically_named;
+        self.local_class &= other.local_class;
         self.unbound_local |= other.unbound_local;
         extend_unique(&mut self.aliases, other.aliases);
         extend_unique(&mut self.modules, other.modules);
@@ -113,6 +117,8 @@ pub(super) struct Scope {
     candidates: HashMap<String, Binding>,
     shadowed: HashMap<String, Binding>,
     safe_callables: HashSet<String>,
+    named_callables: HashSet<String>,
+    local_classes: HashSet<String>,
     unbound_locals: HashSet<String>,
 }
 
@@ -124,6 +130,12 @@ impl Scope {
             capabilities: self.capabilities.get(name).cloned().unwrap_or_default(),
             strings: self.strings.get(name).cloned().unwrap_or_default(),
             known_safe: self.safe_callables.contains(name),
+            statically_named: self.named_callables.contains(name)
+                || self.safe_callables.contains(name)
+                || (self.wildcard_import
+                    && !self.bound.contains(name)
+                    && !targets::builtin_callable(name)),
+            local_class: self.local_classes.contains(name),
             unbound_local: self.unbound_locals.contains(name),
         }
     }
@@ -141,6 +153,16 @@ impl Scope {
         if candidate {
             self.merge_candidate(name, binding);
             return;
+        }
+        if binding.statically_named && !binding.known_safe {
+            self.named_callables.insert(name.to_string());
+        } else {
+            self.named_callables.remove(name);
+        }
+        if binding.local_class {
+            self.local_classes.insert(name.to_string());
+        } else {
+            self.local_classes.remove(name);
         }
         if binding.known_safe {
             self.safe_callables.insert(name.to_string());
@@ -189,7 +211,7 @@ fn replace<T>(map: &mut HashMap<String, Vec<T>>, name: &str, values: Vec<T>) {
     }
 }
 
-impl SignalVisitor {
+impl SignalVisitor<'_> {
     fn declared_owner(&self, index: usize, name: &str) -> Option<usize> {
         let scope = &self.scopes[index];
         if scope.globals.contains(name) {
@@ -250,6 +272,14 @@ impl SignalVisitor {
             .unwrap_or_else(|| builtin_binding(name))
     }
 
+    pub(super) fn is_builtin_fallback(&self, name: &str) -> bool {
+        self.binding_scope(name).is_none() && targets::builtin_callable(name)
+    }
+
+    pub(super) fn has_named_receiver(&self, name: &str) -> bool {
+        self.binding_scope(name).is_some() || targets::builtin_callable(name)
+    }
+
     pub(super) fn wildcard_call_target(&self, expr: &ast::Expr) -> bool {
         let ast::Expr::Name(name) = expr else {
             return false;
@@ -260,7 +290,7 @@ impl SignalVisitor {
                 && !scope.bound.contains(name.id.as_str())
                 && (direct_call_kind(name.id.as_str()).is_some()
                     || direct_capability(name.id.as_str()).is_some()
-                    || self.observed_safe_builtin(name.id.as_str()))
+                    || targets::builtin_callable(name.id.as_str()))
         })
     }
 
@@ -294,6 +324,7 @@ impl SignalVisitor {
             ast::Expr::Name(name) => self.resolve_name(name.id.as_str()),
             ast::Expr::Lambda(_) => Binding {
                 known_safe: true,
+                statically_named: true,
                 ..Binding::default()
             },
             ast::Expr::Attribute(attr) => {
@@ -333,7 +364,11 @@ impl SignalVisitor {
         if let ast::Expr::Name(name) = expr
             && self.binding_scope(name.id.as_str()).is_none()
         {
-            binding.known_safe = self.observed_safe_builtin(name.id.as_str());
+            binding.known_safe =
+                !self.builtin_poisoned && self.observed_safe_builtin(name.id.as_str());
+            if self.builtin_poisoned && targets::builtin_callable(name.id.as_str()) {
+                binding.statically_named = false;
+            }
         }
         if let Some(value) = tracked_python_string_value(expr, self) {
             binding.strings = vec![value];
@@ -459,6 +494,7 @@ impl SignalVisitor {
     }
 
     pub(super) fn bind_target(&mut self, target: &ast::Expr, binding: Binding, named_expr: bool) {
+        self.builtin_poisoned |= self.poisons_builtins(target);
         match target {
             ast::Expr::Name(name) => self.bind_name(name.id.as_str(), binding, named_expr),
             ast::Expr::Tuple(value) => {
@@ -761,11 +797,13 @@ fn builtin_binding(name: &str) -> Binding {
             _ => Vec::new(),
         },
         capabilities: direct_capability(name).into_iter().collect(),
+        statically_named: targets::builtin_callable(name)
+            || matches!(name, "builtins" | "importlib"),
         ..Binding::default()
     }
 }
 
-impl SignalVisitor {
+impl SignalVisitor<'_> {
     fn member_binding(&self, receiver: Binding, member: &str) -> Binding {
         let mut members = receiver.modules.into_iter().map(|module| Binding {
             aliases: qualified_call_kind(&module, member).into_iter().collect(),
@@ -773,6 +811,7 @@ impl SignalVisitor {
                 .into_iter()
                 .collect(),
             known_safe: self.safe_imported_callable(&module, member),
+            statically_named: receiver.statically_named,
             modules: vec![format!("{module}.{member}")],
             ..Binding::default()
         });

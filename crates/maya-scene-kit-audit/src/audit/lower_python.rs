@@ -10,6 +10,7 @@ use rustpython_parser::{Parse, ast, ast::Ranged};
 
 mod maya;
 mod scope;
+mod targets;
 pub(crate) use maya::{MayaCall, MayaKind};
 use scope::{
     AssignmentValue, Binding, LocalBindings, Scope, ScopeKind, add_first_comprehension_iterable,
@@ -66,24 +67,47 @@ pub(crate) enum PythonSignal {
 }
 
 pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
-    let program = parse_python_suite(source).or_else(|| {
-        let normalized = normalize_python_compat_source(source);
-        ast::Suite::parse(&normalized, "<audit>").ok()
+    let original_program = parse_python_suite(source);
+    let original_positions = original_program.is_some();
+    let normalized = (!original_positions).then(|| normalize_python_compat_source(source));
+    let program = original_program.or_else(|| {
+        ast::Suite::parse(normalized.as_deref().expect("normalized source"), "<audit>").ok()
     });
     let Some(program) = program else {
         let mut signals = vec![PythonSignal::ParseFailure {
             message: "python parse failure".to_string(),
         }];
-        let markers = crate::audit::analyze::scan_hard_python_obfuscation_markers(source);
+        let markers: Vec<_> =
+            crate::audit::analyze::scan_hard_python_obfuscation_markers(source, false)
+                .into_iter()
+                .map(|marker| marker.label)
+                .collect();
         if !markers.is_empty() {
             signals.push(PythonSignal::HardMarker { markers });
         }
         signals.extend(autorun_persistence_marker_signals(source));
         return signals;
     };
-    let mut visitor = SignalVisitor::default();
+    let mut visitor = SignalVisitor {
+        source: normalized.as_deref().unwrap_or(source),
+        ..SignalVisitor::default()
+    };
     visitor.enter(ScopeKind::Module, LocalBindings::default());
     walk_suite(&mut visitor, &program);
+    for marker in crate::audit::analyze::scan_hard_python_obfuscation_markers(source, true) {
+        let offset = ast::text_size::TextSize::from(marker.offset as u32);
+        if !original_positions
+            || !visitor
+                .marker_occurrences
+                .iter()
+                .any(|(label, range)| label == &marker.label && range.contains(offset))
+        {
+            visitor.record_hard_markers(
+                vec![marker.label],
+                ast::text_size::TextRange::at(offset, 1.into()),
+            );
+        }
+    }
     visitor
         .signals
         .extend(autorun_persistence_marker_signals(source));
@@ -95,7 +119,8 @@ fn parse_python_suite(source: &str) -> Option<ast::Suite> {
 }
 
 #[derive(Default)]
-struct SignalVisitor {
+struct SignalVisitor<'a> {
+    source: &'a str,
     signals: Vec<PythonSignal>,
     scopes: Vec<Scope>,
     conditional_bindings: Vec<ConditionalBindings>,
@@ -106,6 +131,9 @@ struct SignalVisitor {
     handler_ends: HashMap<u32, Vec<String>>,
     pending_evaluations: HashMap<ast::text_size::TextRange, BindingEvaluation>,
     evaluated_values: HashMap<ast::text_size::TextRange, AssignmentValue>,
+    marker_occurrences: HashSet<(String, ast::text_size::TextRange)>,
+    builtin_poisoned: bool,
+    implicit_calls: HashSet<ast::text_size::TextRange>,
     safe_builtins: std::cell::RefCell<HashMap<String, bool>>,
 }
 
@@ -154,7 +182,7 @@ fn conditional_body_ends(stmt: &ast::Stmt) -> HashSet<u32> {
         .collect()
 }
 
-impl PythonAstVisitor for SignalVisitor {
+impl PythonAstVisitor for SignalVisitor<'_> {
     fn visit_stmt(&mut self, stmt: &ast::Stmt) {
         if let Some(conditional) = self.conditional_bindings.last_mut()
             && conditional.finally_start == Some(stmt.range().start().to_u32())
@@ -196,13 +224,53 @@ impl PythonAstVisitor for SignalVisitor {
         match stmt {
             ast::Stmt::FunctionDef(value) => {
                 self.pending_definition_safe = value.decorator_list.is_empty();
+                self.implicit_calls.extend(
+                    value
+                        .decorator_list
+                        .iter()
+                        .filter(|expr| !matches!(expr, ast::Expr::Call(_)))
+                        .map(Ranged::range),
+                );
                 self.prepare_argument_defaults(&value.args);
             }
             ast::Stmt::AsyncFunctionDef(value) => {
                 self.pending_definition_safe = value.decorator_list.is_empty();
+                self.implicit_calls.extend(
+                    value
+                        .decorator_list
+                        .iter()
+                        .filter(|expr| !matches!(expr, ast::Expr::Call(_)))
+                        .map(Ranged::range),
+                );
                 self.prepare_argument_defaults(&value.args);
             }
-            ast::Stmt::ClassDef(_) => self.pending_definition_safe = false,
+            ast::Stmt::ClassDef(value) => {
+                self.pending_definition_safe = value.decorator_list.is_empty()
+                    && value
+                        .bases
+                        .iter()
+                        .chain(value.keywords.iter().map(|keyword| &keyword.value))
+                        .all(|expr| self.named_class_constructor(expr));
+                self.implicit_calls.extend(
+                    value
+                        .decorator_list
+                        .iter()
+                        .filter(|expr| !matches!(expr, ast::Expr::Call(_)))
+                        .map(Ranged::range),
+                );
+                self.implicit_calls.extend(
+                    value
+                        .keywords
+                        .iter()
+                        .filter(|keyword| {
+                            keyword
+                                .arg
+                                .as_ref()
+                                .is_some_and(|arg| arg.as_str() == "metaclass")
+                        })
+                        .map(|keyword| keyword.value.range()),
+                );
+            }
             _ => {}
         }
         walk_stmt(self, stmt);
@@ -210,7 +278,10 @@ impl PythonAstVisitor for SignalVisitor {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
                     self.record_capability_module(alias.name.as_str());
-                    self.record_hard_markers(hard_markers_for_imported_module(alias.name.as_str()));
+                    self.record_hard_markers(
+                        hard_markers_for_imported_module(alias.name.as_str()),
+                        self.import_module_range(alias.range, alias.name.as_str()),
+                    );
                     let top = alias
                         .name
                         .as_str()
@@ -231,6 +302,7 @@ impl PythonAstVisitor for SignalVisitor {
                         &local,
                         Binding {
                             modules: vec![module.to_string()],
+                            statically_named: true,
                             ..Binding::default()
                         },
                         false,
@@ -246,7 +318,11 @@ impl PythonAstVisitor for SignalVisitor {
                 }
                 if let Some(module) = &import.module {
                     self.record_capability_module(module.as_str());
-                    self.record_hard_markers(hard_markers_for_imported_module(module.as_str()));
+                    let module_range = self.import_module_range(stmt.range(), module.as_str());
+                    self.record_hard_markers(
+                        hard_markers_for_imported_module(module.as_str()),
+                        module_range,
+                    );
                     for alias in &import.names {
                         if alias.name.as_str() == "*" {
                             if is_maya_target(module.as_str()) {
@@ -258,10 +334,10 @@ impl PythonAstVisitor for SignalVisitor {
                             }
                             continue;
                         }
-                        self.record_hard_markers(hard_markers_for_imported_name(
-                            module.as_str(),
-                            alias.name.as_str(),
-                        ));
+                        self.record_hard_markers(
+                            hard_markers_for_name(alias.name.as_str()),
+                            self.import_module_range(alias.range, alias.name.as_str()),
+                        );
                         let module = if import.level.is_some_and(|level| level.to_u32() != 0) {
                             "<relative>"
                         } else {
@@ -275,6 +351,7 @@ impl PythonAstVisitor for SignalVisitor {
                                     .into_iter()
                                     .collect(),
                                 modules: vec![format!("{module}.{}", alias.name)],
+                                statically_named: true,
                                 capabilities: capability_for_imported_name(
                                     top,
                                     alias.name.as_str(),
@@ -296,7 +373,10 @@ impl PythonAstVisitor for SignalVisitor {
                         }
                         self.bind_name(
                             &alias_local_name(alias.name.as_str(), alias.asname.as_ref()),
-                            Binding::default(),
+                            Binding {
+                                statically_named: true,
+                                ..Binding::default()
+                            },
                             false,
                         );
                     }
@@ -372,17 +452,21 @@ impl PythonAstVisitor for SignalVisitor {
         }
         match expr {
             ast::Expr::Call(call) => {
-                self.record_hard_markers(hard_markers_for_call(call));
+                self.record_hard_markers(
+                    hard_markers_for_call(call),
+                    callable_identifier_range(&call.func),
+                );
                 self.visit_call(call);
             }
-            ast::Expr::Attribute(value) => {
-                self.record_hard_markers(hard_markers_for_attribute(value))
-            }
+            ast::Expr::Attribute(value) => self.record_hard_markers(
+                hard_markers_for_attribute(value),
+                attribute_identifier_range(value),
+            ),
             ast::Expr::Subscript(value) => {
-                self.record_hard_markers(hard_markers_for_subscript(value))
+                self.record_hard_markers(hard_markers_for_subscript(value), value.range)
             }
             ast::Expr::Name(name) => {
-                self.record_hard_markers(hard_markers_for_name(name.id.as_str()))
+                self.record_hard_markers(hard_markers_for_name(name.id.as_str()), name.range)
             }
             _ => {}
         }
@@ -399,6 +483,9 @@ impl PythonAstVisitor for SignalVisitor {
             };
             self.evaluated_values.insert(expr.range(), binding);
         }
+        if self.implicit_calls.remove(&expr.range()) {
+            self.check_implicit_call(expr);
+        }
         self.iterable_ranges.truncate(previous_ranges);
     }
 
@@ -410,6 +497,7 @@ impl PythonAstVisitor for SignalVisitor {
                     name.as_str(),
                     Binding {
                         known_safe: self.pending_definition_safe,
+                        statically_named: self.pending_definition_safe,
                         ..Binding::default()
                     },
                     false,
@@ -421,7 +509,17 @@ impl PythonAstVisitor for SignalVisitor {
                 self.shadow_arguments(args);
             }
             PythonScope::ClassBody { name, body } => {
-                self.bind_name(name.as_str(), Binding::default(), false);
+                self.bind_name(
+                    name.as_str(),
+                    Binding {
+                        known_safe: self.pending_definition_safe,
+                        statically_named: self.pending_definition_safe,
+                        local_class: self.pending_definition_safe,
+                        ..Binding::default()
+                    },
+                    false,
+                );
+                self.pending_definition_safe = false;
                 self.enter(ScopeKind::Class, collect_local_bindings(body));
             }
             PythonScope::LambdaBody { args, body } => {
@@ -522,7 +620,7 @@ impl PythonAstVisitor for SignalVisitor {
     }
 }
 
-impl SignalVisitor {
+impl SignalVisitor<'_> {
     fn finish_conditional(&mut self) {
         let alternatives = self
             .conditional_bindings
@@ -553,6 +651,7 @@ impl SignalVisitor {
     }
 
     fn visit_call(&mut self, call: &ast::ExprCall) {
+        let prior_signal_count = self.signals.len();
         if let ast::Expr::Call(dispatch) = call.func.as_ref()
             && is_dynamic_dispatch_call(dispatch)
             && dispatch
@@ -582,8 +681,10 @@ impl SignalVisitor {
                         .is_some_and(|operation| !operation.operations.is_empty())
                 })
         };
+        let already_signaled = self.signals.len() != prior_signal_count;
         let known =
             concrete_maya || !binding.aliases.is_empty() || !binding.capabilities.is_empty();
+        let unresolved = self.unresolved_target(&call.func, &binding);
         for kind in binding.aliases {
             self.signals.push(PythonSignal::Call {
                 kind,
@@ -613,26 +714,49 @@ impl SignalVisitor {
                         call.func.range().start().to_u32()
                     ),
                 });
-            } else if unresolved_dynamic_call(&call.func) {
+            } else if unresolved && (!already_signaled || unresolved_dynamic_dispatch(&call.func)) {
                 self.signals.push(PythonSignal::UnresolvedCallTarget {
-                    message: "python call target resolved through dynamic dispatch".to_string(),
+                    message: format!(
+                        "Python call target at byte {} cannot be resolved statically",
+                        call.func.range().start().to_u32()
+                    ),
                 });
             }
         }
     }
 
-    fn record_hard_markers(&mut self, markers: Vec<String>) {
-        if markers.is_empty() {
-            return;
-        }
-        let already_seen = self.signals.iter().any(|signal| {
-            matches!(
-                signal,
-                PythonSignal::HardMarker { markers: existing }
-                    if markers.iter().all(|marker| existing.contains(marker))
-            )
-        });
-        if !already_seen {
+    fn import_module_range(
+        &self,
+        statement: ast::text_size::TextRange,
+        module: &str,
+    ) -> ast::text_size::TextRange {
+        let top = module.split('.').next().unwrap_or(module);
+        let source = &self.source[statement.start().to_usize()..statement.end().to_usize()];
+        let Some((offset, _)) = source.match_indices(top).find(|(offset, _)| {
+            let identifier = |ch: char| ch.is_alphanumeric() || ch == '_';
+            !source[..*offset]
+                .chars()
+                .next_back()
+                .is_some_and(identifier)
+                && !source[*offset + top.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(identifier)
+        }) else {
+            return ast::text_size::TextRange::empty(statement.start());
+        };
+        ast::text_size::TextRange::at(
+            statement.start() + ast::text_size::TextSize::from(offset as u32),
+            ast::text_size::TextSize::from(top.len() as u32),
+        )
+    }
+
+    fn record_hard_markers(&mut self, markers: Vec<String>, range: ast::text_size::TextRange) {
+        let markers: Vec<_> = markers
+            .into_iter()
+            .filter(|marker| self.marker_occurrences.insert((marker.clone(), range)))
+            .collect();
+        if !markers.is_empty() {
             self.signals.push(PythonSignal::HardMarker { markers });
         }
     }
@@ -809,12 +933,19 @@ fn push_marker_if_contains(markers: &mut Vec<String>, haystack: &str, label: &st
     }
 }
 
-fn unresolved_dynamic_call(func: &ast::Expr) -> bool {
+fn unresolved_dynamic_dispatch(func: &ast::Expr) -> bool {
     match func {
         ast::Expr::Call(call) => {
             is_dynamic_dispatch_call(call) && indirect_call_name(call).is_none()
         }
-        ast::Expr::Subscript(subscript) => is_dynamic_dispatch_subscript(subscript),
+        ast::Expr::Subscript(subscript) => {
+            string_literal_expr(&subscript.slice).is_none()
+                && match subscript.value.as_ref() {
+                    ast::Expr::Attribute(attr) => attr.attr.as_str() == "__dict__",
+                    ast::Expr::Call(call) => is_locals_like_dispatch(call),
+                    _ => false,
+                }
+        }
         _ => false,
     }
 }
@@ -842,18 +973,6 @@ fn is_locals_like_dispatch(call: &ast::ExprCall) -> bool {
     }
 }
 
-fn is_dynamic_dispatch_subscript(subscript: &ast::ExprSubscript) -> bool {
-    match subscript.value.as_ref() {
-        ast::Expr::Attribute(attr) if attr.attr.as_str() == "__dict__" => {
-            string_literal_expr(&subscript.slice).is_none()
-        }
-        ast::Expr::Call(call) if is_locals_like_dispatch(call) => {
-            string_literal_expr(&subscript.slice).is_none()
-        }
-        _ => false,
-    }
-}
-
 fn hard_markers_for_call(call: &ast::ExprCall) -> Vec<String> {
     let mut markers = Vec::new();
     match call.func.as_ref() {
@@ -863,31 +982,24 @@ fn hard_markers_for_call(call: &ast::ExprCall) -> Vec<String> {
             "globals" => push_marker(&mut markers, "globals("),
             "locals" => push_marker(&mut markers, "locals("),
             "vars" => push_marker(&mut markers, "vars("),
-            "getattr" => {
-                if call.args.first().is_some_and(expr_names_builtins) {
-                    push_marker(&mut markers, "builtins");
-                }
+            _ => {}
+        },
+        ast::Expr::Attribute(attr) => match attr.attr.as_str() {
+            "__getattribute__"
+                if call
+                    .args
+                    .first()
+                    .is_none_or(|arg| string_literal_expr(arg).is_none()) =>
+            {
+                push_marker(&mut markers, "__getattribute__");
+            }
+            "decode" => push_marker(&mut markers, ".decode("),
+            "hex" | "fromhex" | "unhexlify" => push_marker(&mut markers, "hex"),
+            "b64decode" | "standard_b64decode" | "urlsafe_b64decode" => {
+                push_marker(&mut markers, "base64")
             }
             _ => {}
         },
-        ast::Expr::Attribute(attr) => {
-            match attr.attr.as_str() {
-                "decode" => push_marker(&mut markers, ".decode("),
-                "hex" | "fromhex" | "unhexlify" => push_marker(&mut markers, "hex"),
-                "b64decode" | "standard_b64decode" | "urlsafe_b64decode" => {
-                    push_marker(&mut markers, "base64")
-                }
-                "getattr" => {
-                    if call.args.first().is_some_and(expr_names_builtins) {
-                        push_marker(&mut markers, "builtins");
-                    }
-                }
-                _ => {}
-            }
-            if expr_names_builtins(&attr.value) {
-                push_marker(&mut markers, "builtins");
-            }
-        }
         _ => {}
     }
     markers
@@ -896,7 +1008,8 @@ fn hard_markers_for_call(call: &ast::ExprCall) -> Vec<String> {
 fn hard_markers_for_attribute(attr: &ast::ExprAttribute) -> Vec<String> {
     let mut markers = Vec::new();
     match attr.attr.as_str() {
-        "__dict__" if expr_names_builtins(&attr.value) => push_marker(&mut markers, "builtins"),
+        "__import__" | "__builtins__" | "__globals__" | "__subclasses__" | "__code__"
+        | "__closure__" | "__self__" => push_marker(&mut markers, attr.attr.as_str()),
         "decode" => push_marker(&mut markers, ".decode("),
         "hex" | "fromhex" | "unhexlify" => push_marker(&mut markers, "hex"),
         "b64decode" | "standard_b64decode" | "urlsafe_b64decode" => {
@@ -904,17 +1017,11 @@ fn hard_markers_for_attribute(attr: &ast::ExprAttribute) -> Vec<String> {
         }
         _ => {}
     }
-    if expr_names_builtins(&attr.value) {
-        push_marker(&mut markers, "builtins");
-    }
     markers
 }
 
 fn hard_markers_for_subscript(subscript: &ast::ExprSubscript) -> Vec<String> {
     let mut markers = Vec::new();
-    if expr_names_builtins(&subscript.value) {
-        push_marker(&mut markers, "builtins");
-    }
     if matches!(subscript.value.as_ref(), ast::Expr::Call(call) if is_locals_like_dispatch(call)) {
         push_marker(&mut markers, "dynamic dispatch");
     }
@@ -923,8 +1030,8 @@ fn hard_markers_for_subscript(subscript: &ast::ExprSubscript) -> Vec<String> {
 
 fn hard_markers_for_name(name: &str) -> Vec<String> {
     let mut markers = Vec::new();
-    if name == "__builtins__" {
-        push_marker(&mut markers, "__builtins__");
+    if matches!(name, "builtins" | "__builtins__" | "__import__") {
+        push_marker(&mut markers, name);
     }
     markers
 }
@@ -941,25 +1048,18 @@ fn hard_markers_for_imported_module(module: &str) -> Vec<String> {
     markers
 }
 
-fn hard_markers_for_imported_name(module: &str, name: &str) -> Vec<String> {
-    let mut markers = hard_markers_for_imported_module(module);
-    match (module, name) {
-        ("base64", "b64decode" | "standard_b64decode" | "urlsafe_b64decode") => {
-            push_marker(&mut markers, "base64")
-        }
-        ("binascii", "unhexlify") => push_marker(&mut markers, "hex"),
-        ("builtins", "getattr") => push_marker(&mut markers, "builtins"),
-        _ => {}
-    }
-    markers
+fn attribute_identifier_range(attr: &ast::ExprAttribute) -> ast::text_size::TextRange {
+    let end = attr.range.end();
+    ast::text_size::TextRange::new(
+        end - ast::text_size::TextSize::from(attr.attr.as_str().len() as u32),
+        end,
+    )
 }
 
-fn expr_names_builtins(expr: &ast::Expr) -> bool {
+fn callable_identifier_range(expr: &ast::Expr) -> ast::text_size::TextRange {
     match expr {
-        ast::Expr::Name(name) => matches!(name.id.as_str(), "builtins" | "__builtins__"),
-        ast::Expr::Attribute(attr) => expr_names_builtins(&attr.value),
-        ast::Expr::Subscript(subscript) => expr_names_builtins(&subscript.value),
-        _ => false,
+        ast::Expr::Attribute(attr) => attribute_identifier_range(attr),
+        _ => expr.range(),
     }
 }
 
@@ -1353,3 +1453,6 @@ mod tests {
 
 #[cfg(test)]
 mod skeleton_tests;
+
+#[cfg(test)]
+mod call_target_tests;

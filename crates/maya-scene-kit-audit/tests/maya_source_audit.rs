@@ -445,7 +445,13 @@ fn unknown_flags_unpacking_and_conflicting_query_modes_never_exempt_operations()
     ] {
         for report in paired(source) {
             assert_uncertain(&report, source);
-            assert_eq!(report.disposition, AuditDisposition::Review, "{source}");
+            let expected = if source.starts_with("if example_condition:") {
+                assert!(report.findings.iter().any(|finding| finding.code == AuditFindingCode::PythonUnresolvedCallTarget));
+                AuditDisposition::DenyMalicious
+            } else {
+                AuditDisposition::Review
+            };
+            assert_eq!(report.disposition, expected, "{source}");
         }
     }
     for source in [

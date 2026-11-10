@@ -246,6 +246,7 @@ fn outer_modules_and_assembled_strings_follow_callable_lookup() {
 #[test]
 fn hidden_dangerous_targets_remain_unresolved_unless_proven_callable() {
     for source in [
+        "unknown('Example')",
         "def Example(exec):\n    exec('Example')",
         "run = exec\nlambda run: run('Example')",
         "from os import system as s\n[s('echo Example') for s in []]",
@@ -269,7 +270,6 @@ fn hidden_dangerous_targets_remain_unresolved_unless_proven_callable() {
         "run = exec\nrun = print\nrun('Example')",
         "run = exec\ndef run(sample): pass\nrun('Example')",
         "run = exec\nrun = lambda sample: None\nrun('Example')",
-        "unknown('Example')",
         "import maya.cmds as sample\ndef Example(sample):\n    sample.file(query=True)",
     ] {
         assert_eq!(
@@ -519,6 +519,7 @@ fn conditional_callable_candidates_reach_finally_and_following_calls() {
 fn wildcard_imports_block_builtin_fallback_but_preserve_explicit_bindings() {
     let mut failures = Vec::new();
     for source in [
+        "from sample import *\nprint = len\nprint('Example')",
         "from sample import *\nprint('Example')",
         "from sample import *\nexec('Example')",
         "from sample import *\ndef Example():\n    print('Example')",
@@ -531,10 +532,9 @@ fn wildcard_imports_block_builtin_fallback_but_preserve_explicit_bindings() {
         }
     }
     for source in [
-        "from sample import *\nprint = len\nprint('Example')",
-        "from sample import *\nfrom builtins import print\nprint('Example')",
-        "from sample import *\nExample('Example')",
         "from maya.cmds import *\nfile(q=True)",
+        "from sample import *\nExample('Example')",
+        "from sample import *\nfrom builtins import print\nprint('Example')",
         "class Example:\n    from sample import *\n    def Sample():\n        print('Example')",
     ] {
         if count(source, AuditFindingCode::PythonUnresolvedCallTarget) != 0 {
@@ -608,7 +608,7 @@ fn assignment_forms_preserve_concrete_and_unresolved_targets() {
     assert_eq!(count(deleted, AuditFindingCode::PythonExec), 0);
     assert_eq!(
         count(deleted, AuditFindingCode::PythonUnresolvedCallTarget),
-        0
+        1
     );
     assert_eq!(
         count(
@@ -622,6 +622,6 @@ fn assignment_forms_preserve_concrete_and_unresolved_targets() {
             "from sample import *\nprint = len\nprint('Example')",
             AuditFindingCode::PythonUnresolvedCallTarget
         ),
-        0
+        1
     );
 }
