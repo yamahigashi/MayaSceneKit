@@ -115,7 +115,10 @@ pub fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, S
     out
 }
 
-pub fn remove_raw_script_nodes_from_mb(data: &[u8], root: &Chunk) -> (Vec<u8>, Vec<String>) {
+pub fn remove_raw_script_nodes_from_mb(
+    data: &[u8],
+    root: &Chunk,
+) -> Result<(Vec<u8>, Vec<String>), crate::mb::MbRewriteError> {
     remove_raw_script_nodes_with_selection(data, root, MbNameSelection::All)
 }
 
@@ -169,14 +172,17 @@ pub fn locate_raw_script_node_forms_in_mb_by_name(
     (removed_locators, removed_names)
 }
 
+pub type MbRootFormRemoval = (Vec<u8>, Vec<(String, usize)>);
+
 pub fn remove_root_forms_from_mb_by_locator(
     data: &[u8],
     root: &Chunk,
     target_forms: &[(String, usize)],
-) -> (Vec<u8>, Vec<(String, usize)>) {
+) -> Result<MbRootFormRemoval, crate::mb::MbRewriteError> {
+    crate::mb::require_complete_mb_tree(root)?;
     let children = root.children();
     if children.is_empty() {
-        return (data.to_vec(), vec![]);
+        return Ok((data.to_vec(), vec![]));
     }
 
     let targets = target_forms
@@ -184,18 +190,14 @@ pub fn remove_root_forms_from_mb_by_locator(
         .map(|(form, node_offset)| (form.as_str(), *node_offset))
         .collect::<HashSet<_>>();
     if targets.is_empty() {
-        return (data.to_vec(), vec![]);
+        return Ok((data.to_vec(), vec![]));
     }
 
     let mut removed = Vec::new();
     let mut kept_spans = Vec::new();
 
-    for (idx, child) in children.iter().enumerate() {
-        let next_offset = if idx + 1 < children.len() {
-            children[idx + 1].offset()
-        } else {
-            root.payload_end()
-        };
+    for child in children {
+        let next_offset = crate::mb::rewrite::child_span_end(root, child);
         let rendered = child.form_type().map(|f| f.to_string());
         let matched = rendered
             .as_deref()
@@ -209,20 +211,20 @@ pub fn remove_root_forms_from_mb_by_locator(
     }
 
     if removed.is_empty() {
-        return (data.to_vec(), vec![]);
+        return Ok((data.to_vec(), vec![]));
     }
 
     let Some(encoded) = encode_root_chunk_with_kept_spans(data, root, &kept_spans) else {
-        return (data.to_vec(), vec![]);
+        return Ok((data.to_vec(), vec![]));
     };
-    (encoded, removed)
+    Ok((encoded, removed))
 }
 
 pub fn remove_raw_script_nodes_from_mb_by_name(
     data: &[u8],
     root: &Chunk,
     target_names: &[String],
-) -> (Vec<u8>, Vec<String>) {
+) -> Result<(Vec<u8>, Vec<String>), crate::mb::MbRewriteError> {
     remove_raw_script_nodes_with_selection(data, root, MbNameSelection::Only(target_names))
 }
 
@@ -230,17 +232,18 @@ fn remove_raw_script_nodes_with_selection(
     data: &[u8],
     root: &Chunk,
     selection: MbNameSelection<'_>,
-) -> (Vec<u8>, Vec<String>) {
+) -> Result<(Vec<u8>, Vec<String>), crate::mb::MbRewriteError> {
+    crate::mb::require_complete_mb_tree(root)?;
     let (removed_locators, removed_names) =
         locate_raw_script_node_forms_in_mb_by_name(data, root, selection);
     if removed_names.is_empty() {
-        return (data.to_vec(), vec![]);
+        return Ok((data.to_vec(), vec![]));
     }
-    let (encoded, removed) = remove_root_forms_from_mb_by_locator(data, root, &removed_locators);
+    let (encoded, removed) = remove_root_forms_from_mb_by_locator(data, root, &removed_locators)?;
     if removed.is_empty() {
-        return (data.to_vec(), vec![]);
+        return Ok((data.to_vec(), vec![]));
     }
-    (encoded, removed_names)
+    Ok((encoded, removed_names))
 }
 
 pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEntry> {
@@ -1100,7 +1103,8 @@ mod tests {
             parsed.data(),
             parsed.root(),
             std::slice::from_ref(&target),
-        );
+        )
+        .unwrap();
 
         assert_eq!(removed, vec![target.clone()]);
 

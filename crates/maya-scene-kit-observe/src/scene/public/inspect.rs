@@ -21,6 +21,8 @@ impl Default for MbInspectOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MbInspectReport {
+    #[serde(skip)]
+    pub completeness: String,
     pub scene_path: PathBuf,
     pub scene_format: SceneFormat,
     pub root: MbInspectNode,

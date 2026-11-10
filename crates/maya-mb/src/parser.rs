@@ -325,6 +325,60 @@ impl Default for MbParseBudget {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum MbChildren {
+    Leaf,
+    NotExpanded,
+    Complete(Vec<Chunk>),
+    Truncated {
+        prefix: Vec<Chunk>,
+        reason: MbTruncationReason,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum MbTruncationReason {
+    ChildLimit,
+    ChunkBudget,
+    DepthLimit,
+    Malformed(MayaBinaryParseError),
+}
+
+impl std::fmt::Display for MbTruncationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChildLimit => f.write_str("ChildLimit"),
+            Self::ChunkBudget => f.write_str("ChunkBudget"),
+            Self::DepthLimit => f.write_str("DepthLimit"),
+            Self::Malformed(error) => write!(f, "Malformed: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MbCompleteness {
+    Complete,
+    Truncated {
+        first_reason: MbTruncationReason,
+        truncated_groups: usize,
+    },
+}
+
+impl std::fmt::Display for MbCompleteness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Complete => f.write_str("complete"),
+            Self::Truncated {
+                first_reason,
+                truncated_groups,
+            } => write!(
+                f,
+                "truncated first_reason={first_reason} truncated_groups={truncated_groups}"
+            ),
+        }
+    }
+}
+
 /// A parsed chunk whose fields cannot be constructed or modified externally.
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -338,8 +392,7 @@ pub struct Chunk {
     /// Resolved layout of group children, even when expansion is skipped.
     /// Leaves have no child layout; FOR8/Maya children use alignment 4.
     child_layout: Option<ChunkLayout>,
-    children_parsed: bool,
-    children: Vec<Chunk>,
+    children: MbChildren,
 }
 
 impl Chunk {
@@ -386,17 +439,49 @@ impl Chunk {
         self.child_layout
     }
 
-    /// Returns the parsed direct children in their original order.
+    /// Returns the retained direct children in their original order.
     pub fn children(&self) -> &[Chunk] {
+        match &self.children {
+            MbChildren::Complete(children)
+            | MbChildren::Truncated {
+                prefix: children, ..
+            } => children,
+            MbChildren::Leaf | MbChildren::NotExpanded => &[],
+        }
+    }
+
+    pub fn children_state(&self) -> &MbChildren {
         &self.children
     }
 
-    /// Whether the direct child sequence was parsed to its end.
-    /// Leaves, skipped expansion, partial prefixes, and absorbed child errors
-    /// return false. Unexpanded descendants do not prevent a complete parent;
-    /// an empty group can be complete.
+    /// Whether the direct child sequence is complete, independently of descendants.
     pub fn children_complete(&self) -> bool {
-        self.children_parsed
+        matches!(self.children, MbChildren::Complete(_) | MbChildren::Leaf)
+    }
+
+    pub fn completeness(&self) -> MbCompleteness {
+        let mut first_reason = None;
+        let mut truncated_groups = 0;
+        let mut stack = vec![self];
+        while let Some(chunk) = stack.pop() {
+            let reason = match chunk.children_state() {
+                MbChildren::NotExpanded => Some(MbTruncationReason::DepthLimit),
+                MbChildren::Truncated { reason, .. } => Some(reason.clone()),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                first_reason.get_or_insert(reason);
+                truncated_groups += 1;
+            }
+            stack.extend(chunk.children().iter().rev());
+        }
+        match first_reason {
+            Some(first_reason) => MbCompleteness::Truncated {
+                first_reason,
+                truncated_groups,
+            },
+            None => MbCompleteness::Complete,
+        }
     }
 
     /// Returns this chunk's own header width, independently of child layout
@@ -459,12 +544,23 @@ impl MayaBinaryFile {
         &self.data[chunk.payload_offset..chunk.payload_end]
     }
 
+    pub fn completeness(&self) -> MbCompleteness {
+        self.root.completeness()
+    }
+
+    pub fn not_expanded_groups(&self) -> usize {
+        self.walk()
+            .into_iter()
+            .filter(|chunk| matches!(chunk.children_state(), MbChildren::NotExpanded))
+            .count()
+    }
+
     pub fn walk(&self) -> Vec<&Chunk> {
         let mut out = Vec::new();
         let mut stack = vec![&self.root];
         while let Some(node) = stack.pop() {
             out.push(node);
-            for child in node.children.iter().rev() {
+            for child in node.children().iter().rev() {
                 stack.push(child);
             }
         }
@@ -567,12 +663,6 @@ enum ParseChunkStatus {
     BudgetExhausted,
 }
 
-#[derive(Debug)]
-struct ParseChildrenResult {
-    children: Vec<Chunk>,
-    complete: bool,
-}
-
 fn parse_stream(data: &[u8], budget: &MbParseBudget) -> Result<Chunk, MayaBinaryParseError> {
     if data.len() < 8 {
         return Err(MayaBinaryParseError::StreamTooShort {
@@ -658,8 +748,7 @@ fn parse_chunk(
     }
 
     let mut form_type = None;
-    let mut children_parsed = false;
-    let mut children = Vec::new();
+    let mut children = MbChildren::Leaf;
 
     let mut child_layout = None;
     if is_group_chunk_tag(tag) {
@@ -671,7 +760,7 @@ fn parse_chunk(
         child_layout = Some(preferred_layout);
 
         if should_expand_group(depth, state.budget) {
-            if let Ok(parsed) = parse_children_with_format(
+            children = parse_children_with_format(
                 data,
                 payload_offset + 4,
                 payload_end,
@@ -679,15 +768,14 @@ fn parse_chunk(
                 preferred_layout.alignment_usize(),
                 preferred_layout.header_format(),
                 state,
-            ) {
-                children = parsed.children;
-                children_parsed = parsed.complete;
-            }
+            );
+        } else {
+            children = MbChildren::NotExpanded;
         }
     }
 
     let aligned_size = align(size, sibling_alignment);
-    let next_offset = payload_offset.checked_add(aligned_size).ok_or(
+    let mut next_offset = payload_offset.checked_add(aligned_size).ok_or(
         MayaBinaryParseError::AlignmentOverflow {
             tag,
             offset,
@@ -695,6 +783,9 @@ fn parse_chunk(
             aligned_size,
         },
     )?;
+    if depth > 0 && payload_end == limit {
+        next_offset = limit;
+    }
     if next_offset > limit {
         return Err(MayaBinaryParseError::AlignedEndOutOfBounds {
             tag,
@@ -714,7 +805,6 @@ fn parse_chunk(
             payload_end,
             form_type,
             child_layout,
-            children_parsed,
             children,
         },
         next_offset,
@@ -784,14 +874,15 @@ fn parse_children_with_format(
     sibling_alignment: usize,
     header_format: HeaderFormat,
     state: &mut ParseBudgetState<'_>,
-) -> Result<ParseChildrenResult, MayaBinaryParseError> {
+) -> MbChildren {
     let mut children = Vec::new();
     let mut cursor = start;
-    let mut complete = true;
     while cursor < end {
         if children.len() >= state.budget.max_children_per_group {
-            complete = false;
-            break;
+            return MbChildren::Truncated {
+                prefix: children,
+                reason: MbTruncationReason::ChildLimit,
+            };
         }
         match parse_chunk(
             data,
@@ -801,24 +892,26 @@ fn parse_children_with_format(
             depth,
             header_format,
             state,
-        )? {
-            ParseChunkStatus::Parsed((child, next_cursor)) => {
+        ) {
+            Ok(ParseChunkStatus::Parsed((child, next_cursor))) => {
                 children.push(child);
                 cursor = next_cursor;
             }
-            ParseChunkStatus::BudgetExhausted => {
-                complete = false;
-                break;
+            Ok(ParseChunkStatus::BudgetExhausted) => {
+                return MbChildren::Truncated {
+                    prefix: children,
+                    reason: MbTruncationReason::ChunkBudget,
+                };
+            }
+            Err(error) => {
+                return MbChildren::Truncated {
+                    prefix: children,
+                    reason: MbTruncationReason::Malformed(error),
+                };
             }
         }
     }
-    if complete && cursor != end {
-        return Err(MayaBinaryParseError::ChildrenEndMismatch {
-            actual: cursor,
-            expected: end,
-        });
-    }
-    Ok(ParseChildrenResult { children, complete })
+    MbChildren::Complete(children)
 }
 
 #[cfg(test)]
@@ -859,7 +952,7 @@ mod tests {
         assert_eq!(leaf.form_type(), None);
         assert_eq!(leaf.child_layout(), None);
         assert_eq!(leaf.children().len(), 0);
-        assert!(!leaf.children_complete());
+        assert!(leaf.children_complete());
         assert_eq!(leaf.header_format(), HeaderFormat::FourByte);
         assert_eq!(parsed.payload(leaf), b"abc");
     }
@@ -1429,8 +1522,22 @@ mod tests {
         );
 
         let malformed = parse_bytes(b"FOR4\0\0\0\x0cTESTDATA\0\0\0\x04".to_vec()).unwrap();
-        assert!(!malformed.root.children_parsed);
-        assert!(malformed.root.children.is_empty());
+        assert!(!malformed.root.children_complete());
+        assert!(malformed.root.children().is_empty());
+        assert!(matches!(
+            malformed.root.children_state(),
+            MbChildren::Truncated {
+                reason: MbTruncationReason::Malformed(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            malformed.completeness(),
+            MbCompleteness::Truncated {
+                truncated_groups: 1,
+                ..
+            }
+        ));
 
         let nested = b"FOR4\0\0\0\x18TESTFOR4\0\0\0\x0cTESTDATA\0\0\0\0";
         let parsed = parse_bytes_with_budget(
@@ -1441,11 +1548,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(parsed.root.children_parsed);
-        assert_eq!(parsed.root.children.len(), 1);
-        assert_eq!(parsed.root.children[0].tag, "FOR4");
-        assert!(!parsed.root.children[0].children_parsed);
-        assert!(parsed.root.children[0].children.is_empty());
+        assert!(parsed.root.children_complete());
+        assert_eq!(parsed.root.children().len(), 1);
+        assert_eq!(parsed.root.children()[0].tag, "FOR4");
+        assert!(!parsed.root.children()[0].children_complete());
+        assert!(parsed.root.children()[0].children().is_empty());
 
         let siblings = b"FOR4\0\0\0\x14TESTDATA\0\0\0\0DATA\0\0\0\0";
         for budget in [
@@ -1459,10 +1566,19 @@ mod tests {
             },
         ] {
             let parsed = parse_bytes_with_budget(siblings.to_vec(), &budget).unwrap();
-            assert!(!parsed.root.children_parsed);
-            assert_eq!(parsed.root.children.len(), 1);
-            assert_eq!(parsed.root.children[0].tag, "DATA");
-            assert_eq!(parsed.root.children[0].offset, 12);
+            assert!(!parsed.root.children_complete());
+            assert_eq!(parsed.root.children().len(), 1);
+            assert_eq!(parsed.root.children()[0].tag, "DATA");
+            assert_eq!(parsed.root.children()[0].offset, 12);
+            let reason = if budget.max_children_per_group == 1 {
+                "ChildLimit"
+            } else {
+                "ChunkBudget"
+            };
+            assert_eq!(
+                parsed.completeness().to_string(),
+                format!("truncated first_reason={reason} truncated_groups=1")
+            );
         }
     }
 
@@ -1506,8 +1622,8 @@ mod tests {
     fn child_layout_is_retained_when_child_payload_is_missing() {
         let parsed = parse_bytes(b"FOR4\0\0\0\x0cTESTDATA\0\0\0\x04".to_vec()).unwrap();
 
-        assert!(!parsed.root.children_parsed);
-        assert!(parsed.root.children.is_empty());
+        assert!(!parsed.root.children_complete());
+        assert!(parsed.root.children().is_empty());
         let layout = parsed.root.child_layout.expect("group child layout");
         assert_eq!(layout.alignment_usize(), 4);
         assert_eq!(layout.header_format(), HeaderFormat::FourByte);
@@ -1518,18 +1634,18 @@ mod tests {
         let data = b"FOR4\0\0\0\x20TESTFOR8\0\0\0\x14TESTDATA\0\0\0\x01X\0\0\0\0\0\0\0";
         let parsed = parse_bytes(data.to_vec()).unwrap();
 
-        assert!(parsed.root.children_parsed);
-        assert_eq!(parsed.root.children.len(), 1);
-        let nested = &parsed.root.children[0];
+        assert!(parsed.root.children_complete());
+        assert_eq!(parsed.root.children().len(), 1);
+        let nested = &parsed.root.children()[0];
         assert_eq!(nested.tag, "FOR8");
         assert_eq!(nested.form_type, Some(FourCC::new(*b"TEST")));
         let layout = nested.child_layout.expect("nested group child layout");
         assert_eq!(layout.header_format(), HeaderFormat::FourByte);
         assert_eq!(layout.alignment_usize(), 8);
-        assert!(nested.children_parsed);
-        assert_eq!(nested.children.len(), 1);
-        assert_eq!(nested.children[0].tag, "DATA");
-        assert_eq!(parsed.payload(&nested.children[0]), b"X");
+        assert!(nested.children_complete());
+        assert_eq!(nested.children().len(), 1);
+        assert_eq!(nested.children()[0].tag, "DATA");
+        assert_eq!(parsed.payload(&nested.children()[0]), b"X");
     }
 
     #[test]
@@ -1579,11 +1695,11 @@ mod tests {
                 assert_eq!(root.payload_end, data.len());
                 assert_eq!(root.form_type, Some(FourCC::new(form)));
                 assert_eq!(root.child_layout, Some(layout));
-                assert_eq!(root.children_parsed, max_depth != 0);
-                assert_eq!(root.children.len(), usize::from(max_depth != 0));
+                assert_eq!(root.children_complete(), max_depth != 0);
+                assert_eq!(root.children().len(), usize::from(max_depth != 0));
                 assert_eq!(file.payload(root), payload);
                 if max_depth != 0 {
-                    let leaf = &root.children[0];
+                    let leaf = &root.children()[0];
                     assert_eq!(leaf.tag, "DATA");
                     assert_eq!(leaf.offset, header_size + 4);
                     assert_eq!(
@@ -1599,8 +1715,8 @@ mod tests {
                     assert_eq!(leaf.payload_end, header_size * 2 + 5);
                     assert_eq!(leaf.form_type, None);
                     assert_eq!(leaf.child_layout, None);
-                    assert!(!leaf.children_parsed);
-                    assert!(leaf.children.is_empty());
+                    assert!(leaf.children_complete());
+                    assert!(leaf.children().is_empty());
                     assert_eq!(file.payload(leaf), b"X");
                 }
             }

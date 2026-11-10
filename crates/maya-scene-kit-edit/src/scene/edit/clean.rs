@@ -18,7 +18,8 @@ impl PatchPlanner {
 
         if scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
-            let (cleaned, _) = remove_raw_script_nodes_from_mb(mb.data(), mb.root());
+            let (cleaned, _) = remove_raw_script_nodes_from_mb(mb.data(), mb.root())
+                .map_err(super::clean::mb_rewrite_error)?;
             return Ok(cleaned);
         }
 
@@ -47,7 +48,8 @@ impl PatchPlanner {
                 mb.data(),
                 mb.root(),
                 node_names,
-            );
+            )
+            .map_err(super::clean::mb_rewrite_error)?;
             return Ok(cleaned);
         }
 
@@ -115,7 +117,7 @@ impl PatchPlanner {
         if scene_format == SceneFormat::Mb {
             let mb = crate::mb::parse_bytes(bytes.to_vec())?;
             let (owner_form_targets, plugin_requires) =
-                collect_mb_clean_targets(mb.data(), mb.root(), &normalized);
+                collect_mb_clean_targets(mb.data(), mb.root(), &normalized)?;
             if owner_form_targets.is_empty() && plugin_requires.is_empty() {
                 return Err(SceneToolError::Message(format!(
                     "execution clean targets are unsupported for MB scenes: {}",
@@ -129,7 +131,8 @@ impl PatchPlanner {
                     mb.root(),
                     &owner_form_targets,
                     crate::mb::MbNameSelection::Only(&plugin_requires),
-                );
+                )
+                .map_err(super::clean::mb_rewrite_error)?;
             if cleaned.as_slice() == mb.data()
                 && removed_requires.is_empty()
                 && owner_form_targets.is_empty()
@@ -236,11 +239,12 @@ pub(super) fn mb_root_form_present(
     root: &crate::mb::Chunk,
     form: &str,
     node_offset: usize,
-) -> bool {
-    root.children().iter().any(|child| {
+) -> Result<bool, SceneToolError> {
+    crate::mb::require_complete_mb_tree(root).map_err(mb_rewrite_error)?;
+    Ok(root.children().iter().any(|child| {
         let rendered = child.form_type().map(|f| f.to_string());
         child.offset() == node_offset && rendered.as_deref() == Some(form)
-    })
+    }))
 }
 
 pub(super) fn ma_range_edit(target: &ExecutionCleanTarget) -> Option<rewrite::MaRangeEdit> {
@@ -271,11 +275,14 @@ pub(super) fn ma_range_edit_error(error: rewrite::MaRangeEditError) -> SceneTool
     })
 }
 
+type MbCleanTargets = (Vec<(String, usize)>, Vec<String>);
+
 pub(super) fn collect_mb_clean_targets(
     data: &[u8],
     root: &crate::mb::Chunk,
     targets: &[ExecutionCleanTarget],
-) -> (Vec<(String, usize)>, Vec<String>) {
+) -> Result<MbCleanTargets, SceneToolError> {
+    crate::mb::require_complete_mb_tree(root).map_err(mb_rewrite_error)?;
     let script_nodes = targets
         .iter()
         .filter_map(|target| match target {
@@ -311,5 +318,9 @@ pub(super) fn collect_mb_clean_targets(
             _ => None,
         })
         .collect::<Vec<_>>();
-    (owner_form_targets, plugin_requires)
+    Ok((owner_form_targets, plugin_requires))
+}
+
+pub(super) fn mb_rewrite_error(error: crate::mb::MbRewriteError) -> SceneToolError {
+    SceneToolError::Message(error.to_string())
 }

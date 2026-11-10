@@ -19,9 +19,9 @@ pub use self::{
     fourcc::{FourCC, FourCCParseError},
     layout::{ChunkLayout, LayoutHints, resolve_section_layout_hints},
     parser::{
-        BudgetContext, Chunk, MayaBinaryFile, MayaBinaryParseError, MbParseBudget,
-        MbParseBudgetLimit, ReadField, parse_bytes, parse_bytes_with_budget, parse_file,
-        parse_file_with_budget,
+        BudgetContext, Chunk, MayaBinaryFile, MayaBinaryParseError, MbChildren, MbCompleteness,
+        MbParseBudget, MbParseBudgetLimit, MbTruncationReason, ReadField, parse_bytes,
+        parse_bytes_with_budget, parse_file, parse_file_with_budget,
     },
     raw_walk::{
         visit_group_chunks_with_layout, visit_group_chunks_with_layout_with_budget,

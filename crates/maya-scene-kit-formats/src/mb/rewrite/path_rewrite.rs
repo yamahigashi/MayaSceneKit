@@ -23,22 +23,11 @@ pub struct MbPathReplaceRule {
     pub mode: crate::ma::types::PathReplaceMode,
 }
 
-pub(crate) fn replace_raw_scene_paths_in_mb(
-    data: &[u8],
-    root: &Chunk,
-    rules: &[MbPathReplaceRule],
-) -> (Vec<u8>, usize) {
-    let compiled_rules = CompiledPathReplaceRules::compile_lossy(&normalize_mb_rules(rules));
-    let (rewritten, count) =
-        replace_raw_scene_paths_in_mb_with_rules(data, root, &compiled_rules, &|_, _| true);
-    (rewritten.into_owned(), count)
-}
-
 pub fn replace_scene_paths_in_mb_cow<'a>(
     data: &'a [u8],
     root: &Chunk,
     rules: &[MbPathReplaceRule],
-) -> (Cow<'a, [u8]>, usize) {
+) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
     let compiled_rules = CompiledPathReplaceRules::compile_lossy(&normalize_mb_rules(rules));
     replace_raw_scene_paths_in_mb_with_rules(data, root, &compiled_rules, &|_, _| true)
 }
@@ -48,9 +37,10 @@ fn replace_raw_scene_paths_in_mb_with_rules<'a>(
     root: &Chunk,
     compiled_rules: &CompiledPathReplaceRules,
     accept_payload: &impl Fn(usize, usize) -> bool,
-) -> (Cow<'a, [u8]>, usize) {
+) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
+    crate::mb::require_complete_mb_tree(root)?;
     if compiled_rules.is_empty() || root.children().is_empty() {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     }
     let children = root.children();
     let mut payload_parts: Vec<u8> = Vec::new();
@@ -63,12 +53,8 @@ fn replace_raw_scene_paths_in_mb_with_rules<'a>(
     }
 
     let mut total = 0usize;
-    for (idx, child) in children.iter().enumerate() {
-        let next_offset = if idx + 1 < children.len() {
-            children[idx + 1].offset()
-        } else {
-            root.payload_end()
-        };
+    for child in children {
+        let next_offset = crate::mb::rewrite::child_span_end(root, child);
         let original_span = &data[child.offset()..next_offset];
 
         if child.form_type().is_some_and(|f| f == "RTFT") {
@@ -109,42 +95,45 @@ fn replace_raw_scene_paths_in_mb_with_rules<'a>(
     }
 
     if total == 0 {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     }
 
     let Ok(encoded) = encode_root_chunk(root, &payload_parts) else {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     };
-    (Cow::Owned(encoded), total)
+    Ok((Cow::Owned(encoded), total))
 }
 
 pub fn replace_scene_paths_in_mb(
     data: &[u8],
     root: &Chunk,
     rules: &[MbPathReplaceRule],
-) -> (Vec<u8>, usize) {
-    replace_raw_scene_paths_in_mb(data, root, rules)
+) -> Result<(Vec<u8>, usize), crate::mb::MbRewriteError> {
+    replace_scene_paths_in_mb_cow(data, root, rules)
+        .map(|(bytes, count)| (bytes.into_owned(), count))
 }
 
 pub fn replace_scene_paths_in_mb_by_index(
     data: &[u8],
     root: &Chunk,
     replacements: &[(usize, String)],
-) -> (Vec<u8>, usize) {
-    replace_scene_paths_in_mb_by_index_cow(data, root, replacements).map_owned()
+) -> Result<(Vec<u8>, usize), crate::mb::MbRewriteError> {
+    replace_scene_paths_in_mb_by_index_cow(data, root, replacements)
+        .map(|(bytes, count)| (bytes.into_owned(), count))
 }
 
 pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
     data: &'a [u8],
     root: &Chunk,
     replacements: &[(usize, String)],
-) -> (Cow<'a, [u8]>, usize) {
+) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
+    crate::mb::require_complete_mb_tree(root)?;
     if replacements.is_empty() || root.children().is_empty() {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     }
     let targets = replacement_targets_for_mb(data, root, replacements);
     if targets.is_empty() {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     }
 
     let children = root.children();
@@ -158,12 +147,8 @@ pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
     }
 
     let mut total = 0usize;
-    for (idx, child) in children.iter().enumerate() {
-        let next_offset = if idx + 1 < children.len() {
-            children[idx + 1].offset()
-        } else {
-            root.payload_end()
-        };
+    for child in children {
+        let next_offset = crate::mb::rewrite::child_span_end(root, child);
         let original_span = &data[child.offset()..next_offset];
 
         if child.form_type().is_some_and(|f| f == "RTFT") {
@@ -196,13 +181,13 @@ pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
     }
 
     if total == 0 {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     }
 
     let Ok(encoded) = encode_root_chunk(root, &payload_parts) else {
-        return (Cow::Borrowed(data), 0);
+        return Ok((Cow::Borrowed(data), 0));
     };
-    (Cow::Owned(encoded), total)
+    Ok((Cow::Owned(encoded), total))
 }
 
 fn rewrite_section_payloads_preserving_encode_fallback(
@@ -1074,16 +1059,6 @@ fn insert_replacement_target(
     true
 }
 
-trait IntoOwnedBytes {
-    fn map_owned(self) -> (Vec<u8>, usize);
-}
-
-impl<'a> IntoOwnedBytes for (Cow<'a, [u8]>, usize) {
-    fn map_owned(self) -> (Vec<u8>, usize) {
-        (self.0.into_owned(), self.1)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{borrow::Cow, num::NonZeroUsize};
@@ -1119,6 +1094,25 @@ mod tests {
         let compiled_rules =
             CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(rules));
         super::replace_path_field_in_frdi_payload_with_rules(payload, &compiled_rules)
+    }
+
+    fn with_opaque_tail(source: &[u8], tail: &[u8]) -> Vec<u8> {
+        let parsed = crate::mb::parse_bytes(source.to_vec()).unwrap();
+        assert_eq!(parsed.root().children().len(), 1);
+        let child = &parsed.root().children()[0];
+        let payload = parsed.payload(child);
+        assert!(payload.ends_with(tail));
+        let mut payload = payload[..payload.len() - tail.len()].to_vec();
+        payload.extend_from_slice(&manual_chunk(b"DATA", 0, tail, HeaderFormat::EightByte, 8));
+        let mut root_payload = b"Maya".to_vec();
+        root_payload.extend_from_slice(&manual_chunk(
+            b"FOR8",
+            0,
+            &payload,
+            HeaderFormat::EightByte,
+            4,
+        ));
+        manual_chunk(b"FOR8", 0, &root_payload, HeaderFormat::EightByte, 1)
     }
 
     fn build_mb_with_single_form(
@@ -1240,6 +1234,9 @@ mod tests {
     #[test]
     fn replace_scene_paths_keeps_bytes_identical_without_match() {
         let mb = build_mb_with_single_form("RTFT", "STR ", b"ftn\0\x00old/path.mb\0", b"\xFA\xFB");
+        let malformed = crate::mb::parse_bytes(mb.clone()).unwrap();
+        assert!(replace_scene_paths_in_mb(&mb, malformed.root(), &[]).is_err());
+        let mb = with_opaque_tail(&mb, &[0xFA, 0xFB]);
         let dir = tempdir().expect("tmp");
         let input = dir.path().join("src.mb");
         std::fs::write(&input, &mb).expect("write");
@@ -1249,7 +1246,7 @@ mod tests {
             to: "asset/".to_string(),
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules);
+        let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules).unwrap();
         assert_eq!(count, 0);
         assert_eq!(rewritten, mb);
     }
@@ -1257,6 +1254,9 @@ mod tests {
     #[test]
     fn replace_scene_paths_cow_borrows_input_without_match() {
         let mb = build_mb_with_single_form("RTFT", "STR ", b"ftn\0\x00old/path.mb\0", b"\xFA\xFB");
+        let malformed = crate::mb::parse_bytes(mb.clone()).unwrap();
+        assert!(replace_scene_paths_in_mb_cow(&mb, malformed.root(), &[]).is_err());
+        let mb = with_opaque_tail(&mb, &[0xFA, 0xFB]);
         let dir = tempdir().expect("tmp");
         let input = dir.path().join("src.mb");
         std::fs::write(&input, &mb).expect("write");
@@ -1266,7 +1266,7 @@ mod tests {
             to: "asset/".to_string(),
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_scene_paths_in_mb_cow(&mb, parsed.root(), &rules);
+        let (rewritten, count) = replace_scene_paths_in_mb_cow(&mb, parsed.root(), &rules).unwrap();
         assert_eq!(count, 0);
         assert!(matches!(rewritten, Cow::Borrowed(bytes) if bytes == mb.as_slice()));
     }
@@ -1275,6 +1275,9 @@ mod tests {
     fn replace_scene_paths_rtft_preserves_tail_and_non_nul_termination() {
         let mb =
             build_mb_with_single_form("RTFT", "STR ", b"ftn\0\x00old/path.mb", b"\xF1\xF2\xF3");
+        let malformed = crate::mb::parse_bytes(mb.clone()).unwrap();
+        assert!(replace_scene_paths_in_mb(&mb, malformed.root(), &[]).is_err());
+        let mb = with_opaque_tail(&mb, &[0xF1, 0xF2, 0xF3]);
         let dir = tempdir().expect("tmp");
         let input = dir.path().join("src.mb");
         let output = dir.path().join("dst.mb");
@@ -1285,7 +1288,7 @@ mod tests {
             to: "new".to_string(),
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules);
+        let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules).unwrap();
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1300,7 +1303,15 @@ mod tests {
                 .map_or_else(LayoutHints::new, LayoutHints::from),
         );
         let parsed_section = parse_section_chunks_with_hints(&payload[4..], hints);
-        assert_eq!(parsed_section.tail(&payload[4..]), &[0xF1, 0xF2, 0xF3]);
+        assert!(parsed_section.tail(&payload[4..]).is_empty());
+        assert_eq!(
+            parsed_section
+                .chunks()
+                .last()
+                .unwrap()
+                .payload(&payload[4..]),
+            &[0xF1, 0xF2, 0xF3]
+        );
         let str_chunk = parsed_section
             .chunks()
             .iter()
@@ -1381,6 +1392,9 @@ mod tests {
             b"old/char.mb\0charA\0charARN\0mayaBinary\0",
             b"\xCC\xDD",
         );
+        let malformed = crate::mb::parse_bytes(mb.clone()).unwrap();
+        assert!(replace_scene_paths_in_mb(&mb, malformed.root(), &[]).is_err());
+        let mb = with_opaque_tail(&mb, &[0xCC, 0xDD]);
         let dir = tempdir().expect("tmp");
         let input = dir.path().join("src.mb");
         let output = dir.path().join("dst.mb");
@@ -1391,7 +1405,7 @@ mod tests {
             to: "new".to_string(),
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules);
+        let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules).unwrap();
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1406,7 +1420,15 @@ mod tests {
                 .map_or_else(LayoutHints::new, LayoutHints::from),
         );
         let parsed_section = parse_section_chunks_with_hints(&payload[4..], hints);
-        assert_eq!(parsed_section.tail(&payload[4..]), &[0xCC, 0xDD]);
+        assert!(parsed_section.tail(&payload[4..]).is_empty());
+        assert_eq!(
+            parsed_section
+                .chunks()
+                .last()
+                .unwrap()
+                .payload(&payload[4..]),
+            &[0xCC, 0xDD]
+        );
         let fref_chunk = parsed_section
             .chunks()
             .iter()
@@ -1446,6 +1468,9 @@ mod tests {
             b"\x01\x04\0\x02asset/example/old_scene.mb\0Example\0\x01\0ExampleRN\0VERS|2026|\0mayaBinary\0",
             b"\xEE\xEF",
         );
+        let malformed = crate::mb::parse_bytes(mb.clone()).unwrap();
+        assert!(replace_scene_paths_in_mb_by_index(&mb, malformed.root(), &[]).is_err());
+        let mb = with_opaque_tail(&mb, &[0xEE, 0xEF]);
         let dir = tempdir().expect("tmp");
         let input = dir.path().join("src.mb");
         let output = dir.path().join("dst.mb");
@@ -1459,7 +1484,8 @@ mod tests {
             &mb,
             parsed.root(),
             &[(0, "asset/example/new_scene.mb".to_string())],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1474,7 +1500,15 @@ mod tests {
                 .map_or_else(LayoutHints::new, LayoutHints::from),
         );
         let parsed_section = parse_section_chunks_with_hints(&payload[4..], hints);
-        assert_eq!(parsed_section.tail(&payload[4..]), &[0xEE, 0xEF]);
+        assert!(parsed_section.tail(&payload[4..]).is_empty());
+        assert_eq!(
+            parsed_section
+                .chunks()
+                .last()
+                .unwrap()
+                .payload(&payload[4..]),
+            &[0xEE, 0xEF]
+        );
         let frdi_chunk = parsed_section
             .chunks()
             .iter()
@@ -1533,7 +1567,8 @@ mod tests {
             &mb,
             parsed.root(),
             &[(0, "asset/example/new_scene.mb".to_string())],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 2);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1598,7 +1633,8 @@ mod tests {
             &mb,
             parsed.root(),
             &[(0, "asset/example/first_scene.mb".to_string())],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1652,7 +1688,8 @@ mod tests {
             &mb,
             parsed.root(),
             &[(0, "asset/example/first_scene.mb".to_string())],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1709,7 +1746,8 @@ mod tests {
                 (0, "asset/example/first_scene.mb".to_string()),
                 (1, "asset/example/second_scene.mb".to_string()),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 2);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1759,7 +1797,8 @@ mod tests {
             &mb,
             parsed.root(),
             &[(0, "asset/example/UpdatedAsset.fbx".to_string())],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1916,7 +1955,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(child, b"FOR4\0\0\0\x10HEADINCL\0\0\0\x01Y\0\0\0");
-        let (rewritten, total) = replace_scene_paths_in_mb(source, parsed.root(), &rules);
+        let (rewritten, total) = replace_scene_paths_in_mb(source, parsed.root(), &rules).unwrap();
         assert_eq!(total, 1);
         assert_eq!(
             rewritten,
@@ -1929,7 +1968,7 @@ mod tests {
         let source = b"FOR4\0\0\0\x1cMayaFOR4\0\0\0\x10HEADINCL\0\0\0\x01X\xA1\xB2\xC3";
         let parsed = crate::mb::parse_bytes(source.to_vec()).unwrap();
         let (rewritten, count) =
-            replace_scene_paths_in_mb(source, parsed.root(), &literal_rules("X", "Y"));
+            replace_scene_paths_in_mb(source, parsed.root(), &literal_rules("X", "Y")).unwrap();
         assert_eq!(count, 1);
         let output = crate::mb::parse_bytes(rewritten.clone()).unwrap();
         let child = &output.root().children()[0];
@@ -2061,19 +2100,15 @@ mod tests {
                 let compiled = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(
                     &literal_rules("file", "test"),
                 ));
-                let (rewritten, total) = super::replace_raw_scene_paths_in_mb_with_rules(
-                    &source,
-                    parsed.root(),
-                    &compiled,
-                    &accept_payload,
+                assert!(
+                    super::replace_raw_scene_paths_in_mb_with_rules(
+                        &source,
+                        parsed.root(),
+                        &compiled,
+                        &accept_payload,
+                    )
+                    .is_err()
                 );
-                let mut root_payload = b"Maya".to_vec();
-                root_payload.extend_from_slice(&expected);
-                assert_eq!(
-                    rewritten,
-                    manual_chunk(b"FOR8", 0, &root_payload, HeaderFormat::EightByte, 1)
-                );
-                assert_eq!(total, 3);
             }
         }
     }
@@ -2089,6 +2124,9 @@ mod tests {
             ],
             &[0xFA, 0xFB],
         );
+        let malformed = crate::mb::parse_bytes(source.clone()).unwrap();
+        assert!(replace_scene_paths_in_mb_by_index(&source, malformed.root(), &[]).is_err());
+        let source = with_opaque_tail(&source, &[0xFA, 0xFB]);
         let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
         let entries = super::extract_raw_scene_paths_from_mb_parts(&source, parsed.root());
         assert_eq!(entries.len(), 2);
@@ -2110,7 +2148,8 @@ mod tests {
                 (usize::MAX, "asset/example/invalid.mb".into()),
                 (second, "asset/example/sample.mb".into()),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(count, 2);
         let output = crate::mb::parse_bytes(rewritten.clone()).unwrap();
         let values = super::extract_raw_scene_paths_from_mb_parts(&rewritten, output.root())

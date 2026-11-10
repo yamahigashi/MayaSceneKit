@@ -134,7 +134,8 @@ impl PatchPlanner {
             removed_names
         } else if scene_format == SceneFormat::Mb {
             let mb = parse_file(src)?;
-            let (_, removed_names) = remove_raw_script_nodes_from_mb(mb.data(), mb.root());
+            let (_, removed_names) = remove_raw_script_nodes_from_mb(mb.data(), mb.root())
+                .map_err(super::clean::mb_rewrite_error)?;
             removed_names
         } else {
             return Err(unsupported_scene_format(src, scene_format));
@@ -170,7 +171,8 @@ impl PatchPlanner {
                 mb.data(),
                 mb.root(),
                 &normalized,
-            );
+            )
+            .map_err(super::clean::mb_rewrite_error)?;
             removed_names
         } else {
             return Err(unsupported_scene_format(src, scene_format));
@@ -269,7 +271,8 @@ impl PatchPlanner {
                         let (_, removed_names) =
                             crate::mb::paths::remove_raw_script_nodes_from_mb_by_name(
                                 bytes, root, &names,
-                            );
+                            )
+                            .map_err(super::clean::mb_rewrite_error)?;
                         removed_names
                     } else {
                         return Err(unsupported_scene_format(input_path, scene_format));
@@ -288,7 +291,8 @@ impl PatchPlanner {
                     } else if scene_format == SceneFormat::Mb {
                         let root = mb_root.expect("mb root");
                         let (_, removed) =
-                            remove_plugin_requires_from_mb(bytes, root, &rendered_targets);
+                            remove_plugin_requires_from_mb(bytes, root, &rendered_targets)
+                                .map_err(super::clean::mb_rewrite_error)?;
                         removed
                     } else {
                         return Err(unsupported_scene_format(input_path, scene_format));
@@ -335,7 +339,7 @@ impl PatchPlanner {
                         ));
                     }
                     let root = mb_root.expect("mb root");
-                    if super::clean::mb_root_form_present(root, form, *node_offset) {
+                    if super::clean::mb_root_form_present(root, form, *node_offset)? {
                         cleaned_targets.push(target.clone());
                     }
                 }

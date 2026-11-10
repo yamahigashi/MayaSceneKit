@@ -58,7 +58,8 @@ impl PatchPlanner {
                 })
                 .collect::<Vec<_>>();
             let (rewritten, _) =
-                crate::mb::replace_scene_paths_in_mb(mb.data(), mb.root(), &mb_rules);
+                crate::mb::replace_scene_paths_in_mb(mb.data(), mb.root(), &mb_rules)
+                    .map_err(super::clean::mb_rewrite_error)?;
             return Ok(rewritten);
         }
 
@@ -91,7 +92,8 @@ impl PatchPlanner {
                 mb.data(),
                 mb.root(),
                 &indexed_replacements,
-            );
+            )
+            .map_err(super::clean::mb_rewrite_error)?;
             return Ok(rewritten);
         }
 

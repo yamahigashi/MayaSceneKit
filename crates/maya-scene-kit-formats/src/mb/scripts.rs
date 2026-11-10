@@ -8,6 +8,9 @@ pub(crate) fn extract_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String
     paths::extract_raw_script_entries_from_mb(mb)
 }
 
-pub(crate) fn remove_script_nodes_from_mb(data: &[u8], root: &Chunk) -> (Vec<u8>, Vec<String>) {
+pub(crate) fn remove_script_nodes_from_mb(
+    data: &[u8],
+    root: &Chunk,
+) -> Result<(Vec<u8>, Vec<String>), crate::mb::MbRewriteError> {
     paths::remove_raw_script_nodes_from_mb(data, root)
 }

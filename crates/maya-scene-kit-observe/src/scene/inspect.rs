@@ -43,6 +43,7 @@ fn inspect_mb_with_budget(
 ) -> Result<MbInspectReport, SceneToolError> {
     let mb = parse_file_with_budget(scene_path, budget)?;
     Ok(MbInspectReport {
+        completeness: mb.completeness().to_string(),
         scene_path: scene_path.to_path_buf(),
         scene_format: SceneFormat::Mb,
         root: inspect_node(mb.root(), mb.data(), 0, options),
@@ -180,6 +181,7 @@ mod tests {
         .expect("inspect");
 
         assert!(report.root.children.is_empty());
+        assert_eq!(report.completeness, "complete");
     }
 
     #[test]
@@ -217,7 +219,17 @@ mod tests {
         )
         .expect("inspect");
 
-        assert!(report.root.children.iter().any(|child| child.opaque));
+        let opaque_groups = report
+            .root
+            .children
+            .iter()
+            .filter(|child| child.opaque)
+            .count();
+        assert!(opaque_groups > 0);
+        assert_eq!(
+            report.completeness,
+            format!("truncated first_reason=DepthLimit truncated_groups={opaque_groups}")
+        );
     }
 
     #[test]

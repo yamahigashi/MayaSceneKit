@@ -52,7 +52,7 @@ impl PatchPlanner {
             .unwrap_or_default();
         let bytes = if let Some(mb) = mb {
             let (mut forms, requires) =
-                super::clean::collect_mb_clean_targets(mb.data(), mb.root(), accepted_clean);
+                super::clean::collect_mb_clean_targets(mb.data(), mb.root(), accepted_clean)?;
             forms.extend(super::path_owner_delete::resolve_mb_path_owner_forms(
                 report,
                 accepted_owners,
@@ -68,6 +68,7 @@ impl PatchPlanner {
                 &forms,
                 crate::mb::MbNameSelection::Only(&requires),
             )
+            .map_err(super::clean::mb_rewrite_error)?
             .0
         } else if scene_format == SceneFormat::Ma {
             let cleaned = if accepted_clean.is_empty() {

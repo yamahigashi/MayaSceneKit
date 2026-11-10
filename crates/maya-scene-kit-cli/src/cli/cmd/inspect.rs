@@ -41,6 +41,7 @@ pub(crate) fn run_inspect(
 
         match result {
             Ok(report) => {
+                let _ = writeln!(stdout_output, "completeness={}", report.completeness);
                 if let Some(offset) = at_offset {
                     match fs::read(path) {
                         Ok(data) => print_chunk_at(

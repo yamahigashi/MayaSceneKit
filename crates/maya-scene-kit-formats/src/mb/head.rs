@@ -130,25 +130,28 @@ pub fn remove_plugin_requires_from_mb(
     data: &[u8],
     root: &Chunk,
     target_rendered: &[String],
-) -> (Vec<u8>, Vec<String>) {
+) -> Result<(Vec<u8>, Vec<String>), crate::mb::MbRewriteError> {
     let (rewritten, _, removed) = remove_root_forms_and_plugin_requires_from_mb(
         data,
         root,
         &[],
         MbNameSelection::Only(target_rendered),
-    );
-    (rewritten, removed)
+    )?;
+    Ok((rewritten, removed))
 }
+
+pub type MbRootFormsAndRequiresRemoval = (Vec<u8>, Vec<(String, usize)>, Vec<String>);
 
 pub fn remove_root_forms_and_plugin_requires_from_mb(
     data: &[u8],
     root: &Chunk,
     target_forms: &[(String, usize)],
     selection: MbNameSelection<'_>,
-) -> (Vec<u8>, Vec<(String, usize)>, Vec<String>) {
+) -> Result<MbRootFormsAndRequiresRemoval, crate::mb::MbRewriteError> {
+    crate::mb::require_complete_mb_tree(root)?;
     let children = root.children();
     if children.is_empty() {
-        return (data.to_vec(), Vec::new(), Vec::new());
+        return Ok((data.to_vec(), Vec::new(), Vec::new()));
     }
 
     let form_targets = target_forms
@@ -179,12 +182,8 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
     let mut removed = Vec::new();
     let mut changed = false;
 
-    for (idx, child) in children.iter().enumerate() {
-        let next_offset = if idx + 1 < children.len() {
-            children[idx + 1].offset()
-        } else {
-            root.payload_end()
-        };
+    for child in children {
+        let next_offset = crate::mb::rewrite::child_span_end(root, child);
         let original_span = &data[child.offset()..next_offset];
         let rendered = child.form_type().map(|f| f.to_string());
         if let Some(form) = rendered.as_deref()
@@ -211,13 +210,13 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
     }
 
     if !changed {
-        return (data.to_vec(), Vec::new(), Vec::new());
+        return Ok((data.to_vec(), Vec::new(), Vec::new()));
     }
 
     let Ok(encoded) = crate::mb::encode_root_chunk(root, &payload_parts) else {
-        return (data.to_vec(), Vec::new(), Vec::new());
+        return Ok((data.to_vec(), Vec::new(), Vec::new()));
     };
-    (encoded, removed_forms, removed)
+    Ok((encoded, removed_forms, removed))
 }
 
 fn decode_finf(payload: &[u8]) -> Option<(String, String)> {
@@ -414,7 +413,8 @@ mod tests {
                 mb.root(),
                 &[],
                 selection,
-            );
+            )
+            .unwrap();
             assert_eq!(result, bytes);
             assert!(forms.is_empty());
             assert!(requires.is_empty());
@@ -430,7 +430,8 @@ mod tests {
             mb.root(),
             &[],
             MbNameSelection::All,
-        );
+        )
+        .unwrap();
         assert!(forms.is_empty());
         assert_eq!(requires.len(), 2);
         let cleaned = parse_bytes(result).unwrap();
@@ -473,7 +474,8 @@ mod tests {
             mb.data(),
             mb.root(),
             &[String::from("requires \"pluginA\" \"1.0\";")],
-        );
+        )
+        .unwrap();
         assert_eq!(removed, vec!["requires \"pluginA\" \"1.0\";".to_string()]);
 
         std::fs::write(&source, &rewritten).expect("rewrite temp mb");

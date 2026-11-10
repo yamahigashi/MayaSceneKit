@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Maya Binary chunk parsing now exposes MbChildren, MbTruncationReason, and
+  MbCompleteness through maya-mb and the formats MB module. A malformed child
+  preserves its successfully parsed siblings and the original error. Successful
+  parsing can still return an incomplete tree; use file or chunk completeness()
+  to check the whole retained subtree. Depth-limited NotExpanded groups count
+  as DepthLimit truncation; not_expanded_groups() reports their count separately.
+- children_complete() now returns true for leaves. It describes only the direct
+  child sequence; use completeness() to detect truncation in descendants.
+- MB rewrite and removal functions now return Result and reject incomplete
+  subtrees, including depth-limited trees and requests with no matching targets.
+  Edit operations report these refusals without materializing output.
+- Accept omitted padding for the final child whose payload ends exactly at its
+  parent boundary. Inspect now shows previously hidden children in that case and
+  prints a completeness summary. Observe and audit cache schemas advance to 6.
+
 ## [v0.3.1] - 2026-11-10
 
 ### Changed
