@@ -181,7 +181,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 },
                 "files": file_summaries.iter().map(|(path, format, hit_count, review_count, notice_count, surface_count, validation_state, coverage_state, coverage_issue_count, blocked_on_uncertainty, disposition)| json!({
                     "path": path,
-                    "aliases": collection.details.get(std::path::Path::new(path)).map(|d| d.aliases.as_slice()).unwrap_or_default(),
+                    "aliases": collection.details.get(std::path::Path::new(path)).map(|d| d.aliases.iter().map(|alias| alias.to_string_lossy()).collect::<Vec<_>>()).unwrap_or_default(),
                     "outside_input_tree": collection.details.get(std::path::Path::new(path)).is_some_and(|d| d.outside_input_tree),
                     "scene_format": format.as_str(),
                     "finding_count": hit_count,
@@ -421,7 +421,13 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                         let _ = write!(
                             stdout_output,
                             " aliases={}",
-                            serde_json::to_string(&details.aliases).unwrap()
+                            json!(
+                                details
+                                    .aliases
+                                    .iter()
+                                    .map(|alias| alias.to_string_lossy())
+                                    .collect::<Vec<_>>()
+                            )
                         );
                     }
                 }

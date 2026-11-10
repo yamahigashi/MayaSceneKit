@@ -5,6 +5,45 @@ use std::{fs, os::unix::fs::symlink, path::Path, process::Command};
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[test]
+fn audit_renders_non_utf8_alias_in_text() {
+    assert_non_utf8_alias(false);
+}
+
+#[test]
+fn audit_renders_non_utf8_alias_in_json() {
+    assert_non_utf8_alias(true);
+}
+
+fn assert_non_utf8_alias(json: bool) {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("Example.ma"), CLEAN).unwrap();
+    let alias = dir.path().join(OsStr::from_bytes(b"\xff.ma"));
+    symlink("Example.ma", &alias).unwrap();
+    let output = run("audit", dir.path(), json);
+    assert_ne!(output.status.code(), Some(101));
+    assert_eq!(output.status.code(), Some(0));
+    if json {
+        let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            doc["files"][0]["aliases"][0],
+            alias.to_string_lossy().as_ref()
+        );
+        assert!(
+            doc["files"][0]["aliases"][0]
+                .as_str()
+                .unwrap()
+                .contains('\u{fffd}')
+        );
+    } else {
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(&format!("aliases=[\"{}\"]", alias.to_string_lossy())));
+        assert!(text.contains('\u{fffd}'));
+    }
+}
+
 const CLEAN: &str = "//Maya ASCII 2026 scene\nrequires maya \"2026\";\n";
 
 fn run(command: &str, input: &Path, json: bool) -> std::process::Output {
