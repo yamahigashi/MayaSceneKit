@@ -268,12 +268,14 @@ fn decode_add_attr_layout(
         cursor = cursor.checked_add(padding_bytes)?;
     }
     let long_raw = if let Some(prefix_words) = name_prefix_words {
-        let raw_with_prefix = read_cstring(payload, &mut cursor)?;
+        let rest = payload.get(cursor..)?;
+        let name_bytes = rest.iter().position(|byte| *byte == 0)?;
         let prefix_bytes = (prefix_words as usize).checked_mul(4)?;
-        if raw_with_prefix.len() < prefix_bytes {
+        if name_bytes < prefix_bytes {
             return None;
         }
-        raw_with_prefix[prefix_bytes..].to_string()
+        cursor = cursor.checked_add(prefix_bytes)?;
+        read_cstring_allow_empty(payload, &mut cursor)?
     } else {
         read_cstring(payload, &mut cursor)?
     };
@@ -469,4 +471,64 @@ pub(super) fn normalize_attr_name_token(token: &str) -> String {
         .trim_matches(|c: char| c.is_ascii_control() || c == '\0')
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_add_attr_op_from_attr_chunk;
+
+    // Header byte 10 selects a one-word prefix via the big-endian word at bytes 7..11.
+    fn prefixed_payload(name: &[u8]) -> Vec<u8> {
+        let mut payload = b"aCPD\0".to_vec();
+        let mut header = [0u8; 11];
+        header[7..11].copy_from_slice(&1u32.to_be_bytes());
+        payload.extend_from_slice(&header);
+        payload.extend_from_slice(name);
+        payload.extend_from_slice(b"\0sample\0");
+        payload
+    }
+
+    #[test]
+    fn name_prefix_inside_utf8_character_does_not_panic() {
+        let payload = prefixed_payload("Exa€Example".as_bytes());
+        let decoded = decode_add_attr_op_from_attr_chunk(&payload).unwrap();
+        assert_eq!(decoded.long_name, "\u{fffd}\u{fffd}Example");
+        assert_eq!(decoded.short_name, "sample");
+    }
+
+    #[test]
+    fn ascii_name_prefix_preserves_name() {
+        let payload = prefixed_payload(b"TestExample");
+        let decoded = decode_add_attr_op_from_attr_chunk(&payload).unwrap();
+        assert_eq!(decoded.long_name, "Example");
+        assert_eq!(decoded.short_name, "sample");
+    }
+
+    #[test]
+    fn name_prefix_with_empty_remainder_is_rejected() {
+        let payload = prefixed_payload(b"Test");
+        assert!(decode_add_attr_op_from_attr_chunk(&payload).is_none());
+    }
+
+    #[test]
+    fn name_shorter_than_prefix_is_rejected() {
+        let payload = prefixed_payload(b"Te");
+        assert!(decode_add_attr_op_from_attr_chunk(&payload).is_none());
+    }
+
+    #[test]
+    fn name_without_nul_terminators_is_rejected() {
+        let mut payload = prefixed_payload(b"TestExample");
+        payload.truncate(payload.len() - b"\0sample\0".len());
+        payload.extend_from_slice(b"sample");
+        assert!(decode_add_attr_op_from_attr_chunk(&payload).is_none());
+    }
+
+    #[test]
+    fn name_prefix_preserves_following_utf8_character() {
+        let payload = prefixed_payload("Testéx".as_bytes());
+        let decoded = decode_add_attr_op_from_attr_chunk(&payload).unwrap();
+        assert_eq!(decoded.long_name, "éx");
+        assert_eq!(decoded.short_name, "sample");
+    }
 }
