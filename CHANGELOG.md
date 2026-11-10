@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.1] - 2026-11-10
+
+### Changed
+
+- The GUI paths table "Delete owner nodes" context action now applies to every
+  selected path entry when the right-clicked entry is part of the selection.
+  Right-clicking an entry outside the selection still affects only that entry.
+
 ## [v0.3.0] - 2026-11-09
 
 This release adds allowlist-based review of known scripts across the CLI,
