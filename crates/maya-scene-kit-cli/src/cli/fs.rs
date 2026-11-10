@@ -128,7 +128,7 @@ pub(super) fn render_scene_paths_json(
     let kind_label = scene_path_kind_label(kind);
     let doc = json!({
         "contract_version": JSON_CONTRACT_VERSION,
-        "scene_path": report.scene_path.display().to_string(),
+        "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "kind": kind_label,
         "count": report.entries.len(),
@@ -169,7 +169,7 @@ pub(super) fn render_scene_paths_collection_json(
     for file in files {
         let report = collect_scene_paths_with_options(file, kind, load_options)?;
         items.push(json!({
-            "scene_path": report.scene_path.display().to_string(),
+            "scene_path": report.scene_path.to_string_lossy(),
             "scene_format": report.scene_format,
             "count": report.entries.len(),
             "entries": report.entries.into_iter().map(|e| json!({
@@ -196,7 +196,7 @@ pub(super) fn render_scene_paths_collection_json(
     }
     let doc = json!({
         "contract_version": JSON_CONTRACT_VERSION,
-        "input": input.display().to_string(),
+        "input": input.to_string_lossy(),
         "kind": kind_label,
         "file_count": items.len(),
         "files": items,

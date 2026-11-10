@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::{self, Write as _},
+    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -37,455 +37,463 @@ pub(crate) struct ScriptAuditArgs<'a> {
 }
 
 pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
-    let ScriptAuditArgs {
-        input,
-        inline_rules,
-        allowlist_paths,
-        json_output,
-        summary_only,
-        max_preview,
-        node_info_paths,
-        max_bytes,
-    } = args;
+    crate::cli::stdout::with_stdout(|stdout_output| {
+        let ScriptAuditArgs {
+            input,
+            inline_rules,
+            allowlist_paths,
+            json_output,
+            summary_only,
+            max_preview,
+            node_info_paths,
+            max_bytes,
+        } = args;
 
-    let plan = match build_script_audit_plan(inline_rules, max_preview) {
-        Ok(plan) => plan,
-        Err(SceneToolError::Config(err)) | Err(SceneToolError::Message(err)) => {
-            eprintln!("error: {err}");
-            return 2;
-        }
-        Err(err) => {
-            eprintln!("scene error: {err}");
-            return 1;
-        }
-    };
-    let plan = match load_allowlists(allowlist_paths) {
-        Ok(allowlist) => plan.with_allowlist(allowlist),
-        Err(err) => {
-            eprintln!("error: {err}");
-            return 2;
-        }
-    };
-    // Allowlist fields are emitted only on request so output without allowlists stays unchanged.
-    let report_allowed = !allowlist_paths.is_empty();
-    let load_options = load_options(node_info_paths, max_bytes);
-
-    let files = match collect_scene_files(input) {
-        Ok(v) if !v.is_empty() => v,
-        Ok(_) => {
-            eprintln!("error: no .ma/.mb files found: {}", input.display());
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 2;
-        }
-    };
-
-    let audit_options = AuditOptions::strict_default();
-    let graph_report = audit_reference_graph_roots_with_options_and_digests(
-        files.iter().map(PathBuf::as_path),
-        &plan,
-        &load_options,
-        audit_options,
-        false,
-    );
-    if graph_report.reports.is_empty()
-        && graph_report
-            .traversal_issues
-            .iter()
-            .any(|issue| issue.kind == crate::scene::AuditTraversalIssueKind::LoadFailed)
-    {
-        for issue in &graph_report.traversal_issues {
-            eprintln!("scene error: {}", issue.message);
-        }
-        return 1;
-    }
-
-    if json_output {
-        let mut file_summaries = Vec::new();
-        let mut file_allowed_counts = Vec::new();
-        for report in &graph_report.reports {
-            let file_hit_count = report.finding_count();
-            let file_review_count = report.review_signal_count();
-            let file_notice_count = report.notice_count();
-            let scene_path = report.scene_path.to_string_lossy();
-            file_allowed_counts.push(report.allowed_finding_count());
-            file_summaries.push((
-                scene_path.clone().into_owned(),
-                report.scene_format,
-                file_hit_count,
-                file_review_count,
-                file_notice_count,
-                report.surface_count,
-                report.validation_state,
-                report.coverage_state,
-                report.coverage_issues.len(),
-                report.blocked_on_uncertainty,
-                report.disposition,
-            ));
-        }
-
-        let reports = &graph_report.reports;
-        let all_hit_count = reports
-            .iter()
-            .map(|report| report.findings.len())
-            .sum::<usize>();
-        let all_review_count = reports
-            .iter()
-            .map(|report| report.review_signals.len())
-            .sum::<usize>();
-        let all_notice_count = reports
-            .iter()
-            .map(|report| report.notices.len())
-            .sum::<usize>();
-        let mut doc = json!({
-            "contract_version": JSON_CONTRACT_VERSION,
-            "input": input.display().to_string(),
-            "profile": audit_options.profile.as_str(),
-            "graph": {
-                "root_count": graph_report.roots.len(),
-                "scene_count": graph_report.reports.len(),
-                "edge_count": graph_report.edges.len(),
-                "traversal_issue_count": graph_report.traversal_issues.len(),
-                "disposition": graph_report.disposition.as_str(),
-                "roots": &graph_report.roots,
-                "edges": &graph_report.edges,
-                "traversal_issues": &graph_report.traversal_issues,
-            },
-            "files": file_summaries.iter().map(|(path, format, hit_count, review_count, notice_count, surface_count, validation_state, coverage_state, coverage_issue_count, blocked_on_uncertainty, disposition)| json!({
-                "path": path,
-                "scene_format": format.as_str(),
-                "finding_count": hit_count,
-                "review_signal_count": review_count,
-                "notice_count": notice_count,
-                "disposition": disposition.as_str(),
-                "surface_count": surface_count,
-                "validation_state": validation_state,
-                "coverage_state": coverage_state.as_str(),
-                "coverage_issue_count": coverage_issue_count,
-                "blocked_on_uncertainty": blocked_on_uncertainty,
-            })).collect::<Vec<_>>(),
-            "unit_summaries": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    report.unit_summaries.iter().map(move |summary| {
-                        json!({
-                            "path": scene_path.as_ref(),
-                            "effect": summary.effect.as_str(),
-                            "semantic_class": summary.semantic_class.as_str(),
-                            "certainty": summary.certainty.as_str(),
-                            "preview": summary.preview,
-                            "reasons": summary.reasons.iter().map(render_execution_reason).collect::<Vec<_>>(),
-                            "origin": {
-                                "lang": summary.origin.lang.as_str(),
-                                "trigger": summary.origin.trigger.as_str(),
-                                "surface_kind": summary.origin.surface_kind.as_str(),
-                                "node_name": summary.origin.node_name.clone(),
-                                "attr_name": summary.origin.attr_name.clone(),
-                                "source_kind": summary.origin.source_kind.clone(),
-                                "chunk_form": summary.origin.chunk_form.clone(),
-                                "chunk_tag": summary.origin.chunk_tag.clone(),
-                                "chunk_node_offset": summary.origin.chunk_node_offset,
-                                "chunk_aux": summary.origin.chunk_aux,
-                                "chunk_payload_offset": summary.origin.chunk_payload_offset,
-                                "chunk_payload_size": summary.origin.chunk_payload_size,
-                                "chunk_child_alignment": summary.origin.chunk_child_alignment,
-                                "chunk_child_header_size": summary.origin.chunk_child_header_size,
-                            }
-                        })
-                    })
-                })
-                .collect::<Vec<_>>(),
-            "dependency_facts": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    report.dependency_facts.iter().map(move |fact| {
-                        json!({
-                            "path": scene_path.as_ref(),
-                            "kind": fact.kind.as_str(),
-                            "risk": fact.risk.as_str(),
-                            "target": fact.target,
-                            "message": render_dependency_fact_detail(&fact.detail),
-                            "origin": fact.origin.as_ref().map(|origin| json!({
-                                "lang": origin.lang.as_str(),
-                                "trigger": origin.trigger.as_str(),
-                                "surface_kind": origin.surface_kind.as_str(),
-                                "node_name": origin.node_name.clone(),
-                                "attr_name": origin.attr_name.clone(),
-                                "source_kind": origin.source_kind.clone(),
-                                "chunk_form": origin.chunk_form.clone(),
-                                "chunk_tag": origin.chunk_tag.clone(),
-                                "chunk_node_offset": origin.chunk_node_offset,
-                                "chunk_aux": origin.chunk_aux,
-                                "chunk_payload_offset": origin.chunk_payload_offset,
-                                "chunk_payload_size": origin.chunk_payload_size,
-                                "chunk_child_alignment": origin.chunk_child_alignment,
-                                "chunk_child_header_size": origin.chunk_child_header_size,
-                            })),
-                        })
-                    })
-                })
-                .collect::<Vec<_>>(),
-            "finding_count": all_hit_count,
-            "review_signal_count": all_review_count,
-            "notice_count": all_notice_count,
-            "coverage_issue_count": reports
-                .iter()
-                .map(|report| report.coverage_issues.len())
-                .sum::<usize>(),
-            "notices": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    report
-                        .notices
-                        .iter()
-                        .map(move |notice| render_audit_notice_json(scene_path.as_ref(), report, notice))
-                })
-                .collect::<Vec<_>>(),
-            "review_signals": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    report
-                        .review_signals
-                        .iter()
-                        .map(move |review| render_review_signal_json(scene_path.as_ref(), report, review))
-                })
-                .collect::<Vec<_>>(),
-            "hits": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    report
-                        .findings
-                        .iter()
-                        .map(move |hit| render_audit_hit_json(scene_path.as_ref(), report, hit))
-                })
-                .collect::<Vec<_>>(),
-            "coverage_issues": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    report.coverage_issues.iter().map(move |issue| {
-                        json!({
-                            "path": scene_path.as_ref(),
-                            "scene_format": report.scene_format.as_str(),
-                            "coverage_state": report.coverage_state.as_str(),
-                            "kind": issue.kind.as_str(),
-                            "message": render_coverage_issue_detail(&issue.detail),
-                            "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
-                            "origin": issue.origin.as_ref().map(|origin| json!({
-                                "lang": origin.lang.as_str(),
-                                "trigger": origin.trigger.as_str(),
-                                "surface_kind": origin.surface_kind.as_str(),
-                                "node_name": origin.node_name.clone(),
-                                "attr_name": origin.attr_name.clone(),
-                                "source_kind": origin.source_kind.clone(),
-                                "chunk_form": origin.chunk_form.clone(),
-                                "chunk_tag": origin.chunk_tag.clone(),
-                                "chunk_node_offset": origin.chunk_node_offset,
-                                "chunk_aux": origin.chunk_aux,
-                                "chunk_payload_offset": origin.chunk_payload_offset,
-                                "chunk_payload_size": origin.chunk_payload_size,
-                                "chunk_child_alignment": origin.chunk_child_alignment,
-                                "chunk_child_header_size": origin.chunk_child_header_size,
-                            })),
-                        })
-                    })
-                })
-                .collect::<Vec<_>>(),
-            "coverage_issue_groups": reports
-                .iter()
-                .flat_map(|report| {
-                    let scene_path = report.scene_path.to_string_lossy();
-                    grouped_coverage_issues(report).into_iter().map(move |group| {
-                        let issue = group.issue;
-                        json!({
-                            "path": scene_path.as_ref(),
-                            "scene_format": report.scene_format.as_str(),
-                            "coverage_state": report.coverage_state.as_str(),
-                            "kind": issue.kind.as_str(),
-                            "message": group.message,
-                            "count": group.count,
-                            "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
-                            "origin": issue.origin.as_ref().map(|origin| json!({
-                                "lang": origin.lang.as_str(),
-                                "trigger": origin.trigger.as_str(),
-                                "surface_kind": origin.surface_kind.as_str(),
-                                "node_name": null,
-                                "attr_name": origin.attr_name.clone(),
-                                "source_kind": origin.source_kind.clone(),
-                                "chunk_form": origin.chunk_form.clone(),
-                                "chunk_tag": origin.chunk_tag.clone(),
-                                "chunk_node_offset": origin.chunk_node_offset,
-                                "chunk_aux": origin.chunk_aux,
-                                "chunk_payload_offset": origin.chunk_payload_offset,
-                                "chunk_payload_size": origin.chunk_payload_size,
-                                "chunk_child_alignment": origin.chunk_child_alignment,
-                                "chunk_child_header_size": origin.chunk_child_header_size,
-                            })),
-                        })
-                    })
-                })
-                .collect::<Vec<_>>(),
-        });
-        if report_allowed {
-            doc["allowed_finding_count"] = json!(graph_report.allowed_finding_count());
-            if let Some(files) = doc["files"].as_array_mut() {
-                for (file, allowed) in files.iter_mut().zip(&file_allowed_counts) {
-                    file["allowed_finding_count"] = json!(allowed);
-                }
+        let plan = match build_script_audit_plan(inline_rules, max_preview) {
+            Ok(plan) => plan,
+            Err(SceneToolError::Config(err)) | Err(SceneToolError::Message(err)) => {
+                eprintln!("error: {err}");
+                return 2;
             }
-        }
-        match serde_json::to_string_pretty(&doc) {
-            Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("error: failed to render json: {e}");
+            Err(err) => {
+                eprintln!("scene error: {err}");
                 return 1;
             }
+        };
+        let plan = match load_allowlists(allowlist_paths) {
+            Ok(allowlist) => plan.with_allowlist(allowlist),
+            Err(err) => {
+                eprintln!("error: {err}");
+                return 2;
+            }
+        };
+        // Allowlist fields are emitted only on request so output without allowlists stays unchanged.
+        let report_allowed = !allowlist_paths.is_empty();
+        let load_options = load_options(node_info_paths, max_bytes);
+
+        let files = match collect_scene_files(input) {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => {
+                eprintln!("error: no .ma/.mb files found: {}", input.display());
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+
+        let audit_options = AuditOptions::strict_default();
+        let graph_report = audit_reference_graph_roots_with_options_and_digests(
+            files.iter().map(PathBuf::as_path),
+            &plan,
+            &load_options,
+            audit_options,
+            false,
+        );
+        if graph_report.reports.is_empty()
+            && graph_report
+                .traversal_issues
+                .iter()
+                .any(|issue| issue.kind == crate::scene::AuditTraversalIssueKind::LoadFailed)
+        {
+            for issue in &graph_report.traversal_issues {
+                eprintln!("scene error: {}", issue.message);
+            }
+            return 1;
         }
 
-        match graph_report.disposition {
-            crate::scene::AuditDisposition::Allow
-            | crate::scene::AuditDisposition::AllowWithNotice => 0,
-            crate::scene::AuditDisposition::Review => 20,
-            crate::scene::AuditDisposition::DenyMalicious => 10,
-            crate::scene::AuditDisposition::DenyUncertain => 11,
-        }
-    } else {
-        let stdout = io::stdout();
-        let mut output = io::BufWriter::with_capacity(256 * 1024, stdout.lock());
-        let mut total_findings = 0usize;
+        if json_output {
+            let mut file_summaries = Vec::new();
+            let mut file_allowed_counts = Vec::new();
+            for report in &graph_report.reports {
+                let file_hit_count = report.finding_count();
+                let file_review_count = report.review_signal_count();
+                let file_notice_count = report.notice_count();
+                let scene_path = report.scene_path.to_string_lossy();
+                file_allowed_counts.push(report.allowed_finding_count());
+                file_summaries.push((
+                    scene_path.clone().into_owned(),
+                    report.scene_format,
+                    file_hit_count,
+                    file_review_count,
+                    file_notice_count,
+                    report.surface_count,
+                    report.validation_state,
+                    report.coverage_state,
+                    report.coverage_issues.len(),
+                    report.blocked_on_uncertainty,
+                    report.disposition,
+                ));
+            }
 
-        for report in &graph_report.reports {
-            let file_hit_count = report.finding_count();
-            let file_review_count = report.review_signal_count();
-            let file_notice_count = report.notice_count();
-            let scene_path = report.scene_path.to_string_lossy();
-
-            let _ = write!(
-                output,
-                "path={} format={} profile={} state={} coverage_state={} coverage_issues={} blocked_on_uncertainty={} disposition={} findings={} reviews={} notices={} surfaces={}",
-                scene_path.as_ref(),
-                report.scene_format.as_str(),
-                audit_options.profile.as_str(),
-                report.validation_state,
-                report.coverage_state.as_str(),
-                report.coverage_issues.len(),
-                report.blocked_on_uncertainty,
-                report.disposition.as_str(),
-                file_hit_count,
-                file_review_count,
-                file_notice_count,
-                report.surface_count,
-            );
+            let reports = &graph_report.reports;
+            let all_hit_count = reports
+                .iter()
+                .map(|report| report.findings.len())
+                .sum::<usize>();
+            let all_review_count = reports
+                .iter()
+                .map(|report| report.review_signals.len())
+                .sum::<usize>();
+            let all_notice_count = reports
+                .iter()
+                .map(|report| report.notices.len())
+                .sum::<usize>();
+            let (roots, edges, traversal_issues) = graph_paths_json(&graph_report);
+            let mut doc = json!({
+                "contract_version": JSON_CONTRACT_VERSION,
+                "input": input.to_string_lossy(),
+                "profile": audit_options.profile.as_str(),
+                "graph": {
+                    "root_count": graph_report.roots.len(),
+                    "scene_count": graph_report.reports.len(),
+                    "edge_count": graph_report.edges.len(),
+                    "traversal_issue_count": graph_report.traversal_issues.len(),
+                    "disposition": graph_report.disposition.as_str(),
+                    "roots": roots,
+                    "edges": edges,
+                    "traversal_issues": traversal_issues,
+                },
+                "files": file_summaries.iter().map(|(path, format, hit_count, review_count, notice_count, surface_count, validation_state, coverage_state, coverage_issue_count, blocked_on_uncertainty, disposition)| json!({
+                    "path": path,
+                    "scene_format": format.as_str(),
+                    "finding_count": hit_count,
+                    "review_signal_count": review_count,
+                    "notice_count": notice_count,
+                    "disposition": disposition.as_str(),
+                    "surface_count": surface_count,
+                    "validation_state": validation_state,
+                    "coverage_state": coverage_state.as_str(),
+                    "coverage_issue_count": coverage_issue_count,
+                    "blocked_on_uncertainty": blocked_on_uncertainty,
+                })).collect::<Vec<_>>(),
+                "unit_summaries": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        report.unit_summaries.iter().map(move |summary| {
+                            json!({
+                                "path": scene_path.as_ref(),
+                                "effect": summary.effect.as_str(),
+                                "semantic_class": summary.semantic_class.as_str(),
+                                "certainty": summary.certainty.as_str(),
+                                "preview": summary.preview,
+                                "reasons": summary.reasons.iter().map(render_execution_reason).collect::<Vec<_>>(),
+                                "origin": {
+                                    "lang": summary.origin.lang.as_str(),
+                                    "trigger": summary.origin.trigger.as_str(),
+                                    "surface_kind": summary.origin.surface_kind.as_str(),
+                                    "node_name": summary.origin.node_name.clone(),
+                                    "attr_name": summary.origin.attr_name.clone(),
+                                    "source_kind": summary.origin.source_kind.clone(),
+                                    "chunk_form": summary.origin.chunk_form.clone(),
+                                    "chunk_tag": summary.origin.chunk_tag.clone(),
+                                    "chunk_node_offset": summary.origin.chunk_node_offset,
+                                    "chunk_aux": summary.origin.chunk_aux,
+                                    "chunk_payload_offset": summary.origin.chunk_payload_offset,
+                                    "chunk_payload_size": summary.origin.chunk_payload_size,
+                                    "chunk_child_alignment": summary.origin.chunk_child_alignment,
+                                    "chunk_child_header_size": summary.origin.chunk_child_header_size,
+                                }
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "dependency_facts": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        report.dependency_facts.iter().map(move |fact| {
+                            json!({
+                                "path": scene_path.as_ref(),
+                                "kind": fact.kind.as_str(),
+                                "risk": fact.risk.as_str(),
+                                "target": fact.target,
+                                "message": render_dependency_fact_detail(&fact.detail),
+                                "origin": fact.origin.as_ref().map(|origin| json!({
+                                    "lang": origin.lang.as_str(),
+                                    "trigger": origin.trigger.as_str(),
+                                    "surface_kind": origin.surface_kind.as_str(),
+                                    "node_name": origin.node_name.clone(),
+                                    "attr_name": origin.attr_name.clone(),
+                                    "source_kind": origin.source_kind.clone(),
+                                    "chunk_form": origin.chunk_form.clone(),
+                                    "chunk_tag": origin.chunk_tag.clone(),
+                                    "chunk_node_offset": origin.chunk_node_offset,
+                                    "chunk_aux": origin.chunk_aux,
+                                    "chunk_payload_offset": origin.chunk_payload_offset,
+                                    "chunk_payload_size": origin.chunk_payload_size,
+                                    "chunk_child_alignment": origin.chunk_child_alignment,
+                                    "chunk_child_header_size": origin.chunk_child_header_size,
+                                })),
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "finding_count": all_hit_count,
+                "review_signal_count": all_review_count,
+                "notice_count": all_notice_count,
+                "coverage_issue_count": reports
+                    .iter()
+                    .map(|report| report.coverage_issues.len())
+                    .sum::<usize>(),
+                "notices": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        report
+                            .notices
+                            .iter()
+                            .map(move |notice| render_audit_notice_json(scene_path.as_ref(), report, notice))
+                    })
+                    .collect::<Vec<_>>(),
+                "review_signals": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        report
+                            .review_signals
+                            .iter()
+                            .map(move |review| render_review_signal_json(scene_path.as_ref(), report, review))
+                    })
+                    .collect::<Vec<_>>(),
+                "hits": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        report
+                            .findings
+                            .iter()
+                            .map(move |hit| render_audit_hit_json(scene_path.as_ref(), report, hit))
+                    })
+                    .collect::<Vec<_>>(),
+                "coverage_issues": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        report.coverage_issues.iter().map(move |issue| {
+                            json!({
+                                "path": scene_path.as_ref(),
+                                "scene_format": report.scene_format.as_str(),
+                                "coverage_state": report.coverage_state.as_str(),
+                                "kind": issue.kind.as_str(),
+                                "message": render_coverage_issue_detail(&issue.detail),
+                                "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
+                                "origin": issue.origin.as_ref().map(|origin| json!({
+                                    "lang": origin.lang.as_str(),
+                                    "trigger": origin.trigger.as_str(),
+                                    "surface_kind": origin.surface_kind.as_str(),
+                                    "node_name": origin.node_name.clone(),
+                                    "attr_name": origin.attr_name.clone(),
+                                    "source_kind": origin.source_kind.clone(),
+                                    "chunk_form": origin.chunk_form.clone(),
+                                    "chunk_tag": origin.chunk_tag.clone(),
+                                    "chunk_node_offset": origin.chunk_node_offset,
+                                    "chunk_aux": origin.chunk_aux,
+                                    "chunk_payload_offset": origin.chunk_payload_offset,
+                                    "chunk_payload_size": origin.chunk_payload_size,
+                                    "chunk_child_alignment": origin.chunk_child_alignment,
+                                    "chunk_child_header_size": origin.chunk_child_header_size,
+                                })),
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "coverage_issue_groups": reports
+                    .iter()
+                    .flat_map(|report| {
+                        let scene_path = report.scene_path.to_string_lossy();
+                        grouped_coverage_issues(report).into_iter().map(move |group| {
+                            let issue = group.issue;
+                            json!({
+                                "path": scene_path.as_ref(),
+                                "scene_format": report.scene_format.as_str(),
+                                "coverage_state": report.coverage_state.as_str(),
+                                "kind": issue.kind.as_str(),
+                                "message": group.message,
+                                "count": group.count,
+                                "preview": if issue.preview.is_empty() { None } else { Some(issue.preview.clone()) },
+                                "origin": issue.origin.as_ref().map(|origin| json!({
+                                    "lang": origin.lang.as_str(),
+                                    "trigger": origin.trigger.as_str(),
+                                    "surface_kind": origin.surface_kind.as_str(),
+                                    "node_name": null,
+                                    "attr_name": origin.attr_name.clone(),
+                                    "source_kind": origin.source_kind.clone(),
+                                    "chunk_form": origin.chunk_form.clone(),
+                                    "chunk_tag": origin.chunk_tag.clone(),
+                                    "chunk_node_offset": origin.chunk_node_offset,
+                                    "chunk_aux": origin.chunk_aux,
+                                    "chunk_payload_offset": origin.chunk_payload_offset,
+                                    "chunk_payload_size": origin.chunk_payload_size,
+                                    "chunk_child_alignment": origin.chunk_child_alignment,
+                                    "chunk_child_header_size": origin.chunk_child_header_size,
+                                })),
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            });
             if report_allowed {
-                let _ = write!(output, " allowed={}", report.allowed_finding_count());
+                doc["allowed_finding_count"] = json!(graph_report.allowed_finding_count());
+                if let Some(files) = doc["files"].as_array_mut() {
+                    for (file, allowed) in files.iter_mut().zip(&file_allowed_counts) {
+                        file["allowed_finding_count"] = json!(allowed);
+                    }
+                }
             }
-            let _ = writeln!(output);
+            match serde_json::to_string_pretty(&doc) {
+                Ok(s) => {
+                    let _ = writeln!(stdout_output, "{s}");
+                }
+                Err(e) => {
+                    eprintln!("error: failed to render json: {e}");
+                    return 1;
+                }
+            }
 
-            total_findings += report.findings.len();
+            match graph_report.disposition {
+                crate::scene::AuditDisposition::Allow
+                | crate::scene::AuditDisposition::AllowWithNotice => 0,
+                crate::scene::AuditDisposition::Review => 20,
+                crate::scene::AuditDisposition::DenyMalicious => 10,
+                crate::scene::AuditDisposition::DenyUncertain => 11,
+            }
+        } else {
+            let mut total_findings = 0usize;
 
-            if summary_only {
-                continue;
-            }
+            for report in &graph_report.reports {
+                let file_hit_count = report.finding_count();
+                let file_review_count = report.review_signal_count();
+                let file_notice_count = report.notice_count();
+                let scene_path = report.scene_path.to_string_lossy();
 
-            for summary in &report.unit_summaries {
-                let _ = writeln!(
-                    output,
-                    "{}",
-                    render_unit_summary_text(scene_path.as_ref(), summary)
-                );
-            }
-            for notice in &report.notices {
-                let _ = writeln!(
-                    output,
-                    "{}",
-                    render_audit_notice_text(scene_path.as_ref(), notice)
-                );
-            }
-            for (review_index, count) in group_review_signal_indexes(report) {
-                let review = &report.review_signals[review_index];
-                let _ = writeln!(
-                    output,
-                    "{}",
-                    render_grouped_review_signal_text(scene_path.as_ref(), report, review, count)
-                );
-            }
-            for (hit_index, count) in group_audit_hit_indexes(report) {
-                let hit = &report.findings[hit_index];
-                let _ = writeln!(
-                    output,
-                    "{}",
-                    render_grouped_audit_hit_text(scene_path.as_ref(), report, hit, count)
-                );
-            }
-            for fact in &report.dependency_facts {
-                let _ = writeln!(
-                    output,
-                    "- dependency path={} kind={} risk={} target=\"{}\" msg=\"{}\"",
+                let _ = write!(
+                    stdout_output,
+                    "path={} format={} profile={} state={} coverage_state={} coverage_issues={} blocked_on_uncertainty={} disposition={} findings={} reviews={} notices={} surfaces={}",
                     scene_path.as_ref(),
-                    fact.kind.as_str(),
-                    fact.risk.as_str(),
-                    fact.target,
-                    render_dependency_fact_detail(&fact.detail),
-                );
-            }
-            for group in grouped_coverage_issues(report) {
-                let issue = group.issue;
-                let _ = writeln!(
-                    output,
-                    "- coverage path={} gate=block coverage_state={} kind={} count={} msg=\"{}\" preview=\"{}\"",
-                    scene_path.as_ref(),
+                    report.scene_format.as_str(),
+                    audit_options.profile.as_str(),
+                    report.validation_state,
                     report.coverage_state.as_str(),
-                    issue.kind.as_str(),
-                    group.count,
-                    group.message,
-                    issue.preview,
+                    report.coverage_issues.len(),
+                    report.blocked_on_uncertainty,
+                    report.disposition.as_str(),
+                    file_hit_count,
+                    file_review_count,
+                    file_notice_count,
+                    report.surface_count,
+                );
+                if report_allowed {
+                    let _ = write!(stdout_output, " allowed={}", report.allowed_finding_count());
+                }
+                let _ = writeln!(stdout_output);
+
+                total_findings += report.findings.len();
+
+                if summary_only {
+                    continue;
+                }
+
+                for summary in &report.unit_summaries {
+                    let _ = writeln!(
+                        stdout_output,
+                        "{}",
+                        render_unit_summary_text(scene_path.as_ref(), summary)
+                    );
+                }
+                for notice in &report.notices {
+                    let _ = writeln!(
+                        stdout_output,
+                        "{}",
+                        render_audit_notice_text(scene_path.as_ref(), notice)
+                    );
+                }
+                for (review_index, count) in group_review_signal_indexes(report) {
+                    let review = &report.review_signals[review_index];
+                    let _ = writeln!(
+                        stdout_output,
+                        "{}",
+                        render_grouped_review_signal_text(
+                            scene_path.as_ref(),
+                            report,
+                            review,
+                            count
+                        )
+                    );
+                }
+                for (hit_index, count) in group_audit_hit_indexes(report) {
+                    let hit = &report.findings[hit_index];
+                    let _ = writeln!(
+                        stdout_output,
+                        "{}",
+                        render_grouped_audit_hit_text(scene_path.as_ref(), report, hit, count)
+                    );
+                }
+                for fact in &report.dependency_facts {
+                    let _ = writeln!(
+                        stdout_output,
+                        "- dependency path={} kind={} risk={} target=\"{}\" msg=\"{}\"",
+                        scene_path.as_ref(),
+                        fact.kind.as_str(),
+                        fact.risk.as_str(),
+                        fact.target,
+                        render_dependency_fact_detail(&fact.detail),
+                    );
+                }
+                for group in grouped_coverage_issues(report) {
+                    let issue = group.issue;
+                    let _ = writeln!(
+                        stdout_output,
+                        "- coverage path={} gate=block coverage_state={} kind={} count={} msg=\"{}\" preview=\"{}\"",
+                        scene_path.as_ref(),
+                        report.coverage_state.as_str(),
+                        issue.kind.as_str(),
+                        group.count,
+                        group.message,
+                        issue.preview,
+                    );
+                }
+            }
+            for issue in &graph_report.traversal_issues {
+                let _ = writeln!(
+                    stdout_output,
+                    "- reference_graph_issue kind={:?} scene_path={} source_path={} target=\"{}\" msg=\"{}\"",
+                    issue.kind,
+                    issue
+                        .scene_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    issue
+                        .source_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    issue.raw_target.as_deref().unwrap_or(""),
+                    issue.message,
                 );
             }
-        }
-        for issue in &graph_report.traversal_issues {
-            let _ = writeln!(
-                output,
-                "- reference_graph_issue kind={:?} scene_path={} source_path={} target=\"{}\" msg=\"{}\"",
-                issue.kind,
-                issue
-                    .scene_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<none>".to_string()),
-                issue
-                    .source_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<none>".to_string()),
-                issue.raw_target.as_deref().unwrap_or(""),
-                issue.message,
-            );
-        }
-        let _ = write!(output, "total_findings={total_findings}");
-        if report_allowed {
-            let _ = write!(
-                output,
-                " total_allowed={}",
-                graph_report.allowed_finding_count()
-            );
-        }
-        let _ = writeln!(output);
+            let _ = write!(stdout_output, "total_findings={total_findings}");
+            if report_allowed {
+                let _ = write!(
+                    stdout_output,
+                    " total_allowed={}",
+                    graph_report.allowed_finding_count()
+                );
+            }
+            let _ = writeln!(stdout_output);
 
-        match graph_report.disposition {
-            crate::scene::AuditDisposition::Allow
-            | crate::scene::AuditDisposition::AllowWithNotice => 0,
-            crate::scene::AuditDisposition::Review => 20,
-            crate::scene::AuditDisposition::DenyMalicious => 10,
-            crate::scene::AuditDisposition::DenyUncertain => 11,
+            match graph_report.disposition {
+                crate::scene::AuditDisposition::Allow
+                | crate::scene::AuditDisposition::AllowWithNotice => 0,
+                crate::scene::AuditDisposition::Review => 20,
+                crate::scene::AuditDisposition::DenyMalicious => 10,
+                crate::scene::AuditDisposition::DenyUncertain => 11,
+            }
         }
-    }
+    })
 }
 
 struct GroupedCoverageIssue<'a> {
@@ -641,5 +649,101 @@ mod tests {
 
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].count, 2);
+    }
+}
+
+fn graph_paths_json(
+    graph_report: &crate::scene::AuditGraphReport,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    (
+        json!(
+            graph_report
+                .roots
+                .iter()
+                .map(|root| json!({
+                    "path": root.path.to_string_lossy(),
+                    "identity": root.identity,
+                    "report_index": root.report_index,
+                    "issue_index": root.issue_index,
+                }))
+                .collect::<Vec<_>>()
+        ),
+        json!(
+            graph_report
+                .edges
+                .iter()
+                .map(|edge| json!({
+                    "source_identity": edge.source_identity,
+                    "source_path": edge.source_path.to_string_lossy(),
+                    "raw_target": edge.raw_target,
+                    "resolved_path": edge.resolved_path.as_ref().map(|path| path.to_string_lossy()),
+                    "resolution_status": edge.resolution_status,
+                    "target_identity": edge.target_identity,
+                    "target_report_index": edge.target_report_index,
+                    "issue_index": edge.issue_index,
+                }))
+                .collect::<Vec<_>>()
+        ),
+        json!(
+            graph_report
+                .traversal_issues
+                .iter()
+                .map(|issue| json!({
+                    "kind": issue.kind,
+                    "scene_path": issue.scene_path.as_ref().map(|path| path.to_string_lossy()),
+                    "source_path": issue.source_path.as_ref().map(|path| path.to_string_lossy()),
+                    "raw_target": issue.raw_target,
+                    "message": issue.message,
+                }))
+                .collect::<Vec<_>>()
+        ),
+    )
+}
+
+#[cfg(test)]
+mod graph_json_tests {
+    use super::*;
+
+    #[test]
+    fn graph_paths_match_serde_for_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Example.ma");
+        std::fs::write(
+            &root,
+            r#"//Maya ASCII 2026 scene
+requires maya "2026";
+file -r -ns "Sample" "Sample.ma";
+file -r -ns "Missing" "Missing.ma";
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Sample.ma"),
+            "//Maya ASCII 2026 scene\nrequires maya \"2026\";\n",
+        )
+        .unwrap();
+        let plan = build_script_audit_plan(vec![], 96).unwrap();
+        let graph = audit_reference_graph_roots_with_options_and_digests(
+            [root.as_path()],
+            &plan,
+            &load_options(&[], None),
+            AuditOptions::strict_default(),
+            false,
+        );
+        assert!(!graph.roots.is_empty());
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.target_report_index.is_some())
+        );
+        assert!(!graph.traversal_issues.is_empty());
+        let (roots, edges, issues) = graph_paths_json(&graph);
+        assert_eq!(roots, serde_json::to_value(&graph.roots).unwrap());
+        assert_eq!(edges, serde_json::to_value(&graph.edges).unwrap());
+        assert_eq!(
+            issues,
+            serde_json::to_value(&graph.traversal_issues).unwrap()
+        );
     }
 }

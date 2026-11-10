@@ -7,6 +7,7 @@ mod issues_artifacts;
 mod output_contracts;
 mod render;
 mod runtime_context;
+mod stdout;
 
 #[cfg(test)]
 use self::issues_artifacts::{
@@ -20,10 +21,11 @@ use self::{
     },
 };
 
-pub fn main(argv: Vec<String>) -> i32 {
+pub fn main(argv: Vec<std::ffi::OsString>) -> i32 {
     let normalized = normalize_argv(argv);
-    let matches = build_parser()
-        .try_get_matches_from(std::iter::once("maya-scene-kit".to_string()).chain(normalized));
+    let matches = build_parser().try_get_matches_from(
+        std::iter::once(std::ffi::OsString::from("maya-scene-kit")).chain(normalized),
+    );
 
     let matches = match matches {
         Ok(m) => m,
@@ -194,6 +196,10 @@ mod tests {
         },
     };
 
+    fn main_strings(argv: Vec<String>) -> i32 {
+        super::main(argv.into_iter().map(Into::into).collect())
+    }
+
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -212,16 +218,13 @@ mod tests {
 
     #[test]
     fn normalize_argv_keeps_inspect_as_known_command() {
-        let normalized = normalize_argv(vec![
-            "inspect".to_string(),
-            "tests/02/sphere.mb".to_string(),
-        ]);
+        let normalized = normalize_argv(vec!["inspect".into(), "tests/02/sphere.mb".into()]);
         assert_eq!(normalized[0], "inspect");
     }
 
     #[test]
     fn inspect_accepts_mb_input() {
-        let code = super::main(vec![
+        let code = main_strings(vec![
             "inspect".to_string(),
             repo_root().join("tests/02/sphere.mb").display().to_string(),
         ]);
@@ -230,7 +233,7 @@ mod tests {
 
     #[test]
     fn inspect_rejects_ma_input() {
-        let code = super::main(vec![
+        let code = main_strings(vec![
             "inspect".to_string(),
             repo_root().join("tests/02/sphere.ma").display().to_string(),
         ]);
@@ -239,7 +242,7 @@ mod tests {
 
     #[test]
     fn inspect_rejects_directory_input() {
-        let code = super::main(vec![
+        let code = main_strings(vec![
             "inspect".to_string(),
             repo_root().join("tests/02").display().to_string(),
         ]);
@@ -942,7 +945,7 @@ mod tests {
 
     #[test]
     fn normalize_argv_leaves_path_like_input_unchanged() {
-        let argv = vec!["tests/02/sphere.ma".to_string()];
+        let argv = vec!["tests/02/sphere.ma".into()];
         assert_eq!(normalize_argv(argv.clone()), argv);
     }
 
@@ -974,14 +977,14 @@ mod tests {
     fn audit_and_paths_accept_opaque_typed_ascii_scene() {
         let source = repo_root().join("tests/fixtures/ma/opaque_typed_attrs.ma");
 
-        let audit_code = super::main(vec![
+        let audit_code = main_strings(vec![
             "audit".to_string(),
             source.display().to_string(),
             "--summary-only".to_string(),
         ]);
         assert_eq!(audit_code, 0);
 
-        let paths_code = super::main(vec!["paths".to_string(), source.display().to_string()]);
+        let paths_code = main_strings(vec!["paths".to_string(), source.display().to_string()]);
         assert_eq!(paths_code, 0);
     }
 }

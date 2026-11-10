@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io::Write as _, path::PathBuf};
 
 use crate::{
     cli::runtime_context::materialize_options,
@@ -11,30 +11,33 @@ pub(crate) fn run_script_clean(
     node_info_paths: &[PathBuf],
     max_bytes: Option<usize>,
 ) -> i32 {
-    let options = materialize_options(node_info_paths, max_bytes)
-        .with_operation_mode(OperationMode::Forensic);
-    match remove_script_nodes_with_options(input, output, &options) {
-        Ok(result) => {
-            println!(
-                "written={} format={} mode={} state={} removed={}",
-                result.output_path.display(),
-                result.scene_format,
-                result.operation_mode,
-                result.validation_state,
-                result.removed_count()
-            );
-            for name in result.removed_nodes {
-                println!("- {name}");
+    crate::cli::stdout::with_stdout(|stdout_output| {
+        let options = materialize_options(node_info_paths, max_bytes)
+            .with_operation_mode(OperationMode::Forensic);
+        match remove_script_nodes_with_options(input, output, &options) {
+            Ok(result) => {
+                let _ = writeln!(
+                    stdout_output,
+                    "written={} format={} mode={} state={} removed={}",
+                    result.output_path.display(),
+                    result.scene_format,
+                    result.operation_mode,
+                    result.validation_state,
+                    result.removed_count()
+                );
+                for name in result.removed_nodes {
+                    let _ = writeln!(stdout_output, "- {name}");
+                }
+                0
             }
-            0
+            Err(SceneToolError::Io(e)) => {
+                eprintln!("error: {e}");
+                2
+            }
+            Err(e) => {
+                eprintln!("scene error: {e}");
+                1
+            }
         }
-        Err(SceneToolError::Io(e)) => {
-            eprintln!("error: {e}");
-            2
-        }
-        Err(e) => {
-            eprintln!("scene error: {e}");
-            1
-        }
-    }
+    })
 }

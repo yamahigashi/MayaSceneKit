@@ -24,8 +24,8 @@ pub(crate) fn build_to_ascii_issues_json(
 ) -> Value {
     json!({
         "contract_version": JSON_CONTRACT_VERSION,
-        "source": input,
-        "output": report.output_path,
+        "source": input.to_string_lossy(),
+        "output": report.output_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "operation_mode": report.operation_mode,
         "validation_state": report.validation_state,

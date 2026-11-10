@@ -241,16 +241,6 @@ fn max_bytes_arg() -> Arg {
         .help("Maximum parse size in bytes for Maya scene input")
 }
 
-pub(super) fn normalize_argv(argv: Vec<String>) -> Vec<String> {
-    if argv.is_empty() {
-        return argv;
-    }
-    let commands = [
-        "inspect", "dump", "paths", "audit", "to-ascii", "clean", "replace", "help",
-    ];
-    let first = &argv[0];
-    if commands.contains(&first.as_str()) || first.starts_with('-') {
-        return argv;
-    }
+pub(super) fn normalize_argv(argv: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     argv
 }

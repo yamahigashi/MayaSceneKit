@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write as _, path::PathBuf};
 
 use crate::scene::{
     MbInspectNode, MbInspectOptions, SceneToolError, inspect_mb, inspect_mb_with_max_parse_bytes,
@@ -11,97 +11,107 @@ pub(crate) fn run_inspect(
     at: Option<&str>,
     max_bytes: Option<usize>,
 ) -> i32 {
-    if path.is_dir() {
-        eprintln!(
-            "error: inspect only supports a single Maya Binary (.mb) file: {}",
-            path.display()
-        );
-        return 2;
-    }
-
-    let at_offset = match at.map(parse_offset) {
-        Some(Ok(value)) => Some(value),
-        Some(Err(message)) => {
-            eprintln!("error: {message}");
+    crate::cli::stdout::with_stdout(|stdout_output| {
+        if path.is_dir() {
+            eprintln!(
+                "error: inspect only supports a single Maya Binary (.mb) file: {}",
+                path.display()
+            );
             return 2;
         }
-        None => None,
-    };
-    let options = MbInspectOptions {
-        max_depth: if at_offset.is_some() { None } else { max_depth },
-        preview_bytes,
-    };
-    let result = match max_bytes {
-        Some(max_parse_bytes) => inspect_mb_with_max_parse_bytes(path, options, max_parse_bytes),
-        None => inspect_mb(path, options),
-    };
 
-    match result {
-        Ok(report) => {
-            if let Some(offset) = at_offset {
-                match fs::read(path) {
-                    Ok(data) => print_chunk_at(&report.root, &data, offset, preview_bytes),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        return 2;
-                    }
-                }
-            } else {
-                print_chunk(&report.root, 0);
+        let at_offset = match at.map(parse_offset) {
+            Some(Ok(value)) => Some(value),
+            Some(Err(message)) => {
+                eprintln!("error: {message}");
+                return 2;
             }
-            0
+            None => None,
+        };
+        let options = MbInspectOptions {
+            max_depth: if at_offset.is_some() { None } else { max_depth },
+            preview_bytes,
+        };
+        let result = match max_bytes {
+            Some(max_parse_bytes) => {
+                inspect_mb_with_max_parse_bytes(path, options, max_parse_bytes)
+            }
+            None => inspect_mb(path, options),
+        };
+
+        match result {
+            Ok(report) => {
+                if let Some(offset) = at_offset {
+                    match fs::read(path) {
+                        Ok(data) => print_chunk_at(
+                            stdout_output,
+                            &report.root,
+                            &data,
+                            offset,
+                            preview_bytes,
+                        ),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            return 2;
+                        }
+                    }
+                } else {
+                    print_chunk(stdout_output, &report.root, 0);
+                }
+                0
+            }
+            Err(SceneToolError::Io(e)) => {
+                eprintln!("error: {e}");
+                2
+            }
+            Err(SceneToolError::UnsupportedSceneFormat { path, detected }) => {
+                eprintln!(
+                    "error: inspect only supports Maya Binary (.mb) input: {} ({})",
+                    path.display(),
+                    detected
+                );
+                1
+            }
+            Err(SceneToolError::Parse(e)) => {
+                eprintln!("parse error: {e}");
+                1
+            }
+            Err(
+                SceneToolError::Config(msg)
+                | SceneToolError::AsciiSyntax(msg)
+                | SceneToolError::UnsupportedAsciiFeature(msg)
+                | SceneToolError::EncodeInvariant(msg)
+                | SceneToolError::AtomicWrite(msg)
+                | SceneToolError::Message(msg),
+            ) => {
+                eprintln!("error: {msg}");
+                1
+            }
+            Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
+                eprintln!("error: parse budget exceeded: {limit}");
+                1
+            }
+            Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
+                eprintln!("error: parse budget exceeded: {limit}");
+                1
+            }
+            Err(SceneToolError::InvalidUtf8 { policy, message }) => {
+                eprintln!("error: invalid UTF-8 Maya ASCII input ({policy}): {message}");
+                1
+            }
+            Err(SceneToolError::RejectedByMode {
+                mode,
+                validation_state,
+                issue_count,
+                unknown_count,
+            }) => {
+                eprintln!(
+                    "error: operation rejected by mode {mode}: validation_state={validation_state} issues={issue_count} unknown_entries={unknown_count}"
+                );
+                1
+            }
         }
-        Err(SceneToolError::Io(e)) => {
-            eprintln!("error: {e}");
-            2
-        }
-        Err(SceneToolError::UnsupportedSceneFormat { path, detected }) => {
-            eprintln!(
-                "error: inspect only supports Maya Binary (.mb) input: {} ({})",
-                path.display(),
-                detected
-            );
-            1
-        }
-        Err(SceneToolError::Parse(e)) => {
-            eprintln!("parse error: {e}");
-            1
-        }
-        Err(
-            SceneToolError::Config(msg)
-            | SceneToolError::AsciiSyntax(msg)
-            | SceneToolError::UnsupportedAsciiFeature(msg)
-            | SceneToolError::EncodeInvariant(msg)
-            | SceneToolError::AtomicWrite(msg)
-            | SceneToolError::Message(msg),
-        ) => {
-            eprintln!("error: {msg}");
-            1
-        }
-        Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
-            eprintln!("error: parse budget exceeded: {limit}");
-            1
-        }
-        Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
-            eprintln!("error: parse budget exceeded: {limit}");
-            1
-        }
-        Err(SceneToolError::InvalidUtf8 { policy, message }) => {
-            eprintln!("error: invalid UTF-8 Maya ASCII input ({policy}): {message}");
-            1
-        }
-        Err(SceneToolError::RejectedByMode {
-            mode,
-            validation_state,
-            issue_count,
-            unknown_count,
-        }) => {
-            eprintln!(
-                "error: operation rejected by mode {mode}: validation_state={validation_state} issues={issue_count} unknown_entries={unknown_count}"
-            );
-            1
-        }
-    }
+    })
 }
 
 fn parse_offset(value: &str) -> Result<usize, String> {
@@ -120,48 +130,58 @@ fn parse_offset(value: &str) -> Result<usize, String> {
         .map_err(|_| format!("invalid --at offset: {value}"))
 }
 
-fn print_chunk_at(root: &MbInspectNode, data: &[u8], offset: usize, preview_bytes: usize) {
+fn print_chunk_at(
+    stdout_output: &mut crate::cli::stdout::Output,
+    root: &MbInspectNode,
+    data: &[u8],
+    offset: usize,
+    preview_bytes: usize,
+) {
     let mut chain = Vec::new();
     if !find_chunk_chain(root, offset, &mut chain) {
-        println!("no chunk contains offset 0x{offset:08X} ({offset})");
+        let _ = writeln!(
+            stdout_output,
+            "no chunk contains offset 0x{offset:08X} ({offset})"
+        );
         return;
     }
 
-    println!("offset=0x{offset:08X} ({offset})");
-    println!("chain:");
+    let _ = writeln!(stdout_output, "offset=0x{offset:08X} ({offset})");
+    let _ = writeln!(stdout_output, "chain:");
     for (depth, chunk) in chain.iter().enumerate() {
         let indent = "  ".repeat(depth);
-        println!("{indent}{}", chunk_summary(chunk));
+        let _ = writeln!(stdout_output, "{indent}{}", chunk_summary(chunk));
     }
 
     let Some(target) = chain.last() else {
         return;
     };
-    println!("target:");
-    println!("  {}", chunk_summary(target));
-    println!(
+    let _ = writeln!(stdout_output, "target:");
+    let _ = writeln!(stdout_output, "  {}", chunk_summary(target));
+    let _ = writeln!(
+        stdout_output,
         "  payload=0x{:08X}..0x{:08X} size={}",
         target.payload_offset, target.payload_end, target.size
     );
     if let Some(alignment) = target.child_alignment {
-        println!("  child_alignment={alignment}");
+        let _ = writeln!(stdout_output, "  child_alignment={alignment}");
     }
     if let Some(header_size) = target.child_header_size {
-        println!("  child_header_size={header_size}");
+        let _ = writeln!(stdout_output, "  child_header_size={header_size}");
     }
     let preview_len = preview_bytes.min(target.payload_end.saturating_sub(target.payload_offset));
     if preview_len > 0 && target.payload_end <= data.len() {
         let preview = &data[target.payload_offset..target.payload_offset + preview_len];
-        println!("  hex_preview={}", hex_preview(preview));
+        let _ = writeln!(stdout_output, "  hex_preview={}", hex_preview(preview));
     }
     let fields = nul_fields(
         data.get(target.payload_offset..target.payload_end)
             .unwrap_or_default(),
     );
     if !fields.is_empty() {
-        println!("  fields:");
+        let _ = writeln!(stdout_output, "  fields:");
         for (index, field) in fields.iter().enumerate() {
-            println!("    [{index}] {field}");
+            let _ = writeln!(stdout_output, "    [{index}] {field}");
         }
     }
 }
@@ -223,7 +243,11 @@ fn nul_fields(payload: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn print_chunk(chunk: &MbInspectNode, depth: usize) {
+fn print_chunk(
+    stdout_output: &mut crate::cli::stdout::Output,
+    chunk: &MbInspectNode,
+    depth: usize,
+) {
     let indent = "  ".repeat(depth);
     let mut line = format!(
         "{indent}{} off=0x{:08X} aux=0x{:08X} size={}",
@@ -237,9 +261,9 @@ fn print_chunk(chunk: &MbInspectNode, depth: usize) {
     } else if let Some(preview) = &chunk.payload_preview {
         line.push_str(&format!(" data='{preview}'"));
     }
-    println!("{line}");
+    let _ = writeln!(stdout_output, "{line}");
 
     for child in &chunk.children {
-        print_chunk(child, depth + 1);
+        print_chunk(stdout_output, child, depth + 1);
     }
 }
