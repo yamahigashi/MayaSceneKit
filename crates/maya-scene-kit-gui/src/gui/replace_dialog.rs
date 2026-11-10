@@ -343,12 +343,37 @@ impl GuiShell {
             return;
         }
 
-        let planned_overrides = dialog_state
+        let previous_banner = if self.mutation_banner_depth == 0 {
+            self.status_message.take()
+        } else {
+            None
+        };
+        let mut planned_overrides = dialog_state
             .preview
             .as_ref()
             .map(|preview| preview.planned_overrides.clone())
             .unwrap_or_default();
         let source_cache = dialog_state.source_cache.clone();
+        let (indices, rejected) = self.mutation_targets(
+            planned_overrides
+                .iter()
+                .filter(|(_, overrides)| !overrides.is_empty())
+                .map(|(row_id, _)| *row_id),
+            RowMutation::PathEdit,
+        );
+        let accepted = self
+            .row_ids_for_indices(&indices)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        planned_overrides.retain(|(row_id, _)| accepted.contains(row_id));
+        if indices.is_empty() {
+            self.report_replace_rejections(rejected, 0, cx);
+            if self.status_message.is_none() {
+                self.status_message = previous_banner;
+            }
+            return;
+        }
+        let mut applied = 0;
         let target_indices = planned_overrides
             .iter()
             .filter_map(|(row_id, overrides)| {
@@ -398,6 +423,7 @@ impl GuiShell {
                 row.status = FileStatus::Dirty;
                 revision = Some(row.replace_generation);
             }
+            applied += 1;
             self.refresh_row_path_resolution_state(index);
             self.record_job(
                 operation_key(RowOperation::Replace),
@@ -410,14 +436,45 @@ impl GuiShell {
                 self.spawn_replace_artifact_refresh(row_id, revision, window, cx);
             }
         }
-        self.push_edit_history(before);
+        if !before.is_empty() {
+            self.push_edit_history(before);
+        }
         self.preserve_path_order_after_path_mutation(path_order_snapshot);
         self.refresh_app_menus(window, cx);
 
         self.clear_replace_dialog_state(window, cx);
         window.close_dialog(cx);
         self.set_tab(ResultTab::Paths, window, cx);
+        self.report_replace_rejections(rejected, applied, cx);
+        if self.status_message.is_none() {
+            self.status_message = previous_banner;
+        }
         cx.notify();
+    }
+
+    fn report_replace_rejections(
+        &mut self,
+        rejected: MutationRejections,
+        applied: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.status_message.is_none()
+            && let Some(skipped) = rejected.banner()
+        {
+            let summary = format!(
+                "{} file(s) staged; {}",
+                applied,
+                render_banner_message(&self.i18n(), &skipped)
+            );
+            self.record_job(
+                operation_key(RowOperation::Replace),
+                self.state.workspace_root_path().unwrap_or_default(),
+                None,
+                summary,
+                false,
+            );
+        }
+        self.report_mutation_rejections(rejected, cx);
     }
 
     pub(super) fn toggle_replace_dialog_path_type_filter(

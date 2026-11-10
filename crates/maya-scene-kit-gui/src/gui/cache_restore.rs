@@ -253,10 +253,13 @@ impl GuiShell {
             let Some(index) = self.index_of_row_id(update.row_id) else {
                 continue;
             };
-            let row = &mut self.rows[index];
-            if row.is_processing() || row.dirty() {
+            if self
+                .can_mutate(update.row_id, RowMutation::CacheRestore)
+                .is_err()
+            {
                 continue;
             }
+            let row = &mut self.rows[index];
 
             if let Some(snapshot) = update.observe_snapshot {
                 if row.paths_report.is_none() || row.dump_report.is_none() {

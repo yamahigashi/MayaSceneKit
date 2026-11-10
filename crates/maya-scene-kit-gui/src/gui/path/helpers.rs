@@ -156,11 +156,30 @@ pub(in crate::gui) fn path_value_edit_supported_for_entry(
     row: &SceneRow,
     entry_index: usize,
 ) -> bool {
+    super::super::check_row_mutation(Some(row), super::super::RowMutation::PathEdit).is_ok()
+        && path_value_input_supported_for_entry(row, entry_index)
+}
+
+pub(in crate::gui) fn path_value_input_supported_for_entry(
+    row: &SceneRow,
+    entry_index: usize,
+) -> bool {
     row.display_paths_report()
         .and_then(|report| report.entries.get(entry_index))
         .is_some()
-        && !row.is_processing()
         && !path_owner_delete_staged_for_entry(row, entry_index)
+}
+
+pub(in crate::gui) fn path_value_input_supported_for_edit_targets(
+    rows: &[SceneRow],
+    edit_targets: &PathEditTargets,
+) -> bool {
+    !edit_targets.is_empty()
+        && edit_targets.iter().all(|(row_id, entry_index)| {
+            rows.iter()
+                .find(|row| row.id == *row_id)
+                .is_some_and(|row| path_value_input_supported_for_entry(row, *entry_index))
+        })
 }
 
 pub(in crate::gui) fn path_value_edit_supported_for_edit_targets(

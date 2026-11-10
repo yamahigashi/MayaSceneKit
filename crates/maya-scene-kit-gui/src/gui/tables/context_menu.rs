@@ -21,13 +21,19 @@ pub(in crate::gui) fn audit_context_menu_state(rows: &[AuditTableRow]) -> AuditC
     let can_clean = rows
         .iter()
         .any(|entry| entry.clean_state == AuditRowCleanState::Available);
-    let can_undo = rows
+    let can_undo = !rows
         .iter()
-        .any(|entry| entry.clean_state == AuditRowCleanState::Staged);
-    let show_disabled_clean = !can_clean
+        .any(|entry| entry.clean_state == AuditRowCleanState::Busy)
         && rows
             .iter()
-            .any(|entry| entry.clean_state == AuditRowCleanState::BlockedByOtherDirty);
+            .any(|entry| entry.clean_state == AuditRowCleanState::Staged);
+    let show_disabled_clean = !can_clean
+        && rows.iter().any(|entry| {
+            matches!(
+                entry.clean_state,
+                AuditRowCleanState::BlockedByOtherDirty | AuditRowCleanState::Busy
+            )
+        });
 
     AuditContextMenuState {
         can_clean,
@@ -75,14 +81,19 @@ pub(in crate::gui) fn file_context_menu_state(
 fn file_context_row_indices(rows: &[SceneRow], row_id: u64) -> Option<Vec<usize>> {
     let row_index = rows.iter().position(|row| row.id == row_id)?;
     let row = rows.get(row_index)?;
-    if row.is_processing() {
-        return None;
-    }
     if row.selected {
         Some(
             rows.iter()
                 .enumerate()
-                .filter_map(|(index, row)| (!row.is_processing() && row.selected).then_some(index))
+                .filter_map(|(index, row)| {
+                    (super::super::check_row_mutation(
+                        Some(row),
+                        super::super::RowMutation::SceneEdit,
+                    )
+                    .is_ok()
+                        && row.selected)
+                        .then_some(index)
+                })
                 .collect(),
         )
     } else {
@@ -91,7 +102,7 @@ fn file_context_row_indices(rows: &[SceneRow], row_id: u64) -> Option<Vec<usize>
 }
 
 fn file_context_scene_edit_allowed(row: &SceneRow) -> bool {
-    !row.is_processing()
+    super::super::check_row_mutation(Some(row), super::super::RowMutation::SceneEdit).is_ok()
         && !matches!(
             row.dirty_kind,
             Some(DirtyKind::Replace | DirtyKind::ToAscii)
@@ -153,6 +164,7 @@ pub(in crate::gui) fn path_context_menu_state(
         .and_then(|(row_id, _)| row_by_id.get(row_id))
         .and_then(|row| row.scene_workspace_root.as_ref());
     let mut all_targets_editable = has_targets;
+    let mut has_ready_target = false;
     let mut all_targets_collectable_files = has_targets;
     let mut shared_workspace_root = has_targets && first_workspace_root.is_some();
     let mut has_workspace_double_slash_relative_target = false;
@@ -185,14 +197,18 @@ pub(in crate::gui) fn path_context_menu_state(
         let has_resolved_file = resolved_target_file_path_for_entry(row, *entry_index).is_some();
         has_collectable_file_target |= has_resolved_file;
         all_targets_collectable_files &= has_resolved_file;
-        all_targets_editable &= target_editable;
+        if super::super::check_row_mutation(Some(row), super::super::RowMutation::PathEdit).is_ok()
+        {
+            has_ready_target = true;
+            all_targets_editable &= target_editable;
+        }
         if missing_path_entry_file_name(row, *entry_index).is_some() {
             has_missing_search_target = true;
             has_editable_missing_search_target |= target_editable;
         }
         shared_workspace_root &= row.scene_workspace_root.as_ref() == first_workspace_root;
     }
-    let can_edit_path_values = all_targets_editable;
+    let can_edit_path_values = all_targets_editable && has_ready_target;
     let can_collect_files_to_folder = shared_workspace_root && all_targets_collectable_files;
     let can_collect_files = can_collect_files_to_folder && can_edit_path_values;
     let can_search_missing_files = has_editable_missing_search_target;

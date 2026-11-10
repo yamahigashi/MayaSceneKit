@@ -732,7 +732,30 @@ impl GuiShell {
             compute_visible_row_indices_for(&self.rows, &self.state, self.file_sort);
     }
 
+    pub(super) fn with_audit_refresh_batch<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut Self, &mut Context<Self>) -> R,
+    ) -> R {
+        self.audit_refresh_batch_depth += 1;
+        let result = update(self, cx);
+        self.audit_refresh_batch_depth -= 1;
+        if self.audit_refresh_batch_depth == 0 && self.audit_refresh_pending {
+            self.audit_refresh_pending = false;
+            self.refresh_audit_table(cx);
+        }
+        result
+    }
+
     pub(super) fn refresh_audit_table(&mut self, cx: &mut Context<Self>) {
+        if self.audit_refresh_batch_depth != 0 {
+            self.audit_refresh_pending = true;
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.audit_refresh_count += 1;
+        }
         let selected = self.selected_indices();
         self.audit_allowed_total = count_allowed_findings(&self.rows, &selected);
         self.audit_all_rows =

@@ -1025,7 +1025,7 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
             shell.state.active_tab = ResultTab::Audit;
             shell.state.workspace_auto_analyze = false;
             shell.rows = vec![row];
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
@@ -1122,7 +1122,7 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
             );
 
             shell.state.workspace_auto_analyze = false;
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
@@ -1244,7 +1244,7 @@ fn clean_result_keeps_active_audit_tab_and_marks_audit_rows_staged(cx: &mut Test
             shell.rows = vec![row];
             shell.refresh_file_table(cx);
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Clean,
                 staged_clean_result(&scene, "literalPythonReview"),
@@ -1280,8 +1280,8 @@ fn clean_undo_restores_pre_processing_status(cx: &mut TestAppContext) {
             let edit_sequence = shell
                 .begin_edit_transaction(&[0])
                 .expect("edit transaction");
-            shell.rows[0].busy = Some(RowOperation::Clean);
-            shell.apply_job_result(
+            shell.rows[0].busy = Some((RowOperation::Clean, 0));
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Clean,
                 staged_clean_result(&scene, "script1"),
@@ -1352,10 +1352,10 @@ fn bulk_clean_undo_restores_all_rows_after_out_of_order_completion(cx: &mut Test
             let edit_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("edit transaction");
-            shell.rows[0].busy = Some(RowOperation::Clean);
-            shell.rows[1].busy = Some(RowOperation::Clean);
+            shell.rows[0].busy = Some((RowOperation::Clean, 0));
+            shell.rows[1].busy = Some((RowOperation::Clean, 0));
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 2,
                 RowOperation::Clean,
                 staged_clean_result(&scene_b, "script_b"),
@@ -1365,7 +1365,7 @@ fn bulk_clean_undo_restores_all_rows_after_out_of_order_completion(cx: &mut Test
             );
             assert!(shell.undo_stack.is_empty());
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Clean,
                 staged_clean_result(&scene_a, "script_a"),
@@ -1506,13 +1506,13 @@ fn undo_history_respects_action_order_not_completion_order(cx: &mut TestAppConte
             let first_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("first sequence");
-            shell.rows[0].busy = Some(RowOperation::Clean);
-            shell.rows[1].busy = Some(RowOperation::Clean);
+            shell.rows[0].busy = Some((RowOperation::Clean, 0));
+            shell.rows[1].busy = Some((RowOperation::Clean, 0));
 
             let second_sequence = shell.begin_edit_transaction(&[2]).expect("second sequence");
-            shell.rows[2].busy = Some(RowOperation::Clean);
+            shell.rows[2].busy = Some((RowOperation::Clean, 0));
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 3,
                 RowOperation::Clean,
                 staged_clean_result(&scene_c, "script_c"),
@@ -1522,7 +1522,7 @@ fn undo_history_respects_action_order_not_completion_order(cx: &mut TestAppConte
             );
             assert!(shell.undo_stack.is_empty());
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 2,
                 RowOperation::Clean,
                 staged_clean_result(&scene_b, "script_b"),
@@ -1532,7 +1532,7 @@ fn undo_history_respects_action_order_not_completion_order(cx: &mut TestAppConte
             );
             assert!(shell.undo_stack.is_empty());
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Clean,
                 staged_clean_result(&scene_a, "script_a"),
@@ -1570,10 +1570,10 @@ fn bulk_clean_failure_only_records_successful_subset(cx: &mut TestAppContext) {
             let edit_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("edit transaction");
-            shell.rows[0].busy = Some(RowOperation::Clean);
-            shell.rows[1].busy = Some(RowOperation::Clean);
+            shell.rows[0].busy = Some((RowOperation::Clean, 0));
+            shell.rows[1].busy = Some((RowOperation::Clean, 0));
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Clean,
                 staged_clean_result(&scene_a, "script_a"),
@@ -1582,7 +1582,7 @@ fn bulk_clean_failure_only_records_successful_subset(cx: &mut TestAppContext) {
                 cx,
             );
             shell.mark_error_by_id(
-                2,
+                (2, 0),
                 RowOperation::Clean,
                 Some(edit_sequence),
                 "boom",
@@ -1616,10 +1616,10 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
             let edit_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("edit transaction");
-            shell.rows[0].busy = Some(RowOperation::Clean);
-            shell.rows[1].busy = Some(RowOperation::Clean);
+            shell.rows[0].busy = Some((RowOperation::Clean, 0));
+            shell.rows[1].busy = Some((RowOperation::Clean, 0));
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Clean,
                 staged_clean_result(&scene_a, "script_a"),
@@ -1627,7 +1627,7 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
                 window,
                 cx,
             );
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 2,
                 RowOperation::Clean,
                 staged_clean_result(&scene_b, "script_b"),
@@ -1638,7 +1638,7 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
             assert_eq!(shell.undo_stack.len(), 1);
             assert_eq!(shell.undo_stack[0].transitions.len(), 2);
 
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
@@ -3247,7 +3247,7 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_for_proc
     let path = dir.path().join("processing_delete_ui_config.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.busy = Some(RowOperation::Analyze);
+    row.busy = Some((RowOperation::Analyze, 0));
 
     let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
@@ -4670,7 +4670,7 @@ fn apply_job_result_marks_budget_blocked_rows_as_error(cx: &mut TestAppContext) 
 
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.rows = vec![test_row(1, &scene)];
-        shell.apply_job_result(
+        shell.deliver_job_result_for_test(
             1,
             RowOperation::Analyze,
             RowJobResult::Analyze(result),
@@ -5254,7 +5254,7 @@ fn workspace_auto_analysis_dispatch_respects_parallelism_preference(cx: &mut Tes
             shell
                 .rows
                 .iter()
-                .filter(|row| row.busy == Some(RowOperation::Analyze))
+                .filter(|row| matches!(row.busy, Some((RowOperation::Analyze, _))))
                 .count(),
             32
         );
@@ -5305,7 +5305,7 @@ fn workspace_auto_analysis_suppresses_low_priority_during_cache_restore(cx: &mut
             shell
                 .rows
                 .iter()
-                .filter(|row| row.busy == Some(RowOperation::Analyze))
+                .filter(|row| matches!(row.busy, Some((RowOperation::Analyze, _))))
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![1]
@@ -5345,7 +5345,10 @@ fn selected_auto_analysis_still_dispatches_during_cache_restore(cx: &mut TestApp
 
         assert_eq!(shell.auto_analyze_queue.in_flight_len(), 1);
         assert_eq!(shell.auto_analyze_queue.pending_low.len(), 2);
-        assert!(matches!(shell.rows[1].busy, Some(RowOperation::Analyze)));
+        assert!(matches!(
+            shell.rows[1].busy,
+            Some((RowOperation::Analyze, _))
+        ));
     });
 }
 
@@ -5400,7 +5403,14 @@ fn analyze_result_queues_debounced_refresh_and_persist(cx: &mut TestAppContext) 
             shell.rows = vec![test_row(1, &scene)];
             shell.refresh_file_table(cx);
 
-            shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+            shell.deliver_job_result_for_test(
+                1,
+                RowOperation::Analyze,
+                analyze_result,
+                None,
+                window,
+                cx,
+            );
 
             assert!(shell.auto_analyze_refresh_state.pending_full_refresh);
             assert_eq!(shell.auto_analyze_refresh_state.pending_completion_count, 1);
@@ -5440,7 +5450,14 @@ fn analyze_result_invalidates_path_resolution_state_for_async_refresh(cx: &mut T
             shell.rows = vec![row];
             shell.refresh_file_table(cx);
 
-            shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+            shell.deliver_job_result_for_test(
+                1,
+                RowOperation::Analyze,
+                analyze_result,
+                None,
+                window,
+                cx,
+            );
 
             assert!(shell.rows[0].path_resolution_cache.is_empty());
             assert_eq!(shell.rows[0].missing_path_count(), None);
@@ -5516,7 +5533,14 @@ createNode file -n "file1";
         shell.update_file_table_viewport_range(0..0, window, cx);
         assert!(shell.visible_rows.is_empty());
 
-        shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Analyze,
+            analyze_result,
+            None,
+            window,
+            cx,
+        );
 
         assert!(shell.rows[0].display_paths_report().is_some());
         assert!(
@@ -7135,7 +7159,7 @@ fn file_context_delete_ui_configuration_script_node_skips_processing_rows(cx: &m
             let mut row_b = test_row(2, &scene_b);
             row_b.selected = true;
             row_b.dump_report = result_b.dump_report.clone();
-            row_b.busy = Some(RowOperation::Analyze);
+            row_b.busy = Some((RowOperation::Analyze, 0));
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
 
@@ -8049,7 +8073,7 @@ fn path_context_menu_state_disables_search_for_processing_missing_targets() {
 
     let mut row = test_row(1, &scene);
     row.selected = true;
-    row.busy = Some(RowOperation::Analyze);
+    row.busy = Some((RowOperation::Analyze, 0));
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
     row.refresh_path_resolution_cache();
 
@@ -8079,7 +8103,7 @@ fn path_context_menu_state_search_skips_processing_targets_when_editable_missing
     first_row.refresh_path_resolution_cache();
     let mut second_row = test_row(2, &second_scene);
     second_row.selected = true;
-    second_row.busy = Some(RowOperation::Analyze);
+    second_row.busy = Some((RowOperation::Analyze, 0));
     second_row.paths_report =
         Some(collect_scene_paths(&second_scene, PathKind::File).expect("paths"));
     second_row.refresh_path_resolution_cache();
@@ -10845,7 +10869,7 @@ fn audit_detail_fix_analysis_apply_records_file_state(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.replace_rows(vec![row]);
         let generation = shell.rows[0].audit_generation;
-        shell.apply_job_result(1, RowOperation::Analyze, result, None, window, cx);
+        shell.deliver_job_result_for_test(1, RowOperation::Analyze, result, None, window, cx);
         assert_eq!(shell.rows[0].audit_file_state, expected);
         assert!(shell.rows[0].audit_generation > generation);
     });
@@ -10870,7 +10894,7 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
         shell.state.workspace_auto_analyze = false;
         shell.replace_rows(vec![row]);
         let generation = shell.rows[0].audit_generation;
-        shell.apply_job_result(
+        shell.deliver_job_result_for_test(
             1,
             RowOperation::Save,
             RowJobResult::Save {
@@ -11293,7 +11317,7 @@ mod allowlist_tests {
             shell.audit_plan_fingerprint = fingerprint_audit_plan(&shell.audit_plan);
             shell.replace_rows(vec![test_row(1, &path)]);
             for result in [path_result, bytes_result] {
-                shell.apply_job_result(
+                shell.deliver_job_result_for_test(
                     1,
                     RowOperation::Analyze,
                     RowJobResult::Analyze(result),
@@ -11305,7 +11329,7 @@ mod allowlist_tests {
                 assert_eq!(shell.rows[0].effective_findings_count(), 0);
                 assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
             }
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 1,
                 RowOperation::Analyze,
                 RowJobResult::Analyze(control),
@@ -11611,7 +11635,7 @@ mod allowlist_tests {
             check_error(shell);
             let id = shell.rows[0].id;
             let result = analyze(&path, &shell.audit_plan);
-            shell.apply_job_result(
+            shell.deliver_job_result_for_test(
                 id,
                 RowOperation::Analyze,
                 RowJobResult::Analyze(result),
@@ -11735,19 +11759,19 @@ mod allowlist_tests {
             assert_eq!(finding.detail_fields[0].raw, "Sample reason (Distributed (app))");
             shell.rows[0].selected = false;
             shell.file_table_viewport_range = 0..0;
-            shell.apply_job_result(1, RowOperation::Analyze, RowJobResult::Analyze(old_analyze), None, window, cx);
+            shell.deliver_job_result_for_test(1, RowOperation::Analyze, RowJobResult::Analyze(old_analyze), None, window, cx);
             assert!(shell.rows[0].audit_report.is_some());
             assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
-            shell.apply_job_result(2, RowOperation::Clean, old_staged, None, window, cx);
+            shell.deliver_job_result_for_test(2, RowOperation::Clean, old_staged, None, window, cx);
             assert!(shell.rows[1].dirty_artifact.is_some());
             assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             assert_eq!(shell.rows[1].staged_audit_mode, None);
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
             let edit_state = shell.rows[1].edit_state();
-            shell.rows[1].apply_edit_state(&edit_state);
+            assert!(shell.rows[1].apply_edit_state(&edit_state).is_ok());
             assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             let audit_generation = shell.rows[1].audit_generation;
-            shell.apply_job_result(2, RowOperation::Save, RowJobResult::Save {
+            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save {
                 output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
             }, None, window, cx);
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
@@ -12152,7 +12176,14 @@ createNode file -n "file1";
         shell.update_file_table_viewport_range(0..0, window, cx);
         assert!(shell.visible_rows.is_empty());
 
-        shell.apply_job_result(1, RowOperation::Analyze, analyze_result, None, window, cx);
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Analyze,
+            analyze_result,
+            None,
+            window,
+            cx,
+        );
         shell.auto_analyze_refresh_state.pending_full_refresh = false;
         shell.invalidate_file_list_membership_refresh();
 
@@ -12589,7 +12620,7 @@ fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
         fs::write(dir.path().join("Example.ma"), "//Maya ASCII 2026 scene\n").expect("write scene");
         shell.replace_rows(vec![test_row(2, &dir.path().join("Example.ma"))]);
         let history_len = shell.state.job_history.len();
-        shell.apply_job_result(
+        shell.deliver_job_result_for_test(
             1,
             RowOperation::Save,
             RowJobResult::Save {
@@ -12619,7 +12650,7 @@ fn save_overlay_blocks_workspace_handlers(cx: &mut TestAppContext) {
             .state
             .set_workspace_root(Some(dir.path().to_path_buf()));
         let mut row = test_row(1, &dir.path().join("TestScene.ma"));
-        row.busy = Some(RowOperation::Save);
+        row.busy = Some((RowOperation::Save, 0));
         shell.replace_rows(vec![row]);
         shell.on_menu_select_folder(&super::MenuSelectFolder, window, cx);
         assert!(matches!(
@@ -12719,7 +12750,7 @@ fn save_guard_blocks_undo_and_redo(cx: &mut TestAppContext) {
         shell.state = test_state(dir.path(), "");
         shell.replace_rows(vec![test_row(1, &path)]);
         let sequence = shell.begin_edit_transaction(&[0]).expect("transaction");
-        shell.apply_job_result(
+        shell.deliver_job_result_for_test(
             1,
             RowOperation::Clean,
             staged_clean_result(&path, "ExampleScript"),
@@ -12741,7 +12772,7 @@ fn save_guard_blocks_undo_and_redo(cx: &mut TestAppContext) {
             shell.status_message,
             Some(BannerMessage::SaveInProgress)
         ));
-        assert!(matches!(shell.rows[0].busy, Some(RowOperation::Save)));
+        assert!(matches!(shell.rows[0].busy, Some((RowOperation::Save, _))));
         assert!(shell.is_saving());
         assert_eq!(shell.undo_stack.len(), undo_count);
         shell.status_message = None;
@@ -12750,7 +12781,7 @@ fn save_guard_blocks_undo_and_redo(cx: &mut TestAppContext) {
             shell.status_message,
             Some(BannerMessage::SaveInProgress)
         ));
-        assert!(matches!(shell.rows[0].busy, Some(RowOperation::Save)));
+        assert!(matches!(shell.rows[0].busy, Some((RowOperation::Save, _))));
         assert!(shell.is_saving());
     });
 }
@@ -12782,4 +12813,915 @@ fn save_guard_confirmation_resolves_row_ids(cx: &mut TestAppContext) {
         fs::read_to_string(other).expect("read scene"),
         "// Example\n"
     );
+}
+
+fn write_mutation_scene(path: &Path) {
+    fs::write(
+        path,
+        concat!(
+            "//Maya ASCII 2026 scene\n",
+            "requires maya \"2026\";\n",
+            "createNode file -n \"Example\";\n",
+            "    setAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\n",
+            "createNode script -n \"ExampleScript\";\n",
+            "    setAttr \".b\" -type \"string\" \"python(\\\"print('Example')\\\")\";\n",
+            "    setAttr \".st\" 0;\n",
+        ),
+    )
+    .unwrap();
+}
+
+fn mutation_row(id: u64, path: &Path) -> SceneRow {
+    let RowJobResult::Analyze(result) =
+        analyze_row(path, AuditModePreference::StrictDefault).unwrap()
+    else {
+        panic!("analysis result");
+    };
+    let mut row = test_row(id, path);
+    row.selected = true;
+    row.status = FileStatus::Audited;
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    row.audit_plan_fingerprint = Some(result.audit_plan_fingerprint);
+    row.analyzed_audit_mode = Some(result.audit_mode);
+    row.paths_report = result.paths_report;
+    row.dump_report = result.dump_report;
+    row.sync_findings_count();
+    assert_eq!(row.paths_report.as_ref().unwrap().entries.len(), 1);
+    row
+}
+
+fn mutation_banner(shell: &GuiShell) -> String {
+    shell
+        .status_message
+        .as_ref()
+        .map(|message| render_banner_message(&shell.i18n(), message))
+        .unwrap_or_default()
+}
+
+fn prepare_mutation_replace_dialog(
+    shell: &mut GuiShell,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<GuiShell>,
+) {
+    shell.replace_from_input.update(cx, |input, cx| {
+        input.set_value("asset/example/file.tx", window, cx)
+    });
+    shell.replace_to_input.update(cx, |input, cx| {
+        input.set_value("asset/sample/file.tx", window, cx)
+    });
+    let row_ids = shell.rows.iter().map(|row| row.id).collect::<Vec<_>>();
+    let planned_overrides = row_ids
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                vec![PathReplaceOverride {
+                    entry_index: 0,
+                    before_value: "asset/example/file.tx".into(),
+                    after_value: "asset/sample/file.tx".into(),
+                }],
+            )
+        })
+        .collect();
+    shell.replace_dialog = Some(ReplaceDialogState {
+        captured_row_ids: row_ids.clone(),
+        path_targets: None,
+        path_type_filter: default_path_type_filter(),
+        replace_mode: PathReplaceMode::Literal,
+        preview_sort: ReplaceDialogSort {
+            key: ReplaceDialogSortKey::Before,
+            direction: ColumnSort::Default,
+        },
+        is_previewing: false,
+        generation: 1,
+        source_cache: shell.seed_replace_dialog_source_cache(),
+        preview_signature: Some(ReplaceDialogPreviewSignature {
+            from_value: "asset/example/file.tx".into(),
+            to_value: "asset/sample/file.tx".into(),
+            replace_mode: PathReplaceMode::Literal,
+            path_type_filter: default_path_type_filter(),
+        }),
+        preview: Some(ReplaceDialogPreviewState {
+            previewable_row_ids: row_ids,
+            failed_files: Vec::new(),
+            matched_count: shell.rows.len(),
+            items: Vec::new(),
+            planned_overrides,
+        }),
+    });
+}
+
+#[gpui::test]
+fn row_mutation_replace_skips_analyzing_rows(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    let other = dir.path().join("Sample.ma");
+    write_mutation_scene(&path);
+    write_mutation_scene(&other);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &other)]);
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.spawn_row_job(1, RowOperation::Analyze, None, None, window, cx, |path| {
+            analyze_row(&path, AuditModePreference::StrictDefault)
+        });
+        let before = shell.rows[0].edit_state();
+        shell.apply_replace_dialog(window, cx);
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert!(shell.rows[0].is_processing());
+        assert!(shell.rows[1].dirty());
+        assert_eq!(shell.undo_stack.len(), 1);
+        assert_eq!(shell.undo_stack[0].transitions.len(), 1);
+        assert_eq!(shell.undo_stack[0].transitions[0].row_id, 2);
+        assert!(mutation_banner(shell).contains("Skipped 1 busy rows."));
+        assert!(
+            shell
+                .state
+                .job_history
+                .iter()
+                .any(|entry| entry.summary.contains("Skipped 1 busy rows."))
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(!shell.rows[0].is_processing());
+        assert!(!shell.rows[0].dirty());
+        assert!(shell.rows[1].dirty());
+    });
+}
+
+#[gpui::test]
+fn row_mutation_audit_snapshot_cannot_restart_clean(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.refresh_audit_table(cx);
+        let snapshot = shell
+            .audit_rows
+            .iter()
+            .find(|row| row.clean_target.is_some())
+            .expect("cleanable audit row")
+            .clone();
+        shell.run_audit_table_clean(vec![snapshot.clone()], window, cx);
+        assert!(shell.rows[0].is_processing());
+        let before = shell.rows[0].edit_state();
+        let sequence = shell.next_edit_history_sequence;
+        shell.run_audit_table_clean(vec![snapshot.clone()], window, cx);
+        assert_eq!(shell.next_edit_history_sequence, sequence);
+        assert_eq!(shell.pending_edit_transactions.len(), 1);
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert!(mutation_banner(shell).contains("Skipped 1 busy rows."));
+        assert!(!shell.audit_rows.iter().any(|row| matches!(
+            row.clean_state,
+            AuditRowCleanState::Available | AuditRowCleanState::Staged
+        )));
+        shell.status_message = None;
+        shell.run_clean(window, cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::BusyRowsSkipped { count: 1, .. })
+        ));
+        assert_eq!(shell.next_edit_history_sequence, sequence);
+        let mut staged_snapshot = snapshot;
+        staged_snapshot.clean_state = AuditRowCleanState::Staged;
+        shell.status_message = None;
+        shell.undo_audit_table_clean(vec![staged_snapshot], window, cx);
+        assert_eq!(shell.next_edit_history_sequence, sequence);
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert!(shell.status_message.is_none());
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.rows[0].busy.is_none());
+        assert!(
+            shell
+                .audit_rows
+                .iter()
+                .any(|row| row.clean_state == AuditRowCleanState::Staged)
+        );
+    });
+}
+
+#[gpui::test]
+fn row_mutation_history_refuses_partial_restore(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        for operation in [
+            RowOperation::Clean,
+            RowOperation::Analyze,
+            RowOperation::ToAscii,
+            RowOperation::Save,
+        ] {
+            shell.clear_edit_history();
+            shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
+            let before = shell.capture_row_edit_states(&[0, 1]);
+            for row in &mut shell.rows {
+                row.path_overrides.insert(0, "asset/sample/file.tx".into());
+                row.status = FileStatus::Dirty;
+            }
+            shell.push_edit_history(before);
+            let entry = shell.undo_stack[0].clone();
+            shell.redo_stack.push(entry.clone());
+            shell.rows[1].busy = Some((operation, 0));
+            let expected = shell.capture_row_edit_states(&[0, 1]);
+            shell.run_menu_undo(cx);
+            assert_eq!(shell.undo_stack.len(), 1);
+            assert_eq!(shell.redo_stack.len(), 1);
+            shell.run_menu_redo(cx);
+            assert_eq!(shell.undo_stack.len(), 1);
+            assert_eq!(shell.redo_stack.len(), 1);
+            shell.apply_edit_history_entry(&entry, false, cx);
+            shell.undo_row_changes_for_ids(vec![1, 2], window, cx);
+            shell.undo_context_path_targets(vec![(1, 0), (2, 0)], window, cx);
+            for (id, state) in expected {
+                assert!(
+                    shell.rows[shell.index_of_row_id(id).unwrap()]
+                        .edit_state()
+                        .same_as(&state)
+                );
+            }
+            assert!(shell.status_message.is_some());
+            assert!(shell.rows[1].is_processing());
+        }
+    });
+}
+
+#[gpui::test]
+fn row_mutation_analysis_preserves_staged_fields_and_history(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        let sequence = shell.begin_edit_transaction(&[0]).unwrap();
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Clean,
+            staged_clean_result(&path, "ExampleScript"),
+            Some(sequence),
+            window,
+            cx,
+        );
+        let before = shell.rows[0].edit_state();
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.refresh_audit_table(cx);
+        let completion_count = shell.auto_analyze_refresh_state.pending_completion_count;
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Analyze,
+            analyze_row(&path, AuditModePreference::StrictDefault).unwrap(),
+            None,
+            window,
+            cx,
+        );
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert_eq!(
+            shell.rows[0].staged_source_bytes,
+            before.staged_source_bytes
+        );
+        assert_eq!(shell.undo_stack.len(), 1);
+        assert!(mutation_banner(shell).contains("Kept staged edits"));
+        assert!(shell.rows[0].busy.is_none());
+        assert!(
+            shell
+                .audit_rows
+                .iter()
+                .all(|row| row.clean_state != AuditRowCleanState::Busy)
+        );
+        assert!(shell.auto_analyze_refresh_state.pending_completion_count > completion_count);
+    });
+}
+
+#[gpui::test]
+fn row_mutation_cache_preserves_residual_staged_state(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        let mut row = test_row(1, &path);
+        row.dirty_kind = Some(DirtyKind::SceneEdits);
+        assert!(!row.dirty());
+        shell.replace_rows(vec![row]);
+        let before = shell.rows[0].edit_state();
+        shell.status_message = Some(BannerMessage::Raw("Example notice".into()));
+        shell.apply_cache_restore_updates(
+            vec![super::cache_restore::CacheHydrationUpdate {
+                row_id: 1,
+                observe_snapshot: Some(sample_observed_snapshot("Example.ma")),
+                observe_access: None,
+                audit_snapshot: Some(sample_audited_snapshot("Example.ma")),
+                audit_access: None,
+            }],
+            &shell.audit_plan_fingerprint.clone(),
+            window,
+            cx,
+        );
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert!(shell.rows[0].paths_report.is_none());
+        assert_eq!(mutation_banner(shell), "Example notice");
+        shell.rows[0].dirty_kind = None;
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.apply_cache_restore_updates(
+            vec![super::cache_restore::CacheHydrationUpdate {
+                row_id: 1,
+                observe_snapshot: Some(sample_observed_snapshot("Example.ma")),
+                observe_access: None,
+                audit_snapshot: Some(sample_audited_snapshot("Example.ma")),
+                audit_access: None,
+            }],
+            &shell.audit_plan_fingerprint.clone(),
+            window,
+            cx,
+        );
+        assert_eq!(mutation_banner(shell), "Example notice");
+        assert!(shell.rows[0].paths_report.is_none());
+    });
+}
+
+#[gpui::test]
+fn row_mutation_save_blocks_saved_edit_callbacks(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let other = dir.path().join("Sample.ma");
+    write_mutation_scene(&other);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        let sequence = shell.begin_edit_transaction(&[0]).unwrap();
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Clean,
+            staged_clean_result(&path, "ExampleScript"),
+            Some(sequence),
+            window,
+            cx,
+        );
+        shell.refresh_audit_table(cx);
+        let audit = shell
+            .audit_rows
+            .iter()
+            .find(|row| row.clean_state == AuditRowCleanState::Staged)
+            .expect("staged audit row")
+            .clone();
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.begin_path_edit(vec![(1, 0)], window, cx);
+        shell.path_edit_input.update(cx, |input, cx| {
+            input.set_value("asset/sample/file.tx", window, cx)
+        });
+        shell.run_save_selected(window, cx);
+        assert!(shell.is_saving());
+        let before = shell.rows[0].edit_state();
+        let undo_count = shell.undo_stack.len();
+        for operation in 0..4 {
+            shell.status_message = None;
+            match operation {
+                0 => shell.apply_replace_dialog(window, cx),
+                1 => shell.apply_path_edit(window, cx),
+                2 => {
+                    let mut available = audit.clone();
+                    available.clean_state = AuditRowCleanState::Available;
+                    shell.run_audit_table_clean(vec![available], window, cx);
+                }
+                _ => shell.undo_audit_table_clean(vec![audit.clone()], window, cx),
+            }
+            assert!(shell.is_saving());
+            assert!(shell.rows[0].edit_state().same_as(&before));
+            assert_eq!(shell.undo_stack.len(), undo_count);
+            if operation == 2 {
+                assert!(shell.status_message.is_none());
+            } else {
+                assert!(matches!(
+                    shell.status_message,
+                    Some(BannerMessage::SaveInProgress)
+                        | Some(BannerMessage::BusyRowsSkipped { saving: true, .. })
+                ));
+            }
+        }
+        let mut control = mutation_row(2, &other);
+        control.selected = true;
+        shell.rows.push(control);
+        shell.rebuild_row_id_index();
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.apply_replace_dialog(window, cx);
+        assert!(shell.rows[1].dirty());
+        assert!(shell.rows[0].edit_state().same_as(&before));
+
+        shell.rows[1] = mutation_row(2, &other);
+        shell.begin_path_edit(vec![(2, 0)], window, cx);
+        shell.path_edit_input.update(cx, |input, cx| {
+            input.set_value("asset/sample/file.tx", window, cx)
+        });
+        shell.apply_path_edit(window, cx);
+        assert!(shell.rows[1].dirty());
+        assert!(shell.rows[0].edit_state().same_as(&before));
+
+        shell.rows[1] = mutation_row(2, &other);
+        shell.refresh_audit_table(cx);
+        let control_audit = shell
+            .audit_rows
+            .iter()
+            .find(|row| {
+                row.clean_target.is_some() && row.row_keys.iter().any(|key| key.row_id == 2)
+            })
+            .unwrap()
+            .clone();
+        shell.run_audit_table_clean(vec![control_audit], window, cx);
+        assert!(shell.rows[1].busy.is_some());
+        assert!(shell.rows[0].edit_state().same_as(&before));
+    });
+}
+
+#[gpui::test]
+fn row_mutation_failed_clean_preserves_edits_and_reports_error(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let expected = shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Clean,
+            staged_clean_result(&path, "ExampleScript"),
+            None,
+            window,
+            cx,
+        );
+        let mut expected = shell.rows[0].edit_state();
+        expected.status = FileStatus::Error("Example failure".into());
+        shell.status_message = None;
+        let sequence = shell.begin_edit_transaction(&[0]).unwrap();
+        shell.spawn_row_job(
+            1,
+            RowOperation::Clean,
+            None,
+            Some(sequence),
+            window,
+            cx,
+            |_| Err("Example failure".into()),
+        );
+        expected
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.rows[0].edit_state().same_as(&expected));
+        assert_eq!(
+            shell.rows[0].staged_source_bytes,
+            expected.staged_source_bytes
+        );
+        assert!(shell.rows[0].busy.is_none());
+        assert!(shell.pending_edit_transactions.is_empty());
+        assert!(shell.state.job_history[0].failed);
+        assert_eq!(mutation_banner(shell), "Example failure");
+    });
+}
+
+#[gpui::test]
+fn row_mutation_save_selected_reports_busy_count(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    let other = dir.path().join("Sample.ma");
+    write_mutation_scene(&path);
+    write_mutation_scene(&other);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        let mut second = save_guard_row(&other);
+        second.id = 2;
+        shell.replace_rows(vec![save_guard_row(&path), second]);
+        shell.spawn_save_jobs(vec![0], window, cx);
+        let before = shell.rows[0].edit_state();
+        shell.run_save_selected(window, cx);
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert!(shell.rows[1].is_processing());
+        assert!(mutation_banner(shell).contains("Skipped 1 busy rows."));
+    });
+}
+
+#[gpui::test]
+fn row_mutation_save_confirmation_reports_newly_busy_rows(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let original = fs::read(&path).unwrap();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![save_guard_row(&path)]);
+        shell.run_save_all(window, cx);
+        shell.rows[0].busy = Some((RowOperation::Clean, 0));
+    });
+    visual_cx.simulate_prompt_answer("Save All");
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.rows[0].is_processing());
+        assert!(shell.state.job_history.is_empty());
+        assert!(mutation_banner(shell).contains("Skipped 1 busy rows."));
+    });
+    assert_eq!(fs::read(&path).unwrap(), original);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![save_guard_row(&path)]);
+        shell.run_save_all(window, cx);
+        shell.rows[0] = mutation_row(1, &path);
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.status_message = None;
+    });
+    visual_cx.simulate_prompt_answer("Save All");
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.status_message.is_none());
+        assert!(shell.state.job_history.is_empty());
+        assert!(shell.rows[0].busy == Some((RowOperation::Analyze, 100)));
+    });
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[gpui::test]
+fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![save_guard_row(&path)]);
+        let save_job_id = shell.next_row_job_id();
+        shell.rows[0].busy = Some((RowOperation::Save, save_job_id));
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Save,
+            RowJobResult::Save {
+                output_path: path.clone(),
+                audit_file_state: None,
+            },
+            None,
+            window,
+            cx,
+        );
+        let ascii_job_id = shell.next_row_job_id();
+        shell.rows[0].busy = Some((RowOperation::ToAscii, ascii_job_id));
+        shell.apply_job_result(
+            (1, save_job_id),
+            RowOperation::Save,
+            RowJobResult::Save { output_path: path.clone(), audit_file_state: None },
+            None, window, cx,
+        );
+        assert!(shell.rows[0].busy == Some((RowOperation::ToAscii, ascii_job_id)));
+        shell.mark_error((1, ascii_job_id), RowOperation::ToAscii, None, "Example failure", window, cx);
+        assert_eq!(shell.state.job_history.iter().filter(|entry| entry.summary == "saved").count(), 1);
+        assert_eq!(shell.state.job_history.iter().filter(|entry| entry.summary.contains("stale job result")).count(), 1);
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message == "Example failure"));
+    });
+}
+
+#[gpui::test]
+fn row_mutation_missing_job_row_finalizes_pending_history(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        let sequence = shell.begin_edit_transaction(&[0]).unwrap();
+        shell.spawn_row_job(
+            1,
+            RowOperation::Clean,
+            None,
+            Some(sequence),
+            window,
+            cx,
+            |path| Ok(staged_clean_result(&path, "ExampleScript")),
+        );
+        shell.replace_rows(vec![mutation_row(2, &path)]);
+        let before = shell.capture_row_edit_states(&[0]);
+        shell.rows[0]
+            .path_overrides
+            .insert(0, "asset/sample/file.tx".into());
+        shell.push_edit_history(before);
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(shell.pending_edit_transactions.is_empty());
+        assert_eq!(shell.undo_stack.len(), 1);
+        assert_eq!(shell.undo_stack[0].transitions[0].row_id, 2);
+    });
+}
+
+#[gpui::test]
+fn row_mutation_history_clear_does_not_reuse_sequences(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, _, _| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        let old = shell.begin_edit_transaction(&[0]).unwrap();
+        shell.clear_edit_history();
+        let next = shell.begin_edit_transaction(&[0]).unwrap();
+        assert!(next > old);
+        shell.complete_edit_transaction_failure(old, 1);
+        assert!(shell.pending_edit_transactions.contains_key(&next));
+        shell.complete_edit_transaction_failure(next, 1);
+        assert!(shell.pending_edit_transactions.is_empty());
+        assert_eq!(
+            shell.next_edit_history_commit_sequence,
+            shell.next_edit_history_sequence
+        );
+    });
+    let sequence = shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.next_row_id = 2;
+        let sequence = shell.begin_edit_transaction(&[0]).unwrap();
+        shell.rows[0].busy = Some((RowOperation::Clean, 100));
+        shell.rescan_workspace_with_current_settings(window, cx);
+        assert!(shell.workspace_scan_active());
+        sequence
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(shell.rows[0].busy == Some((RowOperation::Clean, 100)));
+        assert!(shell.pending_edit_transactions.is_empty());
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Clean,
+            staged_clean_result(&path, "ExampleScript"),
+            Some(sequence),
+            window,
+            cx,
+        );
+        assert!(shell.rows[0].busy.is_none());
+        assert!(shell.rows[0].dirty());
+        assert!(shell.undo_stack.is_empty());
+    });
+}
+
+#[test]
+fn row_mutation_locales_have_matching_message_arguments() {
+    for source in [
+        include_str!("../../locales/en.json"),
+        include_str!("../../locales/ja.json"),
+        include_str!("../../locales/cn.json"),
+    ] {
+        let catalog: BTreeMap<String, String> = serde_json::from_str(source).unwrap();
+        for (key, args) in [
+            ("banner.row_mutation_busy", vec!["name", "operation"]),
+            ("banner.row_mutation_missing", vec![]),
+            ("banner.replace_busy_skipped", vec!["count"]),
+            ("banner.analysis_staged_preserved", vec!["name"]),
+        ] {
+            let value = catalog.get(key).expect("message in every catalog");
+            let actual = value
+                .split('{')
+                .skip(1)
+                .map(|part| part.split('}').next().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, args.into_iter().collect());
+        }
+    }
+}
+
+impl GuiShell {
+    fn deliver_job_result_for_test(
+        &mut self,
+        row_id: u64,
+        operation: RowOperation,
+        result: RowJobResult,
+        edit_sequence: Option<u64>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let current_job = self.index_of_row_id(row_id).and_then(|index| {
+            self.rows[index].busy.map(|(busy_operation, job_id)| {
+                debug_assert!(busy_operation == operation);
+                job_id
+            })
+        });
+        let job_id = current_job.unwrap_or_else(|| {
+            let job_id = self.next_row_job_id();
+            if let Some(index) = self.index_of_row_id(row_id) {
+                self.rows[index].busy = Some((operation, job_id));
+            }
+            job_id
+        });
+        self.apply_job_result(
+            (row_id, job_id),
+            operation,
+            result,
+            edit_sequence,
+            window,
+            cx,
+        );
+    }
+}
+
+#[gpui::test]
+fn row_mutation_undo_filters_unmodified_candidates(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        for operation in 0..3 {
+            shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
+            shell.rows[0]
+                .path_overrides
+                .insert(0, "asset/sample/file.tx".into());
+            shell.rows[0].dirty_kind = Some(DirtyKind::Replace);
+            shell.rows[0].status = FileStatus::Dirty;
+            shell.rows[1].busy = Some((RowOperation::Analyze, 100));
+            match operation {
+                0 => shell.undo_row_changes_for_ids(vec![1, 2], window, cx),
+                1 => shell.undo_context_path_targets(vec![(1, 0), (2, 0)], window, cx),
+                _ => shell.undo_path_edit_targets(vec![(1, 0), (2, 0)], window, cx),
+            }
+            assert!(shell.rows[0].path_overrides.is_empty());
+            assert!(shell.rows[1].busy == Some((RowOperation::Analyze, 100)));
+        }
+    });
+}
+
+#[gpui::test]
+fn row_mutation_save_filters_clean_busy_candidates(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.run_save_selected(window, cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::NothingSelectedDirtyToSave)
+        ));
+        shell.status_message = None;
+        shell.run_context_save_from_row(1, window, cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::NothingSelectedDirtyToSave)
+        ));
+        let mut dirty = save_guard_row(&path);
+        dirty.id = 2;
+        dirty.busy = Some((RowOperation::Clean, 101));
+        shell.rows.push(dirty);
+        shell.rebuild_row_id_index();
+        shell.run_save_selected(window, cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::BusyRowsSkipped { count: 1, .. })
+        ));
+    });
+}
+
+#[gpui::test]
+fn row_mutation_rejections_preserve_apply_errors(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, _, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.with_mutation_targets(vec![1, 2], super::RowMutation::PathEdit, cx, |shell, indices, cx| {
+            assert_eq!(indices, vec![1]);
+            shell.status_message = Some(BannerMessage::InlinePathEditFailed("Example failure".into()));
+            shell.with_mutation_targets(vec![1], super::RowMutation::PathEdit, cx, |_, _, _| panic!("busy target admitted"));
+        });
+        assert!(matches!(&shell.status_message, Some(BannerMessage::InlinePathEditFailed(message)) if message == "Example failure"));
+        assert!(shell.state.job_history.iter().any(|entry| entry.summary.contains("Skipped 1 busy rows.")));
+    });
+}
+
+#[gpui::test]
+fn row_mutation_all_rejected_keeps_editor_inputs(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.begin_path_edit(vec![(1, 0)], window, cx);
+        let signature = shell.replace_dialog_current_signature(cx);
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.apply_path_edit(window, cx);
+        assert!(shell.active_path_edit.is_some());
+        shell.apply_replace_dialog(window, cx);
+        assert!(shell.replace_dialog.is_some());
+        assert!(shell.replace_dialog_current_signature(cx) == signature);
+        assert!(shell.undo_stack.is_empty());
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::BusyRowsSkipped { count: 1, .. })
+        ));
+        shell.clear_rows();
+        shell.status_message = None;
+        shell.apply_replace_dialog(window, cx);
+        shell.apply_path_edit(window, cx);
+        assert!(shell.status_message.is_none());
+        assert!(shell.replace_dialog.is_some());
+        assert!(shell.active_path_edit.is_some());
+    });
+}
+
+#[gpui::test]
+fn row_mutation_analysis_failure_keeps_banner(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.rows[0].busy = Some((RowOperation::Analyze, 100));
+        shell.status_message = Some(BannerMessage::Raw("Example notice".into()));
+        shell.mark_error(
+            (1, 100),
+            RowOperation::Analyze,
+            None,
+            "Example failure",
+            window,
+            cx,
+        );
+        assert_eq!(mutation_banner(shell), "Example notice");
+        assert!(shell.rows[0].busy.is_none());
+        assert!(shell.state.job_history[0].failed);
+    });
+}
+
+#[gpui::test]
+fn row_mutation_unsupported_audit_stays_unsupported_while_busy(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, _, _| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.rows[0].busy = Some((RowOperation::Clean, 100));
+        assert_eq!(
+            super::audit_row_clean_state(&shell.rows[0], None),
+            AuditRowCleanState::Unsupported
+        );
+    });
+}
+
+#[gpui::test]
+fn row_mutation_bulk_jobs_refresh_audit_once(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
+        shell.refresh_audit_table(cx);
+        let refreshes = shell.audit_refresh_count;
+        shell.run_to_ascii(window, cx);
+        assert_eq!(shell.audit_refresh_count - refreshes, 1);
+        assert!(
+            shell
+                .audit_rows
+                .iter()
+                .filter(|row| row.clean_target.is_some())
+                .all(|row| row.clean_state == AuditRowCleanState::Busy)
+        );
+        let refreshes = shell.audit_refresh_count;
+        shell.with_audit_refresh_batch(cx, |shell, cx| {
+            for id in [1, 2] {
+                let index = shell.index_of_row_id(id).unwrap();
+                let (_, job_id) = shell.rows[index].busy.unwrap();
+                shell.mark_error(
+                    (id, job_id),
+                    RowOperation::ToAscii,
+                    None,
+                    "Example failure",
+                    window,
+                    cx,
+                );
+            }
+        });
+        assert_eq!(shell.audit_refresh_count - refreshes, 1);
+        assert!(
+            shell
+                .audit_rows
+                .iter()
+                .all(|row| row.clean_state != AuditRowCleanState::Busy)
+        );
+    });
 }

@@ -215,8 +215,7 @@ impl GuiShell {
         self.redo_stack.clear();
         self.pending_edit_transactions.clear();
         self.completed_edit_history.clear();
-        self.next_edit_history_sequence = 0;
-        self.next_edit_history_commit_sequence = 0;
+        self.next_edit_history_commit_sequence = self.next_edit_history_sequence;
     }
 
     pub(super) fn apply_edit_history_entry(
@@ -224,7 +223,13 @@ impl GuiShell {
         entry: &GuiEditHistoryEntry,
         restore_after: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if !self.admit_history_restore(
+            entry.transitions.iter().map(|transition| transition.row_id),
+            cx,
+        ) {
+            return false;
+        }
         for transition in &entry.transitions {
             let Some(row_index) = self.index_of_row_id(transition.row_id) else {
                 continue;
@@ -234,7 +239,11 @@ impl GuiShell {
             } else {
                 &transition.before
             };
-            self.rows[row_index].apply_edit_state(state);
+            if let Err(blocked) = self.rows[row_index].apply_edit_state(state) {
+                self.status_message = Some(blocked.into_banner());
+                cx.notify();
+                return false;
+            }
             // A report restored from history may predate the current allowlist.
             if self.rows[row_index].audit_report.is_some()
                 && self.rows[row_index].audit_plan_fingerprint.as_deref()
@@ -247,6 +256,7 @@ impl GuiShell {
         self.refresh_file_table(cx);
         self.persist();
         cx.notify();
+        true
     }
 
     pub(super) fn run_menu_undo(&mut self, cx: &mut Context<Self>) {
@@ -258,8 +268,11 @@ impl GuiShell {
             cx.notify();
             return;
         };
-        self.apply_edit_history_entry(&entry, false, cx);
-        self.redo_stack.push(entry);
+        if self.apply_edit_history_entry(&entry, false, cx) {
+            self.redo_stack.push(entry);
+        } else {
+            self.undo_stack.push(entry);
+        }
     }
 
     pub(super) fn run_menu_redo(&mut self, cx: &mut Context<Self>) {
@@ -271,8 +284,11 @@ impl GuiShell {
             cx.notify();
             return;
         };
-        self.apply_edit_history_entry(&entry, true, cx);
-        self.undo_stack.push(entry);
+        if self.apply_edit_history_entry(&entry, true, cx) {
+            self.undo_stack.push(entry);
+        } else {
+            self.redo_stack.push(entry);
+        }
     }
 
     pub(super) fn begin_file_dialog_ui_block(&mut self, cx: &mut Context<Self>) {
@@ -312,7 +328,7 @@ impl GuiShell {
     pub(super) fn is_saving(&self) -> bool {
         self.rows
             .iter()
-            .any(|row| row.busy == Some(RowOperation::Save))
+            .any(|row| matches!(row.busy, Some((RowOperation::Save, _))))
     }
 
     pub(super) fn refresh_row_path_resolution_state(&mut self, row_index: usize) {
@@ -339,7 +355,10 @@ impl GuiShell {
         self.rows
             .iter()
             .enumerate()
-            .filter_map(|(ix, row)| (row.selected && !row.is_processing()).then_some(ix))
+            .filter_map(|(ix, row)| {
+                (row.selected && self.can_mutate(row.id, RowMutation::SceneEdit).is_ok())
+                    .then_some(ix)
+            })
             .collect()
     }
 
@@ -351,16 +370,9 @@ impl GuiShell {
         self.rows
             .iter()
             .enumerate()
-            .filter_map(|(ix, row)| (row.dirty() && !row.is_processing()).then_some(ix))
-            .collect()
-    }
-
-    pub(super) fn selected_ready_dirty_indices(&self) -> Vec<usize> {
-        self.rows
-            .iter()
-            .enumerate()
             .filter_map(|(ix, row)| {
-                (row.selected && row.dirty() && !row.is_processing()).then_some(ix)
+                (row.dirty() && self.can_mutate(row.id, RowMutation::SceneEdit).is_ok())
+                    .then_some(ix)
             })
             .collect()
     }
@@ -426,7 +438,6 @@ impl GuiShell {
                             let targets = target_ids
                                 .into_iter()
                                 .filter_map(|id| shell.index_of_row_id(id))
-                                .filter(|&index| !shell.rows[index].is_processing())
                                 .collect();
                             shell.spawn_save_jobs(targets, window, cx);
                         },
@@ -657,64 +668,79 @@ impl GuiShell {
 
     pub(super) fn mark_error(
         &mut self,
-        index: usize,
+        job: (u64, u64),
         operation: RowOperation,
         edit_sequence: Option<u64>,
         error: impl ToString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let message = error.to_string();
-        let row_id = self.rows[index].id;
-        self.rows[index].busy = None;
-        self.rows[index].status = FileStatus::Error(message.clone());
-        if matches!(operation, RowOperation::Analyze) {
-            self.record_auto_analyze_job(self.rows[index].path.clone(), message, true);
-            self.queue_auto_analyze_completion_refresh(row_id, window, cx);
-            self.schedule_persist_flush(window, cx, false);
-        } else {
-            self.refresh_file_table(cx);
-            self.record_job(
-                operation_key(operation),
-                self.rows[index].path.clone(),
-                None,
-                message,
-                true,
-            );
-        }
-        if let Some(edit_sequence) = edit_sequence {
-            self.complete_edit_transaction_failure(edit_sequence, row_id);
-        }
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+            let Some(index) = shell.accept_job_completion(job, operation, edit_sequence) else {
+                return;
+            };
+            let message = error.to_string();
+            let row_id = job.0;
+            shell.rows[index].status = FileStatus::Error(message.clone());
+            if matches!(operation, RowOperation::Analyze) {
+                shell.record_auto_analyze_job(
+                    shell.rows[index].path.clone(),
+                    message.clone(),
+                    true,
+                );
+                shell.queue_auto_analyze_completion_refresh(row_id, window, cx);
+                shell.schedule_persist_flush(window, cx, false);
+            } else {
+                shell.refresh_file_table(cx);
+                shell.record_job(
+                    operation_key(operation),
+                    shell.rows[index].path.clone(),
+                    None,
+                    message.clone(),
+                    true,
+                );
+            }
+            if let Some(edit_sequence) = edit_sequence {
+                shell.complete_edit_transaction_failure(edit_sequence, row_id);
+            }
+            shell.refresh_audit_table(cx);
+            if !matches!(operation, RowOperation::Analyze) {
+                shell.status_message = Some(BannerMessage::Raw(message));
+            }
+            cx.notify();
+        })
     }
 
     pub(super) fn mark_error_by_id(
         &mut self,
-        row_id: u64,
+        job: (u64, u64),
         operation: RowOperation,
         edit_sequence: Option<u64>,
         error: impl ToString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.index_of_row_id(row_id) {
-            self.mark_error(index, operation, edit_sequence, error, window, cx);
-        }
+        self.mark_error(job, operation, edit_sequence, error, window, cx);
     }
 
     pub(super) fn apply_job_result(
         &mut self,
-        row_id: u64,
+        job: (u64, u64),
         operation: RowOperation,
         result: RowJobResult,
         edit_sequence: Option<u64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.index_of_row_id(row_id) else {
-            if matches!(operation, RowOperation::Save)
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+        let row_id = job.0;
+        let row_missing = shell.index_of_row_id(row_id).is_none();
+        let Some(index) = shell.accept_job_completion(job, operation, edit_sequence) else {
+            if row_missing
+                && matches!(operation, RowOperation::Save)
                 && let RowJobResult::Save { output_path, .. } = result
             {
-                self.record_job(
+                shell.record_job(
                     operation_key(operation),
                     output_path.clone(),
                     Some(output_path),
@@ -725,9 +751,26 @@ impl GuiShell {
             return;
         };
 
-        self.rows[index].busy = None;
         match result {
             RowJobResult::Analyze(result) => {
+                if shell.rows[index].has_staged_edits() {
+                    if let Some(sequence) = edit_sequence {
+                        shell.complete_edit_transaction_failure(sequence, row_id);
+                    }
+                    shell.refresh_file_table(cx);
+                    let message = BannerMessage::AnalysisStagedPreserved {
+                        name: shell.rows[index].name.clone(),
+                    };
+                    shell.record_auto_analyze_job(
+                        shell.rows[index].path.clone(),
+                        render_banner_message(&shell.i18n(), &message),
+                        false,
+                    );
+                    shell.status_message = Some(message);
+                    shell.finish_row_job_update(row_id, operation, window, cx);
+                    cx.notify();
+                    return;
+                }
                 let AnalyzeRowResult {
                     audit_plan_fingerprint,
                     audit_file_state,
@@ -739,7 +782,7 @@ impl GuiShell {
                     audit_mode,
                     elapsed,
                 } = result;
-                self.prune_edit_history_for_row_ids(&[row_id]);
+                shell.prune_edit_history_for_row_ids(&[row_id]);
                 let findings = audit_report.finding_count() - audit_report.allowed_finding_count();
                 let path_count = paths_report
                     .as_ref()
@@ -761,50 +804,50 @@ impl GuiShell {
                 } else {
                     FileStatus::Audited
                 };
-                self.rows[index].findings = findings;
-                self.rows[index].set_audit_report(Some(audit_report), audit_file_state);
-                self.rows[index].audit_plan_fingerprint = Some(audit_plan_fingerprint.clone());
-                self.rows[index].paths_report = paths_report;
-                self.rows[index].dump_report = dump_report;
-                self.rows[index].analyzed_audit_mode = Some(audit_mode);
-                self.rows[index].pending_clean_targets.clear();
-                self.rows[index].path_overrides.clear();
-                self.rows[index].replace_preview = None;
-                self.rows[index].path_owner_delete_preview = None;
-                self.rows[index].pending_path_owner_delete_targets.clear();
-                self.rows[index].staged_audit_mode = None;
-                self.rows[index].staged_audit_report = None;
-                self.rows[index].staged_audit_plan_fingerprint = None;
-                self.rows[index].staged_paths_report = None;
-                self.rows[index].staged_dump_report = None;
-                self.rows[index].staged_source_bytes = None;
-                self.rows[index].dirty_artifact = None;
-                self.rows[index].clean_preview = None;
-                self.rows[index].ascii_report = None;
-                self.rows[index].dirty_kind = None;
-                self.rows[index].replace_artifact_generation = None;
-                self.rows[index].status = row_status;
-                self.rows[index].sync_findings_count();
-                if audit_plan_fingerprint != self.audit_plan_fingerprint {
-                    self.rows[index].mark_analysis_stale();
-                    self.schedule_selected_auto_analysis(window, cx);
-                    self.sync_viewport_auto_analyze(window, cx);
-                    self.schedule_workspace_auto_analysis_if_enabled(window, cx);
+                shell.rows[index].findings = findings;
+                shell.rows[index].set_audit_report(Some(audit_report), audit_file_state);
+                shell.rows[index].audit_plan_fingerprint = Some(audit_plan_fingerprint.clone());
+                shell.rows[index].paths_report = paths_report;
+                shell.rows[index].dump_report = dump_report;
+                shell.rows[index].analyzed_audit_mode = Some(audit_mode);
+                shell.rows[index].pending_clean_targets.clear();
+                shell.rows[index].path_overrides.clear();
+                shell.rows[index].replace_preview = None;
+                shell.rows[index].path_owner_delete_preview = None;
+                shell.rows[index].pending_path_owner_delete_targets.clear();
+                shell.rows[index].staged_audit_mode = None;
+                shell.rows[index].staged_audit_report = None;
+                shell.rows[index].staged_audit_plan_fingerprint = None;
+                shell.rows[index].staged_paths_report = None;
+                shell.rows[index].staged_dump_report = None;
+                shell.rows[index].staged_source_bytes = None;
+                shell.rows[index].dirty_artifact = None;
+                shell.rows[index].clean_preview = None;
+                shell.rows[index].ascii_report = None;
+                shell.rows[index].dirty_kind = None;
+                shell.rows[index].replace_artifact_generation = None;
+                shell.rows[index].status = row_status;
+                shell.rows[index].sync_findings_count();
+                if audit_plan_fingerprint != shell.audit_plan_fingerprint {
+                    shell.rows[index].mark_analysis_stale();
+                    shell.schedule_selected_auto_analysis(window, cx);
+                    shell.sync_viewport_auto_analyze(window, cx);
+                    shell.schedule_workspace_auto_analysis_if_enabled(window, cx);
                 }
-                self.rows[index].invalidate_path_resolution_state();
-                self.queue_path_resolution_backlog_for_row_id(row_id, window, cx);
-                self.status_message = Some(BannerMessage::AnalyzeCompleted {
-                    name: self.rows[index].name.clone(),
+                shell.rows[index].invalidate_path_resolution_state();
+                shell.queue_path_resolution_backlog_for_row_id(row_id, window, cx);
+                shell.status_message = Some(BannerMessage::AnalyzeCompleted {
+                    name: shell.rows[index].name.clone(),
                     elapsed,
                 });
-                self.record_auto_analyze_job(
-                    self.rows[index].path.clone(),
+                shell.record_auto_analyze_job(
+                    shell.rows[index].path.clone(),
                     format!(
                         "{findings} finding(s), {path_count} path(s), {require_count} require(s), {script_count} script node(s)"
                     ),
                     false,
                 );
-                self.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
+                shell.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
             }
             RowJobResult::SceneEdits {
                 audit_plan_fingerprint,
@@ -817,11 +860,11 @@ impl GuiShell {
             } => {
                 let cleaned = staged.preview.cleaned_targets.len();
                 let deleted = staged.preview.deleted_path_owner_targets.len();
-                self.rows[index].findings = staged_audit_report.finding_count()
+                shell.rows[index].findings = staged_audit_report.finding_count()
                     - staged_audit_report.allowed_finding_count();
-                self.rows[index].dirty_artifact = Some(staged.artifact);
-                self.rows[index].dirty_kind = Some(DirtyKind::SceneEdits);
-                self.rows[index].clean_preview = Some(ExecutionCleanPreview {
+                shell.rows[index].dirty_artifact = Some(staged.artifact);
+                shell.rows[index].dirty_kind = Some(DirtyKind::SceneEdits);
+                shell.rows[index].clean_preview = Some(ExecutionCleanPreview {
                     input_path: staged.preview.input_path.clone(),
                     scene_format: staged.preview.scene_format,
                     operation_mode: staged.preview.operation_mode,
@@ -830,136 +873,148 @@ impl GuiShell {
                     removed_script_nodes: staged.preview.removed_script_nodes.clone(),
                     removed_plugin_requires: staged.preview.removed_plugin_requires.clone(),
                 });
-                self.rows[index].path_owner_delete_preview = Some(PathOwnerDeletePreview {
+                shell.rows[index].path_owner_delete_preview = Some(PathOwnerDeletePreview {
                     input_path: staged.preview.input_path.clone(),
                     scene_format: staged.preview.scene_format,
                     operation_mode: staged.preview.operation_mode,
                     validation_state: staged.preview.validation_state,
                     deleted_targets: staged.preview.deleted_path_owner_targets.clone(),
                 });
-                self.rows[index].pending_clean_targets =
+                shell.rows[index].pending_clean_targets =
                     staged.preview.cleaned_targets.iter().cloned().collect();
-                self.rows[index].pending_path_owner_delete_targets = staged
+                shell.rows[index].pending_path_owner_delete_targets = staged
                     .preview
                     .deleted_path_owner_targets
                     .iter()
                     .cloned()
                     .collect();
-                self.rows[index].staged_audit_mode = Some(audit_mode);
-                self.rows[index].staged_audit_report = Some(staged_audit_report);
-                if audit_plan_fingerprint != self.audit_plan_fingerprint {
-                    self.rows[index].mark_analysis_stale();
-                    self.rows[index].staged_audit_mode = None;
+                shell.rows[index].staged_audit_mode = Some(audit_mode);
+                shell.rows[index].staged_audit_report = Some(staged_audit_report);
+                if audit_plan_fingerprint != shell.audit_plan_fingerprint {
+                    shell.rows[index].mark_analysis_stale();
+                    shell.rows[index].staged_audit_mode = None;
                 }
-                self.rows[index].staged_audit_plan_fingerprint = Some(audit_plan_fingerprint);
-                self.rows[index].staged_paths_report = Some(staged_paths_report);
-                self.rows[index].staged_dump_report = Some(staged_dump_report);
-                self.rows[index].staged_source_bytes = Some(staged_source_bytes);
-                self.rows[index].replace_preview = None;
-                self.rows[index].ascii_report = None;
-                self.rows[index].replace_artifact_generation = None;
-                self.rows[index].status = FileStatus::Dirty;
-                self.rows[index].sync_findings_count();
-                self.refresh_row_path_resolution_state(index);
-                self.record_job(
+                shell.rows[index].staged_audit_plan_fingerprint = Some(audit_plan_fingerprint);
+                shell.rows[index].staged_paths_report = Some(staged_paths_report);
+                shell.rows[index].staged_dump_report = Some(staged_dump_report);
+                shell.rows[index].staged_source_bytes = Some(staged_source_bytes);
+                shell.rows[index].replace_preview = None;
+                shell.rows[index].ascii_report = None;
+                shell.rows[index].replace_artifact_generation = None;
+                shell.rows[index].status = FileStatus::Dirty;
+                shell.rows[index].sync_findings_count();
+                shell.refresh_row_path_resolution_state(index);
+                shell.record_job(
                     operation_key(operation),
-                    self.rows[index].path.clone(),
+                    shell.rows[index].path.clone(),
                     None,
                     format!("{cleaned} clean target(s), {deleted} owner node(s) staged"),
                     false,
                 );
                 if let Some(edit_sequence) = edit_sequence {
-                    self.complete_edit_transaction_success(edit_sequence, row_id);
+                    shell.complete_edit_transaction_success(edit_sequence, row_id);
                 }
             }
             RowJobResult::ToAscii { report, artifact } => {
-                self.rows[index].dirty_artifact = Some(artifact);
-                self.rows[index].dirty_kind = Some(DirtyKind::ToAscii);
-                self.rows[index].ascii_report = Some(report);
-                self.rows[index].path_owner_delete_preview = None;
-                self.rows[index].staged_audit_mode = None;
-                self.rows[index].status = FileStatus::Dirty;
-                self.record_job(
+                shell.rows[index].dirty_artifact = Some(artifact);
+                shell.rows[index].dirty_kind = Some(DirtyKind::ToAscii);
+                shell.rows[index].ascii_report = Some(report);
+                shell.rows[index].path_owner_delete_preview = None;
+                shell.rows[index].staged_audit_mode = None;
+                shell.rows[index].status = FileStatus::Dirty;
+                shell.record_job(
                     operation_key(operation),
-                    self.rows[index].path.clone(),
+                    shell.rows[index].path.clone(),
                     None,
                     "staged".to_string(),
                     false,
                 );
                 if let Some(edit_sequence) = edit_sequence {
-                    self.complete_edit_transaction_success(edit_sequence, row_id);
+                    shell.complete_edit_transaction_success(edit_sequence, row_id);
                 }
             }
             RowJobResult::Save {
                 output_path,
                 audit_file_state,
             } => {
-                self.prune_edit_history_for_row_ids(&[row_id]);
-                let dirty_kind = self.rows[index].dirty_kind;
+                shell.prune_edit_history_for_row_ids(&[row_id]);
+                let dirty_kind = shell.rows[index].dirty_kind;
                 if dirty_kind == Some(DirtyKind::Replace) {
-                    let overrides = self.rows[index].path_overrides.clone();
-                    if let Some(report) = self.rows[index].paths_report.as_mut() {
+                    let overrides = shell.rows[index].path_overrides.clone();
+                    if let Some(report) = shell.rows[index].paths_report.as_mut() {
                         apply_path_overrides_to_report(report, &overrides);
                     }
                 } else if dirty_kind == Some(DirtyKind::SceneEdits) {
-                    if self.rows[index].staged_audit_plan_fingerprint.as_deref()
-                        == Some(self.audit_plan_fingerprint.as_str())
+                    if shell.rows[index].staged_audit_plan_fingerprint.as_deref()
+                        == Some(shell.audit_plan_fingerprint.as_str())
                     {
-                        if let Some(report) = self.rows[index].staged_audit_report.take() {
-                            self.rows[index].set_audit_report(Some(report), audit_file_state);
-                            self.rows[index].audit_plan_fingerprint =
-                                self.rows[index].staged_audit_plan_fingerprint.clone();
+                        if let Some(report) = shell.rows[index].staged_audit_report.take() {
+                            shell.rows[index].set_audit_report(Some(report), audit_file_state);
+                            shell.rows[index].audit_plan_fingerprint =
+                                shell.rows[index].staged_audit_plan_fingerprint.clone();
                         }
-                        if let Some(audit_mode) = self.rows[index].staged_audit_mode.take() {
-                            self.rows[index].analyzed_audit_mode = Some(audit_mode);
+                        if let Some(audit_mode) = shell.rows[index].staged_audit_mode.take() {
+                            shell.rows[index].analyzed_audit_mode = Some(audit_mode);
                         }
                     } else {
-                        self.rows[index].mark_analysis_stale();
+                        shell.rows[index].mark_analysis_stale();
                     }
-                    if let Some(report) = self.rows[index].staged_paths_report.take() {
-                        self.rows[index].paths_report = Some(report);
+                    if let Some(report) = shell.rows[index].staged_paths_report.take() {
+                        shell.rows[index].paths_report = Some(report);
                     }
-                    if let Some(report) = self.rows[index].staged_dump_report.take() {
-                        self.rows[index].dump_report = Some(report);
+                    if let Some(report) = shell.rows[index].staged_dump_report.take() {
+                        shell.rows[index].dump_report = Some(report);
                     }
                 }
-                self.rows[index].dirty_artifact = None;
-                self.rows[index].replace_artifact_generation = None;
-                self.rows[index].dirty_kind = None;
-                self.rows[index].pending_clean_targets.clear();
-                self.rows[index].pending_path_owner_delete_targets.clear();
-                self.rows[index].path_overrides.clear();
-                self.rows[index].replace_preview = None;
-                self.rows[index].path_owner_delete_preview = None;
-                self.rows[index].staged_audit_mode = None;
-                self.rows[index].staged_audit_report = None;
-                self.rows[index].staged_audit_plan_fingerprint = None;
-                self.rows[index].staged_paths_report = None;
-                self.rows[index].staged_dump_report = None;
-                self.rows[index].staged_source_bytes = None;
-                self.rows[index].clean_preview = None;
-                self.rows[index].ascii_report = None;
+                shell.rows[index].dirty_artifact = None;
+                shell.rows[index].replace_artifact_generation = None;
+                shell.rows[index].dirty_kind = None;
+                shell.rows[index].pending_clean_targets.clear();
+                shell.rows[index].pending_path_owner_delete_targets.clear();
+                shell.rows[index].path_overrides.clear();
+                shell.rows[index].replace_preview = None;
+                shell.rows[index].path_owner_delete_preview = None;
+                shell.rows[index].staged_audit_mode = None;
+                shell.rows[index].staged_audit_report = None;
+                shell.rows[index].staged_audit_plan_fingerprint = None;
+                shell.rows[index].staged_paths_report = None;
+                shell.rows[index].staged_dump_report = None;
+                shell.rows[index].staged_source_bytes = None;
+                shell.rows[index].clean_preview = None;
+                shell.rows[index].ascii_report = None;
                 if dirty_kind != Some(DirtyKind::SceneEdits) {
-                    self.rows[index].mark_analysis_stale();
+                    shell.rows[index].mark_analysis_stale();
                 }
-                self.rows[index].sync_findings_count();
-                self.rows[index].status = FileStatus::Saved;
-                self.refresh_row_path_resolution_state(index);
-                self.record_job(
+                shell.rows[index].sync_findings_count();
+                shell.rows[index].status = FileStatus::Saved;
+                shell.refresh_row_path_resolution_state(index);
+                shell.record_job(
                     operation_key(operation),
-                    self.rows[index].path.clone(),
+                    shell.rows[index].path.clone(),
                     Some(output_path),
                     "saved".to_string(),
                     false,
                 );
-                if self.rows[index].selected {
-                    self.schedule_selected_auto_analysis(window, cx);
+                if shell.rows[index].selected {
+                    shell.schedule_selected_auto_analysis(window, cx);
                 }
-                self.schedule_workspace_auto_analysis_if_enabled(window, cx);
+                shell.schedule_workspace_auto_analysis_if_enabled(window, cx);
             }
         }
 
+        shell.finish_row_job_update(row_id, operation, window, cx);
+            })
+    }
+
+    fn finish_row_job_update(
+        &mut self,
+        row_id: u64,
+        operation: RowOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if matches!(operation, RowOperation::Analyze) {
+            self.refresh_audit_table(cx);
             self.queue_auto_analyze_completion_refresh(row_id, window, cx);
             self.schedule_persist_flush(window, cx, false);
         } else {
@@ -978,17 +1033,23 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
         job: impl FnOnce(PathBuf) -> Result<RowJobResult, String> + Send + 'static,
-    ) {
-        let Some(index) = self.index_of_row_id(row_id) else {
-            return;
-        };
+    ) -> Option<u64> {
+        if !self.admit_mutation(row_id, RowMutation::Job(operation), cx) {
+            if let Some(sequence) = edit_sequence {
+                self.complete_edit_transaction_failure(sequence, row_id);
+            }
+            return None;
+        }
+        let index = self.index_of_row_id(row_id)?;
+        let job_id = self.next_row_job_id();
 
         let save_output_path = if matches!(operation, RowOperation::Save) {
             self.save_target_path_for_row(index)
         } else {
             None
         };
-        self.rows[index].busy = Some(operation);
+        self.rows[index].busy = Some((operation, job_id));
+        self.refresh_audit_table(cx);
         let path = self.rows[index].path.clone();
         let view = cx.entity();
 
@@ -1001,50 +1062,64 @@ impl GuiShell {
                     let _ = async_cx.update_window_entity(
                         &view,
                         |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {
-                            match result {
-                                Ok(result) => shell.apply_job_result(
-                                    row_id,
-                                    operation,
-                                    result,
-                                    edit_sequence,
-                                    window,
-                                    cx,
-                                ),
-                                Err(err)
-                                    if shell.index_of_row_id(row_id).is_none()
-                                        && save_output_path.is_some() =>
-                                {
-                                    let output_path = save_output_path.expect("save output path");
-                                    shell.record_job(
-                                        operation_key(operation),
-                                        output_path.clone(),
-                                        Some(output_path),
-                                        err,
-                                        true,
-                                    );
+                            shell.with_audit_refresh_batch(cx, |shell, cx| {
+                                let owns_job = shell.index_of_row_id(row_id).is_some_and(|index| {
+                                    shell.rows[index]
+                                        .busy
+                                        .is_some_and(|(_, current)| current == job_id)
+                                });
+                                if owns_job && let Some(target_tab) = target_tab {
+                                    shell.set_tab(target_tab, window, cx);
                                 }
-                                Err(err) => shell.mark_error_by_id(
-                                    row_id,
-                                    operation,
-                                    edit_sequence,
-                                    err,
-                                    window,
-                                    cx,
-                                ),
-                            }
-                            if let Some(target_tab) = target_tab {
-                                shell.set_tab(target_tab, window, cx);
-                            }
-                            cx.notify();
+                                match result {
+                                    Ok(result) => shell.apply_job_result(
+                                        (row_id, job_id),
+                                        operation,
+                                        result,
+                                        edit_sequence,
+                                        window,
+                                        cx,
+                                    ),
+                                    Err(err)
+                                        if shell.index_of_row_id(row_id).is_none()
+                                            && save_output_path.is_some() =>
+                                    {
+                                        if let Some(sequence) = edit_sequence {
+                                            shell.complete_edit_transaction_failure(
+                                                sequence, row_id,
+                                            );
+                                        }
+                                        let output_path =
+                                            save_output_path.expect("save output path");
+                                        shell.record_job(
+                                            operation_key(operation),
+                                            output_path.clone(),
+                                            Some(output_path),
+                                            err,
+                                            true,
+                                        );
+                                    }
+                                    Err(err) => shell.mark_error_by_id(
+                                        (row_id, job_id),
+                                        operation,
+                                        edit_sequence,
+                                        err,
+                                        window,
+                                        cx,
+                                    ),
+                                }
+                                cx.notify();
+                            });
                         },
                     );
                 }
             })
             .detach();
+        Some(job_id)
     }
 
     pub(super) fn run_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.ready_selected_indices();
+        let selected = self.selected_indices();
         let needs_reaudit = selected.iter().any(|&row_index| {
             self.rows[row_index].audit_report.is_some()
                 && !self.rows[row_index].analysis_current_for(self.state.audit_mode)
@@ -1067,7 +1142,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected = self.ready_selected_indices();
+        let selected = self.selected_indices();
         if !bulk_enabled(selected.len()) {
             self.status_message = Some(BannerMessage::SelectFilesFirst);
             return;
@@ -1104,7 +1179,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(row_indices) = self.selected_ready_indices_if_clicked_row_selected(row_id) else {
+        let Some(row_indices) = self.selected_indices_if_clicked_row_selected(row_id) else {
             return;
         };
         let row_indices = row_indices
@@ -1132,7 +1207,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(row_indices) = self.ready_context_indices_from_row(row_id) else {
+        let Some(row_indices) = self.context_indices_from_row(row_id) else {
             return;
         };
         let row_indices = row_indices
@@ -1174,8 +1249,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(row_indices) = self.selected_ready_dirty_indices_if_clicked_row_selected(row_id)
-        else {
+        let Some(row_indices) = self.selected_indices_if_clicked_row_selected(row_id) else {
             return;
         };
         let row_ids = row_indices
@@ -1191,21 +1265,31 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let row_indices = targets_by_row
+        let row_ids = targets_by_row
             .iter()
-            .map(|(row_index, _)| *row_index)
-            .collect::<Vec<_>>();
-        let edit_sequence = self.begin_edit_transaction(&row_indices);
-        for (row_index, targets) in targets_by_row {
-            self.stage_clean_targets_for_row(
-                row_index,
-                targets,
-                ResultTab::Audit,
-                edit_sequence,
-                window,
-                cx,
-            );
-        }
+            .filter_map(|(index, _)| self.rows.get(*index).map(|row| row.id))
+            .collect();
+        self.with_mutation_targets(row_ids, RowMutation::SceneEdit, cx, |shell, indices, cx| {
+            let targets_by_row = targets_by_row
+                .into_iter()
+                .filter(|(index, _)| indices.contains(index))
+                .collect::<Vec<_>>();
+            let row_indices = targets_by_row
+                .iter()
+                .map(|(row_index, _)| *row_index)
+                .collect::<Vec<_>>();
+            let edit_sequence = shell.begin_edit_transaction(&row_indices);
+            for (row_index, targets) in targets_by_row {
+                shell.stage_clean_targets_for_row(
+                    row_index,
+                    targets,
+                    ResultTab::Audit,
+                    edit_sequence,
+                    window,
+                    cx,
+                );
+            }
+        });
     }
 
     fn stage_script_node_clean_target(
@@ -1216,22 +1300,29 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = ExecutionCleanTarget::ScriptNode {
-            node_name: node_name.to_string(),
-        };
-        let edit_sequence = self.begin_edit_transaction(&row_indices);
-        for row_index in row_indices {
-            let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
-            next_targets.insert(target.clone());
-            self.stage_clean_targets_for_row(
-                row_index,
-                next_targets,
-                target_tab,
-                edit_sequence,
-                window,
-                cx,
-            );
-        }
+        self.with_mutation_targets(
+            self.row_ids_for_indices(&row_indices),
+            RowMutation::SceneEdit,
+            cx,
+            |shell, row_indices, cx| {
+                let target = ExecutionCleanTarget::ScriptNode {
+                    node_name: node_name.to_string(),
+                };
+                let edit_sequence = shell.begin_edit_transaction(&row_indices);
+                for row_index in row_indices {
+                    let mut next_targets = shell.rows[row_index].pending_clean_targets.clone();
+                    next_targets.insert(target.clone());
+                    shell.stage_clean_targets_for_row(
+                        row_index,
+                        next_targets,
+                        target_tab,
+                        edit_sequence,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        );
     }
 
     pub(super) fn file_threat_clean_targets_by_row(
@@ -1251,66 +1342,58 @@ impl GuiShell {
             .collect()
     }
 
-    fn selected_ready_indices_if_clicked_row_selected(&self, row_id: u64) -> Option<Vec<usize>> {
+    fn selected_indices_if_clicked_row_selected(&self, row_id: u64) -> Option<Vec<usize>> {
         let row_index = self.index_of_row_id(row_id)?;
         self.rows
             .get(row_index)
             .is_some_and(|row| row.selected)
-            .then(|| self.ready_selected_indices())
+            .then(|| self.selected_indices())
     }
 
-    fn ready_context_indices_from_row(&self, row_id: u64) -> Option<Vec<usize>> {
+    fn context_indices_from_row(&self, row_id: u64) -> Option<Vec<usize>> {
         let row_index = self.index_of_row_id(row_id)?;
         let row = self.rows.get(row_index)?;
-        if row.is_processing() {
-            return None;
-        }
         if row.selected {
-            Some(self.ready_selected_indices())
+            Some(self.selected_indices())
         } else {
             Some(vec![row_index])
         }
     }
 
-    fn selected_ready_dirty_indices_if_clicked_row_selected(
-        &self,
-        row_id: u64,
-    ) -> Option<Vec<usize>> {
-        let row_index = self.index_of_row_id(row_id)?;
-        self.rows
-            .get(row_index)
-            .is_some_and(|row| row.selected)
-            .then(|| self.selected_ready_dirty_indices())
-    }
-
     pub(super) fn run_to_ascii(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.ready_selected_indices();
-        if !bulk_enabled(selected.len()) {
-            self.status_message = Some(BannerMessage::SelectFilesFirst);
-            return;
-        }
+        self.with_mutation_targets(
+            self.row_ids_for_indices(&self.selected_indices()),
+            RowMutation::Job(RowOperation::ToAscii),
+            cx,
+            |shell, selected, cx| {
+                if !bulk_enabled(selected.len()) {
+                    shell.status_message = Some(BannerMessage::SelectFilesFirst);
+                    return;
+                }
 
-        let edit_sequence = self.begin_edit_transaction(&selected);
-        for index in selected {
-            let row_id = self.rows[index].id;
-            let options = self.scene_materialize_options(OperationMode::Forensic);
-            self.spawn_row_job(
-                row_id,
-                RowOperation::ToAscii,
-                Some(ResultTab::Overview),
-                edit_sequence,
-                window,
-                cx,
-                move |path| {
-                    let staged = stage_maya_ascii_with_options(&path, &options)
-                        .map_err(|err| err.to_string())?;
-                    Ok(RowJobResult::ToAscii {
-                        report: staged.report,
-                        artifact: staged.artifact,
-                    })
-                },
-            );
-        }
+                let edit_sequence = shell.begin_edit_transaction(&selected);
+                for index in selected {
+                    let row_id = shell.rows[index].id;
+                    let options = shell.scene_materialize_options(OperationMode::Forensic);
+                    shell.spawn_row_job(
+                        row_id,
+                        RowOperation::ToAscii,
+                        Some(ResultTab::Overview),
+                        edit_sequence,
+                        window,
+                        cx,
+                        move |path| {
+                            let staged = stage_maya_ascii_with_options(&path, &options)
+                                .map_err(|err| err.to_string())?;
+                            Ok(RowJobResult::ToAscii {
+                                report: staged.report,
+                                artifact: staged.artifact,
+                            })
+                        },
+                    );
+                }
+            },
+        );
     }
 
     pub(super) fn run_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1318,21 +1401,43 @@ impl GuiShell {
     }
 
     pub(super) fn run_save_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.selected_ready_dirty_indices();
-        if !save_enabled(targets.len()) {
-            self.status_message = Some(BannerMessage::NothingSelectedDirtyToSave);
-            return;
-        }
-        self.spawn_save_jobs(targets, window, cx);
+        self.with_mutation_targets(
+            self.rows
+                .iter()
+                .filter(|row| row.selected && row.dirty())
+                .map(|row| row.id)
+                .collect(),
+            RowMutation::Job(RowOperation::Save),
+            cx,
+            |shell, indices, cx| {
+                let targets = indices;
+                if !save_enabled(targets.len()) {
+                    shell.status_message = Some(BannerMessage::NothingSelectedDirtyToSave);
+                    return;
+                }
+                shell.spawn_save_jobs(targets, window, cx);
+            },
+        );
     }
 
     pub(super) fn run_save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.ready_dirty_indices();
-        if !save_enabled(targets.len()) {
-            self.status_message = Some(BannerMessage::NothingDirtyToSave);
-            return;
-        }
-        self.confirm_save_all(targets, window, cx);
+        self.with_mutation_targets(
+            self.rows
+                .iter()
+                .filter(|row| row.dirty())
+                .map(|row| row.id)
+                .collect(),
+            RowMutation::Job(RowOperation::Save),
+            cx,
+            |shell, indices, cx| {
+                let targets = indices;
+                if !save_enabled(targets.len()) {
+                    shell.status_message = Some(BannerMessage::NothingDirtyToSave);
+                    return;
+                }
+                shell.confirm_save_all(targets, window, cx);
+            },
+        );
     }
 
     pub(super) fn run_context_save_from_row(
@@ -1342,20 +1447,33 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.index_of_row_id(row_id) else {
+            self.admit_mutation(row_id, RowMutation::Job(RowOperation::Save), cx);
             return;
         };
-        let targets = if self.rows[index].selected {
-            self.selected_ready_dirty_indices()
-        } else if self.rows[index].dirty() && !self.rows[index].is_processing() {
-            vec![index]
+        let row_ids = if self.rows[index].selected {
+            self.row_ids_for_indices(&self.selected_indices())
         } else {
-            Vec::new()
+            vec![row_id]
         };
-        if !save_enabled(targets.len()) {
-            self.status_message = Some(BannerMessage::NothingSelectedDirtyToSave);
-            return;
-        }
-        self.spawn_save_jobs(targets, window, cx);
+        self.with_mutation_targets(
+            row_ids
+                .into_iter()
+                .filter(|id| {
+                    self.index_of_row_id(*id)
+                        .is_some_and(|index| self.rows[index].dirty())
+                })
+                .collect(),
+            RowMutation::Job(RowOperation::Save),
+            cx,
+            |shell, indices, cx| {
+                let targets = indices;
+                if !save_enabled(targets.len()) {
+                    shell.status_message = Some(BannerMessage::NothingSelectedDirtyToSave);
+                    return;
+                }
+                shell.spawn_save_jobs(targets, window, cx);
+            },
+        );
     }
 
     pub(super) fn spawn_save_jobs(
@@ -1364,20 +1482,29 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let backup_location = self.state.backup_location;
-        for index in targets {
-            let Some(path) = self.save_target_path_for_row(index) else {
-                continue;
-            };
-            let row_id = self.rows[index].id;
-            let row = &self.rows[index];
-            let dirty_kind = row.dirty_kind;
-            let artifact = row.dirty_artifact.clone();
-            let artifact_current = row.replace_artifact_is_current();
-            let report = row.paths_report.clone();
-            let overrides = replace_overrides_for_row(row).unwrap_or_default();
-            let options = self.scene_materialize_options(OperationMode::Forensic);
-            self.spawn_row_job(
+        let targets = targets
+            .into_iter()
+            .filter(|index| self.rows.get(*index).is_some_and(|row| row.dirty()))
+            .collect::<Vec<_>>();
+        self.with_mutation_targets(
+            self.row_ids_for_indices(&targets),
+            RowMutation::Job(RowOperation::Save),
+            cx,
+            |shell, targets, cx| {
+                let backup_location = shell.state.backup_location;
+                for index in targets {
+                    let Some(path) = shell.save_target_path_for_row(index) else {
+                        continue;
+                    };
+                    let row_id = shell.rows[index].id;
+                    let row = &shell.rows[index];
+                    let dirty_kind = row.dirty_kind;
+                    let artifact = row.dirty_artifact.clone();
+                    let artifact_current = row.replace_artifact_is_current();
+                    let report = row.paths_report.clone();
+                    let overrides = replace_overrides_for_row(row).unwrap_or_default();
+                    let options = shell.scene_materialize_options(OperationMode::Forensic);
+                    shell.spawn_row_job(
                 row_id,
                 RowOperation::Save,
                 None,
@@ -1412,7 +1539,9 @@ impl GuiShell {
                     })
                 },
             );
-            cx.notify();
-        }
+                    cx.notify();
+                }
+            },
+        );
     }
 }

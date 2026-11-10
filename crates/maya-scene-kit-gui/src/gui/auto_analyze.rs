@@ -206,7 +206,8 @@ impl GuiShell {
     }
 
     fn can_auto_analyze_row(&self, row: &SceneRow, audit_mode: AuditModePreference) -> bool {
-        !row.is_processing()
+        self.can_mutate(row.id, RowMutation::Job(RowOperation::Analyze))
+            .is_ok()
             && !row.dirty()
             && !row.analysis_current_for(audit_mode)
             && !matches!(row.status, FileStatus::Error(_))
@@ -418,24 +419,27 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let audit_mode = self.state.audit_mode;
-        let allow_low_priority = !self.cache_restore_active();
-        while self.auto_analyze_queue.in_flight_len() < self.state.auto_analyze_parallelism_limit()
-        {
-            let Some(row_id) = self.auto_analyze_queue.pop_next(allow_low_priority) else {
-                break;
-            };
-            let Some(index) = self.index_of_row_id(row_id) else {
-                self.auto_analyze_queue.complete(row_id);
-                continue;
-            };
-            if !self.can_auto_analyze_row(&self.rows[index], audit_mode) {
-                self.auto_analyze_queue.complete(row_id);
-                continue;
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+            let audit_mode = shell.state.audit_mode;
+            let allow_low_priority = !shell.cache_restore_active();
+            while shell.auto_analyze_queue.in_flight_len()
+                < shell.state.auto_analyze_parallelism_limit()
+            {
+                let Some(row_id) = shell.auto_analyze_queue.pop_next(allow_low_priority) else {
+                    break;
+                };
+                let Some(index) = shell.index_of_row_id(row_id) else {
+                    shell.auto_analyze_queue.complete(row_id);
+                    continue;
+                };
+                if !shell.can_auto_analyze_row(&shell.rows[index], audit_mode) {
+                    shell.auto_analyze_queue.complete(row_id);
+                    continue;
+                }
+                let generation = shell.auto_analyze_queue.generation;
+                shell.spawn_auto_analyze_job(row_id, generation, window, cx, audit_mode);
             }
-            let generation = self.auto_analyze_queue.generation;
-            self.spawn_auto_analyze_job(row_id, generation, window, cx, audit_mode);
-        }
+        })
     }
 
     fn spawn_auto_analyze_job(
@@ -450,7 +454,13 @@ impl GuiShell {
             self.auto_analyze_queue.complete(row_id);
             return;
         };
-        self.rows[index].busy = Some(RowOperation::Analyze);
+        if !self.admit_mutation(row_id, RowMutation::Job(RowOperation::Analyze), cx) {
+            self.auto_analyze_queue.complete(row_id);
+            return;
+        }
+        let job_id = self.next_row_job_id();
+        self.rows[index].busy = Some((RowOperation::Analyze, job_id));
+        self.refresh_audit_table(cx);
         let path = self.rows[index].path.clone();
         let plan = Arc::clone(&self.audit_plan);
         let load_options = self.scene_load_options();
@@ -469,7 +479,13 @@ impl GuiShell {
                     let _ = async_cx.update_window_entity(
                         &view,
                         |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {
-                            shell.finish_auto_analyze_job(row_id, generation, result, window, cx);
+                            shell.finish_auto_analyze_job(
+                                (row_id, job_id),
+                                generation,
+                                result,
+                                window,
+                                cx,
+                            );
                         },
                     );
                 }
@@ -479,31 +495,37 @@ impl GuiShell {
 
     fn finish_auto_analyze_job(
         &mut self,
-        row_id: u64,
+        job: (u64, u64),
         generation: u64,
         result: Result<RowJobResult, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.auto_analyze_queue.generation == generation {
-            self.auto_analyze_queue.complete(row_id);
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+        let (row_id, job_id) = job;
+        let newer_analysis = shell.index_of_row_id(row_id).is_some_and(|index| {
+            matches!(shell.rows[index].busy, Some((RowOperation::Analyze, current)) if current != job_id)
+        });
+        if shell.auto_analyze_queue.generation == generation && !newer_analysis {
+            shell.auto_analyze_queue.complete(row_id);
         }
         match result {
             Ok(result) => {
-                self.apply_job_result(row_id, RowOperation::Analyze, result, None, window, cx)
+                shell.apply_job_result(job, RowOperation::Analyze, result, None, window, cx)
             }
-            Err(err) => self.mark_error_by_id(row_id, RowOperation::Analyze, None, err, window, cx),
+            Err(err) => shell.mark_error_by_id(job, RowOperation::Analyze, None, err, window, cx),
         }
-        if self.auto_analyze_queue.generation == generation {
-            self.dispatch_auto_analyze_jobs(window, cx);
-            if self.auto_analyze_queue.remaining_count() == 0 {
-                self.flush_pending_auto_analyze_refresh(cx);
+        if shell.auto_analyze_queue.generation == generation {
+            shell.dispatch_auto_analyze_jobs(window, cx);
+            if shell.auto_analyze_queue.remaining_count() == 0 {
+                shell.flush_pending_auto_analyze_refresh(cx);
             }
-            self.maybe_finish_workspace_auto_analyze_batch(window, cx);
+            shell.maybe_finish_workspace_auto_analyze_batch(window, cx);
         }
-        if self.should_notify_auto_analyze_progress(row_id) {
+        if shell.should_notify_auto_analyze_progress(row_id) {
             cx.notify();
         }
+            })
     }
 
     fn selected_path_resolution_row_ids(&self) -> Vec<u64> {

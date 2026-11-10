@@ -925,6 +925,12 @@ fn build_audit_detail_dialog(
                                 })
                                 .into_any_element(),
                         ),
+                        (AuditRowCleanState::Busy, Some(_)) => buttons.push(
+                            Button::new("audit-detail-clean")
+                                .label(i18n.text("action.clean"))
+                                .disabled(true)
+                                .into_any_element(),
+                        ),
                         (AuditRowCleanState::Staged, Some(target)) => buttons.push(
                             Button::new("audit-detail-undo")
                                 .label(i18n.text("action.undo"))

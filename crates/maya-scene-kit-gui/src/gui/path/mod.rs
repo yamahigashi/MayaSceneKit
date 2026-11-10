@@ -53,57 +53,60 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !path_value_edit_supported_for_edit_targets(&self.rows, &edit_targets) {
-            return;
-        }
-        let shared_workspace_root = shared_workspace_root_for_targets(&self.rows, &edit_targets);
-        let value_style = self.active_path_edit_value_style(&edit_targets);
-        let next_value = write_back_selected_scene_path(
-            &selected_path,
-            shared_workspace_root.as_deref(),
-            value_style,
-        );
-        let edit_targets = normalize_path_edit_targets(edit_targets);
-        let mut row_targets: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-
-        for (row_id, entry_index) in &edit_targets {
-            let Some(row_index) = self.index_of_row_id(*row_id) else {
+        self.with_path_mutations(edit_targets, cx, |shell, edit_targets, cx| {
+            if !path_value_edit_supported_for_edit_targets(&shell.rows, &edit_targets) {
                 return;
-            };
-            row_targets
-                .entry(row_index)
-                .or_default()
-                .insert(*entry_index);
-        }
+            }
+            let shared_workspace_root =
+                shared_workspace_root_for_targets(&shell.rows, &edit_targets);
+            let value_style = shell.active_path_edit_value_style(&edit_targets);
+            let next_value = write_back_selected_scene_path(
+                &selected_path,
+                shared_workspace_root.as_deref(),
+                value_style,
+            );
+            let edit_targets = normalize_path_edit_targets(edit_targets);
+            let mut row_targets: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
 
-        let mut planned_edits = Vec::<(usize, BTreeMap<usize, String>)>::new();
-        for (row_index, entry_indices) in row_targets {
-            let mut next_overrides = self.rows[row_index].path_overrides.clone();
-            for entry_index in entry_indices {
-                let Some(current_value) =
-                    self.current_path_value(&self.rows[row_index], entry_index)
-                else {
+            for (row_id, entry_index) in &edit_targets {
+                let Some(row_index) = shell.index_of_row_id(*row_id) else {
                     return;
                 };
-                if next_value == current_value {
-                    next_overrides.remove(&entry_index);
-                } else {
-                    next_overrides.insert(entry_index, next_value.clone());
-                }
+                row_targets
+                    .entry(row_index)
+                    .or_default()
+                    .insert(*entry_index);
             }
-            planned_edits.push((row_index, next_overrides));
-        }
 
-        if self
-            .apply_path_override_updates(planned_edits, window, cx)
-            .is_err()
-        {
-            return;
-        }
+            let mut planned_edits = Vec::<(usize, BTreeMap<usize, String>)>::new();
+            for (row_index, entry_indices) in row_targets {
+                let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                for entry_index in entry_indices {
+                    let Some(current_value) =
+                        shell.current_path_value(&shell.rows[row_index], entry_index)
+                    else {
+                        return;
+                    };
+                    if next_value == current_value {
+                        next_overrides.remove(&entry_index);
+                    } else {
+                        next_overrides.insert(entry_index, next_value.clone());
+                    }
+                }
+                planned_edits.push((row_index, next_overrides));
+            }
 
-        self.cancel_path_edit(window, cx);
-        self.refresh_file_table(cx);
-        self.persist();
+            if shell
+                .apply_path_override_updates(planned_edits, window, cx)
+                .is_err()
+            {
+                return;
+            }
+
+            shell.cancel_path_edit(window, cx);
+            shell.refresh_file_table(cx);
+            shell.persist();
+        });
     }
 
     fn open_path_edit_file_dialog(
@@ -220,7 +223,7 @@ impl GuiShell {
         let Some(edit_targets) = self.active_path_edit.clone() else {
             return;
         };
-        if !path_value_edit_supported_for_edit_targets(&self.rows, &edit_targets) {
+        if !path_value_input_supported_for_edit_targets(&self.rows, &edit_targets) {
             return;
         }
         let view = cx.entity();
@@ -274,35 +277,53 @@ impl GuiShell {
                     let _ = async_cx.update_window_entity(
                         &view,
                         |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
-                            let Some(row_index) = shell.index_of_row_id(row_id) else {
-                                return;
-                            };
-                            let Some(row) = shell.rows.get_mut(row_index) else {
-                                return;
-                            };
-                            if row.replace_generation != revision
-                                || row.dirty_kind != Some(DirtyKind::Replace)
-                                || row.path_overrides.is_empty()
-                            {
-                                return;
-                            }
-                            match result {
-                                Ok(staged) => {
-                                    row.dirty_artifact = Some(staged.artifact);
-                                    row.replace_artifact_generation = Some(revision);
-                                }
-                                Err(err) => {
-                                    row.dirty_artifact = None;
-                                    row.replace_artifact_generation = None;
-                                    shell.status_message = Some(BannerMessage::Raw(err));
-                                }
-                            }
-                            cx.notify();
+                            shell.apply_replace_artifact_result(
+                                row_id,
+                                revision,
+                                result.map(|staged| staged.artifact),
+                                cx,
+                            );
                         },
                     );
                 }
             })
             .detach();
+    }
+
+    pub(super) fn apply_replace_artifact_result(
+        &mut self,
+        row_id: u64,
+        revision: u64,
+        result: Result<StagedSceneArtifact, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.index_of_row_id(row_id) else {
+            self.admit_mutation(row_id, RowMutation::ReplaceArtifact, cx);
+            return;
+        };
+        let row = &self.rows[index];
+        if row.replace_generation != revision
+            || row.dirty_kind != Some(DirtyKind::Replace)
+            || row.path_overrides.is_empty()
+        {
+            return;
+        }
+        if !self.admit_mutation(row_id, RowMutation::ReplaceArtifact, cx) {
+            return;
+        }
+        let row = &mut self.rows[index];
+        match result {
+            Ok(artifact) => {
+                row.dirty_artifact = Some(artifact);
+                row.replace_artifact_generation = Some(revision);
+            }
+            Err(error) => {
+                row.dirty_artifact = None;
+                row.replace_artifact_generation = None;
+                self.status_message = Some(BannerMessage::Raw(error));
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn context_path_targets(&self, edit_targets: &PathEditTargets) -> PathEditTargets {
@@ -346,52 +367,69 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let edit_targets = normalize_path_edit_targets(edit_targets);
-        if edit_targets.is_empty() {
-            return;
-        }
-
-        let mut replace_targets = Vec::new();
-        let mut delete_targets_by_row = BTreeMap::<usize, BTreeSet<PathOwnerDeleteTarget>>::new();
-        for (row_id, entry_index) in edit_targets {
-            let Some(row_index) = self.index_of_row_id(row_id) else {
-                continue;
-            };
-            if self.rows[row_index].is_processing() {
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+            let edit_targets = normalize_path_edit_targets(edit_targets);
+            if edit_targets.is_empty() {
                 return;
             }
 
-            match self.rows[row_index].dirty_kind {
-                Some(DirtyKind::SceneEdits) => {
-                    if let Some(target) =
-                        path_owner_delete_target_for_entry(&self.rows[row_index], entry_index)
-                            .filter(|target| {
-                                self.rows[row_index]
-                                    .pending_path_owner_delete_targets
-                                    .contains(target)
-                            })
-                    {
-                        delete_targets_by_row
-                            .entry(row_index)
-                            .or_default()
-                            .insert(target);
-                    } else if self.rows[row_index]
+            let mut replace_targets = Vec::new();
+            let mut delete_targets_by_row =
+                BTreeMap::<usize, BTreeSet<PathOwnerDeleteTarget>>::new();
+            for (row_id, entry_index) in edit_targets {
+                let Some(row_index) = shell.index_of_row_id(row_id) else {
+                    continue;
+                };
+                match shell.rows[row_index].dirty_kind {
+                    Some(DirtyKind::SceneEdits) => {
+                        if let Some(target) =
+                            path_owner_delete_target_for_entry(&shell.rows[row_index], entry_index)
+                                .filter(|target| {
+                                    shell.rows[row_index]
+                                        .pending_path_owner_delete_targets
+                                        .contains(target)
+                                })
+                        {
+                            delete_targets_by_row
+                                .entry(row_index)
+                                .or_default()
+                                .insert(target);
+                        } else if shell.rows[row_index]
+                            .path_overrides
+                            .contains_key(&entry_index)
+                        {
+                            replace_targets.push((row_id, entry_index));
+                        }
+                    }
+                    _ if shell.rows[row_index]
                         .path_overrides
-                        .contains_key(&entry_index)
+                        .contains_key(&entry_index) =>
                     {
                         replace_targets.push((row_id, entry_index));
                     }
+                    _ => {}
                 }
-                _ => replace_targets.push((row_id, entry_index)),
             }
-        }
 
-        if !replace_targets.is_empty() {
-            self.undo_path_edit_targets(replace_targets, window, cx);
-        }
-        if !delete_targets_by_row.is_empty() {
-            self.undo_staged_path_owner_delete_targets(delete_targets_by_row, window, cx);
-        }
+            let row_ids = replace_targets
+                .iter()
+                .map(|(row_id, _)| *row_id)
+                .chain(
+                    delete_targets_by_row
+                        .keys()
+                        .map(|index| shell.rows[*index].id),
+                )
+                .collect::<Vec<_>>();
+            if !shell.admit_history_restore(row_ids, cx) {
+                return;
+            }
+            if !replace_targets.is_empty() {
+                shell.undo_path_edit_targets(replace_targets, window, cx);
+            }
+            if !delete_targets_by_row.is_empty() {
+                shell.undo_staged_path_owner_delete_targets(delete_targets_by_row, window, cx);
+            }
+        })
     }
 
     pub(super) fn copy_path_target_files_to_clipboard(
@@ -510,56 +548,70 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let edit_targets = normalize_path_edit_targets(edit_targets);
-        if edit_targets.is_empty() {
-            return;
-        }
-        if !path_value_edit_supported_for_edit_targets(&self.rows, &edit_targets) {
-            return;
-        }
-
-        let mut row_targets: BTreeMap<usize, BTreeMap<usize, String>> = BTreeMap::new();
-        for (row_id, entry_index) in edit_targets {
-            let Some(row_index) = self.index_of_row_id(row_id) else {
-                continue;
-            };
-            if self.rows[row_index].is_processing() {
-                continue;
-            }
-            let Some(next_value) = workspace_relative_override_value_for_entry(
-                &self.rows[row_index],
-                entry_index,
-                rewrite_mode,
-            ) else {
-                continue;
-            };
-            row_targets
-                .entry(row_index)
-                .or_default()
-                .insert(entry_index, next_value);
-        }
-        if row_targets.is_empty() {
-            return;
-        }
-
-        let planned_edits = row_targets
+        let edit_targets = edit_targets
             .into_iter()
-            .map(|(row_index, overrides)| {
-                let mut next_overrides = self.rows[row_index].path_overrides.clone();
-                for (entry_index, next_value) in overrides {
-                    next_overrides.insert(entry_index, next_value);
-                }
-                (row_index, next_overrides)
+            .filter(|(row_id, entry_index)| {
+                self.index_of_row_id(*row_id).is_some_and(|index| {
+                    let row = &self.rows[index];
+                    path_value_input_supported_for_entry(row, *entry_index)
+                        && workspace_relative_override_value_for_entry(
+                            row,
+                            *entry_index,
+                            rewrite_mode,
+                        )
+                        .is_some()
+                })
             })
-            .collect::<Vec<_>>();
+            .collect();
+        self.with_path_mutations(edit_targets, cx, |shell, edit_targets, cx| {
+            let edit_targets = normalize_path_edit_targets(edit_targets);
+            if edit_targets.is_empty() {
+                return;
+            }
+            if !path_value_edit_supported_for_edit_targets(&shell.rows, &edit_targets) {
+                return;
+            }
 
-        if let Err(err) = self.apply_path_override_updates(planned_edits, window, cx) {
-            self.status_message = Some(BannerMessage::InlinePathEditFailed(err));
-            return;
-        }
-        self.refresh_file_table(cx);
-        self.persist();
-        cx.notify();
+            let mut row_targets: BTreeMap<usize, BTreeMap<usize, String>> = BTreeMap::new();
+            for (row_id, entry_index) in edit_targets {
+                let Some(row_index) = shell.index_of_row_id(row_id) else {
+                    continue;
+                };
+                let Some(next_value) = workspace_relative_override_value_for_entry(
+                    &shell.rows[row_index],
+                    entry_index,
+                    rewrite_mode,
+                ) else {
+                    continue;
+                };
+                row_targets
+                    .entry(row_index)
+                    .or_default()
+                    .insert(entry_index, next_value);
+            }
+            if row_targets.is_empty() {
+                return;
+            }
+
+            let planned_edits = row_targets
+                .into_iter()
+                .map(|(row_index, overrides)| {
+                    let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                    for (entry_index, next_value) in overrides {
+                        next_overrides.insert(entry_index, next_value);
+                    }
+                    (row_index, next_overrides)
+                })
+                .collect::<Vec<_>>();
+
+            if let Err(err) = shell.apply_path_override_updates(planned_edits, window, cx) {
+                shell.status_message = Some(BannerMessage::InlinePathEditFailed(err));
+                return;
+            }
+            shell.refresh_file_table(cx);
+            shell.persist();
+            cx.notify();
+        });
     }
 
     pub(super) fn convert_path_targets_to_absolute(
@@ -568,57 +620,89 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let edit_targets = normalize_path_edit_targets(edit_targets);
-        if edit_targets.is_empty() {
-            return;
-        }
-        if !path_value_edit_supported_for_edit_targets(&self.rows, &edit_targets) {
-            return;
-        }
-
-        let mut row_targets: BTreeMap<usize, BTreeMap<usize, String>> = BTreeMap::new();
-        for (row_id, entry_index) in edit_targets {
-            let Some(row_index) = self.index_of_row_id(row_id) else {
-                continue;
-            };
-            if self.rows[row_index].is_processing() {
-                continue;
-            }
-            let Some(next_value) =
-                absolute_override_value_for_entry(&self.rows[row_index], entry_index)
-            else {
-                continue;
-            };
-            row_targets
-                .entry(row_index)
-                .or_default()
-                .insert(entry_index, next_value);
-        }
-        if row_targets.is_empty() {
-            return;
-        }
-
-        let planned_edits = row_targets
+        let edit_targets = edit_targets
             .into_iter()
-            .map(|(row_index, overrides)| {
-                let mut next_overrides = self.rows[row_index].path_overrides.clone();
-                for (entry_index, next_value) in overrides {
-                    next_overrides.insert(entry_index, next_value);
-                }
-                (row_index, next_overrides)
+            .filter(|(row_id, entry_index)| {
+                self.index_of_row_id(*row_id).is_some_and(|index| {
+                    let row = &self.rows[index];
+                    path_value_input_supported_for_entry(row, *entry_index)
+                        && absolute_override_value_for_entry(row, *entry_index).is_some()
+                })
             })
-            .collect::<Vec<_>>();
+            .collect();
+        self.with_path_mutations(edit_targets, cx, |shell, edit_targets, cx| {
+            let edit_targets = normalize_path_edit_targets(edit_targets);
+            if edit_targets.is_empty() {
+                return;
+            }
+            if !path_value_edit_supported_for_edit_targets(&shell.rows, &edit_targets) {
+                return;
+            }
 
-        if let Err(err) = self.apply_path_override_updates(planned_edits, window, cx) {
-            self.status_message = Some(BannerMessage::InlinePathEditFailed(err));
-            return;
-        }
-        self.refresh_file_table(cx);
-        self.persist();
-        cx.notify();
+            let mut row_targets: BTreeMap<usize, BTreeMap<usize, String>> = BTreeMap::new();
+            for (row_id, entry_index) in edit_targets {
+                let Some(row_index) = shell.index_of_row_id(row_id) else {
+                    continue;
+                };
+                let Some(next_value) =
+                    absolute_override_value_for_entry(&shell.rows[row_index], entry_index)
+                else {
+                    continue;
+                };
+                row_targets
+                    .entry(row_index)
+                    .or_default()
+                    .insert(entry_index, next_value);
+            }
+            if row_targets.is_empty() {
+                return;
+            }
+
+            let planned_edits = row_targets
+                .into_iter()
+                .map(|(row_index, overrides)| {
+                    let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                    for (entry_index, next_value) in overrides {
+                        next_overrides.insert(entry_index, next_value);
+                    }
+                    (row_index, next_overrides)
+                })
+                .collect::<Vec<_>>();
+
+            if let Err(err) = shell.apply_path_override_updates(planned_edits, window, cx) {
+                shell.status_message = Some(BannerMessage::InlinePathEditFailed(err));
+                return;
+            }
+            shell.refresh_file_table(cx);
+            shell.persist();
+            cx.notify();
+        });
     }
 
     pub(super) fn collect_path_targets_to_folder(
+        &mut self,
+        edit_targets: PathEditTargets,
+        destination_folder: PathBuf,
+        rewrite_mode: PathCollectRewriteMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if rewrite_mode == PathCollectRewriteMode::CopyOnly {
+            self.collect_path_targets(edit_targets, destination_folder, rewrite_mode, window, cx);
+        } else {
+            self.with_path_mutations(edit_targets, cx, |shell, edit_targets, cx| {
+                shell.collect_path_targets(
+                    edit_targets,
+                    destination_folder,
+                    rewrite_mode,
+                    window,
+                    cx,
+                );
+            });
+        }
+    }
+
+    fn collect_path_targets(
         &mut self,
         edit_targets: PathEditTargets,
         destination_folder: PathBuf,
@@ -809,7 +893,7 @@ impl GuiShell {
             let Some(row) = self.rows.get(row_index) else {
                 return;
             };
-            if !row.selected || !path_value_edit_supported_for_entry(row, *entry_index) {
+            if !row.selected || !path_value_input_supported_for_entry(row, *entry_index) {
                 return;
             }
             let Some(_report) = row.display_paths_report() else {
@@ -862,225 +946,260 @@ impl GuiShell {
         let Some(edit_targets) = self.active_path_edit.clone() else {
             return;
         };
-        let edit_targets = normalize_path_edit_targets(edit_targets);
-        if edit_targets.is_empty() {
-            self.cancel_path_edit(window, cx);
-            return;
-        }
 
-        let new_value = self.path_edit_input.read(cx).value().to_string();
-        let mut row_targets: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-
-        for (row_id, entry_index) in &edit_targets {
-            let Some(row_index) = self.index_of_row_id(*row_id) else {
-                self.cancel_path_edit(window, cx);
-                return;
-            };
-            let Some(row) = self.rows.get(row_index) else {
-                self.cancel_path_edit(window, cx);
-                return;
-            };
-            if !row.selected || !path_value_edit_supported_for_entry(row, *entry_index) {
-                self.cancel_path_edit(window, cx);
+        self.with_path_mutations(edit_targets, cx, |shell, edit_targets, cx| {
+            let edit_targets = normalize_path_edit_targets(edit_targets);
+            if edit_targets.is_empty() {
+                shell.cancel_path_edit(window, cx);
                 return;
             }
-            let Some(report) = row.display_paths_report() else {
-                self.cancel_path_edit(window, cx);
-                return;
-            };
-            let Some(_entry) = report.entries.get(*entry_index) else {
-                self.cancel_path_edit(window, cx);
-                return;
-            };
-            row_targets
-                .entry(row_index)
-                .or_default()
-                .insert(*entry_index);
-        }
 
-        let mut planned_edits = Vec::<(usize, BTreeMap<usize, String>)>::new();
-        for (row_index, entry_indices) in row_targets {
-            let Some(_report) = self.rows[row_index].display_paths_report() else {
-                self.cancel_path_edit(window, cx);
-                return;
-            };
+            let new_value = shell.path_edit_input.read(cx).value().to_string();
+            let mut row_targets: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
 
-            let mut next_overrides = self.rows[row_index].path_overrides.clone();
-            for entry_index in entry_indices {
-                let Some(current_value) =
-                    self.current_path_value(&self.rows[row_index], entry_index)
-                else {
-                    self.cancel_path_edit(window, cx);
+            for (row_id, entry_index) in &edit_targets {
+                let Some(row_index) = shell.index_of_row_id(*row_id) else {
+                    shell.cancel_path_edit(window, cx);
                     return;
                 };
-                if new_value == current_value {
-                    next_overrides.remove(&entry_index);
-                } else {
-                    next_overrides.insert(entry_index, new_value.clone());
+                let Some(row) = shell.rows.get(row_index) else {
+                    shell.cancel_path_edit(window, cx);
+                    return;
+                };
+                if !row.selected || !path_value_edit_supported_for_entry(row, *entry_index) {
+                    shell.cancel_path_edit(window, cx);
+                    return;
                 }
+                let Some(report) = row.display_paths_report() else {
+                    shell.cancel_path_edit(window, cx);
+                    return;
+                };
+                let Some(_entry) = report.entries.get(*entry_index) else {
+                    shell.cancel_path_edit(window, cx);
+                    return;
+                };
+                row_targets
+                    .entry(row_index)
+                    .or_default()
+                    .insert(*entry_index);
             }
 
-            planned_edits.push((row_index, next_overrides));
-        }
+            let mut planned_edits = Vec::<(usize, BTreeMap<usize, String>)>::new();
+            for (row_index, entry_indices) in row_targets {
+                let Some(_report) = shell.rows[row_index].display_paths_report() else {
+                    shell.cancel_path_edit(window, cx);
+                    return;
+                };
 
-        if self
-            .apply_path_override_updates(planned_edits, window, cx)
-            .is_err()
-        {
-            self.cancel_path_edit(window, cx);
-            return;
-        }
+                let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                for entry_index in entry_indices {
+                    let Some(current_value) =
+                        shell.current_path_value(&shell.rows[row_index], entry_index)
+                    else {
+                        shell.cancel_path_edit(window, cx);
+                        return;
+                    };
+                    if new_value == current_value {
+                        next_overrides.remove(&entry_index);
+                    } else {
+                        next_overrides.insert(entry_index, new_value.clone());
+                    }
+                }
 
-        self.cancel_path_edit(window, cx);
-        self.refresh_file_table(cx);
-        self.persist();
+                planned_edits.push((row_index, next_overrides));
+            }
+
+            if shell
+                .apply_path_override_updates(planned_edits, window, cx)
+                .is_err()
+            {
+                shell.cancel_path_edit(window, cx);
+                return;
+            }
+
+            shell.cancel_path_edit(window, cx);
+            shell.refresh_file_table(cx);
+            shell.persist();
+        });
     }
 
-    fn apply_path_override_updates(
+    pub(super) fn apply_path_override_updates(
         &mut self,
         planned_edits: Vec<(usize, BTreeMap<usize, String>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let path_order_snapshot = self.capture_path_order_snapshot();
-        let row_indices = planned_edits
-            .iter()
-            .map(|(row_index, _)| *row_index)
-            .collect::<Vec<_>>();
-        let requires_scene_edit_restaging = planned_edits.iter().any(|(row_index, _)| {
-            let row = &self.rows[*row_index];
-            row.scene_edits_are_staged()
-                || !row.pending_clean_targets.is_empty()
-                || !row.pending_path_owner_delete_targets.is_empty()
-        });
-        let mut prepared_edits = Vec::with_capacity(planned_edits.len());
-        for (row_index, next_overrides) in planned_edits {
-            let Some(report) = self.rows[row_index].display_paths_report() else {
-                return Err("missing path report for override update".to_string());
-            };
-            let staged_overrides = next_overrides
-                .iter()
-                .filter_map(|(ix, after_value)| {
-                    report.entries.get(*ix).map(|entry| PathReplaceOverride {
-                        entry_index: *ix,
-                        before_value: entry.value.clone(),
-                        after_value: after_value.clone(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            let preview = if staged_overrides.is_empty() {
-                None
-            } else {
-                let options = self.scene_materialize_options(OperationMode::Forensic);
-                Some(
-                    preview_replace_scene_paths_with_overrides_in_report_with_options(
-                        report,
-                        &staged_overrides,
-                        &options,
-                    )
-                    .map_err(|err| err.to_string())?,
-                )
-            };
-
-            prepared_edits.push((row_index, next_overrides, preview));
-        }
-        let before =
-            (!requires_scene_edit_restaging).then(|| self.capture_row_edit_states(&row_indices));
-        let edit_sequence = if requires_scene_edit_restaging {
-            self.begin_edit_transaction(&row_indices)
+    ) -> Result<usize, String> {
+        let previous_banner = if self.mutation_banner_depth == 0 {
+            self.status_message.take()
         } else {
             None
         };
-        let mut inline_job_records = Vec::new();
-        for (row_index, next_overrides, preview) in prepared_edits {
-            let row_id = self.rows[row_index].id;
-            let row_path = self.rows[row_index].path.clone();
-            let mut revision = None;
-            let mut summary = "cleared".to_string();
-            let pending_clean_targets = self.rows[row_index].pending_clean_targets.clone();
-            let pending_path_owner_delete_targets = self.rows[row_index]
-                .pending_path_owner_delete_targets
-                .clone();
-            let restage_scene_edits = self.rows[row_index].scene_edits_are_staged()
-                || !pending_clean_targets.is_empty()
-                || !pending_path_owner_delete_targets.is_empty();
-            let row = &mut self.rows[row_index];
-            row.path_overrides = next_overrides;
-            row.replace_generation = row.replace_generation.wrapping_add(1);
-            row.replace_artifact_generation = None;
-            if restage_scene_edits {
-                row.replace_preview = None;
-                summary = if row.path_overrides.is_empty() {
-                    "scene edits restaged".to_string()
-                } else {
-                    format!("{} composite path edit(s) staged", row.path_overrides.len())
+        let row_ids = planned_edits
+            .iter()
+            .filter_map(|(index, _)| self.rows.get(*index).map(|row| row.id))
+            .collect::<Vec<_>>();
+        let (indices, rejected) = self.mutation_targets(row_ids, RowMutation::PathEdit);
+        let skipped = rejected.busy_count();
+        let planned_edits = planned_edits
+            .into_iter()
+            .filter(|(index, _)| indices.contains(index))
+            .collect::<Vec<_>>();
+        if planned_edits.is_empty() {
+            self.report_mutation_rejections(rejected, cx);
+            if self.status_message.is_none() {
+                self.status_message = previous_banner;
+            }
+            return Ok(skipped);
+        }
+        let result = (|| {
+            let path_order_snapshot = self.capture_path_order_snapshot();
+            let row_indices = planned_edits
+                .iter()
+                .map(|(row_index, _)| *row_index)
+                .collect::<Vec<_>>();
+            let requires_scene_edit_restaging = planned_edits.iter().any(|(row_index, _)| {
+                let row = &self.rows[*row_index];
+                row.scene_edits_are_staged()
+                    || !row.pending_clean_targets.is_empty()
+                    || !row.pending_path_owner_delete_targets.is_empty()
+            });
+            let mut prepared_edits = Vec::with_capacity(planned_edits.len());
+            for (row_index, next_overrides) in planned_edits {
+                let Some(report) = self.rows[row_index].display_paths_report() else {
+                    return Err("missing path report for override update".to_string());
                 };
-            } else {
-                row.dirty_artifact = None;
-                row.staged_audit_mode = None;
-                row.staged_audit_report = None;
-                row.staged_audit_plan_fingerprint = None;
-                row.staged_paths_report = None;
-                row.staged_dump_report = None;
-                row.staged_source_bytes = None;
-                row.pending_clean_targets.clear();
-                row.pending_path_owner_delete_targets.clear();
-                row.clean_preview = None;
-                row.path_owner_delete_preview = None;
-                match preview {
-                    Some(preview) => {
-                        let matched = preview.matched_count;
-                        row.dirty_kind = Some(DirtyKind::Replace);
-                        row.replace_preview = Some(preview);
-                        row.status = FileStatus::Dirty;
-                        summary = format!("{matched} match(es) staged");
-                        revision = Some(row.replace_generation);
-                    }
-                    None => {
-                        row.dirty_kind = None;
-                        row.replace_preview = None;
-                        row.status = if row.paths_report.is_some() {
-                            FileStatus::Audited
-                        } else {
-                            FileStatus::Idle
-                        };
-                    }
-                }
-                row.sync_findings_count();
-            }
-            self.refresh_row_path_resolution_state(row_index);
-            if restage_scene_edits {
-                self.stage_scene_edits_for_row(
-                    row_index,
-                    pending_clean_targets,
-                    pending_path_owner_delete_targets,
-                    ResultTab::Paths,
-                    edit_sequence,
-                    false,
-                    window,
-                    cx,
-                );
-            } else {
-                inline_job_records.push((row_path, summary, false));
-                if let Some(revision) = revision {
-                    self.spawn_replace_artifact_refresh(row_id, revision, window, cx);
-                }
-                if let Some(edit_sequence) = edit_sequence {
-                    self.complete_edit_transaction_success(edit_sequence, row_id);
-                }
-            }
-        }
+                let staged_overrides = next_overrides
+                    .iter()
+                    .filter_map(|(ix, after_value)| {
+                        report.entries.get(*ix).map(|entry| PathReplaceOverride {
+                            entry_index: *ix,
+                            before_value: entry.value.clone(),
+                            after_value: after_value.clone(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let preview = if staged_overrides.is_empty() {
+                    None
+                } else {
+                    let options = self.scene_materialize_options(OperationMode::Forensic);
+                    Some(
+                        preview_replace_scene_paths_with_overrides_in_report_with_options(
+                            report,
+                            &staged_overrides,
+                            &options,
+                        )
+                        .map_err(|err| err.to_string())?,
+                    )
+                };
 
-        for (row_path, summary, failed) in inline_job_records {
-            self.record_job("replace-inline", row_path, None, summary, failed);
-        }
-        if let Some(before) = before {
-            self.push_edit_history(before);
-        }
-        self.preserve_path_order_after_path_mutation(path_order_snapshot);
-        self.refresh_app_menus(window, cx);
+                prepared_edits.push((row_index, next_overrides, preview));
+            }
+            let before = (!requires_scene_edit_restaging)
+                .then(|| self.capture_row_edit_states(&row_indices));
+            let edit_sequence = if requires_scene_edit_restaging {
+                self.begin_edit_transaction(&row_indices)
+            } else {
+                None
+            };
+            let mut inline_job_records = Vec::new();
+            for (row_index, next_overrides, preview) in prepared_edits {
+                let row_id = self.rows[row_index].id;
+                let row_path = self.rows[row_index].path.clone();
+                let mut revision = None;
+                let mut summary = "cleared".to_string();
+                let pending_clean_targets = self.rows[row_index].pending_clean_targets.clone();
+                let pending_path_owner_delete_targets = self.rows[row_index]
+                    .pending_path_owner_delete_targets
+                    .clone();
+                let restage_scene_edits = self.rows[row_index].scene_edits_are_staged()
+                    || !pending_clean_targets.is_empty()
+                    || !pending_path_owner_delete_targets.is_empty();
+                let row = &mut self.rows[row_index];
+                row.path_overrides = next_overrides;
+                row.replace_generation = row.replace_generation.wrapping_add(1);
+                row.replace_artifact_generation = None;
+                if restage_scene_edits {
+                    row.replace_preview = None;
+                    summary = if row.path_overrides.is_empty() {
+                        "scene edits restaged".to_string()
+                    } else {
+                        format!("{} composite path edit(s) staged", row.path_overrides.len())
+                    };
+                } else {
+                    row.dirty_artifact = None;
+                    row.staged_audit_mode = None;
+                    row.staged_audit_report = None;
+                    row.staged_audit_plan_fingerprint = None;
+                    row.staged_paths_report = None;
+                    row.staged_dump_report = None;
+                    row.staged_source_bytes = None;
+                    row.pending_clean_targets.clear();
+                    row.pending_path_owner_delete_targets.clear();
+                    row.clean_preview = None;
+                    row.path_owner_delete_preview = None;
+                    match preview {
+                        Some(preview) => {
+                            let matched = preview.matched_count;
+                            row.dirty_kind = Some(DirtyKind::Replace);
+                            row.replace_preview = Some(preview);
+                            row.status = FileStatus::Dirty;
+                            summary = format!("{matched} match(es) staged");
+                            revision = Some(row.replace_generation);
+                        }
+                        None => {
+                            row.dirty_kind = None;
+                            row.replace_preview = None;
+                            row.status = if row.paths_report.is_some() {
+                                FileStatus::Audited
+                            } else {
+                                FileStatus::Idle
+                            };
+                        }
+                    }
+                    row.sync_findings_count();
+                }
+                self.refresh_row_path_resolution_state(row_index);
+                if restage_scene_edits {
+                    self.stage_scene_edits_for_row(
+                        row_index,
+                        pending_clean_targets,
+                        pending_path_owner_delete_targets,
+                        ResultTab::Paths,
+                        edit_sequence,
+                        false,
+                        window,
+                        cx,
+                    );
+                } else {
+                    inline_job_records.push((row_path, summary, false));
+                    if let Some(revision) = revision {
+                        self.spawn_replace_artifact_refresh(row_id, revision, window, cx);
+                    }
+                    if let Some(edit_sequence) = edit_sequence {
+                        self.complete_edit_transaction_success(edit_sequence, row_id);
+                    }
+                }
+            }
 
-        Ok(())
+            for (row_path, summary, failed) in inline_job_records {
+                self.record_job("replace-inline", row_path, None, summary, failed);
+            }
+            if let Some(before) = before {
+                self.push_edit_history(before);
+            }
+            self.preserve_path_order_after_path_mutation(path_order_snapshot);
+            self.refresh_app_menus(window, cx);
+
+            Ok(skipped)
+        })();
+        if let Err(error) = &result {
+            self.status_message = Some(BannerMessage::InlinePathEditFailed(error.clone()));
+        }
+        self.report_mutation_rejections(rejected, cx);
+        if self.status_message.is_none() {
+            self.status_message = previous_banner;
+        }
+        result
     }
 
     pub(super) fn undo_path_edit_targets(
@@ -1089,6 +1208,17 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let edit_targets = edit_targets
+            .into_iter()
+            .filter(|(row_id, entry_index)| {
+                self.index_of_row_id(*row_id)
+                    .is_some_and(|index| self.rows[index].path_overrides.contains_key(entry_index))
+            })
+            .collect::<Vec<_>>();
+        if !self.admit_history_restore(edit_targets.iter().map(|(row_id, _)| *row_id), cx) {
+            return;
+        }
+
         let edit_targets = normalize_path_edit_targets(edit_targets);
         if edit_targets.is_empty() {
             return;
@@ -1099,7 +1229,14 @@ impl GuiShell {
             let Some(row_index) = self.index_of_row_id(row_id) else {
                 return;
             };
-            if self.rows[row_index].is_processing() {
+            if self.rows[row_index]
+                .display_paths_report()
+                .and_then(|report| report.entries.get(entry_index))
+                .is_none()
+            {
+                self.status_message = Some(BannerMessage::InlinePathEditFailed(
+                    "missing path entry for undo".into(),
+                ));
                 return;
             }
             row_targets
@@ -1132,36 +1269,56 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if targets_by_row.is_empty() {
-            return;
-        }
-
-        let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
-        let edit_sequence = self.begin_edit_transaction(&row_indices);
-        for (row_index, targets) in targets_by_row {
-            let mut next_path_owner_delete_targets = self.rows[row_index]
-                .pending_path_owner_delete_targets
-                .clone();
-            for target in targets {
-                next_path_owner_delete_targets.remove(&target);
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+            let targets_by_row = targets_by_row
+                .into_iter()
+                .filter_map(|(index, targets)| {
+                    let row = shell.rows.get(index)?;
+                    let targets = targets
+                        .intersection(&row.pending_path_owner_delete_targets)
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    (!targets.is_empty()).then_some((index, targets))
+                })
+                .collect::<BTreeMap<_, _>>();
+            if !shell.admit_history_restore(
+                shell.row_ids_for_indices(&targets_by_row.keys().copied().collect::<Vec<_>>()),
+                cx,
+            ) {
+                return;
             }
 
-            let next_clean_targets = self.rows[row_index].pending_clean_targets.clone();
-            if next_clean_targets.is_empty() && next_path_owner_delete_targets.is_empty() {
-                self.clear_clean_state_for_row(row_index, true, edit_sequence, cx);
-            } else {
-                self.stage_scene_edits_for_row(
-                    row_index,
-                    next_clean_targets,
-                    next_path_owner_delete_targets,
-                    ResultTab::Paths,
-                    edit_sequence,
-                    true,
-                    window,
-                    cx,
-                );
+            if targets_by_row.is_empty() {
+                return;
             }
-        }
+
+            let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
+            let edit_sequence = shell.begin_edit_transaction(&row_indices);
+            for (row_index, targets) in targets_by_row {
+                let mut next_path_owner_delete_targets = shell.rows[row_index]
+                    .pending_path_owner_delete_targets
+                    .clone();
+                for target in targets {
+                    next_path_owner_delete_targets.remove(&target);
+                }
+
+                let next_clean_targets = shell.rows[row_index].pending_clean_targets.clone();
+                if next_clean_targets.is_empty() && next_path_owner_delete_targets.is_empty() {
+                    shell.clear_clean_state_for_row(row_index, true, edit_sequence, cx);
+                } else {
+                    shell.stage_scene_edits_for_row(
+                        row_index,
+                        next_clean_targets,
+                        next_path_owner_delete_targets,
+                        ResultTab::Paths,
+                        edit_sequence,
+                        true,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        })
     }
 
     pub(super) fn undo_row_changes_for_ids(
@@ -1173,12 +1330,11 @@ impl GuiShell {
         let row_indices = row_ids
             .into_iter()
             .filter_map(|row_id| self.index_of_row_id(row_id))
-            .filter(|row_index| {
-                self.rows
-                    .get(*row_index)
-                    .is_some_and(|row| row.dirty() && !row.is_processing())
-            })
+            .filter(|row_index| self.rows.get(*row_index).is_some_and(|row| row.dirty()))
             .collect::<Vec<_>>();
+        if !self.admit_history_restore(self.row_ids_for_indices(&row_indices), cx) {
+            return;
+        }
         if row_indices.is_empty() {
             return;
         }
@@ -1259,9 +1415,19 @@ impl GuiShell {
         edit_sequence: Option<u64>,
         cx: &mut Context<Self>,
     ) {
+        let Some(row_id) = self.rows.get(row_index).map(|row| row.id) else {
+            return;
+        };
+        if !self.admit_mutation(row_id, RowMutation::SceneEdit, cx) {
+            if let Some(sequence) = edit_sequence {
+                self.complete_edit_transaction_failure(sequence, row_id);
+            }
+            return;
+        }
+
         let row_id = self.rows[row_index].id;
         let row_path = self.rows[row_index].path.clone();
-        self.clear_staged_scene_edits_for_row(row_index);
+        self.clear_staged_scene_edits_for_row(row_index, cx);
         if record_undo {
             self.record_job("undo", row_path, None, "cleared".to_string(), false);
         }
@@ -1273,7 +1439,14 @@ impl GuiShell {
         cx.notify();
     }
 
-    fn clear_staged_scene_edits_for_row(&mut self, row_index: usize) {
+    fn clear_staged_scene_edits_for_row(&mut self, row_index: usize, cx: &mut Context<Self>) {
+        let Some(row_id) = self.rows.get(row_index).map(|row| row.id) else {
+            return;
+        };
+        if !self.admit_mutation(row_id, RowMutation::SceneEdit, cx) {
+            return;
+        }
+
         let row = &mut self.rows[row_index];
         row.dirty_artifact = None;
         row.clean_preview = None;
@@ -1311,8 +1484,18 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(row_id) = self.rows.get(row_index).map(|row| row.id) else {
+            return;
+        };
+        if !self.admit_mutation(row_id, RowMutation::SceneEdit, cx) {
+            if let Some(sequence) = edit_sequence {
+                self.complete_edit_transaction_failure(sequence, row_id);
+            }
+            return;
+        }
+
         if clean_targets.is_empty() && path_owner_delete_targets.is_empty() {
-            self.clear_staged_scene_edits_for_row(row_index);
+            self.clear_staged_scene_edits_for_row(row_index, cx);
             if let Some(edit_sequence) = edit_sequence {
                 let row_id = self.rows[row_index].id;
                 self.complete_edit_transaction_success(edit_sequence, row_id);
@@ -1446,6 +1629,16 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(row_id) = self.rows.get(row_index).map(|row| row.id) else {
+            return;
+        };
+        if !self.admit_mutation(row_id, RowMutation::SceneEdit, cx) {
+            if let Some(sequence) = edit_sequence {
+                self.complete_edit_transaction_failure(sequence, row_id);
+            }
+            return;
+        }
+
         let path_owner_delete_targets = self.rows[row_index]
             .pending_path_owner_delete_targets
             .clone();
@@ -1492,9 +1685,6 @@ impl GuiShell {
     ) -> BTreeMap<usize, BTreeSet<ExecutionCleanTarget>> {
         let mut by_row = BTreeMap::<usize, BTreeSet<ExecutionCleanTarget>>::new();
         for row in rows {
-            if row.clean_state != state {
-                continue;
-            }
             let Some(target) = row.clean_target.clone() else {
                 continue;
             };
@@ -1502,6 +1692,11 @@ impl GuiShell {
                 let Some(row_index) = self.index_of_row_id(key.row_id) else {
                     continue;
                 };
+                if self.can_mutate(key.row_id, RowMutation::SceneEdit).is_err()
+                    || audit_row_clean_state(&self.rows[row_index], Some(&target)) != state
+                {
+                    continue;
+                }
                 by_row.entry(row_index).or_default().insert(target.clone());
             }
         }
@@ -1544,7 +1739,9 @@ impl GuiShell {
         match state {
             AuditRowCleanState::Available => self.run_audit_table_clean(rows, window, cx),
             AuditRowCleanState::Staged => self.undo_audit_table_clean(rows, window, cx),
-            AuditRowCleanState::Unsupported | AuditRowCleanState::BlockedByOtherDirty => {}
+            AuditRowCleanState::Unsupported
+            | AuditRowCleanState::BlockedByOtherDirty
+            | AuditRowCleanState::Busy => {}
         }
     }
 
@@ -1554,21 +1751,40 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let targets_by_row = self.audit_targets_by_row(&rows, AuditRowCleanState::Available);
-        let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
-        let edit_sequence = self.begin_edit_transaction(&row_indices);
-        for (row_index, targets) in targets_by_row {
-            let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
-            next_targets.extend(targets);
-            self.stage_clean_targets_for_row(
-                row_index,
-                next_targets,
-                ResultTab::Audit,
-                edit_sequence,
-                window,
-                cx,
-            );
-        }
+        let row_ids = rows
+            .iter()
+            .flat_map(|row| {
+                row.row_keys.iter().filter_map(|key| {
+                    let index = self.index_of_row_id(key.row_id)?;
+                    (audit_row_clean_eligibility(&self.rows[index], row.clean_target.as_ref())
+                        == AuditRowCleanState::Available)
+                        .then_some(key.row_id)
+                })
+            })
+            .collect();
+        self.with_mutation_targets(
+            row_ids,
+            RowMutation::SceneEdit,
+            cx,
+            |shell, _indices, cx| {
+                let targets_by_row =
+                    shell.audit_targets_by_row(&rows, AuditRowCleanState::Available);
+                let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
+                let edit_sequence = shell.begin_edit_transaction(&row_indices);
+                for (row_index, targets) in targets_by_row {
+                    let mut next_targets = shell.rows[row_index].pending_clean_targets.clone();
+                    next_targets.extend(targets);
+                    shell.stage_clean_targets_for_row(
+                        row_index,
+                        next_targets,
+                        ResultTab::Audit,
+                        edit_sequence,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        );
     }
 
     pub(super) fn undo_audit_table_clean(
@@ -1577,43 +1793,67 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let targets_by_row = self.audit_targets_by_row(&rows, AuditRowCleanState::Staged);
-        let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
-        let edit_sequence = self.begin_edit_transaction(&row_indices);
-        for (row_index, targets) in targets_by_row {
-            let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
-            for target in targets {
-                next_targets.remove(&target);
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+            let mut targets_by_row = BTreeMap::<usize, BTreeSet<ExecutionCleanTarget>>::new();
+            for row in rows {
+                let Some(target) = row.clean_target else {
+                    continue;
+                };
+                for key in row.row_keys {
+                    if let Some(index) = shell.index_of_row_id(key.row_id)
+                        && shell.rows[index].pending_clean_targets.contains(&target)
+                    {
+                        targets_by_row
+                            .entry(index)
+                            .or_default()
+                            .insert(target.clone());
+                    }
+                }
             }
-            if next_targets.is_empty() {
-                let path_owner_delete_targets = self.rows[row_index]
-                    .pending_path_owner_delete_targets
-                    .clone();
-                if path_owner_delete_targets.is_empty() {
-                    self.clear_clean_state_for_row(row_index, true, edit_sequence, cx);
+            let row_ids = targets_by_row
+                .keys()
+                .map(|index| shell.rows[*index].id)
+                .collect::<Vec<_>>();
+            if !shell.admit_history_restore(row_ids, cx) {
+                return;
+            }
+            let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
+            let edit_sequence = shell.begin_edit_transaction(&row_indices);
+            for (row_index, targets) in targets_by_row {
+                let mut next_targets = shell.rows[row_index].pending_clean_targets.clone();
+                for target in targets {
+                    next_targets.remove(&target);
+                }
+                if next_targets.is_empty() {
+                    let path_owner_delete_targets = shell.rows[row_index]
+                        .pending_path_owner_delete_targets
+                        .clone();
+                    if path_owner_delete_targets.is_empty() {
+                        shell.clear_clean_state_for_row(row_index, true, edit_sequence, cx);
+                    } else {
+                        shell.stage_scene_edits_for_row(
+                            row_index,
+                            next_targets,
+                            path_owner_delete_targets,
+                            ResultTab::Audit,
+                            edit_sequence,
+                            true,
+                            window,
+                            cx,
+                        );
+                    }
                 } else {
-                    self.stage_scene_edits_for_row(
+                    shell.stage_clean_targets_for_row(
                         row_index,
                         next_targets,
-                        path_owner_delete_targets,
                         ResultTab::Audit,
                         edit_sequence,
-                        true,
                         window,
                         cx,
                     );
                 }
-            } else {
-                self.stage_clean_targets_for_row(
-                    row_index,
-                    next_targets,
-                    ResultTab::Audit,
-                    edit_sequence,
-                    window,
-                    cx,
-                );
             }
-        }
+        })
     }
 
     pub(super) fn seed_replace_dialog_source_cache(
@@ -1641,57 +1881,89 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut targets_by_row = BTreeMap::<usize, BTreeSet<PathOwnerDeleteTarget>>::new();
-        for edit_targets in selected_rows {
-            for (row_id, entry_index) in edit_targets {
-                let Some(row_index) = self.index_of_row_id(row_id) else {
-                    continue;
-                };
-                let Some(row) = self.rows.get(row_index) else {
-                    continue;
-                };
-                if row.is_processing() {
-                    continue;
+        let selected_rows = selected_rows
+            .into_iter()
+            .map(|targets| {
+                targets
+                    .into_iter()
+                    .filter(|(row_id, entry_index)| {
+                        self.index_of_row_id(*row_id).is_some_and(|index| {
+                            super::helpers::path_owner_delete_supported_for_entry(
+                                &self.rows[index],
+                                *entry_index,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let row_ids = selected_rows
+            .iter()
+            .flat_map(|targets| targets.iter().map(|(row_id, _)| *row_id))
+            .collect();
+        self.with_mutation_targets(row_ids, RowMutation::SceneEdit, cx, |shell, indices, cx| {
+            let accepted = shell
+                .row_ids_for_indices(&indices)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let selected_rows = selected_rows
+                .into_iter()
+                .map(|targets| {
+                    targets
+                        .into_iter()
+                        .filter(|(row_id, _)| accepted.contains(row_id))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut targets_by_row = BTreeMap::<usize, BTreeSet<PathOwnerDeleteTarget>>::new();
+            for edit_targets in selected_rows {
+                for (row_id, entry_index) in edit_targets {
+                    let Some(row_index) = shell.index_of_row_id(row_id) else {
+                        continue;
+                    };
+                    let Some(row) = shell.rows.get(row_index) else {
+                        continue;
+                    };
+                    let Some(report) = row.display_paths_report() else {
+                        continue;
+                    };
+                    let Some(entry) = report.entries.get(entry_index) else {
+                        continue;
+                    };
+                    if !super::helpers::path_owner_delete_supported_for_entry(row, entry_index) {
+                        continue;
+                    }
+                    targets_by_row
+                        .entry(row_index)
+                        .or_default()
+                        .insert(PathOwnerDeleteTarget {
+                            node_type: entry.node_type.clone(),
+                            node_name: entry.node_name.clone(),
+                        });
                 }
-                let Some(report) = row.display_paths_report() else {
-                    continue;
-                };
-                let Some(entry) = report.entries.get(entry_index) else {
-                    continue;
-                };
-                if !super::helpers::path_owner_delete_supported_for_entry(row, entry_index) {
-                    continue;
-                }
-                targets_by_row
-                    .entry(row_index)
-                    .or_default()
-                    .insert(PathOwnerDeleteTarget {
-                        node_type: entry.node_type.clone(),
-                        node_name: entry.node_name.clone(),
-                    });
             }
-        }
 
-        let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
-        let edit_sequence = self.begin_edit_transaction(&row_indices);
-        for (row_index, targets) in targets_by_row {
-            if targets.is_empty() {
-                continue;
+            let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
+            let edit_sequence = shell.begin_edit_transaction(&row_indices);
+            for (row_index, targets) in targets_by_row {
+                if targets.is_empty() {
+                    continue;
+                }
+                let mut next_targets = shell.rows[row_index]
+                    .pending_path_owner_delete_targets
+                    .clone();
+                next_targets.extend(targets);
+                shell.stage_scene_edits_for_row(
+                    row_index,
+                    shell.rows[row_index].pending_clean_targets.clone(),
+                    next_targets,
+                    ResultTab::Paths,
+                    edit_sequence,
+                    false,
+                    window,
+                    cx,
+                );
             }
-            let mut next_targets = self.rows[row_index]
-                .pending_path_owner_delete_targets
-                .clone();
-            next_targets.extend(targets);
-            self.stage_scene_edits_for_row(
-                row_index,
-                self.rows[row_index].pending_clean_targets.clone(),
-                next_targets,
-                ResultTab::Paths,
-                edit_sequence,
-                false,
-                window,
-                cx,
-            );
-        }
+        });
     }
 }

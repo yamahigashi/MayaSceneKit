@@ -330,6 +330,12 @@ impl GuiShell {
             file_dialog_ui_blocked: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            next_row_job_id: 1,
+            audit_refresh_batch_depth: 0,
+            mutation_banner_depth: 0,
+            audit_refresh_pending: false,
+            #[cfg(test)]
+            audit_refresh_count: 0,
             next_edit_history_sequence: 0,
             next_edit_history_commit_sequence: 0,
             pending_edit_transactions: BTreeMap::new(),

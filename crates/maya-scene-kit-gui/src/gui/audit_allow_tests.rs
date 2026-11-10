@@ -516,7 +516,7 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
         }
         shell.rows[0].audit_report.as_mut().unwrap().findings[key.item_index].code =
             AuditFindingCode::MelExec;
-        shell.rows[0].busy = Some(RowOperation::Analyze);
+        shell.rows[0].busy = Some((RowOperation::Analyze, 0));
         assert_eq!(
             shell.audit_detail_allow_disabled_reason(),
             Some("audit_allow.busy")

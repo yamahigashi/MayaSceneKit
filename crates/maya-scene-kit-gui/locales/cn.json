@@ -1,4 +1,8 @@
 {
+  "banner.row_mutation_busy": "{name} 正在执行 {operation}，无法修改。",
+  "banner.row_mutation_missing": "目标行已被删除。",
+  "banner.replace_busy_skipped": "已跳过 {count} 个正在处理的行。",
+  "banner.analysis_staged_preserved": "已保留 {name} 的暂存修改。",
   "banner.save_in_progress": "正在保存，请稍候。",
   "action.add": "添加",
   "action.apply": "应用",

@@ -1,4 +1,8 @@
 {
+  "banner.row_mutation_busy": "{name} は {operation} の実行中のため変更できません。",
+  "banner.row_mutation_missing": "対象の行は既に削除されています。",
+  "banner.replace_busy_skipped": "処理中の {count} 行をスキップしました。",
+  "banner.analysis_staged_preserved": "{name} のステージ済み編集を保持しました。",
   "banner.save_in_progress": "保存中です。完了するまでお待ちください。",
   "action.add": "追加",
   "action.apply": "適用",

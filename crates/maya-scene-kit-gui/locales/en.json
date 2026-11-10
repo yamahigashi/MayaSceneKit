@@ -1,4 +1,8 @@
 {
+  "banner.row_mutation_busy": "Cannot modify {name} while {operation} is running.",
+  "banner.row_mutation_missing": "The target row no longer exists.",
+  "banner.replace_busy_skipped": "Skipped {count} busy rows.",
+  "banner.analysis_staged_preserved": "Kept staged edits for {name}.",
   "banner.save_in_progress": "A save is in progress. Please wait.",
   "action.add": "Add",
   "action.apply": "Apply",

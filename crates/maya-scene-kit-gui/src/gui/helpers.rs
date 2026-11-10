@@ -246,7 +246,21 @@ fn dump_require_clean_target(require: &SceneDumpRequireEntry) -> Option<Executio
     }
 }
 
-fn audit_row_clean_state(
+pub(super) fn audit_row_clean_state(
+    row: &SceneRow,
+    clean_target: Option<&ExecutionCleanTarget>,
+) -> AuditRowCleanState {
+    let eligibility = audit_row_clean_eligibility(row, clean_target);
+    if eligibility == AuditRowCleanState::Unsupported {
+        return eligibility;
+    }
+    if check_row_mutation(Some(row), RowMutation::SceneEdit).is_err() {
+        return AuditRowCleanState::Busy;
+    }
+    eligibility
+}
+
+pub(super) fn audit_row_clean_eligibility(
     row: &SceneRow,
     clean_target: Option<&ExecutionCleanTarget>,
 ) -> AuditRowCleanState {
@@ -254,11 +268,10 @@ fn audit_row_clean_state(
         None => AuditRowCleanState::Unsupported,
         Some(target) if row.pending_clean_targets.contains(target) => AuditRowCleanState::Staged,
         Some(_)
-            if row.is_processing()
-                || matches!(
-                    row.dirty_kind,
-                    Some(DirtyKind::Replace | DirtyKind::ToAscii)
-                ) =>
+            if matches!(
+                row.dirty_kind,
+                Some(DirtyKind::Replace | DirtyKind::ToAscii)
+            ) =>
         {
             AuditRowCleanState::BlockedByOtherDirty
         }
@@ -2203,6 +2216,29 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
         BannerMessage::SelectedFilesNeedReaudit => i18n.text("banner.selected_files_need_reaudit"),
         BannerMessage::Raw(message) => message.clone(),
         BannerMessage::SaveInProgress => i18n.text("banner.save_in_progress"),
+        BannerMessage::RowMutationBusy { name, operation } => i18n.format(
+            "banner.row_mutation_busy",
+            &[
+                ("name", name.clone()),
+                ("operation", operation_label(i18n, *operation)),
+            ],
+        ),
+        BannerMessage::RowMutationMissing => i18n.text("banner.row_mutation_missing"),
+        BannerMessage::BusyRowsSkipped { count, saving } => {
+            let skipped = i18n.format(
+                "banner.replace_busy_skipped",
+                &[("count", count.to_string())],
+            );
+            if *saving {
+                format!("{} {skipped}", i18n.text("banner.save_in_progress"))
+            } else {
+                skipped
+            }
+        }
+        BannerMessage::AnalysisStagedPreserved { name } => i18n.format(
+            "banner.analysis_staged_preserved",
+            &[("name", name.clone())],
+        ),
         BannerMessage::NothingDirtyToSave => i18n.text("banner.nothing_dirty_to_save"),
         BannerMessage::NothingSelectedDirtyToSave => {
             i18n.text("banner.nothing_selected_dirty_to_save")

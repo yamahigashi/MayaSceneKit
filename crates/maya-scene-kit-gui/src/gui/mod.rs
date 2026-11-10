@@ -229,6 +229,12 @@ struct GuiShell {
     path_order_snapshot: Option<PathOrderSnapshot>,
     audit_sort: AuditTableSort,
     next_row_id: u64,
+    next_row_job_id: u64,
+    audit_refresh_batch_depth: usize,
+    mutation_banner_depth: usize,
+    audit_refresh_pending: bool,
+    #[cfg(test)]
+    audit_refresh_count: usize,
     selection_anchor: Option<usize>,
     selected_auto_analyze_generation: u64,
     workspace_auto_analyze_generation: u64,
@@ -777,6 +783,7 @@ enum AuditRowCleanState {
     Available,
     Staged,
     BlockedByOtherDirty,
+    Busy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -806,7 +813,7 @@ struct SceneRow {
     modified: Option<SystemTime>,
     selected: bool,
     status: FileStatus,
-    busy: Option<RowOperation>,
+    busy: Option<(RowOperation, u64)>,
     findings: usize,
     scene_workspace_root: Option<PathBuf>,
     audit_report: Option<AuditReport>,
@@ -1076,24 +1083,58 @@ enum RowOperation {
 }
 
 enum BannerMessage {
-    AllowlistAdded { count: usize },
+    AllowlistAdded {
+        count: usize,
+    },
     AllowlistAlreadyPresent,
-    AllowlistRemoved { label: String },
+    AllowlistRemoved {
+        label: String,
+    },
     AllowlistFileChanged,
-    AllowlistReadFailed { path: PathBuf, error: String },
-    AllowlistWriteFailed { path: PathBuf, error: String },
-    AllowlistsReloaded { count: usize, stale_rows: usize },
+    AllowlistReadFailed {
+        path: PathBuf,
+        error: String,
+    },
+    AllowlistWriteFailed {
+        path: PathBuf,
+        error: String,
+    },
+    AllowlistsReloaded {
+        count: usize,
+        stale_rows: usize,
+    },
     PersistFailed(String),
     CachePurged,
-    WorkspaceLoaded { count: usize, path: PathBuf },
-    AnalyzeCompleted { name: String, elapsed: Duration },
-    WorkspaceAutoAnalyzeCompleted { count: usize, elapsed: Duration },
+    WorkspaceLoaded {
+        count: usize,
+        path: PathBuf,
+    },
+    AnalyzeCompleted {
+        name: String,
+        elapsed: Duration,
+    },
+    WorkspaceAutoAnalyzeCompleted {
+        count: usize,
+        elapsed: Duration,
+    },
     WorkspaceCleared,
     InlinePathEditFailed(String),
     SelectFilesFirst,
     SelectedFilesNeedReaudit,
     Raw(String),
     SaveInProgress,
+    RowMutationBusy {
+        name: String,
+        operation: RowOperation,
+    },
+    RowMutationMissing,
+    BusyRowsSkipped {
+        count: usize,
+        saving: bool,
+    },
+    AnalysisStagedPreserved {
+        name: String,
+    },
     NothingDirtyToSave,
     NothingSelectedDirtyToSave,
     NothingToUndo,
@@ -1212,7 +1253,7 @@ impl SceneRow {
     fn status_label(&self, i18n: &I18n) -> String {
         self.busy.map_or_else(
             || self.status.label(i18n),
-            |operation| operation_label(i18n, operation),
+            |(operation, _)| operation_label(i18n, operation),
         )
     }
 
@@ -1443,6 +1484,21 @@ impl SceneRow {
             || !self.pending_path_owner_delete_targets.is_empty()
     }
 
+    fn has_staged_edits(&self) -> bool {
+        self.dirty()
+            || self.dirty_kind.is_some()
+            || self.clean_preview.is_some()
+            || self.replace_preview.is_some()
+            || self.path_owner_delete_preview.is_some()
+            || self.ascii_report.is_some()
+            || self.staged_audit_mode.is_some()
+            || self.staged_audit_report.is_some()
+            || self.staged_audit_plan_fingerprint.is_some()
+            || self.staged_paths_report.is_some()
+            || self.staged_dump_report.is_some()
+            || self.staged_source_bytes.is_some()
+    }
+
     fn effective_findings_count(&self) -> usize {
         self.staged_audit_report
             .as_ref()
@@ -1538,7 +1594,8 @@ impl SceneRow {
         }
     }
 
-    fn apply_edit_state(&mut self, state: &SceneRowEditState) {
+    fn apply_edit_state(&mut self, state: &SceneRowEditState) -> Result<(), MutateBlocked> {
+        check_row_mutation(Some(self), RowMutation::HistoryRestore)?;
         self.set_audit_report(state.audit_report.clone(), state.audit_file_state);
         self.status = state.status.clone();
         self.findings = state.findings;
@@ -1562,6 +1619,7 @@ impl SceneRow {
         self.replace_artifact_generation = state.replace_artifact_generation;
         self.sync_findings_count();
         self.refresh_missing_path_count_cache();
+        Ok(())
     }
 }
 
@@ -1640,6 +1698,8 @@ mod ignore_dialog;
 mod jobs;
 mod max_bytes_dialog;
 mod menu;
+mod mutation;
+use mutation::*;
 mod path;
 mod path_edit;
 mod persist_flush;

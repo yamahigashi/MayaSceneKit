@@ -42,6 +42,7 @@ impl GuiShell {
             for row in &mut self.rows {
                 if row.audit_report.is_some() || row.staged_audit_report.is_some() {
                     row.mark_analysis_stale();
+                    // This derived-information update is outside the scene mutation gate.
                     row.staged_audit_mode = None;
                     stale_rows += 1;
                 }

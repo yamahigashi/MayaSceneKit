@@ -303,130 +303,143 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let total = targets.len();
-        if total == 0 {
-            return;
-        }
+        let row_ids = targets.iter().map(|target| target.row_id).collect();
+        self.with_mutation_targets(row_ids, RowMutation::PathEdit, cx, |shell, indices, cx| {
+            let accepted = shell
+                .row_ids_for_indices(&indices)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let targets = targets
+                .into_iter()
+                .filter(|target| accepted.contains(&target.row_id))
+                .collect::<Vec<_>>();
 
-        let mut row_targets = BTreeMap::<usize, BTreeMap<usize, String>>::new();
-        for target in targets {
-            let Some(hit) = hits.get(&path_search_hit_key(&target.file_name)) else {
-                continue;
-            };
-            let Some(row_index) = self.index_of_row_id(target.row_id) else {
-                continue;
-            };
-            let Some(row) = self.rows.get(row_index) else {
-                continue;
-            };
-            if !path_value_edit_supported_for_entry(row, target.entry_index) {
-                continue;
-            }
-            let Some(current_value) = effective_path_value_for_entry(row, target.entry_index)
-            else {
-                continue;
-            };
-            if current_value != target.before_value {
-                continue;
-            }
-            if missing_path_entry_file_name(row, target.entry_index).as_deref()
-                != Some(target.file_name.as_str())
-            {
-                continue;
+            let total = targets.len();
+            if total == 0 {
+                return;
             }
 
-            let value_style = path_value_style_for_entry(row, target.entry_index, &current_value);
-            let next_value = write_back_selected_scene_path(
-                hit,
-                row.scene_workspace_root.as_deref(),
-                value_style,
-            );
-            if next_value == current_value {
-                continue;
-            }
-            row_targets
-                .entry(row_index)
-                .or_default()
-                .insert(target.entry_index, next_value);
-        }
-
-        let found = row_targets.values().map(BTreeMap::len).sum::<usize>();
-        if row_targets.is_empty() {
-            self.status_message = Some(BannerMessage::Raw(self.i18n().format(
-                "banner.path_search_no_hits",
-                &[("total", total.to_string())],
-            )));
-            self.record_job(
-                "path-search",
-                search_root,
-                None,
-                format!(
-                    "0/{total} path(s) staged in {}",
-                    format_elapsed_seconds(elapsed)
-                ),
-                false,
-            );
-            self.persist();
-            cx.notify();
-            return;
-        }
-
-        let planned_edits = row_targets
-            .into_iter()
-            .map(|(row_index, overrides)| {
-                let mut next_overrides = self.rows[row_index].path_overrides.clone();
-                for (entry_index, next_value) in overrides {
-                    next_overrides.insert(entry_index, next_value);
+            let mut row_targets = BTreeMap::<usize, BTreeMap<usize, String>>::new();
+            for target in targets {
+                let Some(hit) = hits.get(&path_search_hit_key(&target.file_name)) else {
+                    continue;
+                };
+                let Some(row_index) = shell.index_of_row_id(target.row_id) else {
+                    continue;
+                };
+                let Some(row) = shell.rows.get(row_index) else {
+                    continue;
+                };
+                if !path_value_edit_supported_for_entry(row, target.entry_index) {
+                    continue;
                 }
-                (row_index, next_overrides)
-            })
-            .filter(|(row_index, next_overrides)| {
-                self.rows[*row_index].path_overrides != *next_overrides
-            })
-            .collect::<Vec<_>>();
+                let Some(current_value) = effective_path_value_for_entry(row, target.entry_index)
+                else {
+                    continue;
+                };
+                if current_value != target.before_value {
+                    continue;
+                }
+                if missing_path_entry_file_name(row, target.entry_index).as_deref()
+                    != Some(target.file_name.as_str())
+                {
+                    continue;
+                }
 
-        if planned_edits.is_empty() {
-            self.status_message = Some(BannerMessage::Raw(self.i18n().format(
-                "banner.path_search_no_hits",
-                &[("total", total.to_string())],
+                let value_style =
+                    path_value_style_for_entry(row, target.entry_index, &current_value);
+                let next_value = write_back_selected_scene_path(
+                    hit,
+                    row.scene_workspace_root.as_deref(),
+                    value_style,
+                );
+                if next_value == current_value {
+                    continue;
+                }
+                row_targets
+                    .entry(row_index)
+                    .or_default()
+                    .insert(target.entry_index, next_value);
+            }
+
+            let found = row_targets.values().map(BTreeMap::len).sum::<usize>();
+            if row_targets.is_empty() {
+                shell.status_message = Some(BannerMessage::Raw(shell.i18n().format(
+                    "banner.path_search_no_hits",
+                    &[("total", total.to_string())],
+                )));
+                shell.record_job(
+                    "path-search",
+                    search_root,
+                    None,
+                    format!(
+                        "0/{total} path(s) staged in {}",
+                        format_elapsed_seconds(elapsed)
+                    ),
+                    false,
+                );
+                shell.persist();
+                cx.notify();
+                return;
+            }
+
+            let planned_edits = row_targets
+                .into_iter()
+                .map(|(row_index, overrides)| {
+                    let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                    for (entry_index, next_value) in overrides {
+                        next_overrides.insert(entry_index, next_value);
+                    }
+                    (row_index, next_overrides)
+                })
+                .filter(|(row_index, next_overrides)| {
+                    shell.rows[*row_index].path_overrides != *next_overrides
+                })
+                .collect::<Vec<_>>();
+
+            if planned_edits.is_empty() {
+                shell.status_message = Some(BannerMessage::Raw(shell.i18n().format(
+                    "banner.path_search_no_hits",
+                    &[("total", total.to_string())],
+                )));
+                shell.record_job(
+                    "path-search",
+                    search_root,
+                    None,
+                    format!(
+                        "0/{total} path(s) staged in {}",
+                        format_elapsed_seconds(elapsed)
+                    ),
+                    false,
+                );
+                shell.persist();
+                cx.notify();
+                return;
+            }
+
+            if let Err(err) = shell.apply_path_override_updates(planned_edits, window, cx) {
+                shell.status_message = Some(BannerMessage::InlinePathEditFailed(err));
+                return;
+            }
+
+            shell.status_message = Some(BannerMessage::Raw(shell.i18n().format(
+                "banner.path_search_completed",
+                &[("found", found.to_string()), ("total", total.to_string())],
             )));
-            self.record_job(
+            shell.record_job(
                 "path-search",
                 search_root,
                 None,
                 format!(
-                    "0/{total} path(s) staged in {}",
+                    "{found}/{total} path(s) staged in {}",
                     format_elapsed_seconds(elapsed)
                 ),
                 false,
             );
-            self.persist();
+            shell.refresh_file_table(cx);
+            shell.persist();
             cx.notify();
-            return;
-        }
-
-        if let Err(err) = self.apply_path_override_updates(planned_edits, window, cx) {
-            self.status_message = Some(BannerMessage::InlinePathEditFailed(err));
-            return;
-        }
-
-        self.status_message = Some(BannerMessage::Raw(self.i18n().format(
-            "banner.path_search_completed",
-            &[("found", found.to_string()), ("total", total.to_string())],
-        )));
-        self.record_job(
-            "path-search",
-            search_root,
-            None,
-            format!(
-                "{found}/{total} path(s) staged in {}",
-                format_elapsed_seconds(elapsed)
-            ),
-            false,
-        );
-        self.refresh_file_table(cx);
-        self.persist();
-        cx.notify();
+        });
     }
 }
 
