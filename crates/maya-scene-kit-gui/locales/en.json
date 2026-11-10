@@ -356,5 +356,8 @@
   "allowlist_manager.also_app_tag": "also app",
   "allowlist_manager.remove_warning": "Removing this entry stops allowing its codes unless another entry also lists them. Affected files are re-audited.",
   "allowlist_manager.empty_user": "No entries. Use \"Allow this threat…\" in the audit details to add one.",
-  "allowlist_manager.copy_hash": "Copy hash"
+  "allowlist_manager.copy_hash": "Copy hash",
+  "banner.missing_staged_artifact": "missing staged artifact for save",
+  "banner.edit_rows_skipped": "Skipped {busy} busy row(s), {staged} row(s) with staged edits, {stale} row(s) with a stale preview, {missing_artifacts} missing artifact row(s), and {skipped} skipped row(s). First rejected row: {name}.",
+  "banner.edit_rows_changed": "{count} row(s) changed."
 }

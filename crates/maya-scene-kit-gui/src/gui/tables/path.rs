@@ -469,7 +469,7 @@ impl TableDelegate for PathTableDelegate {
                     .iter()
                     .find(|row| row.id == *row_id)
                     .is_some_and(|row| {
-                        row.path_overrides.contains_key(entry_index)
+                        row.staged.overrides().contains_key(entry_index)
                             || path_owner_delete_staged_for_entry(row, *entry_index)
                     })
             })

@@ -390,6 +390,7 @@ impl GuiShell {
             next_row_job_id: 1,
             audit_refresh_batch_depth: 0,
             mutation_banner_depth: 0,
+            mutation_rejected_rows: BTreeSet::new(),
             audit_refresh_pending: false,
             #[cfg(test)]
             audit_refresh_count: 0,

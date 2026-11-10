@@ -256,6 +256,13 @@ impl GuiShell {
                 cx.notify();
                 return false;
             }
+            if matches!(self.rows[row_index].staged, Staged::Replace { .. }) {
+                self.spawn_replace_artifact_refresh(
+                    transition.row_id,
+                    self.rows[row_index].replace_generation,
+                    cx,
+                );
+            }
             // A report restored from history may predate the current allowlist.
             if self.rows[row_index].audit_report.is_some()
                 && self.rows[row_index].audit_plan_fingerprint.as_deref()
@@ -363,17 +370,6 @@ impl GuiShell {
             .collect()
     }
 
-    pub(super) fn ready_selected_indices(&self) -> Vec<usize> {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, row)| {
-                (row.selected && self.can_mutate(row.id, RowMutation::SceneEdit).is_ok())
-                    .then_some(ix)
-            })
-            .collect()
-    }
-
     pub(super) fn audit_visible_position_for_key(&self, key: &AuditResultRowKey) -> Option<usize> {
         self.audit_rows.iter().position(|row| &row.key == key)
     }
@@ -383,22 +379,24 @@ impl GuiShell {
             .iter()
             .enumerate()
             .filter_map(|(ix, row)| {
-                (row.dirty() && self.can_mutate(row.id, RowMutation::SceneEdit).is_ok())
-                    .then_some(ix)
+                (row.dirty()
+                    && self
+                        .can_mutate(row.id, RowMutation::Job(RowOperation::Save))
+                        .is_ok())
+                .then_some(ix)
             })
             .collect()
     }
 
     pub(super) fn save_target_path_for_row(&self, index: usize) -> Option<PathBuf> {
         let row = self.rows.get(index)?;
-        match row.dirty_kind? {
-            DirtyKind::Replace => Some(row.path.clone()),
-            DirtyKind::SceneEdits => row
-                .dirty_artifact
+        match &row.staged {
+            Staged::None => None,
+            Staged::Replace { .. } => Some(row.path.clone()),
+            Staged::SceneEdits { artifact, .. } => artifact
                 .as_ref()
                 .map(|artifact| artifact.input_path.clone()),
-            DirtyKind::ToAscii => row
-                .dirty_artifact
+            Staged::ToAscii { artifact, .. } => artifact
                 .as_ref()
                 .map(|artifact| artifact.suggested_output_path.clone()),
         }
@@ -693,6 +691,13 @@ impl GuiShell {
             };
             let message = error.to_string();
             let row_id = job.0;
+            if matches!(
+                operation,
+                RowOperation::Clean | RowOperation::DeleteOwnerNodes
+            ) {
+                shell.rows[index].rollback_restage();
+                shell.refresh_row_path_resolution_state(index);
+            }
             shell.rows[index].status = FileStatus::Error(message.clone());
             if matches!(operation, RowOperation::Analyze) {
                 shell.record_auto_analyze_job(
@@ -717,7 +722,7 @@ impl GuiShell {
             }
             shell.refresh_audit_table(cx);
             if !matches!(operation, RowOperation::Analyze) {
-                shell.status_message = Some(BannerMessage::Raw(message));
+                shell.report_edit_detail(message);
             }
             cx.notify();
         })
@@ -763,6 +768,7 @@ impl GuiShell {
             return;
         };
 
+        shell.rows[index].restage_rollback = None;
         match result {
             RowJobResult::Analyze(result) => {
                 if shell.rows[index].has_staged_edits() {
@@ -793,7 +799,7 @@ impl GuiShell {
                     audit_snapshot,
                     audit_mode,
                     elapsed,
-                } = result;
+                } = *result;
                 shell.prune_edit_history_for_row_ids(&[row_id]);
                 let findings = audit_report.finding_count() - audit_report.allowed_finding_count();
                 let path_count = paths_report
@@ -822,23 +828,9 @@ impl GuiShell {
                 shell.rows[index].paths_report = paths_report;
                 shell.rows[index].dump_report = dump_report;
                 shell.rows[index].analyzed_audit_mode = Some(audit_mode);
-                shell.rows[index].pending_clean_targets.clear();
-                shell.rows[index].pending_clean_source = None;
-                shell.rows[index].path_overrides.clear();
-                shell.rows[index].replace_preview = None;
+                shell.rows[index].staged = Staged::None;
+                shell.rows[index].applied_replace_preview = None;
                 shell.rows[index].replace_changes = None;
-                shell.rows[index].path_owner_delete_preview = None;
-                shell.rows[index].pending_path_owner_delete_targets.clear();
-                shell.rows[index].staged_audit_mode = None;
-                shell.rows[index].staged_audit_report = None;
-                shell.rows[index].staged_audit_plan_fingerprint = None;
-                shell.rows[index].staged_paths_report = None;
-                shell.rows[index].staged_dump_report = None;
-                shell.rows[index].staged_source_bytes = None;
-                shell.rows[index].dirty_artifact = None;
-                shell.rows[index].clean_preview = None;
-                shell.rows[index].ascii_report = None;
-                shell.rows[index].dirty_kind = None;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].status = row_status;
                 shell.rows[index].sync_findings_count();
@@ -866,6 +858,7 @@ impl GuiShell {
             RowJobResult::SceneEdits {
                 clean_source,
                 replace_changes,
+                replace_preview,
                 audit_plan_fingerprint,
                 staged,
                 audit_mode,
@@ -879,46 +872,37 @@ impl GuiShell {
                 let deleted = staged.preview.deleted_path_owner_targets.len();
                 shell.rows[index].findings = staged_audit_report.finding_count()
                     - staged_audit_report.allowed_finding_count();
-                shell.rows[index].dirty_artifact = Some(staged.artifact);
-                shell.rows[index].dirty_kind = Some(DirtyKind::SceneEdits);
-                shell.rows[index].clean_preview = Some(ExecutionCleanPreview {
-                    input_path: staged.preview.input_path.clone(),
-                    scene_format: staged.preview.scene_format,
-                    operation_mode: staged.preview.operation_mode,
-                    validation_state: staged.preview.validation_state,
-                    cleaned_targets: staged.preview.cleaned_targets.clone(),
-                    removed_script_nodes: staged.preview.removed_script_nodes.clone(),
-                    removed_plugin_requires: staged.preview.removed_plugin_requires.clone(),
-                });
-                shell.rows[index].path_owner_delete_preview = Some(PathOwnerDeletePreview {
-                    input_path: staged.preview.input_path.clone(),
-                    scene_format: staged.preview.scene_format,
-                    operation_mode: staged.preview.operation_mode,
-                    validation_state: staged.preview.validation_state,
-                    deleted_targets: staged.preview.deleted_path_owner_targets.clone(),
-                });
-                shell.rows[index].pending_clean_targets =
-                    staged.preview.cleaned_targets.iter().cloned().collect();
-                shell.rows[index].pending_clean_source = clean_source
-                    .filter(|_| !shell.rows[index].pending_clean_targets.is_empty());
-                shell.rows[index].pending_path_owner_delete_targets = staged
-                    .preview
-                    .deleted_path_owner_targets
-                    .iter()
-                    .cloned()
-                    .collect();
-                shell.rows[index].staged_audit_mode = Some(audit_mode);
-                shell.rows[index].staged_audit_report = Some(staged_audit_report);
-                if audit_plan_fingerprint != shell.audit_plan_fingerprint {
-                    shell.rows[index].mark_analysis_stale();
-                    shell.rows[index].staged_audit_mode = None;
-                }
-                shell.rows[index].staged_audit_plan_fingerprint = Some(audit_plan_fingerprint);
-                shell.rows[index].staged_paths_report = Some(staged_paths_report);
-                shell.rows[index].staged_dump_report = Some(staged_dump_report);
-                shell.rows[index].staged_source_bytes = Some(staged_source_bytes);
-                shell.rows[index].replace_preview = None;
-                shell.rows[index].ascii_report = None;
+                let current_plan = audit_plan_fingerprint == shell.audit_plan_fingerprint;
+                if !current_plan { shell.rows[index].mark_analysis_stale(); }
+                shell.rows[index].staged = Staged::SceneEdits {
+                    overrides: shell.rows[index].staged.overrides().clone(),
+                    artifact: Some(staged.artifact),
+                    clean: CleanEdits {
+                        targets: staged.preview.cleaned_targets.iter().cloned().collect(),
+                        source: clean_source.filter(|_| !staged.preview.cleaned_targets.is_empty()),
+                        preview: Some(ExecutionCleanPreview {
+                            input_path: staged.preview.input_path.clone(), scene_format: staged.preview.scene_format,
+                            operation_mode: staged.preview.operation_mode, validation_state: staged.preview.validation_state,
+                            cleaned_targets: staged.preview.cleaned_targets.clone(),
+                            removed_script_nodes: staged.preview.removed_script_nodes.clone(),
+                            removed_plugin_requires: staged.preview.removed_plugin_requires.clone(),
+                        }),
+                    },
+                    owner_delete: OwnerEdits {
+                        targets: staged.preview.deleted_path_owner_targets.iter().cloned().collect(),
+                        preview: Some(PathOwnerDeletePreview {
+                            input_path: staged.preview.input_path.clone(), scene_format: staged.preview.scene_format,
+                            operation_mode: staged.preview.operation_mode, validation_state: staged.preview.validation_state,
+                            deleted_targets: staged.preview.deleted_path_owner_targets.clone(),
+                        }),
+                    },
+                    staged_reports: Box::new(StagedReports {
+                        audit_mode: current_plan.then_some(audit_mode), audit_report: Some(staged_audit_report),
+                        audit_plan_fingerprint: Some(audit_plan_fingerprint), paths_report: Some(staged_paths_report),
+                        dump_report: Some(staged_dump_report), source_bytes: Some(staged_source_bytes),
+                    }),
+                };
+                shell.rows[index].applied_replace_preview = replace_preview;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].status = FileStatus::Dirty;
                 shell.rows[index].sync_findings_count();
@@ -939,11 +923,9 @@ impl GuiShell {
             }
             RowJobResult::ToAscii { report, artifact } => {
                 shell.rows[index].replace_changes = None;
-                shell.rows[index].dirty_artifact = Some(artifact);
-                shell.rows[index].dirty_kind = Some(DirtyKind::ToAscii);
-                shell.rows[index].ascii_report = Some(report);
-                shell.rows[index].path_owner_delete_preview = None;
-                shell.rows[index].staged_audit_mode = None;
+                shell.rows[index].staged = Staged::ToAscii { report: Some(report), artifact: Some(artifact) };
+                shell.rows[index].applied_replace_preview = None;
+                shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].status = FileStatus::Dirty;
                 shell.record_job(
                     operation_key(operation),
@@ -957,63 +939,29 @@ impl GuiShell {
                 }
             }
             RowJobResult::Save {
-                observation_error,
-                saved_paths_report,
-                output_path,
-                audit_file_state,
-                replace_changes,
-                replace_preview,
+                promotion, observation_error, saved_paths_report, output_path, audit_file_state,
+                replace_changes, replace_preview,
             } => {
-                if let Some(changes) = replace_changes { shell.rows[index].replace_changes = Some(changes); }
-                if let Some(preview) = replace_preview { shell.rows[index].replace_preview = Some(preview); }
+                shell.rows[index].replace_changes = replace_changes;
+                shell.rows[index].applied_replace_preview = replace_preview;
                 shell.prune_edit_history_for_row_ids(&[row_id]);
-                let dirty_kind = shell.rows[index].dirty_kind;
-                if dirty_kind == Some(DirtyKind::SceneEdits) {
-                    if shell.rows[index].staged_audit_plan_fingerprint.as_deref()
-                        == Some(shell.audit_plan_fingerprint.as_str())
-                    {
-                        if let Some(report) = shell.rows[index].staged_audit_report.take() {
-                            shell.rows[index].set_audit_report(Some(report), audit_file_state);
-                            shell.rows[index].audit_plan_fingerprint =
-                                shell.rows[index].staged_audit_plan_fingerprint.clone();
-                        }
-                        if let Some(audit_mode) = shell.rows[index].staged_audit_mode.take() {
-                            shell.rows[index].analyzed_audit_mode = Some(audit_mode);
-                        }
-                    } else {
-                        shell.rows[index].mark_analysis_stale();
+                match promotion {
+                    SavePromotion::SceneEdits(reports) => {
+                        if reports.audit_plan_fingerprint.as_deref() == Some(shell.audit_plan_fingerprint.as_str()) {
+                            if let Some(report) = reports.audit_report {
+                                shell.rows[index].set_audit_report(Some(report), audit_file_state);
+                                shell.rows[index].audit_plan_fingerprint = reports.audit_plan_fingerprint;
+                            }
+                            if let Some(mode) = reports.audit_mode { shell.rows[index].analyzed_audit_mode = Some(mode); }
+                        } else { shell.rows[index].mark_analysis_stale(); }
+                        if let Some(report) = reports.dump_report { shell.rows[index].dump_report = Some(report); }
                     }
-                    if let Some(report) = shell.rows[index].staged_paths_report.take() {
-                        shell.rows[index].paths_report = Some(report);
-                    }
-                    if let Some(report) = shell.rows[index].staged_dump_report.take() {
-                        shell.rows[index].dump_report = Some(report);
-                    }
+                    SavePromotion::Unanalyzed => shell.rows[index].mark_analysis_stale(),
                 }
-                if saved_paths_report.is_none() {
-                    shell.rows[index].mark_analysis_stale();
-                }
+                if saved_paths_report.is_none() { shell.rows[index].mark_analysis_stale(); }
                 shell.rows[index].paths_report = saved_paths_report;
-                shell.rows[index].dirty_artifact = None;
+                shell.rows[index].staged = Staged::None;
                 shell.rows[index].replace_artifact_generation = None;
-                shell.rows[index].dirty_kind = None;
-                shell.rows[index].pending_clean_targets.clear();
-                shell.rows[index].pending_clean_source = None;
-                shell.rows[index].pending_path_owner_delete_targets.clear();
-                shell.rows[index].path_overrides.clear();
-                shell.rows[index].replace_preview = None;
-                shell.rows[index].path_owner_delete_preview = None;
-                shell.rows[index].staged_audit_mode = None;
-                shell.rows[index].staged_audit_report = None;
-                shell.rows[index].staged_audit_plan_fingerprint = None;
-                shell.rows[index].staged_paths_report = None;
-                shell.rows[index].staged_dump_report = None;
-                shell.rows[index].staged_source_bytes = None;
-                shell.rows[index].clean_preview = None;
-                shell.rows[index].ascii_report = None;
-                if dirty_kind != Some(DirtyKind::SceneEdits) {
-                    shell.rows[index].mark_analysis_stale();
-                }
                 shell.rows[index].sync_findings_count();
                 shell.rows[index].status = FileStatus::Saved;
                 shell.refresh_row_path_resolution_state(index);
@@ -1071,6 +1019,15 @@ impl GuiShell {
         }
         let index = self.index_of_row_id(row_id)?;
         let job_id = self.next_row_job_id();
+        if matches!(
+            operation,
+            RowOperation::Clean | RowOperation::DeleteOwnerNodes
+        ) {
+            self.rows[index].remember_restage();
+            if let Staged::SceneEdits { artifact, .. } = &mut self.rows[index].staged {
+                *artifact = None;
+            }
+        }
 
         let save_output_path = if matches!(operation, RowOperation::Save) {
             self.save_target_path_for_row(index)
@@ -1211,17 +1168,6 @@ impl GuiShell {
         let Some(row_indices) = self.selected_indices_if_clicked_row_selected(row_id) else {
             return;
         };
-        let row_indices = row_indices
-            .into_iter()
-            .filter(|&row_index| {
-                self.rows.get(row_index).is_some_and(|row| {
-                    !matches!(
-                        row.dirty_kind,
-                        Some(DirtyKind::Replace | DirtyKind::ToAscii)
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
         let targets_by_row = self.file_threat_clean_targets_by_row(row_indices);
         if !bulk_enabled(targets_by_row.len()) {
             return;
@@ -1239,26 +1185,24 @@ impl GuiShell {
         let Some(row_indices) = self.context_indices_from_row(row_id) else {
             return;
         };
-        let row_indices = row_indices
-            .into_iter()
-            .filter(|&row_index| {
-                self.rows.get(row_index).is_some_and(|row| {
-                    !matches!(
-                        row.dirty_kind,
-                        Some(DirtyKind::Replace | DirtyKind::ToAscii)
-                    ) && row.display_dump_report().is_some_and(|report| {
-                        report
-                            .script_entries
-                            .iter()
-                            .any(|entry| entry.name == UI_CONFIGURATION_SCRIPT_NODE_NAME)
-                    }) && !row
-                        .pending_clean_targets
-                        .contains(&ExecutionCleanTarget::ScriptNode {
-                            node_name: UI_CONFIGURATION_SCRIPT_NODE_NAME.to_string(),
-                        })
+        let row_indices =
+            row_indices
+                .into_iter()
+                .filter(|&row_index| {
+                    self.rows.get(row_index).is_some_and(|row| {
+                        row.display_dump_report().is_some_and(|report| {
+                            report
+                                .script_entries
+                                .iter()
+                                .any(|entry| entry.name == UI_CONFIGURATION_SCRIPT_NODE_NAME)
+                        }) && !row.staged.clean().targets.contains(
+                            &ExecutionCleanTarget::ScriptNode {
+                                node_name: UI_CONFIGURATION_SCRIPT_NODE_NAME.to_string(),
+                            },
+                        )
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>();
         if !bulk_enabled(row_indices.len()) {
             return;
         }
@@ -1339,7 +1283,7 @@ impl GuiShell {
                 };
                 let edit_sequence = shell.begin_edit_transaction(&row_indices);
                 for row_index in row_indices {
-                    let mut next_targets = shell.rows[row_index].pending_clean_targets.clone();
+                    let mut next_targets = shell.rows[row_index].staged.clean().targets.clone();
                     next_targets.insert(target.clone());
                     shell.stage_clean_targets_for_row(
                         row_index,
@@ -1364,7 +1308,7 @@ impl GuiShell {
                 if !self.rows[row_index].analysis_current_for(self.state.audit_mode) {
                     return None;
                 }
-                let mut next_targets = self.rows[row_index].pending_clean_targets.clone();
+                let mut next_targets = self.rows[row_index].staged.clean().targets.clone();
                 next_targets.extend(clean_targets_for_threat_findings(&self.rows[row_index]));
                 (!next_targets.is_empty()).then_some((row_index, next_targets))
             })
@@ -1450,23 +1394,17 @@ impl GuiShell {
     }
 
     pub(super) fn run_save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_mutation_targets(
-            self.rows
-                .iter()
-                .filter(|row| row.dirty())
-                .map(|row| row.id)
-                .collect(),
-            RowMutation::Job(RowOperation::Save),
-            cx,
-            |shell, indices, cx| {
-                let targets = indices;
-                if !save_enabled(targets.len()) {
-                    shell.status_message = Some(BannerMessage::NothingDirtyToSave);
-                    return;
-                }
-                shell.confirm_save_all(targets, window, cx);
-            },
-        );
+        let targets = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.dirty().then_some(index))
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            self.status_message = Some(BannerMessage::NothingDirtyToSave);
+            return;
+        }
+        self.confirm_save_all(targets, window, cx);
     }
 
     pub(super) fn run_context_save_from_row(
@@ -1513,7 +1451,15 @@ impl GuiShell {
     ) {
         let targets = targets
             .into_iter()
-            .filter(|index| self.rows.get(*index).is_some_and(|row| row.dirty()))
+            .filter(|index| {
+                self.rows.get(*index).is_some_and(|row| {
+                    row.dirty()
+                        || matches!(
+                            row.staged,
+                            Staged::SceneEdits { .. } | Staged::ToAscii { .. }
+                        )
+                })
+            })
             .collect::<Vec<_>>();
         self.with_mutation_targets(
             self.row_ids_for_indices(&targets),
@@ -1521,22 +1467,29 @@ impl GuiShell {
             cx,
             |shell, targets, cx| {
                 let backup_location = shell.state.backup_location;
+                let mut missing = 0;
                 for index in targets {
                     let Some(path) = shell.save_target_path_for_row(index) else {
+                        let message = shell.i18n().text("banner.missing_staged_artifact");
+                        shell.rows[index].status = FileStatus::Error(message.clone());
+                        shell.record_job(operation_key(RowOperation::Save), shell.rows[index].path.clone(), None, message, true);
+                        missing += 1;
                         continue;
                     };
                     let row_id = shell.rows[index].id;
                     let row = &shell.rows[index];
-                    let dirty_kind = row.dirty_kind;
-                    let artifact = row.dirty_artifact.clone();
+                    let is_replace = matches!(row.staged, Staged::Replace { .. });
+                    let is_ascii = matches!(row.staged, Staged::ToAscii { .. });
+                    let promotion = row.save_promotion();
+                    let artifact = row.staged.artifact().clone();
                     let replace_changes = row.replace_changes.clone();
-                    let replace_preview = row.replace_preview.clone();
+                    let replace_preview = row.replace_preview().clone();
                     let artifact_current = row.replace_artifact_is_current();
                     let report = row.paths_report.clone();
-                    let staged_paths_report = row.staged_paths_report.as_ref().filter(|_| {
-                        dirty_kind == Some(DirtyKind::SceneEdits)
+                    let staged_paths_report = row.staged.reports().paths_report.as_ref().filter(|_| {
+                        matches!(row.staged, Staged::SceneEdits { .. })
                             && artifact.as_ref().is_some_and(|artifact| {
-                                row.staged_source_bytes.as_deref() == Some(artifact.bytes.as_slice())
+                                row.staged.reports().source_bytes.as_deref() == Some(artifact.bytes.as_slice())
                             })
                     }).cloned();
                     let overrides = replace_overrides_for_row(row).unwrap_or_default();
@@ -1551,8 +1504,7 @@ impl GuiShell {
                 move |_input_path| {
                     let mut replace_changes = replace_changes;
                     let mut replace_preview = replace_preview;
-                    let artifact = match dirty_kind {
-                        Some(DirtyKind::Replace) => {
+                    let artifact = if is_replace {
                             if artifact_current {
                                 artifact
                                     .ok_or_else(|| "missing staged replace artifact".to_string())?
@@ -1566,14 +1518,12 @@ impl GuiShell {
                                 replace_preview = Some(staged.preview);
                                 staged.artifact
                             }
-                        }
-                        Some(DirtyKind::SceneEdits) | Some(DirtyKind::ToAscii) => artifact
-                            .ok_or_else(|| "missing staged artifact for save".to_string())?,
-                        None => return Err("missing dirty kind for save".to_string()),
+                    } else {
+                        artifact.ok_or_else(|| "missing staged artifact for save".to_string())?
                     };
                     save_staged_artifact_with_backup(&artifact, &path, backup_location)
                         .map_err(|err| err.to_string())?;
-                    let saved_paths = if dirty_kind == Some(DirtyKind::ToAscii) {
+                    let saved_paths = if is_ascii {
                         Ok(None)
                     } else if let Some(mut report) = staged_paths_report {
                         report.scene_path = path.clone();
@@ -1592,6 +1542,7 @@ impl GuiShell {
                         Err(error) => (None, Some(error)),
                     };
                     Ok(RowJobResult::Save {
+                        promotion,
                         observation_error,
                         saved_paths_report,
                         replace_changes,
@@ -1601,6 +1552,11 @@ impl GuiShell {
                     })
                 },
             );
+                    cx.notify();
+                }
+                if missing > 0 {
+                    shell.report_mutation_rejections(MutationRejections { missing_artifacts: missing, ..Default::default() }, cx);
+                    shell.refresh_file_table(cx);
                     cx.notify();
                 }
             },

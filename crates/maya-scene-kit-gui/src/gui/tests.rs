@@ -45,6 +45,10 @@ use maya_scene_kit_observe::scene::{
 };
 use tempfile::tempdir;
 
+use super::{
+    CleanEdits, OwnerEdits, RowMutation, SavePromotion, Staged, StagedReports, check_row_mutation,
+};
+
 #[gpui::test]
 fn composed_length_changing_replace_cleans_original_command_only(cx: &mut TestAppContext) {
     let dir = tempdir().expect("temporary directory");
@@ -77,7 +81,12 @@ fn composed_length_changing_replace_cleans_original_command_only(cx: &mut TestAp
         .iter()
         .position(|entry| entry.value == before)
         .unwrap();
-    row.path_overrides.insert(entry_index, after.into());
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    test_overrides(&mut row.staged).insert(entry_index, after.into());
     let (shell, visual_cx) = open_test_shell(cx);
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.state.workspace_auto_analyze = false;
@@ -96,7 +105,7 @@ fn composed_length_changing_replace_cleans_original_command_only(cx: &mut TestAp
     });
     visual_cx.run_until_parked();
     shell.update_in(visual_cx, |shell, window, cx| {
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
         shell.spawn_save_jobs(vec![0], window, cx);
     });
     visual_cx.run_until_parked();
@@ -110,7 +119,7 @@ use super::{
     AuditDetailCodeState, AuditDetailDialogState, AuditDetailField, AuditDetailFieldKind,
     AuditDetailTab, AuditResultItemKind, AuditResultRow, AuditResultRowKey, AuditRowCleanState,
     AuditSeverityFilter, AuditSortKey, AuditTableSort, AutoAnalyzeParallelismPreference,
-    AutoAnalyzePriority, AutoAnalyzeQueueState, BackupLocationPreference, BannerMessage, DirtyKind,
+    AutoAnalyzePriority, AutoAnalyzeQueueState, BackupLocationPreference, BannerMessage,
     FileSortKey, FileStatus, FileTableSort, GuiFileState, MenuAutoAnalyzeParallelism32,
     MenuEditDeleteUiConfigurationScriptNode, MenuEditRedo, MenuEditUndo, MenuPurgeAnalysisCache,
     MenuToggleAnalysisCache, MenuToggleIgnoreFolderNames, PathCollectRewriteMode,
@@ -353,15 +362,13 @@ fn pending_clean_reanalysis_case(cx: &mut TestAppContext, binary: bool) {
         );
     });
     visual_cx.run_until_parked();
-    let original_artifact = shell.read_with(visual_cx, |shell, _| {
+    let previous = shell.read_with(visual_cx, |shell, _| {
         assert_eq!(
-            shell.rows[0].pending_clean_targets,
+            shell.rows[0].staged.clean().targets,
             BTreeSet::from([target.clone()])
         );
-        shell.rows[0]
-            .dirty_artifact
-            .clone()
-            .expect("staged original clean")
+        assert!(shell.rows[0].staged.artifact().is_some());
+        shell.rows[0].staged.clone()
     });
     let mut changed = source.clone();
     for start in (0..source.len().saturating_sub(6))
@@ -397,7 +404,9 @@ fn pending_clean_reanalysis_case(cx: &mut TestAppContext, binary: bool) {
     shell.read_with(visual_cx, |shell, _| {
         assert!(matches!(&shell.rows[0].status, FileStatus::Error(reason) if reason.contains("clean observation")));
         assert!(matches!(&shell.status_message, Some(BannerMessage::Raw(reason)) if reason.contains("clean observation")));
-        assert_eq!(shell.rows[0].dirty_artifact.as_ref(), Some(&original_artifact));
+        assert!(shell.rows[0].staged.same_as(&previous));
+        assert_eq!(shell.rows[0].staged.reports().source_bytes, previous.reports().source_bytes);
+        assert!(shell.undo_stack.is_empty());
     });
     assert_eq!(fs::read(path).unwrap(), changed);
 }
@@ -419,8 +428,15 @@ fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
     let bytes = b"//Maya ASCII 2026 scene\ncreateNode transform -n \"Example\";\n";
     fs::write(&path, b"//Maya ASCII 2026 scene\n").unwrap();
     let mut row = observed_test_row(1, &path);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: path.clone(),
         suggested_output_path: path.clone(),
         operation_mode: OperationMode::Forensic,
@@ -451,10 +467,17 @@ fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
     });
     assert_eq!(fs::read(&path).unwrap(), bytes);
     let mut row = observed_test_row(2, &path);
-    row.staged_paths_report = row.paths_report.clone();
-    row.staged_source_bytes = Some(bytes.to_vec());
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+
+    test_scene_state(&mut row.staged).4.paths_report = row.paths_report.clone();
+    test_scene_state(&mut row.staged).4.source_bytes = Some(bytes.to_vec());
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: path.clone(),
         suggested_output_path: path.clone(),
         operation_mode: OperationMode::Forensic,
@@ -483,8 +506,15 @@ fn save_then_clean_named_script_without_auto_analysis(cx: &mut TestAppContext) {
     let source = "//Maya ASCII 2026 scene\nrequires \"ExamplePlugin\" \"1.0\";\ncreateNode script -n \"ExampleScript\";\nsetAttr \".b\" -type \"string\" \"print(1);\";\n";
     fs::write(&path, source).unwrap();
     let mut row = observed_test_row(1, &path);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: path.clone(),
         suggested_output_path: path.clone(),
         operation_mode: OperationMode::Forensic,
@@ -522,8 +552,8 @@ fn save_then_clean_named_script_without_auto_analysis(cx: &mut TestAppContext) {
     });
     visual_cx.run_until_parked();
     shell.read_with(visual_cx, |shell, _| {
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
-        let bytes = &shell.rows[0].dirty_artifact.as_ref().unwrap().bytes;
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+        let bytes = &shell.rows[0].staged.artifact().as_ref().unwrap().bytes;
         assert!(!String::from_utf8_lossy(bytes).contains("ExampleScript"));
         assert!(!String::from_utf8_lossy(bytes).contains("ExamplePlugin"));
     });
@@ -584,7 +614,7 @@ fn undo_after_external_change_requires_reanalysis(cx: &mut TestAppContext) {
             shell.status_message.as_ref().unwrap(),
         );
         assert!(banner.contains("Re-analysis is required"), "{banner}");
-        assert!(shell.rows[0].dirty_artifact.is_none());
+        assert!(shell.rows[0].staged.artifact().is_none());
     });
 }
 
@@ -605,10 +635,15 @@ fn replace_save_refreshes_path_source_without_auto_analysis(cx: &mut TestAppCont
         std::slice::from_ref(&value),
     )
     .unwrap();
-    row.path_overrides.insert(0, value.after_value);
-    row.dirty_kind = Some(DirtyKind::Replace);
-    row.dirty_artifact = Some(staged.artifact);
-    row.replace_preview = Some(staged.preview);
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    test_overrides(&mut row.staged).insert(0, value.after_value);
+
+    *test_artifact(&mut row.staged) = Some(staged.artifact);
+    *test_replace_state(&mut row.staged).1 = Some(staged.preview);
     row.replace_changes = Some(staged.changes);
     row.replace_generation = 1;
     row.replace_artifact_generation = Some(1);
@@ -643,10 +678,12 @@ fn replace_save_refreshes_path_source_without_auto_analysis(cx: &mut TestAppCont
     });
     visual_cx.run_until_parked();
     shell.read_with(visual_cx, |shell, _| {
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
         assert!(
             shell.rows[0]
-                .staged_paths_report
+                .staged
+                .reports()
+                .paths_report
                 .as_ref()
                 .unwrap()
                 .entries
@@ -693,16 +730,19 @@ fn scene_edit_save_after_audit_plan_change_allows_path_only_composition(cx: &mut
     });
     visual_cx.run_until_parked();
     shell.update_in(visual_cx, |shell, window, cx| {
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
         shell.audit_plan_fingerprint = "ExampleChangedPlan".into();
         shell.spawn_save_jobs(vec![0], window, cx);
     });
     visual_cx.run_until_parked();
     shell.update_in(visual_cx, |shell, window, cx| {
         assert!(matches!(shell.rows[0].status, FileStatus::Saved));
-        shell.rows[0]
-            .path_overrides
-            .insert(0, "asset/example/longer_file.tx".into());
+        shell.rows[0].staged = Staged::Replace {
+            overrides: BTreeMap::new(),
+            preview: None,
+            artifact: None,
+        };
+        test_overrides(&mut shell.rows[0].staged).insert(0, "asset/example/longer_file.tx".into());
         shell.stage_scene_edits_for_row(
             0,
             BTreeSet::new(),
@@ -717,9 +757,9 @@ fn scene_edit_save_after_audit_plan_change_allows_path_only_composition(cx: &mut
     visual_cx.run_until_parked();
     shell.read_with(visual_cx, |shell, _| {
         let row = &shell.rows[0];
-        assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(row.staged, Staged::SceneEdits { .. }));
         assert_eq!(
-            row.dirty_artifact.as_ref().unwrap().bytes,
+            row.staged.artifact().as_ref().unwrap().bytes,
             source
                 .replace("python(\"print('Example')\");", "")
                 .replace("asset/example/file.tx", "asset/example/longer_file.tx")
@@ -1182,6 +1222,7 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
     let staged_dump_report = analyzed.dump_report.expect("staged dump");
 
     RowJobResult::SceneEdits {
+        replace_preview: None,
         clean_source: row
             .paths_report
             .as_ref()
@@ -1558,7 +1599,12 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
-            row.dirty_kind = Some(DirtyKind::Replace);
+            row.staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+
             row.status = FileStatus::Dirty;
             shell.state.active_tab = ResultTab::Audit;
             shell.state.workspace_auto_analyze = false;
@@ -1567,6 +1613,7 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    promotion: SavePromotion::Unanalyzed,
                     observation_error: None,
                     saved_paths_report: None,
                     replace_changes: None,
@@ -1616,12 +1663,17 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                     &report, &overrides,
                 )
                 .expect("stage replace");
-            row.path_overrides = BTreeMap::from([
+            row.staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            *test_overrides(&mut row.staged) = BTreeMap::from([
                 (0usize, "textures/diffuse_replaced.tx".to_string()),
                 (1usize, "textures/spec_replaced.tx".to_string()),
             ]);
-            row.dirty_kind = Some(DirtyKind::Replace);
-            row.dirty_artifact = Some(staged.artifact);
+
+            *test_artifact(&mut row.staged) = Some(staged.artifact);
             row.replace_generation = 1;
             row.replace_artifact_generation = Some(1);
             shell.rows = vec![row];
@@ -1646,9 +1698,14 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let row = &shell.rows[0];
-            assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
-            assert_eq!(row.path_overrides.len(), 2);
-            let staged_paths = row.staged_paths_report.as_ref().expect("staged paths");
+            assert!(matches!(row.staged, Staged::SceneEdits { .. }));
+            assert_eq!(row.staged.overrides().len(), 2);
+            let staged_paths = row
+                .staged
+                .reports()
+                .paths_report
+                .as_ref()
+                .expect("staged paths");
             assert!(
                 staged_paths
                     .entries
@@ -1668,8 +1725,9 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    promotion: SavePromotion::Unanalyzed,
                     observation_error: None,
-                    saved_paths_report: shell.rows[0].staged_paths_report.clone(),
+                    saved_paths_report: shell.rows[0].staged.reports().paths_report.clone(),
                     replace_changes: None,
                     replace_preview: None,
                     audit_file_state: None,
@@ -1685,8 +1743,8 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         let row = &shell.rows[0];
-        assert_eq!(row.dirty_kind, None);
-        assert!(row.path_overrides.is_empty());
+        assert!(matches!(row.staged, Staged::None));
+        assert!(row.staged.overrides().is_empty());
         assert_eq!(
             row.analyzed_audit_mode,
             Some(AuditModePreference::StrictDefault)
@@ -1720,11 +1778,16 @@ fn replace_then_delete_owner_rebuilds_missing_replace_artifact(cx: &mut TestAppC
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-            row.path_overrides = BTreeMap::from([
+            row.staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            *test_overrides(&mut row.staged) = BTreeMap::from([
                 (0usize, "textures/diffuse_replaced.tx".to_string()),
                 (1usize, "textures/spec_replaced.tx".to_string()),
             ]);
-            row.dirty_kind = Some(DirtyKind::Replace);
+
             row.replace_generation = 1;
             row.replace_artifact_generation = None;
             shell.rows = vec![row];
@@ -1749,9 +1812,14 @@ fn replace_then_delete_owner_rebuilds_missing_replace_artifact(cx: &mut TestAppC
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         let row = &shell.rows[0];
-        assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
-        assert!(row.dirty_artifact.is_some());
-        let staged_paths = row.staged_paths_report.as_ref().expect("staged paths");
+        assert!(matches!(row.staged, Staged::SceneEdits { .. }));
+        assert!(row.staged.artifact().is_some());
+        let staged_paths = row
+            .staged
+            .reports()
+            .paths_report
+            .as_ref()
+            .expect("staged paths");
         assert!(
             staged_paths
                 .entries
@@ -1928,8 +1996,8 @@ fn bulk_clean_undo_restores_all_rows_after_out_of_order_completion(cx: &mut Test
             assert!(matches!(shell.rows[1].status, FileStatus::Idle));
 
             shell.run_menu_redo(cx);
-            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
-            assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::SceneEdits));
+            assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+            assert!(matches!(shell.rows[1].staged, Staged::SceneEdits { .. }));
         });
     });
 }
@@ -2092,8 +2160,8 @@ fn undo_history_respects_action_order_not_completion_order(cx: &mut TestAppConte
 
             shell.run_menu_undo(cx);
             assert!(matches!(shell.rows[2].status, FileStatus::Idle));
-            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
-            assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::SceneEdits));
+            assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+            assert!(matches!(shell.rows[1].staged, Staged::SceneEdits { .. }));
 
             shell.run_menu_undo(cx);
             assert!(matches!(shell.rows[0].status, FileStatus::Idle));
@@ -2189,6 +2257,7 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    promotion: SavePromotion::Unanalyzed,
                     observation_error: None,
                     saved_paths_report: None,
                     replace_changes: None,
@@ -2304,8 +2373,12 @@ fn scene_row_dirty_when_path_overrides_exist_without_artifact() {
 
     let mut row = test_row(1, &scene);
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-    row.path_overrides
-        .insert(0, "textures/edited.tx".to_string());
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    test_overrides(&mut row.staged).insert(0, "textures/edited.tx".to_string());
 
     assert!(row.dirty());
     assert!(!row.replace_artifact_is_current());
@@ -2320,6 +2393,7 @@ fn replace_dialog_state_can_apply_only_for_matching_preview_rule() {
         path_type_filter: default_path_type_filter(),
     };
     let state = ReplaceDialogState {
+        captured_generations: BTreeMap::new(),
         captured_row_ids: vec![1, 2],
         path_targets: None,
         path_type_filter: default_path_type_filter(),
@@ -2362,6 +2436,7 @@ fn replace_dialog_state_can_apply_only_for_matching_preview_rule() {
 #[test]
 fn replace_dialog_state_invalidate_preview_clears_applyability() {
     let mut state = ReplaceDialogState {
+        captured_generations: BTreeMap::new(),
         captured_row_ids: vec![1],
         path_targets: None,
         path_type_filter: default_path_type_filter(),
@@ -3009,9 +3084,12 @@ fn compute_visible_rows_combines_dirty_with_findings_missing_filters_using_or_lo
     .expect("write missing scene");
 
     let mut dirty_row = test_row(1, &dirty);
-    dirty_row
-        .path_overrides
-        .insert(0, "textures/dirty.tx".to_string());
+    dirty_row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    test_overrides(&mut dirty_row.staged).insert(0, "textures/dirty.tx".to_string());
     let mut findings_row = test_row(2, &findings);
     findings_row.findings = 1;
     let mut missing_row = test_row(3, &missing);
@@ -3495,7 +3573,16 @@ fn build_audit_result_rows_marks_pending_clean_targets_as_staged() {
         panic!("expected analyze result");
     };
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
-    row.pending_clean_targets
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged)
+        .0
+        .targets
         .insert(ExecutionCleanTarget::ScriptNode {
             node_name: "literalPythonReview".to_string(),
         });
@@ -3725,9 +3812,17 @@ fn file_context_menu_state_enables_clean_for_pending_clean_targets() {
     let path = dir.path().join("pending_clean_target.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-        node_name: "Example".to_string(),
-    }]);
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).0.targets =
+        BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+            node_name: "Example".to_string(),
+        }]);
 
     let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
@@ -3741,9 +3836,17 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_when_alr
     let path = dir.path().join("pending_ui_config_target.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-        node_name: "uiConfigurationScriptNode".to_string(),
-    }]);
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).0.targets =
+        BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+            node_name: "uiConfigurationScriptNode".to_string(),
+        }]);
 
     let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
@@ -3783,63 +3886,14 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_for_proc
     assert!(!state.can_delete_ui_configuration_script_node);
 }
 
-#[test]
-fn file_context_menu_state_disables_delete_actions_for_replace_rows() {
-    let dir = tempdir().expect("tmpdir");
-    let path = dir.path().join("replace_context_disabled.ma");
-    write_literal_mel_python_scene(&path);
-    let RowJobResult::Analyze(result) =
-        analyze_row(&path, AuditModePreference::StrictDefault).expect("analyze row")
-    else {
-        panic!("expected analyze result");
-    };
-
-    let mut row = test_row(1, &path);
-    row.selected = true;
-    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
-    row.dirty_kind = Some(DirtyKind::Replace);
-    row.path_overrides
-        .insert(0, "asset/example/edited.fbx".to_string());
-
-    let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
-
-    assert!(!state.can_clean);
-    assert!(!state.can_delete_ui_configuration_script_node);
+#[gpui::test]
+fn file_context_menu_enables_ui_delete_for_replace_row(cx: &mut TestAppContext) {
+    context_replace_composition_case(cx, true, false, true);
 }
 
-#[test]
-fn file_context_menu_state_keeps_clean_enabled_when_selected_rows_mix_eligible_and_replace() {
-    let dir = tempdir().expect("tmpdir");
-    let eligible_path = dir.path().join("eligible_target.ma");
-    let blocked_path = dir.path().join("blocked_target.ma");
-    write_literal_mel_python_scene(&eligible_path);
-    write_literal_mel_python_scene(&blocked_path);
-    let RowJobResult::Analyze(result) =
-        analyze_row(&eligible_path, AuditModePreference::StrictDefault).expect("analyze row")
-    else {
-        panic!("expected analyze result");
-    };
-
-    let mut eligible_row = test_row(1, &eligible_path);
-    eligible_row.selected = true;
-    eligible_row.set_audit_report(Some(result.audit_report), result.audit_file_state);
-    eligible_row.paths_report = result.paths_report.clone();
-    eligible_row.dump_report = result.dump_report.clone();
-    eligible_row.analyzed_audit_mode = Some(result.audit_mode);
-    let mut blocked_row = test_row(2, &blocked_path);
-    blocked_row.selected = true;
-    blocked_row.dirty_kind = Some(DirtyKind::Replace);
-    blocked_row
-        .path_overrides
-        .insert(0, "asset/example/edited.fbx".to_string());
-
-    let state = file_context_menu_state(
-        &[eligible_row, blocked_row],
-        1,
-        AuditModePreference::StrictDefault,
-    );
-
-    assert!(state.can_clean);
+#[gpui::test]
+fn file_context_menu_enables_clean_for_mixed_staged_selection(cx: &mut TestAppContext) {
+    context_replace_composition_case(cx, false, true, true);
 }
 
 #[test]
@@ -3877,8 +3931,12 @@ fn file_context_menu_state_disables_delete_actions_for_to_ascii_rows() {
     fs::write(&path, "FORM").expect("write scene");
     let mut row = test_row(1, &path);
     row.selected = true;
-    row.dirty_kind = Some(DirtyKind::ToAscii);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::ToAscii {
+        report: None,
+        artifact: None,
+    };
+
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: path.clone(),
         suggested_output_path: dir.path().join("to_ascii_context_disabled.ma"),
         scene_format: SceneFormat::Ma,
@@ -5562,9 +5620,13 @@ fn exit_warning_required_is_true_for_replace_rows() {
     let path = dir.path().join("replace_exit_state.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.dirty_kind = Some(DirtyKind::Replace);
-    row.path_overrides
-        .insert(0, "asset/example/edited.fbx".to_string());
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+
+    test_overrides(&mut row.staged).insert(0, "asset/example/edited.fbx".to_string());
 
     assert!(exit_warning_required_for_rows(&[row]));
 }
@@ -5575,8 +5637,15 @@ fn exit_warning_required_is_true_for_scene_edit_rows() {
     let path = dir.path().join("scene_edit_exit_state.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: path.clone(),
         suggested_output_path: path.clone(),
         scene_format: SceneFormat::Ma,
@@ -5595,8 +5664,12 @@ fn exit_warning_required_is_true_for_to_ascii_rows() {
     let output_path = dir.path().join("to_ascii_exit_state.ma");
     fs::write(&source_path, "FORM").expect("write scene");
     let mut row = test_row(1, &source_path);
-    row.dirty_kind = Some(DirtyKind::ToAscii);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::ToAscii {
+        report: None,
+        artifact: None,
+    };
+
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: source_path.clone(),
         suggested_output_path: output_path,
         scene_format: SceneFormat::Ma,
@@ -5614,8 +5687,12 @@ fn exit_warning_required_is_true_for_path_override_rows() {
     let path = dir.path().join("path_override_exit_state.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.path_overrides
-        .insert(1, "asset/example/override.fbx".to_string());
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    test_overrides(&mut row.staged).insert(1, "asset/example/override.fbx".to_string());
 
     assert!(exit_warning_required_for_rows(&[row]));
 }
@@ -5626,9 +5703,17 @@ fn exit_warning_required_is_true_for_pending_clean_rows() {
     let path = dir.path().join("pending_clean_exit_state.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-        node_name: "Example".to_string(),
-    }]);
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).0.targets =
+        BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+            node_name: "Example".to_string(),
+        }]);
 
     assert!(exit_warning_required_for_rows(&[row]));
 }
@@ -5654,8 +5739,12 @@ fn exit_application_cancel_keeps_window_open_when_dirty(cx: &mut TestAppContext)
 
     shell.update_in(visual_cx, |shell, window, cx| {
         let mut row = test_row(1, &path);
-        row.path_overrides
-            .insert(0, "asset/example/edited.fbx".to_string());
+        row.staged = Staged::Replace {
+            overrides: BTreeMap::new(),
+            preview: None,
+            artifact: None,
+        };
+        test_overrides(&mut row.staged).insert(0, "asset/example/edited.fbx".to_string());
         shell.rows = vec![row];
         shell.on_menu_exit_application(&super::MenuExitApplication, window, cx);
     });
@@ -5685,9 +5774,17 @@ fn exit_application_discard_closes_window_when_dirty(cx: &mut TestAppContext) {
 
     shell.update_in(visual_cx, |shell, window, cx| {
         let mut row = test_row(1, &path);
-        row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-            node_name: "Example".to_string(),
-        }]);
+        row.staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+        test_scene_state(&mut row.staged).0.targets =
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "Example".to_string(),
+            }]);
         shell.rows = vec![row];
         shell.on_menu_exit_application(&super::MenuExitApplication, window, cx);
     });
@@ -5708,9 +5805,17 @@ fn window_close_cancel_keeps_window_open_when_dirty(cx: &mut TestAppContext) {
 
     shell.update_in(visual_cx, |shell, _window, _cx| {
         let mut row = test_row(1, &path);
-        row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-            node_name: "Example".to_string(),
-        }]);
+        row.staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+        test_scene_state(&mut row.staged).0.targets =
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "Example".to_string(),
+            }]);
         shell.rows = vec![row];
     });
     visual_cx.run_until_parked();
@@ -5734,7 +5839,15 @@ fn window_close_discard_closes_window_when_dirty(cx: &mut TestAppContext) {
 
     shell.update_in(visual_cx, |shell, _window, _cx| {
         let mut row = test_row(1, &path);
-        row.dirty_artifact = Some(StagedSceneArtifact {
+        row.staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+
+        *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
             input_path: path.clone(),
             suggested_output_path: path.clone(),
             scene_format: SceneFormat::Ma,
@@ -5742,7 +5855,7 @@ fn window_close_discard_closes_window_when_dirty(cx: &mut TestAppContext) {
             validation_state: ValidationState::Validated,
             bytes: b"// staged edit".to_vec(),
         });
-        row.dirty_kind = Some(DirtyKind::SceneEdits);
+
         shell.rows = vec![row];
     });
     visual_cx.run_until_parked();
@@ -6570,7 +6683,12 @@ fn build_path_table_model_enables_scene_column_for_multi_source_selection() {
 
     let mut second_row = test_row(2, &second);
     second_row.selected = true;
-    second_row.replace_preview = Some(PathReplacePreview {
+    second_row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    *test_replace_state(&mut second_row.staged).1 = Some(PathReplacePreview {
         input_path: second.clone(),
         scene_format: SceneFormat::Ma,
         operation_mode: OperationMode::BestEffort,
@@ -6705,6 +6823,7 @@ fn replace_dialog_preview_rows_keep_unmatched_candidates_when_query_exists() {
             planned_overrides: Vec::new(),
         },
         &ReplaceDialogState {
+            captured_generations: BTreeMap::new(),
             captured_row_ids: vec![1],
             path_targets: None,
             path_type_filter: default_path_type_filter(),
@@ -6847,8 +6966,12 @@ fn build_path_table_model_marks_overridden_entries_as_dirty() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-    row.path_overrides
-        .insert(0, "textures/edited.tx".to_string());
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    test_overrides(&mut row.staged).insert(0, "textures/edited.tx".to_string());
 
     let state = test_state(dir.path(), "");
     let table = build_path_table_model(
@@ -6892,11 +7015,14 @@ fn path_context_undo_targets_clear_all_selected_rows_in_same_file(cx: &mut TestA
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-            row.path_overrides
-                .insert(0, "textures/diffuse_edited.tx".to_string());
-            row.path_overrides
-                .insert(1, "textures/spec_edited.tx".to_string());
-            row.dirty_kind = Some(DirtyKind::Replace);
+            row.staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            test_overrides(&mut row.staged).insert(0, "textures/diffuse_edited.tx".to_string());
+            test_overrides(&mut row.staged).insert(1, "textures/spec_edited.tx".to_string());
+
             row.status = FileStatus::Dirty;
             shell.rows = vec![row];
             shell.selected_path_rows = BTreeSet::from([vec![(1, 0)], vec![(1, 1)]]);
@@ -6904,8 +7030,8 @@ fn path_context_undo_targets_clear_all_selected_rows_in_same_file(cx: &mut TestA
             let undo_targets = shell.context_undo_path_targets(&vec![(1, 0)]);
             shell.undo_path_edit_targets(undo_targets, window, cx);
 
-            assert!(shell.rows[0].path_overrides.is_empty());
-            assert_eq!(shell.rows[0].dirty_kind, None);
+            assert!(shell.rows[0].staged.overrides().is_empty());
+            assert!(matches!(shell.rows[0].staged, Staged::None));
         });
     });
 }
@@ -6938,7 +7064,7 @@ fn path_context_undo_delete_owner_targets_clear_all_selected_rows_in_same_file(
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            assert_eq!(shell.rows[0].pending_path_owner_delete_targets.len(), 2);
+            assert_eq!(shell.rows[0].staged.owner_delete().targets.len(), 2);
 
             let undo_targets = shell.context_undo_path_targets(&vec![(1, 0)]);
             shell.undo_context_path_targets(undo_targets, window, cx);
@@ -6949,11 +7075,11 @@ fn path_context_undo_delete_owner_targets_clear_all_selected_rows_in_same_file(
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_path_owner_delete_targets,
+            shell.rows[0].staged.owner_delete().targets,
             BTreeSet::new(),
             "discard should clear all selected owner-delete targets",
         );
-        assert_eq!(shell.rows[0].dirty_kind, None);
+        assert!(matches!(shell.rows[0].staged, Staged::None));
     });
 }
 
@@ -6983,7 +7109,7 @@ fn path_context_delete_owner_targets_stage_all_selected_entries_in_same_file(
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_path_owner_delete_targets,
+            shell.rows[0].staged.owner_delete().targets,
             BTreeSet::from([
                 PathOwnerDeleteTarget {
                     node_type: "file".to_string(),
@@ -6996,9 +7122,9 @@ fn path_context_delete_owner_targets_stage_all_selected_entries_in_same_file(
             ]),
             "delete-owner context action should stage both selected owner targets",
         );
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
         assert!(
-            shell.rows[0].dirty_artifact.is_some(),
+            shell.rows[0].staged.artifact().is_some(),
             "multi-entry owner delete should still produce a saveable staged artifact",
         );
     });
@@ -7030,16 +7156,16 @@ fn path_context_delete_owner_targets_stage_only_clicked_entry_outside_selection(
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_path_owner_delete_targets,
+            shell.rows[0].staged.owner_delete().targets,
             BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
             }]),
             "delete-owner context action should only stage the clicked row target",
         );
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
         assert!(
-            shell.rows[0].dirty_artifact.is_some(),
+            shell.rows[0].staged.artifact().is_some(),
             "single-row owner delete should still produce a saveable staged artifact",
         );
     });
@@ -7086,8 +7212,8 @@ fn path_context_undo_delete_owner_preserves_other_scene_edits(cx: &mut TestAppCo
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            assert_eq!(shell.rows[0].pending_clean_targets.len(), 1);
-            assert_eq!(shell.rows[0].pending_path_owner_delete_targets.len(), 2);
+            assert_eq!(shell.rows[0].staged.clean().targets.len(), 1);
+            assert_eq!(shell.rows[0].staged.owner_delete().targets.len(), 2);
 
             let undo_targets = shell.context_undo_path_targets(&vec![(1, 0)]);
             shell.undo_context_path_targets(undo_targets, window, cx);
@@ -7098,21 +7224,21 @@ fn path_context_undo_delete_owner_preserves_other_scene_edits(cx: &mut TestAppCo
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_clean_targets,
+            shell.rows[0].staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "cleanupScript".to_string(),
             }]),
             "owner-delete undo should keep unrelated staged clean targets",
         );
         assert_eq!(
-            shell.rows[0].pending_path_owner_delete_targets,
+            shell.rows[0].staged.owner_delete().targets,
             BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file2".to_string(),
             }]),
             "clicked owner-delete target should be the only one removed",
         );
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
     });
 }
 
@@ -7147,7 +7273,7 @@ fn file_context_clean_stages_finding_backed_script_node_targets(cx: &mut TestApp
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert!(
-            shell.rows[0].pending_clean_targets.iter().any(|target| {
+            shell.rows[0].staged.clean().targets.iter().any(|target| {
                 matches!(
                     target,
                     ExecutionCleanTarget::ScriptNode { .. }
@@ -7189,8 +7315,8 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
     let (menu_targets, menu_dirty_kind, menu_findings) = visual_cx.update(|_, app| {
         let shell = shell.read(app);
         (
-            shell.rows[0].pending_clean_targets.clone(),
-            shell.rows[0].dirty_kind,
+            shell.rows[0].staged.clean().targets.clone(),
+            std::mem::discriminant(&shell.rows[0].staged),
             shell.rows[0].findings,
         )
     });
@@ -7214,10 +7340,13 @@ fn main_menu_clean_matches_file_context_clean_targets(cx: &mut TestAppContext) {
 
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
-        assert_eq!(shell.rows[0].pending_clean_targets, menu_targets);
-        assert_eq!(shell.rows[0].dirty_kind, menu_dirty_kind);
+        assert_eq!(shell.rows[0].staged.clean().targets, menu_targets);
+        assert_eq!(
+            std::mem::discriminant(&shell.rows[0].staged),
+            menu_dirty_kind
+        );
         assert_eq!(shell.rows[0].findings, menu_findings);
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
     });
 }
 
@@ -7266,122 +7395,25 @@ fn file_context_clean_from_unselected_row_is_noop(cx: &mut TestAppContext) {
             shell
                 .rows
                 .iter()
-                .all(|row| row.pending_clean_targets.is_empty())
+                .all(|row| row.staged.clean().targets.is_empty())
         );
         assert!(shell.undo_stack.is_empty());
     });
 }
 
 #[gpui::test]
-fn file_context_clean_from_replace_row_is_noop(cx: &mut TestAppContext) {
-    let (shell, visual_cx) = open_test_shell(cx);
-    let dir = tempdir().expect("tmpdir");
-    let scene = dir.path().join("replace_clean_noop.ma");
-    write_literal_mel_python_scene(&scene);
-    let RowJobResult::Analyze(result) =
-        analyze_row(&scene, AuditModePreference::StrictDefault).expect("analyze row")
-    else {
-        panic!("expected analyze result");
-    };
-
-    visual_cx.update(|window, app| {
-        shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
-            row.selected = true;
-            row.set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
-            row.dirty_kind = Some(DirtyKind::Replace);
-            row.path_overrides
-                .insert(0, "asset/example/edited.fbx".to_string());
-            shell.rows = vec![row];
-            shell.rebuild_row_id_index();
-
-            shell.run_file_context_clean_from_row(1, window, cx);
-        });
-    });
-
-    visual_cx.update(|_, app| {
-        let shell = shell.read(app);
-        assert!(shell.rows[0].pending_clean_targets.is_empty());
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Replace));
-        assert!(shell.undo_stack.is_empty());
-    });
+fn file_context_clean_composes_with_single_row_replacement(cx: &mut TestAppContext) {
+    context_replace_composition_case(cx, false, false, false);
 }
 
 #[gpui::test]
-fn file_context_clean_skips_replace_rows_in_selected_group(cx: &mut TestAppContext) {
-    let (shell, visual_cx) = open_test_shell(cx);
-    let dir = tempdir().expect("tmpdir");
-    let eligible_scene = dir.path().join("eligible_group_clean.ma");
-    let blocked_scene = dir.path().join("blocked_group_clean.ma");
-    write_literal_mel_python_scene(&eligible_scene);
-    write_literal_mel_python_scene(&blocked_scene);
-    let RowJobResult::Analyze(result) =
-        analyze_row(&eligible_scene, AuditModePreference::StrictDefault).expect("analyze row")
-    else {
-        panic!("expected analyze result");
-    };
-
-    visual_cx.update(|window, app| {
-        shell.update(app, |shell, cx| {
-            let mut eligible_row = test_row(1, &eligible_scene);
-            eligible_row.selected = true;
-            eligible_row
-                .set_audit_report(Some(result.audit_report.clone()), result.audit_file_state);
-            eligible_row.paths_report = result.paths_report.clone();
-            eligible_row.dump_report = result.dump_report.clone();
-            eligible_row.analyzed_audit_mode = Some(result.audit_mode);
-
-            let mut blocked_row = test_row(2, &blocked_scene);
-            blocked_row.selected = true;
-            blocked_row.dirty_kind = Some(DirtyKind::Replace);
-            blocked_row
-                .path_overrides
-                .insert(0, "asset/example/edited.fbx".to_string());
-
-            shell.rows = vec![eligible_row, blocked_row];
-            shell.rebuild_row_id_index();
-            shell.run_file_context_clean_from_row(1, window, cx);
-        });
-    });
-    visual_cx.run_until_parked();
-
-    visual_cx.update(|_, app| {
-        let shell = shell.read(app);
-        assert!(!shell.rows[0].pending_clean_targets.is_empty());
-        assert!(shell.rows[1].pending_clean_targets.is_empty());
-        assert_eq!(shell.rows[1].dirty_kind, Some(DirtyKind::Replace));
-    });
+fn file_context_clean_composes_across_mixed_selected_rows(cx: &mut TestAppContext) {
+    context_replace_composition_case(cx, false, true, false);
 }
 
 #[gpui::test]
-fn file_context_delete_ui_configuration_script_node_from_replace_row_is_noop(
-    cx: &mut TestAppContext,
-) {
-    let (shell, visual_cx) = open_test_shell(cx);
-    let dir = tempdir().expect("tmpdir");
-    let scene = dir.path().join("replace_ui_config_noop.ma");
-    write_ui_configuration_script_node_scene(&scene);
-
-    visual_cx.update(|window, app| {
-        shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
-            row.selected = true;
-            row.dirty_kind = Some(DirtyKind::Replace);
-            row.path_overrides
-                .insert(0, "asset/example/edited.fbx".to_string());
-            shell.rows = vec![row];
-            shell.rebuild_row_id_index();
-
-            shell.run_file_context_delete_ui_configuration_script_node_from_row(1, window, cx);
-        });
-    });
-
-    visual_cx.update(|_, app| {
-        let shell = shell.read(app);
-        assert!(shell.rows[0].pending_clean_targets.is_empty());
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::Replace));
-        assert!(shell.undo_stack.is_empty());
-    });
+fn file_context_ui_delete_composes_with_replacement(cx: &mut TestAppContext) {
+    context_replace_composition_case(cx, true, false, false);
 }
 
 #[gpui::test]
@@ -7397,10 +7429,18 @@ fn file_context_delete_ui_configuration_script_node_when_already_staged_is_noop(
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
             row.selected = true;
-            row.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-                node_name: "uiConfigurationScriptNode".to_string(),
-            }]);
-            row.dirty_kind = Some(DirtyKind::SceneEdits);
+            row.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+            test_scene_state(&mut row.staged).0.targets =
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "uiConfigurationScriptNode".to_string(),
+                }]);
+
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
 
@@ -7411,7 +7451,7 @@ fn file_context_delete_ui_configuration_script_node_when_already_staged_is_noop(
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_clean_targets,
+            shell.rows[0].staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "uiConfigurationScriptNode".to_string(),
             }])
@@ -7455,12 +7495,12 @@ fn file_context_delete_ui_configuration_script_node_skips_non_matching_selected_
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_clean_targets,
+            shell.rows[0].staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "uiConfigurationScriptNode".to_string(),
             }])
         );
-        assert!(shell.rows[1].pending_clean_targets.is_empty());
+        assert!(shell.rows[1].staged.clean().targets.is_empty());
     });
 }
 
@@ -7476,47 +7516,67 @@ fn file_context_undo_from_unselected_row_is_noop(cx: &mut TestAppContext) {
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
             let mut row_a = test_row(1, &scene_a);
-            row_a.dirty_artifact = Some(maya_scene_kit_edit::scene::StagedSceneArtifact {
-                input_path: scene_a.clone(),
-                suggested_output_path: scene_a.clone(),
-                scene_format: SceneFormat::Ma,
-                operation_mode: OperationMode::Forensic,
-                validation_state: ValidationState::Validated,
-                bytes: b"// staged a".to_vec(),
-            });
-            row_a.dirty_kind = Some(DirtyKind::SceneEdits);
-            row_a.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-                node_name: "ExampleA".to_string(),
-            }]);
+            row_a.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+
+            *test_artifact(&mut row_a.staged) =
+                Some(maya_scene_kit_edit::scene::StagedSceneArtifact {
+                    input_path: scene_a.clone(),
+                    suggested_output_path: scene_a.clone(),
+                    scene_format: SceneFormat::Ma,
+                    operation_mode: OperationMode::Forensic,
+                    validation_state: ValidationState::Validated,
+                    bytes: b"// staged a".to_vec(),
+                });
+
+            test_scene_state(&mut row_a.staged).0.targets =
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleA".to_string(),
+                }]);
             row_a.status = FileStatus::Dirty;
 
             let mut row_b = test_row(2, &scene_b);
             row_b.selected = true;
-            row_b.dirty_artifact = Some(maya_scene_kit_edit::scene::StagedSceneArtifact {
-                input_path: scene_b.clone(),
-                suggested_output_path: scene_b.clone(),
-                scene_format: SceneFormat::Ma,
-                operation_mode: OperationMode::Forensic,
-                validation_state: ValidationState::Validated,
-                bytes: b"// staged b".to_vec(),
-            });
-            row_b.dirty_kind = Some(DirtyKind::SceneEdits);
-            row_b.pending_clean_targets = BTreeSet::from([ExecutionCleanTarget::ScriptNode {
-                node_name: "ExampleB".to_string(),
-            }]);
+            row_b.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+
+            *test_artifact(&mut row_b.staged) =
+                Some(maya_scene_kit_edit::scene::StagedSceneArtifact {
+                    input_path: scene_b.clone(),
+                    suggested_output_path: scene_b.clone(),
+                    scene_format: SceneFormat::Ma,
+                    operation_mode: OperationMode::Forensic,
+                    validation_state: ValidationState::Validated,
+                    bytes: b"// staged b".to_vec(),
+                });
+
+            test_scene_state(&mut row_b.staged).0.targets =
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleB".to_string(),
+                }]);
             row_b.status = FileStatus::Dirty;
 
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
             shell.undo_file_context_changes_from_row(1, window, cx);
             assert_eq!(
-                shell.rows[0].pending_clean_targets,
+                shell.rows[0].staged.clean().targets,
                 BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                     node_name: "ExampleA".to_string(),
                 }])
             );
             assert_eq!(
-                shell.rows[1].pending_clean_targets,
+                shell.rows[1].staged.clean().targets,
                 BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                     node_name: "ExampleB".to_string(),
                 }])
@@ -7549,16 +7609,16 @@ fn menu_delete_ui_configuration_script_node_stages_scene_edits(cx: &mut TestAppC
         let shell = shell.read(app);
         let row = &shell.rows[0];
         assert_eq!(
-            row.pending_clean_targets,
+            row.staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "uiConfigurationScriptNode".to_string(),
             }])
         );
-        assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
-        assert!(row.dirty_artifact.is_some());
-        assert!(row.staged_audit_report.is_some());
-        assert!(row.staged_paths_report.is_some());
-        assert!(row.staged_dump_report.is_some());
+        assert!(matches!(row.staged, Staged::SceneEdits { .. }));
+        assert!(row.staged.artifact().is_some());
+        assert!(row.staged.reports().audit_report.is_some());
+        assert!(row.staged.reports().paths_report.is_some());
+        assert!(row.staged.reports().dump_report.is_some());
     });
 }
 
@@ -7600,9 +7660,9 @@ fn file_context_delete_ui_configuration_script_node_from_unselected_row_targets_
 
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
-        assert!(shell.rows[0].pending_clean_targets.is_empty());
+        assert!(shell.rows[0].staged.clean().targets.is_empty());
         assert_eq!(
-            shell.rows[1].pending_clean_targets,
+            shell.rows[1].staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "uiConfigurationScriptNode".to_string(),
             }])
@@ -7651,12 +7711,12 @@ fn file_context_delete_ui_configuration_script_node_from_selected_row_targets_se
         let shell = shell.read(app);
         for row in &shell.rows {
             assert_eq!(
-                row.pending_clean_targets,
+                row.staged.clean().targets,
                 BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                     node_name: "uiConfigurationScriptNode".to_string(),
                 }])
             );
-            assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
+            assert!(matches!(row.staged, Staged::SceneEdits { .. }));
         }
     });
 }
@@ -7700,12 +7760,12 @@ fn file_context_delete_ui_configuration_script_node_skips_processing_rows(cx: &m
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_clean_targets,
+            shell.rows[0].staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "uiConfigurationScriptNode".to_string(),
             }])
         );
-        assert!(shell.rows[1].pending_clean_targets.is_empty());
+        assert!(shell.rows[1].staged.clean().targets.is_empty());
     });
 }
 
@@ -7759,12 +7819,12 @@ fn menu_delete_ui_configuration_script_node_skips_rows_without_the_node(cx: &mut
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].pending_clean_targets,
+            shell.rows[0].staged.clean().targets,
             BTreeSet::from([ExecutionCleanTarget::ScriptNode {
                 node_name: "uiConfigurationScriptNode".to_string(),
             }])
         );
-        assert!(shell.rows[1].pending_clean_targets.is_empty());
+        assert!(shell.rows[1].staged.clean().targets.is_empty());
         assert!(!matches!(shell.rows[1].status, FileStatus::Error(_)));
     });
 }
@@ -7795,7 +7855,7 @@ fn menu_delete_ui_configuration_script_node_is_noop_during_workspace_scan(cx: &m
 
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
-        assert!(shell.rows[0].pending_clean_targets.is_empty());
+        assert!(shell.rows[0].staged.clean().targets.is_empty());
         assert!(shell.undo_stack.is_empty());
         assert!(shell.workspace_scan_active());
     });
@@ -7813,11 +7873,18 @@ fn begin_path_edit_allows_non_deleted_rows_while_scene_edits_are_staged(cx: &mut
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-            row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+            row.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+            test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
             }]);
-            row.dirty_kind = Some(DirtyKind::SceneEdits);
+
             shell.rows = vec![row];
 
             shell.begin_path_edit(vec![(1, 1)], window, cx);
@@ -7842,11 +7909,18 @@ fn begin_path_edit_blocks_deleted_owner_rows_while_scene_edits_are_staged(cx: &m
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-            row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+            row.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+            test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
             }]);
-            row.path_owner_delete_preview = Some(PathOwnerDeletePreview {
+            test_scene_state(&mut row.staged).1.preview = Some(PathOwnerDeletePreview {
                 input_path: scene.clone(),
                 scene_format: SceneFormat::Ma,
                 operation_mode: OperationMode::Strict,
@@ -7856,7 +7930,7 @@ fn begin_path_edit_blocks_deleted_owner_rows_while_scene_edits_are_staged(cx: &m
                     node_name: "file1".to_string(),
                 }],
             });
-            row.dirty_kind = Some(DirtyKind::SceneEdits);
+
             shell.rows = vec![row];
 
             shell.begin_path_edit(vec![(1, 0)], window, cx);
@@ -8125,11 +8199,18 @@ fn convert_workspace_relative_preserves_owner_delete_staging_on_other_rows(
             let mut row = observed_test_row(1, &scene);
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-            row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+            row.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+            test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
             }]);
-            row.path_owner_delete_preview = Some(PathOwnerDeletePreview {
+            test_scene_state(&mut row.staged).1.preview = Some(PathOwnerDeletePreview {
                 input_path: scene.clone(),
                 scene_format: SceneFormat::Ma,
                 operation_mode: OperationMode::Strict,
@@ -8139,7 +8220,7 @@ fn convert_workspace_relative_preserves_owner_delete_staging_on_other_rows(
                     node_name: "file1".to_string(),
                 }],
             });
-            row.dirty_kind = Some(DirtyKind::SceneEdits);
+
             row.status = FileStatus::Dirty;
             row.refresh_path_resolution_cache();
             shell.rows = vec![row];
@@ -8157,20 +8238,25 @@ fn convert_workspace_relative_preserves_owner_delete_staging_on_other_rows(
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         let row = &shell.rows[0];
-        assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(row.staged, Staged::SceneEdits { .. }));
         assert_eq!(
-            row.pending_path_owner_delete_targets,
+            row.staged.owner_delete().targets,
             BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
             }])
         );
         assert_eq!(
-            row.path_overrides.get(&1),
+            row.staged.overrides().get(&1),
             Some(&"sourceimages/second.tx".to_string())
         );
-        assert!(row.path_owner_delete_preview.is_some());
-        let staged_paths = row.staged_paths_report.as_ref().expect("staged paths");
+        assert!(row.staged.owner_delete().preview.is_some());
+        let staged_paths = row
+            .staged
+            .reports()
+            .paths_report
+            .as_ref()
+            .expect("staged paths");
         assert!(
             staged_paths
                 .entries
@@ -8216,42 +8302,51 @@ fn undo_context_path_targets_keeps_owner_delete_when_undoing_other_row_override(
     )
     .expect("write scene");
 
-    visual_cx.update(|window, app| {
-        shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
-            row.selected = true;
-            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-            row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
-                node_type: "file".to_string(),
-                node_name: "file1".to_string(),
-            }]);
-            row.path_owner_delete_preview = Some(PathOwnerDeletePreview {
-                input_path: scene.clone(),
-                scene_format: SceneFormat::Ma,
-                operation_mode: OperationMode::Strict,
-                validation_state: ValidationState::Validated,
-                deleted_targets: vec![PathOwnerDeleteTarget {
-                    node_type: "file".to_string(),
-                    node_name: "file1".to_string(),
-                }],
-            });
-            row.path_overrides = BTreeMap::from([(1usize, "sourceimages/second.tx".to_string())]);
-            row.dirty_kind = Some(DirtyKind::SceneEdits);
-            row.status = FileStatus::Dirty;
-            shell.rows = vec![row];
-
-            shell.undo_context_path_targets(vec![(1, 1)], window, cx);
-        });
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        let mut row = observed_test_row(1, &scene);
+        row.selected = true;
+        shell.replace_rows(vec![row]);
+        shell
+            .apply_path_override_updates(
+                vec![(0, BTreeMap::from([(1, "sourceimages/second.tx".into())]))],
+                window,
+                cx,
+            )
+            .unwrap();
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::new(),
+            BTreeSet::from([PathOwnerDeleteTarget {
+                node_type: "file".into(),
+                node_name: "file1".into(),
+            }]),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(matches!(shell.rows[0].status, FileStatus::Dirty));
+        assert!(shell.rows[0].staged.artifact().is_some());
+        shell.undo_context_path_targets(vec![(1, 1)], window, cx);
     });
     visual_cx.run_until_parked();
 
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         let row = &shell.rows[0];
-        assert!(row.path_overrides.is_empty());
-        assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(row.staged.overrides().is_empty());
+        assert!(matches!(row.staged, Staged::SceneEdits { .. }));
         assert_eq!(
-            row.pending_path_owner_delete_targets,
+            row.staged.owner_delete().targets,
             BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
@@ -8396,7 +8491,14 @@ fn build_path_table_model_marks_delete_owner_preview_targets_as_dirty() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-    row.path_owner_delete_preview = Some(PathOwnerDeletePreview {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).1.preview = Some(PathOwnerDeletePreview {
         input_path: scene.clone(),
         scene_format: SceneFormat::Mb,
         operation_mode: OperationMode::Strict,
@@ -8406,7 +8508,6 @@ fn build_path_table_model_marks_delete_owner_preview_targets_as_dirty() {
             node_name: "deleteTex".to_string(),
         }],
     });
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
 
     let state = test_state(repo_root().as_path(), "");
     let table = build_path_table_model(
@@ -8447,11 +8548,18 @@ fn build_path_table_model_only_blocks_deleted_owner_rows_during_scene_edits() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-    row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
         node_type: "file".to_string(),
         node_name: "file1".to_string(),
     }]);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
+
     row.refresh_path_resolution_cache();
 
     let state = test_state(dir.path(), "");
@@ -8512,11 +8620,18 @@ fn path_context_menu_state_keeps_workspace_relative_for_non_deleted_rows() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-    row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
         node_type: "file".to_string(),
         node_name: "file1".to_string(),
     }]);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
+
     row.refresh_path_resolution_cache();
 
     let state = path_context_menu_state(&[row], &vec![(1, 1)]);
@@ -8575,11 +8690,18 @@ fn path_context_menu_state_disables_search_for_non_editable_missing_targets() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-    row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
         node_type: "file".to_string(),
         node_name: "file1".to_string(),
     }]);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
+
     row.refresh_path_resolution_cache();
 
     let state = path_context_menu_state(&[row], &vec![(1, 0)]);
@@ -8654,11 +8776,17 @@ fn path_value_edit_supported_for_entry_only_blocks_deleted_owner_rows() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
-    row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+    test_scene_state(&mut row.staged).1.targets = BTreeSet::from([PathOwnerDeleteTarget {
         node_type: "file".to_string(),
         node_name: "file1".to_string(),
     }]);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
 
     assert!(!path_value_edit_supported_for_entry(&row, 0));
     assert!(path_value_edit_supported_for_entry(&row, 1));
@@ -9178,11 +9306,11 @@ fn search_missing_path_write_back_preserves_entry_value_styles(cx: &mut TestAppC
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].path_overrides.get(&0),
+            shell.rows[0].staged.overrides().get(&0),
             Some(&"recovered/SamplePlain.tx".to_string())
         );
         assert_eq!(
-            shell.rows[0].path_overrides.get(&1),
+            shell.rows[0].staged.overrides().get(&1),
             Some(&format!(
                 "{workspace_display}//recovered/SampleWorkspace.tx"
             ))
@@ -9257,7 +9385,7 @@ fn search_missing_path_write_back_skips_rows_that_disappeared(cx: &mut TestAppCo
         let shell = shell.read(app);
         assert_eq!(shell.rows.len(), 1);
         assert_eq!(
-            shell.rows[0].path_overrides.get(&0),
+            shell.rows[0].staged.overrides().get(&0),
             Some(&"recovered/SampleFirst.tx".to_string())
         );
     });
@@ -9291,8 +9419,12 @@ fn search_missing_path_write_back_skips_targets_whose_value_changed(cx: &mut Tes
             row.refresh_path_resolution_cache();
             shell.rows = vec![row];
             let targets = shell.missing_path_search_targets(&vec![(1, 0)]);
-            shell.rows[0]
-                .path_overrides
+            shell.rows[0].staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            test_overrides(&mut shell.rows[0].staged)
                 .insert(0, "sourceimages/SampleChanged.tx".to_string());
             let hits = BTreeMap::from([(path_search_hit_key("Sample.tx"), hit.clone())]);
 
@@ -9311,7 +9443,7 @@ fn search_missing_path_write_back_skips_targets_whose_value_changed(cx: &mut Tes
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].path_overrides.get(&0),
+            shell.rows[0].staged.overrides().get(&0),
             Some(&"sourceimages/SampleChanged.tx".to_string())
         );
     });
@@ -9744,8 +9876,12 @@ fn path_dirty_filter_keeps_only_dirty_path_rows(cx: &mut TestAppContext) {
             let mut row = test_row(1, &scene);
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
-            row.path_overrides
-                .insert(1, "sourceimages/second_v2.tx".to_string());
+            row.staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            test_overrides(&mut row.staged).insert(1, "sourceimages/second_v2.tx".to_string());
             row.refresh_path_resolution_cache();
             shell.rows = vec![row];
             shell.path_dirty_only = true;
@@ -9805,7 +9941,7 @@ fn convert_workspace_relative_rewrites_double_slash_style_with_workspace_root(
         let shell = shell.read(app);
         let workspace_display = workspace.to_string_lossy().replace('\\', "/");
         assert_eq!(
-            shell.rows[0].path_overrides.get(&0),
+            shell.rows[0].staged.overrides().get(&0),
             Some(&format!("{workspace_display}//sourceimages/hero.tx")),
         );
     });
@@ -9851,7 +9987,7 @@ fn convert_absolute_rewrites_workspace_relative_path(cx: &mut TestAppContext) {
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].path_overrides.get(&0),
+            shell.rows[0].staged.overrides().get(&0),
             Some(&texture.to_string_lossy().replace('\\', "/")),
         );
         assert!(matches!(shell.path_sort.key, PathSortKey::CapturedOrder));
@@ -9965,7 +10101,7 @@ fn collect_path_targets_copies_files_and_stages_relative_paths(cx: &mut TestAppC
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
         assert_eq!(
-            shell.rows[0].path_overrides.get(&0),
+            shell.rows[0].staged.overrides().get(&0),
             Some(&"sourceimages/hero.tx".to_string()),
         );
         assert_eq!(
@@ -10023,7 +10159,7 @@ fn collect_path_targets_copy_only_does_not_stage_path_overrides(cx: &mut TestApp
 
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
-        assert!(shell.rows[0].path_overrides.is_empty());
+        assert!(shell.rows[0].staged.overrides().is_empty());
         assert_eq!(
             fs::read_to_string(destination_folder.join("hero.tx")).expect("read copied"),
             "tx"
@@ -10119,7 +10255,12 @@ fn build_path_table_model_marks_preview_rows_without_value_style() {
 
     let mut row = test_row(1, &scene);
     row.selected = true;
-    row.replace_preview = Some(PathReplacePreview {
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    *test_replace_state(&mut row.staged).1 = Some(PathReplacePreview {
         input_path: scene,
         scene_format: SceneFormat::Ma,
         operation_mode: OperationMode::Strict,
@@ -10171,7 +10312,12 @@ fn build_path_table_model_filters_preview_rows_by_after_value_form() {
 
     let mut row = test_row(1, &scene);
     row.selected = true;
-    row.replace_preview = Some(PathReplacePreview {
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+    *test_replace_state(&mut row.staged).1 = Some(PathReplacePreview {
         input_path: scene,
         scene_format: SceneFormat::Ma,
         operation_mode: OperationMode::Strict,
@@ -11411,9 +11557,16 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
     let mut row = audit_detail_code_test_row(&path);
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
-    row.staged_audit_report = row.audit_report.clone();
-    row.staged_audit_plan_fingerprint = Some(fingerprint_audit_plan(
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+
+    test_scene_state(&mut row.staged).4.audit_report = row.audit_report.clone();
+    test_scene_state(&mut row.staged).4.audit_plan_fingerprint = Some(fingerprint_audit_plan(
         &build_script_audit_plan(vec![], 64).expect("plan"),
     ));
     let saved = format!("{}// Example\n", fs::read_to_string(&path).unwrap());
@@ -11429,6 +11582,7 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                promotion: SavePromotion::Unanalyzed,
                 observation_error: None,
                 saved_paths_report: None,
                 replace_changes: None,
@@ -11442,7 +11596,7 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
         );
         assert_eq!(shell.rows[0].audit_file_state, expected);
         assert!(shell.rows[0].audit_generation > generation);
-        assert!(shell.rows[0].staged_audit_report.is_none());
+        assert!(shell.rows[0].staged.reports().audit_report.is_none());
     });
 }
 
@@ -11746,7 +11900,7 @@ mod allowlist_tests {
         AuditAllowlist::from_json(&list_json("Example reason"), AllowlistSource::App).unwrap()
     }
 
-    fn analyze(path: &Path, plan: &ScriptAuditPlan) -> AnalyzeRowResult {
+    fn analyze(path: &Path, plan: &ScriptAuditPlan) -> Box<AnalyzeRowResult> {
         let RowJobResult::Analyze(result) = analyze_row_with_options(
             path,
             AuditModePreference::StrictDefault,
@@ -11851,7 +12005,7 @@ mod allowlist_tests {
             shell.audit_plan = Arc::new(plan);
             shell.audit_plan_fingerprint = fingerprint_audit_plan(&shell.audit_plan);
             shell.replace_rows(vec![test_row(1, &path)]);
-            for result in [path_result, bytes_result] {
+            for result in [path_result, Box::new(bytes_result)] {
                 shell.deliver_job_result_for_test(
                     1,
                     RowOperation::Analyze,
@@ -12059,16 +12213,24 @@ mod allowlist_tests {
         shell.update_in(visual_cx, |shell, _, _| {
             shell.replace_rows(vec![row]);
             assert_eq!(shell.file_threat_clean_targets_by_row(vec![0]).len(), 1);
-            shell.rows[0]
-                .pending_clean_targets
+            shell.rows[0].staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+            test_scene_state(&mut shell.rows[0].staged)
+                .0
+                .targets
                 .insert(ExecutionCleanTarget::ScriptNode {
                     node_name: "ExampleScriptNode".into(),
                 });
-            let pending = shell.rows[0].pending_clean_targets.clone();
+            let pending = shell.rows[0].staged.clean().targets.clone();
             shell.rows[0].mark_analysis_stale();
             assert!(shell.file_threat_clean_targets_by_row(vec![0]).is_empty());
             assert!(!file_context_menu_state(&shell.rows, 1, shell.state.audit_mode).can_clean);
-            assert_eq!(shell.rows[0].pending_clean_targets, pending);
+            assert_eq!(shell.rows[0].staged.clean().targets, pending);
         });
     }
 
@@ -12236,24 +12398,33 @@ mod allowlist_tests {
         else {
             panic!("expected staged edits");
         };
-        dirty.dirty_artifact = Some(staged.artifact);
-        dirty.staged_source_bytes = Some(staged_source_bytes);
-        dirty.staged_audit_report = dirty.audit_report.clone();
-        dirty.staged_audit_mode = Some(AuditModePreference::StrictDefault);
-        dirty.staged_audit_plan_fingerprint = Some(old_fingerprint.clone());
-        dirty.dirty_kind = Some(DirtyKind::SceneEdits);
-        dirty
-            .pending_clean_targets
+        dirty.staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+
+        *test_artifact(&mut dirty.staged) = Some(staged.artifact);
+
+        test_scene_state(&mut dirty.staged).4.source_bytes = Some(staged_source_bytes);
+        test_scene_state(&mut dirty.staged).4.audit_report = dirty.audit_report.clone();
+        test_scene_state(&mut dirty.staged).4.audit_mode = Some(AuditModePreference::StrictDefault);
+        test_scene_state(&mut dirty.staged).4.audit_plan_fingerprint =
+            Some(old_fingerprint.clone());
+
+        test_scene_state(&mut dirty.staged)
+            .0
+            .targets
             .insert(ExecutionCleanTarget::ScriptNode {
                 node_name: "ExampleScriptNode".into(),
             });
-        dirty
-            .path_overrides
-            .insert(0, "asset/example/file.fbx".into());
-        let saved_artifact = dirty.dirty_artifact.clone();
-        let saved_bytes = dirty.staged_source_bytes.clone();
-        let saved_targets = dirty.pending_clean_targets.clone();
-        let saved_overrides = dirty.path_overrides.clone();
+        test_overrides(&mut dirty.staged).insert(0, "asset/example/file.fbx".into());
+        let saved_artifact = dirty.staged.artifact().clone();
+        let saved_bytes = dirty.staged.reports().source_bytes.clone();
+        let saved_targets = dirty.staged.clean().targets.clone();
+        let saved_overrides = dirty.staged.overrides().clone();
         let (shell, visual_cx) = open_test_shell(cx);
         shell.update_in(visual_cx, |shell, window, cx| {
             shell.state.workspace_auto_analyze = false;
@@ -12269,11 +12440,11 @@ mod allowlist_tests {
             assert_eq!(shell.selected_auto_analyze_generation, selected_generation);
             assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
-            assert_eq!(shell.rows[1].staged_audit_mode, None);
-            assert_eq!(shell.rows[1].dirty_artifact, saved_artifact);
-            assert_eq!(shell.rows[1].staged_source_bytes, saved_bytes);
-            assert_eq!(shell.rows[1].pending_clean_targets, saved_targets);
-            assert_eq!(shell.rows[1].path_overrides, saved_overrides);
+            assert_eq!(shell.rows[1].staged.reports().audit_mode, None);
+            assert_eq!(shell.rows[1].staged.artifact(), &saved_artifact);
+            assert_eq!(shell.rows[1].staged.reports().source_bytes, saved_bytes);
+            assert_eq!(shell.rows[1].staged.clean().targets, saved_targets);
+            assert_eq!(shell.rows[1].staged.overrides(), &saved_overrides);
             assert!(matches!(shell.status_message, Some(BannerMessage::AllowlistsReloaded { count: 1, stale_rows: 2 })));
             let banner = render_banner_message(&shell.i18n(), shell.status_message.as_ref().unwrap());
             assert_eq!(banner, "Reloaded allowlists: 1 entries 2 file(s) need re-audit; files with unsaved edits update after saving");
@@ -12298,21 +12469,21 @@ mod allowlist_tests {
             assert!(shell.rows[0].audit_report.is_some());
             assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
             shell.deliver_job_result_for_test(2, RowOperation::Clean, old_staged, None, window, cx);
-            assert!(shell.rows[1].dirty_artifact.is_some());
-            assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
-            assert_eq!(shell.rows[1].staged_audit_mode, None);
+            assert!(shell.rows[1].staged.artifact().is_some());
+            assert_eq!(shell.rows[1].staged.reports().audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
+            assert_eq!(shell.rows[1].staged.reports().audit_mode, None);
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
             let edit_state = shell.rows[1].edit_state();
             assert!(shell.rows[1].apply_edit_state(&edit_state).is_ok());
-            assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
+            assert_eq!(shell.rows[1].staged.reports().audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             let audit_generation = shell.rows[1].audit_generation;
-            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
+            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { promotion: SavePromotion::Unanalyzed, observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
                 output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
             }, None, window, cx);
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
-            assert!(shell.rows[1].dirty_artifact.is_none());
-            assert!(shell.rows[1].staged_audit_plan_fingerprint.is_none());
+            assert!(shell.rows[1].staged.artifact().is_none());
+            assert!(shell.rows[1].staged.reports().audit_plan_fingerprint.is_none());
             let generation = shell.rows[2].audit_generation;
             shell.apply_cache_restore_updates(vec![super::super::cache_restore::CacheHydrationUpdate {
                 row_id: 3, observe_snapshot: None, observe_access: None,
@@ -12492,11 +12663,18 @@ fn check_path_override_failure(cx: &mut TestAppContext, pending: bool) {
                 scene_format: maya_scene_kit_observe::scene::SceneFormat::Ma,
                 validation_state: maya_scene_kit_observe::scene::ValidationState::Validated,
             });
-            first
-                .path_overrides
-                .insert(0, "asset/example/Example.tx".into());
-            first
-                .pending_path_owner_delete_targets
+            first.staged = Staged::SceneEdits {
+                clean: CleanEdits::default(),
+                owner_delete: OwnerEdits::default(),
+                overrides: BTreeMap::new(),
+                artifact: None,
+                staged_reports: Box::default(),
+            };
+
+            test_overrides(&mut first.staged).insert(0, "asset/example/Example.tx".into());
+            test_scene_state(&mut first.staged)
+                .1
+                .targets
                 .insert(PathOwnerDeleteTarget {
                     node_type: "file".into(),
                     node_name: "Example".into(),
@@ -12510,10 +12688,10 @@ fn check_path_override_failure(cx: &mut TestAppContext, pending: bool) {
             let commit_sequence = shell.next_edit_history_commit_sequence;
             let undo = shell.undo_stack.len();
             let redo = shell.redo_stack.len();
-            let overrides = shell.rows[0].path_overrides.clone();
+            let overrides = shell.rows[0].staged.overrides().clone();
             let generation = shell.rows[0].replace_generation;
             shell.undo_path_edit_targets(vec![(1, 0), (2, 0)], window, cx);
-            assert_eq!(shell.rows[0].path_overrides, overrides);
+            assert_eq!(shell.rows[0].staged.overrides(), &overrides);
             assert_eq!(shell.rows[0].replace_generation, generation);
             assert_eq!(shell.pending_edit_transactions.len(), transactions);
             assert_eq!(shell.next_edit_history_sequence, sequence);
@@ -12933,7 +13111,12 @@ fn file_row_state_mark_survives_selection() {
 
     let mut row = test_row(1, &scene);
     row.selected = true;
-    row.dirty_kind = Some(DirtyKind::Replace);
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+
     row.status = FileStatus::Dirty;
     let table_row = super::helpers::build_single_file_table_row(&row, &state, &i18n);
     assert!(table_row.selected);
@@ -13142,8 +13325,15 @@ fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.state = test_state(dir.path(), "");
         let mut row = test_row(1, &path);
-        row.dirty_kind = Some(DirtyKind::SceneEdits);
-        row.dirty_artifact = Some(StagedSceneArtifact {
+        row.staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+
+        *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
             input_path: path.clone(),
             suggested_output_path: path.clone(),
             scene_format: SceneFormat::Ma,
@@ -13161,6 +13351,7 @@ fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                promotion: SavePromotion::Unanalyzed,
                 observation_error: None,
                 saved_paths_report: None,
                 replace_changes: None,
@@ -13224,8 +13415,15 @@ fn save_overlay_blocks_workspace_handlers(cx: &mut TestAppContext) {
 fn save_guard_row(path: &Path) -> SceneRow {
     let mut row = test_row(1, path);
     row.selected = true;
-    row.dirty_kind = Some(DirtyKind::SceneEdits);
-    row.dirty_artifact = Some(StagedSceneArtifact {
+    row.staged = Staged::SceneEdits {
+        clean: CleanEdits::default(),
+        owner_delete: OwnerEdits::default(),
+        overrides: BTreeMap::new(),
+        artifact: None,
+        staged_reports: Box::default(),
+    };
+
+    *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
         input_path: path.to_path_buf(),
         suggested_output_path: path.to_path_buf(),
         scene_format: SceneFormat::Ma,
@@ -13348,7 +13546,7 @@ fn save_guard_confirmation_resolves_row_ids(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, _, _| {
         assert!(!shell.is_saving());
         assert!(shell.state.job_history.is_empty());
-        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
     });
     assert_eq!(
         fs::read_to_string(other).expect("read scene"),
@@ -13425,6 +13623,11 @@ fn prepare_mutation_replace_dialog(
         })
         .collect();
     shell.replace_dialog = Some(ReplaceDialogState {
+        captured_generations: shell
+            .rows
+            .iter()
+            .map(|row| (row.id, row.replace_generation))
+            .collect(),
         captured_row_ids: row_ids.clone(),
         path_targets: None,
         path_type_filter: default_path_type_filter(),
@@ -13475,13 +13678,13 @@ fn row_mutation_replace_skips_analyzing_rows(cx: &mut TestAppContext) {
         assert_eq!(shell.undo_stack.len(), 1);
         assert_eq!(shell.undo_stack[0].transitions.len(), 1);
         assert_eq!(shell.undo_stack[0].transitions[0].row_id, 2);
-        assert!(mutation_banner(shell).contains("Skipped 1 busy rows."));
+        assert!(mutation_banner(shell).contains("1 busy"));
         assert!(
             shell
                 .state
                 .job_history
                 .iter()
-                .any(|entry| entry.summary.contains("Skipped 1 busy rows."))
+                .any(|entry| entry.summary.contains("1 busy"))
         );
     });
     visual_cx.run_until_parked();
@@ -13566,7 +13769,12 @@ fn row_mutation_history_refuses_partial_restore(cx: &mut TestAppContext) {
             shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
             let before = shell.capture_row_edit_states(&[0, 1]);
             for row in &mut shell.rows {
-                row.path_overrides.insert(0, "asset/sample/file.tx".into());
+                row.staged = Staged::Replace {
+                    overrides: BTreeMap::new(),
+                    preview: None,
+                    artifact: None,
+                };
+                test_overrides(&mut row.staged).insert(0, "asset/sample/file.tx".into());
                 row.status = FileStatus::Dirty;
             }
             shell.push_edit_history(before);
@@ -13628,8 +13836,8 @@ fn row_mutation_analysis_preserves_staged_fields_and_history(cx: &mut TestAppCon
         );
         assert!(shell.rows[0].edit_state().same_as(&before));
         assert_eq!(
-            shell.rows[0].staged_source_bytes,
-            before.staged_source_bytes
+            shell.rows[0].staged.reports().source_bytes,
+            before.staged.reports().source_bytes
         );
         assert_eq!(shell.undo_stack.len(), 1);
         assert!(mutation_banner(shell).contains("Kept staged edits"));
@@ -13653,7 +13861,14 @@ fn row_mutation_cache_preserves_residual_staged_state(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.state = test_state(dir.path(), "");
         let mut row = test_row(1, &path);
-        row.dirty_kind = Some(DirtyKind::SceneEdits);
+        row.staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+
         assert!(!row.dirty());
         shell.replace_rows(vec![row]);
         let before = shell.rows[0].edit_state();
@@ -13673,7 +13888,7 @@ fn row_mutation_cache_preserves_residual_staged_state(cx: &mut TestAppContext) {
         assert!(shell.rows[0].edit_state().same_as(&before));
         assert!(shell.rows[0].paths_report.is_none());
         assert_eq!(mutation_banner(shell), "Example notice");
-        shell.rows[0].dirty_kind = None;
+        shell.rows[0].staged = Staged::None;
         shell.rows[0].busy = Some((RowOperation::Analyze, 100));
         shell.apply_cache_restore_updates(
             vec![super::cache_restore::CacheHydrationUpdate {
@@ -13750,6 +13965,7 @@ fn row_mutation_save_blocks_saved_edit_callbacks(cx: &mut TestAppContext) {
                     shell.status_message,
                     Some(BannerMessage::SaveInProgress)
                         | Some(BannerMessage::BusyRowsSkipped { saving: true, .. })
+                        | Some(BannerMessage::EditRowsSkipped { saving: true, .. })
                 ));
             }
         }
@@ -13823,8 +14039,8 @@ fn row_mutation_failed_clean_preserves_edits_and_reports_error(cx: &mut TestAppC
     shell.update_in(visual_cx, |shell, _, _| {
         assert!(shell.rows[0].edit_state().same_as(&expected));
         assert_eq!(
-            shell.rows[0].staged_source_bytes,
-            expected.staged_source_bytes
+            shell.rows[0].staged.reports().source_bytes,
+            expected.staged.reports().source_bytes
         );
         assert!(shell.rows[0].busy.is_none());
         assert!(shell.pending_edit_transactions.is_empty());
@@ -13907,7 +14123,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.deliver_job_result_for_test(
             1,
             RowOperation::Save,
-            RowJobResult::Save { observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
+            RowJobResult::Save { promotion: SavePromotion::Unanalyzed, observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: None,
             },
@@ -13920,7 +14136,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.apply_job_result(
             (1, save_job_id),
             RowOperation::Save,
-            RowJobResult::Save { observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
+            RowJobResult::Save { promotion: SavePromotion::Unanalyzed, observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
             None, window, cx,
         );
         assert!(shell.rows[0].busy == Some((RowOperation::ToAscii, ascii_job_id)));
@@ -13952,9 +14168,12 @@ fn row_mutation_missing_job_row_finalizes_pending_history(cx: &mut TestAppContex
         );
         shell.replace_rows(vec![mutation_row(2, &path)]);
         let before = shell.capture_row_edit_states(&[0]);
-        shell.rows[0]
-            .path_overrides
-            .insert(0, "asset/sample/file.tx".into());
+        shell.rows[0].staged = Staged::Replace {
+            overrides: BTreeMap::new(),
+            preview: None,
+            artifact: None,
+        };
+        test_overrides(&mut shell.rows[0].staged).insert(0, "asset/sample/file.tx".into());
         shell.push_edit_history(before);
     });
     visual_cx.run_until_parked();
@@ -14044,11 +14263,16 @@ impl GuiShell {
         &mut self,
         row_id: u64,
         operation: RowOperation,
-        result: RowJobResult,
+        mut result: RowJobResult,
         edit_sequence: Option<u64>,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        if let RowJobResult::Save { promotion, .. } = &mut result {
+            if let Some(index) = self.index_of_row_id(row_id) {
+                *promotion = self.rows[index].save_promotion();
+            }
+        }
         let current_job = self.index_of_row_id(row_id).and_then(|index| {
             self.rows[index].busy.map(|(busy_operation, job_id)| {
                 debug_assert!(busy_operation == operation);
@@ -14082,10 +14306,13 @@ fn row_mutation_undo_filters_unmodified_candidates(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, window, cx| {
         for operation in 0..3 {
             shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
-            shell.rows[0]
-                .path_overrides
-                .insert(0, "asset/sample/file.tx".into());
-            shell.rows[0].dirty_kind = Some(DirtyKind::Replace);
+            shell.rows[0].staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            test_overrides(&mut shell.rows[0].staged).insert(0, "asset/sample/file.tx".into());
+
             shell.rows[0].status = FileStatus::Dirty;
             shell.rows[1].busy = Some((RowOperation::Analyze, 100));
             match operation {
@@ -14093,7 +14320,7 @@ fn row_mutation_undo_filters_unmodified_candidates(cx: &mut TestAppContext) {
                 1 => shell.undo_context_path_targets(vec![(1, 0), (2, 0)], window, cx),
                 _ => shell.undo_path_edit_targets(vec![(1, 0), (2, 0)], window, cx),
             }
-            assert!(shell.rows[0].path_overrides.is_empty());
+            assert!(shell.rows[0].staged.overrides().is_empty());
             assert!(shell.rows[1].busy == Some((RowOperation::Analyze, 100)));
         }
     });
@@ -14141,13 +14368,27 @@ fn row_mutation_rejections_preserve_apply_errors(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, _, cx| {
         shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
         shell.rows[0].busy = Some((RowOperation::Analyze, 100));
-        shell.with_mutation_targets(vec![1, 2], super::RowMutation::PathEdit, cx, |shell, indices, cx| {
-            assert_eq!(indices, vec![1]);
-            shell.status_message = Some(BannerMessage::InlinePathEditFailed("Example failure".into()));
-            shell.with_mutation_targets(vec![1], super::RowMutation::PathEdit, cx, |_, _, _| panic!("busy target admitted"));
-        });
-        assert!(matches!(&shell.status_message, Some(BannerMessage::InlinePathEditFailed(message)) if message == "Example failure"));
-        assert!(shell.state.job_history.iter().any(|entry| entry.summary.contains("Skipped 1 busy rows.")));
+        shell.with_mutation_targets(
+            vec![1, 2],
+            super::RowMutation::PathEdit,
+            cx,
+            |shell, indices, cx| {
+                assert_eq!(indices, vec![1]);
+                shell.status_message = Some(BannerMessage::InlinePathEditFailed(
+                    "Example failure".into(),
+                ));
+                shell.with_mutation_targets(
+                    vec![1],
+                    super::RowMutation::PathEdit,
+                    cx,
+                    |_, _, _| panic!("busy target admitted"),
+                );
+            },
+        );
+        let banner = mutation_banner(shell);
+        assert!(banner.contains("Example failure"), "{banner}");
+        assert!(banner.contains("1 busy"), "{banner}");
+        assert!(!banner.contains("2 busy"), "{banner}");
     });
 }
 
@@ -14171,13 +14412,19 @@ fn row_mutation_all_rejected_keeps_editor_inputs(cx: &mut TestAppContext) {
         assert!(shell.undo_stack.is_empty());
         assert!(matches!(
             shell.status_message,
-            Some(BannerMessage::BusyRowsSkipped { count: 1, .. })
+            Some(BannerMessage::EditRowsSkipped {
+                busy: 1,
+                changed: Some(0),
+                ..
+            })
         ));
         shell.clear_rows();
         shell.status_message = None;
         shell.apply_replace_dialog(window, cx);
         shell.apply_path_edit(window, cx);
-        assert!(shell.status_message.is_none());
+        let banner = mutation_banner(shell);
+        assert!(banner.contains("0 row(s) changed"), "{banner}");
+        assert!(banner.contains("1 skipped"), "{banner}");
         assert!(shell.replace_dialog.is_some());
         assert!(shell.active_path_edit.is_some());
     });
@@ -14309,13 +14556,14 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
         shell.state.workspace_auto_analyze = false;
         let mut row = test_row(1, &input);
         row.paths_report = Some(report);
-        row.path_overrides.insert(0, "asset/Example.ma".into());
-        row.dirty_kind = Some(DirtyKind::Replace);
+        row.staged = Staged::Replace { overrides: BTreeMap::new(), preview: None, artifact: None };
+        test_overrides(&mut row.staged).insert(0, "asset/Example.ma".into());
+
         row.replace_generation = 1;
         shell.replace_rows(vec![row]);
         shell.apply_replace_artifact_result(1, 1, Ok(staged), cx);
         assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
-        assert_eq!(shell.rows[0].replace_preview.as_ref().unwrap().matched_count, 0);
+        assert_eq!(shell.rows[0].replace_preview().as_ref().unwrap().matched_count, 0);
         let summary = super::path::replace_skip_summary(shell.rows[0].replace_changes.as_ref()).unwrap();
         assert_eq!(summary, "skipped non_utf8=0 non_canonical_escape=1 unrepresentable=0 crosses_concat_boundary=0 unterminated_tail=0 unterminated_tail_from=none");
         assert!(matches!(&shell.status_message, Some(BannerMessage::Raw(message)) if message == &summary));
@@ -14323,8 +14571,8 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
         shell.rows[0].replace_changes = None;
         assert!(shell.rows[0].apply_edit_state(&state).is_ok());
         assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
-        let preview = shell.rows[0].replace_preview.clone();
-        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save { observation_error: None,
+        let preview = shell.rows[0].replace_preview().clone();
+        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save { promotion: SavePromotion::Unanalyzed, observation_error: None,
                     saved_paths_report: shell.rows[0].paths_report.clone(),
             replace_changes: Some(expected.clone()),
             replace_preview: preview,
@@ -14362,11 +14610,16 @@ fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext
             shell.state.analysis_cache_enabled = false;
             let mut row = observed_test_row(1, &input);
             row.paths_report = Some(report.clone());
-            row.path_overrides.insert(0, "asset/Example.ma".into());
-            row.dirty_kind = Some(DirtyKind::Replace);
+            row.staged = Staged::Replace {
+                overrides: BTreeMap::new(),
+                preview: None,
+                artifact: None,
+            };
+            test_overrides(&mut row.staged).insert(0, "asset/Example.ma".into());
+
             row.replace_generation = 1;
             if cached {
-                row.dirty_artifact = Some(replacement.artifact.clone());
+                *test_artifact(&mut row.staged) = Some(replacement.artifact.clone());
                 row.replace_artifact_generation = Some(1);
                 row.replace_changes = Some(replacement.changes.clone());
             }
@@ -14386,7 +14639,7 @@ fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext
         });
         visual_cx.run_until_parked();
         shell.update_in(visual_cx, |shell, _, _| {
-            assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+            assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
             assert_eq!(
                 shell.rows[0].replace_changes.as_ref(),
                 Some(&replacement.changes)
@@ -14397,7 +14650,7 @@ fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext
                     .contains("non_canonical_escape=1")
             );
             assert!(
-                !String::from_utf8_lossy(&shell.rows[0].dirty_artifact.as_ref().unwrap().bytes)
+                !String::from_utf8_lossy(&shell.rows[0].staged.artifact().as_ref().unwrap().bytes)
                     .contains("ExampleScript")
             );
         });
@@ -14578,3 +14831,533 @@ fn settings_notice_disabled_saves_are_logged_once(cx: &mut TestAppContext) {
         assert!(!shell.persist_flush_state.dirty);
     });
 }
+
+#[test]
+fn converted_row_rejects_further_edits() {
+    let mut row = SceneRow::new_unloaded_row(1);
+    row.staged = Staged::ToAscii {
+        report: None,
+        artifact: None,
+    };
+
+    for operation in [
+        RowMutation::PathEdit,
+        RowMutation::SceneEdit,
+        RowMutation::Job(RowOperation::ToAscii),
+    ] {
+        assert!(check_row_mutation(Some(&row), operation).is_err());
+    }
+    assert!(check_row_mutation(Some(&row), RowMutation::HistoryRestore).is_ok());
+    assert!(check_row_mutation(Some(&row), RowMutation::Job(RowOperation::Save)).is_ok());
+}
+
+#[test]
+fn edited_rows_reject_conversion() {
+    for kind in 0..3 {
+        let mut row = SceneRow::new_unloaded_row(1);
+        match kind {
+            0 => {
+                row.staged = Staged::Replace {
+                    overrides: BTreeMap::new(),
+                    preview: None,
+                    artifact: None,
+                };
+            }
+            1 => {
+                row.staged = Staged::SceneEdits {
+                    clean: CleanEdits::default(),
+                    owner_delete: OwnerEdits::default(),
+                    overrides: BTreeMap::new(),
+                    artifact: None,
+                    staged_reports: Box::default(),
+                };
+            }
+            _ => {
+                row.staged = Staged::ToAscii {
+                    report: None,
+                    artifact: None,
+                };
+            }
+        }
+        assert!(check_row_mutation(Some(&row), RowMutation::Job(RowOperation::ToAscii)).is_err());
+    }
+}
+
+#[test]
+fn restoring_replace_state_never_rewinds_generation() {
+    let mut row = SceneRow::new_unloaded_row(1);
+    row.staged = Staged::Replace {
+        overrides: BTreeMap::new(),
+        preview: None,
+        artifact: None,
+    };
+
+    test_overrides(&mut row.staged).insert(0, "asset/example/file.ma".into());
+    row.replace_generation = 1;
+    let state = row.edit_state();
+    row.replace_generation = 4;
+    row.apply_edit_state(&state)
+        .unwrap_or_else(|_| panic!("restore"));
+    assert!(row.replace_generation >= 4);
+    assert!(row.staged.artifact().is_none());
+    assert!(row.replace_artifact_generation.is_none());
+}
+
+#[test]
+fn edit_history_equality_ignores_replace_generation() {
+    let mut row = SceneRow::new_unloaded_row(1);
+    let state = row.edit_state();
+    row.replace_generation = 9;
+    let other = row.edit_state();
+    assert!(state.same_as(&other));
+}
+
+#[gpui::test]
+fn replace_dialog_keeps_clean_targets_and_saved_bytes(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleScript".into(),
+            }]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.apply_replace_dialog(window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+        assert_eq!(shell.rows[0].staged.clean().targets.len(), 1);
+        assert_eq!(shell.rows[0].staged.overrides().len(), 1);
+        let bytes = &shell.rows[0].staged.artifact().as_ref().unwrap().bytes;
+        assert!(!String::from_utf8_lossy(bytes).contains("ExampleScript"));
+        assert!(String::from_utf8_lossy(bytes).contains("asset/sample/file.tx"));
+        shell.run_save_selected(window, cx);
+    });
+    visual_cx.run_until_parked();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("ExampleScript"));
+    assert!(saved.contains("asset/sample/file.tx"));
+}
+
+#[gpui::test]
+fn replace_dialog_merges_unmatched_inline_edits(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let mut source = fs::read_to_string(&path).unwrap();
+    source.push_str("createNode file -n \"Sample\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/second.tx\";\n");
+    fs::write(&path, source).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let mut row = observed_test_row(1, &path);
+        row.selected = true;
+        shell.replace_rows(vec![row]);
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        shell
+            .apply_path_override_updates(
+                vec![(0, BTreeMap::from([(1, "asset/sample/second.tx".into())]))],
+                window,
+                cx,
+            )
+            .unwrap();
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.apply_replace_dialog(window, cx);
+        assert_eq!(shell.rows[0].staged.overrides().len(), 2);
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.replace_from_input.update(cx, |input, cx| {
+            input.set_value("asset/sample/file.tx", window, cx)
+        });
+        shell.replace_to_input.update(cx, |input, cx| {
+            input.set_value("asset/sample/final.tx", window, cx)
+        });
+        let signature = shell.replace_dialog_current_signature(cx);
+        let dialog = shell.replace_dialog.as_mut().unwrap();
+        dialog.preview_signature = signature;
+        let replacement = &mut dialog.preview.as_mut().unwrap().planned_overrides[0].1[0];
+        replacement.before_value = "asset/sample/file.tx".into();
+        replacement.after_value = "asset/sample/final.tx".into();
+        shell.apply_replace_dialog(window, cx);
+        assert_eq!(
+            shell.rows[0].staged.overrides()[&0],
+            "asset/sample/final.tx"
+        );
+        assert_eq!(
+            shell.rows[0].staged.overrides()[&1],
+            "asset/sample/second.tx"
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        prepare_mutation_replace_dialog(shell, window, cx);
+        let preview = shell
+            .replace_dialog
+            .as_mut()
+            .unwrap()
+            .preview
+            .as_mut()
+            .unwrap();
+        preview.planned_overrides.clear();
+        preview.matched_count = 0;
+        let before = shell.rows[0].edit_state();
+        let depth = shell.undo_stack.len();
+        shell.apply_replace_dialog(window, cx);
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert_eq!(shell.undo_stack.len(), depth);
+        shell.run_save_selected(window, cx);
+    });
+    visual_cx.run_until_parked();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("asset/sample/final.tx"));
+    assert!(saved.contains("asset/sample/second.tx"));
+}
+
+#[gpui::test]
+fn replace_dialog_rejects_changed_generation_per_row(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    let other = dir.path().join("Sample.ma");
+    write_mutation_scene(&path);
+    write_mutation_scene(&other);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &other)]);
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.rows[0].replace_generation += 1;
+        let before = shell.rows[0].edit_state();
+        shell.apply_replace_dialog(window, cx);
+        assert!(shell.rows[0].edit_state().same_as(&before));
+        assert!(shell.rows[1].dirty());
+        assert!(mutation_banner(shell).to_lowercase().contains("preview"));
+    });
+}
+
+#[gpui::test]
+fn replace_dialog_rejects_changed_report_values(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell.rows[0].paths_report.as_mut().unwrap().entries[0].value =
+            "asset/example/changed.tx".into();
+        shell.apply_replace_dialog(window, cx);
+        assert!(!shell.rows[0].dirty());
+        assert!(mutation_banner(shell).to_lowercase().contains("preview"));
+        prepare_mutation_replace_dialog(shell, window, cx);
+        let report = shell.rows[0].paths_report.as_mut().unwrap();
+        report.entries.push(report.entries[0].clone());
+        shell.apply_replace_dialog(window, cx);
+        assert!(!shell.rows[0].dirty());
+        assert!(mutation_banner(shell).to_lowercase().contains("preview"));
+    });
+}
+
+#[gpui::test]
+fn replace_dialog_removes_overrides_equal_to_original(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.rows[0].staged = Staged::Replace {
+            overrides: BTreeMap::new(),
+            preview: None,
+            artifact: None,
+        };
+
+        test_overrides(&mut shell.rows[0].staged).insert(0, "asset/sample/file.tx".into());
+        prepare_mutation_replace_dialog(shell, window, cx);
+        shell
+            .replace_dialog
+            .as_mut()
+            .unwrap()
+            .preview
+            .as_mut()
+            .unwrap()
+            .planned_overrides[0]
+            .1[0]
+            .after_value = "asset/example/file.tx".into();
+        shell.apply_replace_dialog(window, cx);
+        assert!(shell.rows[0].staged.overrides().is_empty());
+        assert!(!shell.rows[0].has_staged_edits());
+    });
+}
+
+#[gpui::test]
+fn scene_edit_cancellation_preserves_and_saves_replace(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell
+            .apply_path_override_updates(
+                vec![(0, BTreeMap::from([(0, "asset/sample/file.tx".into())]))],
+                window,
+                cx,
+            )
+            .unwrap();
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleScript".into(),
+            }]),
+            BTreeSet::new(),
+            ResultTab::Audit,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let audit = shell
+            .audit_rows
+            .iter()
+            .find(|row| row.clean_state == AuditRowCleanState::Staged)
+            .unwrap()
+            .clone();
+        let depth = shell.undo_stack.len();
+        shell.undo_audit_table_clean(vec![audit], window, cx);
+        assert!(matches!(shell.rows[0].staged, Staged::Replace { .. }));
+        assert!(shell.rows[0].replace_changes.is_none());
+        assert_eq!(shell.undo_stack.len(), depth + 1);
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(shell.rows[0].replace_artifact_is_current());
+        shell.run_save_selected(window, cx);
+    });
+    visual_cx.run_until_parked();
+    let saved = fs::read_to_string(path).unwrap();
+    assert!(saved.contains("ExampleScript"));
+    assert!(saved.contains("asset/sample/file.tx"));
+}
+
+#[gpui::test]
+fn missing_scene_artifact_save_reports_error_without_worker(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let original = fs::read(&path).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.rows[0].staged = Staged::SceneEdits {
+            clean: CleanEdits::default(),
+            owner_delete: OwnerEdits::default(),
+            overrides: BTreeMap::new(),
+            artifact: None,
+            staged_reports: Box::default(),
+        };
+
+        test_scene_state(&mut shell.rows[0].staged)
+            .0
+            .targets
+            .insert(ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleScript".into(),
+            });
+        let job = shell.next_row_job_id;
+        shell.spawn_save_jobs(vec![0], window, cx);
+        assert!(matches!(shell.rows[0].status, FileStatus::Error(_)));
+        assert!(shell.rows[0].busy.is_none());
+        assert_eq!(shell.next_row_job_id, job);
+        assert!(!mutation_banner(shell).is_empty());
+    });
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[track_caller]
+fn test_replace_state(
+    staged: &mut Staged,
+) -> (
+    &mut BTreeMap<usize, String>,
+    &mut Option<PathReplacePreview>,
+    &mut Option<StagedSceneArtifact>,
+) {
+    assert!(
+        matches!(staged, Staged::Replace { .. }),
+        "fixture accessor requires an explicitly constructed Replace"
+    );
+    let Staged::Replace {
+        overrides,
+        preview,
+        artifact,
+    } = staged
+    else {
+        unreachable!()
+    };
+    (overrides, preview, artifact)
+}
+
+#[track_caller]
+fn test_scene_state(
+    staged: &mut Staged,
+) -> (
+    &mut CleanEdits,
+    &mut OwnerEdits,
+    &mut BTreeMap<usize, String>,
+    &mut Option<StagedSceneArtifact>,
+    &mut StagedReports,
+) {
+    assert!(
+        matches!(staged, Staged::SceneEdits { .. }),
+        "fixture accessor requires an explicitly constructed SceneEdits"
+    );
+    let Staged::SceneEdits {
+        clean,
+        owner_delete,
+        overrides,
+        artifact,
+        staged_reports,
+    } = staged
+    else {
+        unreachable!()
+    };
+    (clean, owner_delete, overrides, artifact, staged_reports)
+}
+
+#[track_caller]
+pub(super) fn test_overrides(staged: &mut Staged) -> &mut BTreeMap<usize, String> {
+    match staged {
+        Staged::Replace { overrides, .. } | Staged::SceneEdits { overrides, .. } => overrides,
+        _ => panic!("path fixture requires editable state"),
+    }
+}
+
+#[track_caller]
+fn test_artifact(staged: &mut Staged) -> &mut Option<StagedSceneArtifact> {
+    assert!(
+        !matches!(staged, Staged::None),
+        "artifact fixture requires an explicitly initialized edit variant"
+    );
+    match staged {
+        Staged::Replace { artifact, .. }
+        | Staged::SceneEdits { artifact, .. }
+        | Staged::ToAscii { artifact, .. } => artifact,
+        Staged::None => unreachable!(),
+    }
+}
+
+fn context_replace_composition_case(
+    cx: &mut TestAppContext,
+    ui_configuration: bool,
+    grouped: bool,
+    main_menu: bool,
+) {
+    let directory = tempdir().unwrap();
+    let mut paths = vec![directory.path().join("Example.ma")];
+    if grouped {
+        paths.push(directory.path().join("Sample.ma"));
+    }
+    let script_name = if ui_configuration {
+        "uiConfigurationScriptNode"
+    } else {
+        "ExampleScript"
+    };
+    for path in &paths {
+        write_mutation_scene(path);
+        if ui_configuration {
+            let bytes = fs::read_to_string(path)
+                .unwrap()
+                .replace("ExampleScript", script_name);
+            fs::write(path, bytes).unwrap();
+        }
+    }
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        let rows = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let row = mutation_row(index as u64 + 1, path);
+                assert!(row.paths_report.is_some());
+                assert!(row.dump_report.is_some());
+                assert!(row.analyzed_audit_mode.is_some());
+                row
+            })
+            .collect();
+        shell.replace_rows(rows);
+        let edits = (0..shell.rows.len())
+            .filter(|index| !grouped || *index == 1)
+            .map(|index| (index, BTreeMap::from([(0, "asset/sample/file.tx".into())])))
+            .collect();
+        shell
+            .apply_path_override_updates(edits, window, cx)
+            .unwrap();
+    });
+    visual_cx.run_until_parked();
+    let depth = shell.read_with(visual_cx, |shell, _| shell.undo_stack.len());
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let menu = file_context_menu_state(&shell.rows, 1, AuditModePreference::StrictDefault);
+        if ui_configuration {
+            assert!(menu.can_delete_ui_configuration_script_node);
+            if main_menu {
+                shell.run_delete_ui_configuration_script_node(window, cx);
+            } else {
+                shell.run_file_context_delete_ui_configuration_script_node_from_row(1, window, cx);
+            }
+        } else {
+            assert!(menu.can_clean);
+            if main_menu {
+                shell.run_clean(window, cx);
+            } else {
+                shell.run_file_context_clean_from_row(1, window, cx);
+            }
+        }
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        for (index, row) in shell.rows.iter().enumerate() {
+            assert!(matches!(row.staged, Staged::SceneEdits { .. }));
+            assert!(!row.staged.clean().targets.is_empty());
+            let text = String::from_utf8_lossy(&row.staged.artifact().as_ref().unwrap().bytes);
+            assert!(!text.contains(script_name));
+            assert!(text.contains(if !grouped || index == 1 {
+                "asset/sample/file.tx"
+            } else {
+                "asset/example/file.tx"
+            }));
+        }
+        assert_eq!(shell.undo_stack.len(), depth + 1);
+    });
+}
+
+#[path = "staged_tests.rs"]
+mod staged_tests;

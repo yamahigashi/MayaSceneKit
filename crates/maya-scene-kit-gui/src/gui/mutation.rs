@@ -12,6 +12,12 @@ pub(super) enum RowMutation {
 
 pub(super) enum MutateBlocked {
     Missing,
+    Edit {
+        name: String,
+    },
+    StalePreview {
+        name: String,
+    },
     Busy {
         name: String,
         operation: RowOperation,
@@ -25,6 +31,24 @@ impl MutateBlocked {
     pub(super) fn into_banner(self) -> BannerMessage {
         match self {
             Self::Missing => BannerMessage::RowMutationMissing,
+            Self::Edit { name } => MutationRejections {
+                blocked: vec![(0, Self::Edit { name })],
+                changed: Some(0),
+                ..Default::default()
+            }
+            .banner()
+            .expect("edit rejection"),
+            Self::StalePreview { name } => BannerMessage::EditRowsSkipped {
+                busy: 0,
+                staged: 0,
+                stale: 1,
+                name,
+                missing_artifacts: 0,
+                skipped: 0,
+                changed: Some(0),
+                saving: false,
+                details: Vec::new(),
+            },
             Self::Busy {
                 operation: RowOperation::Save,
                 ..
@@ -37,35 +61,76 @@ impl MutateBlocked {
 
 #[derive(Default)]
 pub(super) struct MutationRejections {
-    blocked: Vec<MutateBlocked>,
+    pub(super) blocked: Vec<(u64, MutateBlocked)>,
+    pub(super) skipped: usize,
+    pub(super) missing_artifacts: usize,
+    pub(super) changed: Option<usize>,
 }
 
 impl MutationRejections {
     pub(super) fn busy_count(&self) -> usize {
         self.blocked
             .iter()
-            .filter(|blocked| matches!(blocked, MutateBlocked::Busy { .. }))
+            .filter(|(_, blocked)| matches!(blocked, MutateBlocked::Busy { .. }))
             .count()
     }
 
     fn is_empty(&self) -> bool {
-        self.blocked.is_empty()
+        self.blocked.is_empty() && self.skipped == 0 && self.missing_artifacts == 0
     }
 
     pub(super) fn banner(&self) -> Option<BannerMessage> {
         let count = self.busy_count();
-        (count > 0).then(|| BannerMessage::BusyRowsSkipped {
-            count,
-            saving: self.blocked.iter().any(|blocked| {
-                matches!(
-                    blocked,
-                    MutateBlocked::Busy {
-                        operation: RowOperation::Save,
-                        ..
-                    }
-                )
-            }),
-        })
+        let staged = self
+            .blocked
+            .iter()
+            .filter(|(_, b)| matches!(b, MutateBlocked::Edit { .. } | MutateBlocked::Staged { .. }))
+            .count();
+        let stale = self
+            .blocked
+            .iter()
+            .filter(|(_, b)| matches!(b, MutateBlocked::StalePreview { .. }))
+            .count();
+        let skipped = self.skipped
+            + self
+                .blocked
+                .iter()
+                .filter(|(_, b)| matches!(b, MutateBlocked::Missing))
+                .count();
+        let saving = self.blocked.iter().any(|(_, b)| {
+            matches!(
+                b,
+                MutateBlocked::Busy {
+                    operation: RowOperation::Save,
+                    ..
+                }
+            )
+        });
+        if staged + stale + skipped + self.missing_artifacts > 0 || self.changed.is_some() {
+            let name = self
+                .blocked
+                .iter()
+                .find_map(|(_, b)| match b {
+                    MutateBlocked::Edit { name }
+                    | MutateBlocked::Staged { name }
+                    | MutateBlocked::StalePreview { name }
+                    | MutateBlocked::Busy { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Some(BannerMessage::EditRowsSkipped {
+                busy: count,
+                staged,
+                stale,
+                name,
+                missing_artifacts: self.missing_artifacts,
+                skipped,
+                changed: self.changed,
+                saving,
+                details: Vec::new(),
+            });
+        }
+        (count > 0).then_some(BannerMessage::BusyRowsSkipped { count, saving })
     }
 }
 
@@ -86,6 +151,17 @@ pub(super) fn check_row_mutation(
     ) && row.has_staged_edits()
     {
         return Err(MutateBlocked::Staged {
+            name: row.name.clone(),
+        });
+    }
+    if (matches!(op, RowMutation::Job(RowOperation::ToAscii)) && row.has_staged_edits())
+        || (matches!(row.staged, Staged::ToAscii { .. })
+            && !matches!(
+                op,
+                RowMutation::HistoryRestore | RowMutation::Job(RowOperation::Save)
+            ))
+    {
+        return Err(MutateBlocked::Edit {
             name: row.name.clone(),
         });
     }
@@ -143,42 +219,113 @@ impl GuiShell {
                         indices.push(index);
                     }
                 }
-                Err(blocked) => rejected.blocked.push(blocked),
+                Err(blocked) => rejected.blocked.push((row_id, blocked)),
             }
+        }
+        if indices.is_empty()
+            && rejected
+                .blocked
+                .iter()
+                .any(|(_, reason)| !matches!(reason, MutateBlocked::Busy { .. }))
+        {
+            rejected.changed = Some(0);
         }
         (indices, rejected)
     }
 
     pub(super) fn report_mutation_rejections(
         &mut self,
-        rejected: MutationRejections,
+        mut rejected: MutationRejections,
         cx: &mut Context<Self>,
     ) {
-        let banner = rejected.banner().or_else(|| {
+        if self.mutation_banner_depth > 0 {
             rejected
                 .blocked
-                .into_iter()
-                .find_map(|blocked| match blocked {
-                    MutateBlocked::Missing => None,
-                    other => Some(other.into_banner()),
-                })
-        });
-        let Some(banner) = banner else {
+                .retain(|(id, _)| self.mutation_rejected_rows.insert(*id));
+        }
+        let Some(banner) = rejected.banner() else {
             return;
         };
-        if let Some(current_banner) = self.status_message.take() {
-            self.record_job(
-                "mutation-skipped",
-                self.state.workspace_root_path().unwrap_or_default(),
-                None,
-                render_banner_message(&self.i18n(), &banner),
-                false,
-            );
-            self.status_message = Some(current_banner);
-        } else {
-            self.status_message = Some(banner);
-        }
+        self.merge_mutation_banner(banner);
         cx.notify();
+    }
+
+    pub(super) fn merge_mutation_banner(&mut self, banner: BannerMessage) {
+        let Some(current) = self.status_message.take() else {
+            self.status_message = Some(banner);
+            return;
+        };
+        let mut summary = BannerMessage::EditRowsSkipped {
+            busy: 0,
+            staged: 0,
+            stale: 0,
+            missing_artifacts: 0,
+            skipped: 0,
+            changed: None,
+            saving: false,
+            name: String::new(),
+            details: Vec::new(),
+        };
+        let BannerMessage::EditRowsSkipped {
+            busy,
+            staged,
+            stale,
+            missing_artifacts,
+            skipped,
+            changed,
+            saving,
+            name,
+            details,
+        } = &mut summary
+        else {
+            unreachable!()
+        };
+        for part in [current, banner] {
+            match part {
+                BannerMessage::EditRowsSkipped {
+                    busy: b,
+                    staged: e,
+                    stale: s,
+                    missing_artifacts: m,
+                    skipped: k,
+                    changed: c,
+                    saving: v,
+                    name: n,
+                    details: d,
+                } => {
+                    *busy += b;
+                    *staged += e;
+                    *stale += s;
+                    *missing_artifacts += m;
+                    *skipped += k;
+                    if let Some(c) = c {
+                        *changed = Some(changed.unwrap_or(0) + c);
+                    }
+                    *saving |= v;
+                    if name.is_empty() {
+                        *name = n;
+                    }
+                    details.extend(d);
+                }
+                BannerMessage::BusyRowsSkipped { count, saving: v } => {
+                    *busy += count;
+                    *saving |= v;
+                }
+                other => details.push(render_banner_message(&self.i18n(), &other)),
+            }
+        }
+        self.status_message = Some(summary);
+    }
+
+    pub(super) fn report_edit_detail(&mut self, message: String) {
+        if matches!(
+            self.status_message,
+            Some(BannerMessage::EditRowsSkipped { .. } | BannerMessage::BusyRowsSkipped { .. })
+        ) {
+            self.merge_mutation_banner(BannerMessage::Raw(message));
+        } else {
+            self.status_message = Some(BannerMessage::Raw(message));
+        }
     }
 
     pub(super) fn with_mutation_targets(
@@ -190,6 +337,7 @@ impl GuiShell {
     ) {
         self.with_audit_refresh_batch(cx, |shell, cx| {
             let previous_banner = if shell.mutation_banner_depth == 0 {
+                shell.mutation_rejected_rows.clear();
                 shell.status_message.take()
             } else {
                 None

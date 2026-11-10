@@ -356,5 +356,8 @@
   "allowlist_manager.also_app_tag": "App 中也有",
   "allowlist_manager.remove_warning": "删除此条目后，除非其他条目也列出这些代码，否则它们将不再被允许。受影响的文件将重新审核。",
   "allowlist_manager.empty_user": "没有条目。请在审核详情中使用“允许此威胁…”添加。",
-  "allowlist_manager.copy_hash": "复制哈希"
+  "allowlist_manager.copy_hash": "复制哈希",
+  "banner.missing_staged_artifact": "缺少用于保存的暂存数据",
+  "banner.edit_rows_skipped": "已跳过 {busy} 个处理中行、{staged} 个已有暂存编辑行、{stale} 个预览过期行、{missing_artifacts} 个缺少保存数据行和 {skipped} 个无更改行。首个拒绝行：{name}。",
+  "banner.edit_rows_changed": "已更改 {count} 行。"
 }

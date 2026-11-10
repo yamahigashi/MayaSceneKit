@@ -20,7 +20,8 @@ impl GuiShell {
         let report = row.display_paths_report()?;
         let entry = report.entries.get(entry_index)?;
         Some(
-            row.path_overrides
+            row.staged
+                .overrides()
                 .get(&entry_index)
                 .cloned()
                 .unwrap_or_else(|| entry.value.clone()),
@@ -80,7 +81,7 @@ impl GuiShell {
 
             let mut planned_edits = Vec::<(usize, BTreeMap<usize, String>)>::new();
             for (row_index, entry_indices) in row_targets {
-                let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                let mut next_overrides = shell.rows[row_index].staged.overrides().clone();
                 for entry_index in entry_indices {
                     let Some(current_value) =
                         shell.current_path_value(&shell.rows[row_index], entry_index)
@@ -239,7 +240,6 @@ impl GuiShell {
         &mut self,
         row_id: u64,
         revision: u64,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.index_of_row_id(row_id) else {
@@ -259,30 +259,22 @@ impl GuiShell {
         }
 
         let options = self.scene_materialize_options(OperationMode::Forensic);
-        let view = cx.entity();
-        window
-            .spawn(cx, move |cx: &mut AsyncWindowContext| {
-                let executor = cx.background_executor().clone();
-                let mut async_cx = cx.clone();
-                async move {
-                    let result = executor
-                        .spawn(async move {
-                            stage_replace_scene_paths_with_overrides_in_report_with_options(
-                                &report, &overrides, &options,
-                            )
-                            .map_err(|err| err.to_string())
-                        })
-                        .await;
-
-                    let _ = async_cx.update_window_entity(
-                        &view,
-                        |shell: &mut GuiShell, _window: &mut Window, cx: &mut Context<GuiShell>| {
-                            shell.apply_replace_artifact_result(row_id, revision, result, cx);
-                        },
-                    );
-                }
-            })
-            .detach();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    stage_replace_scene_paths_with_overrides_in_report_with_options(
+                        &report, &overrides, &options,
+                    )
+                    .map_err(|err| err.to_string())
+                })
+                .await;
+            let _ = view.update(cx, |shell, cx| {
+                shell.apply_replace_artifact_result(row_id, revision, result, cx);
+                shell.refresh_file_table(cx);
+            });
+        })
+        .detach();
     }
 
     pub(super) fn apply_replace_artifact_result(
@@ -298,8 +290,8 @@ impl GuiShell {
         };
         let row = &self.rows[index];
         if row.replace_generation != revision
-            || row.dirty_kind != Some(DirtyKind::Replace)
-            || row.path_overrides.is_empty()
+            || !matches!(row.staged, Staged::Replace { .. })
+            || row.staged.overrides().is_empty()
         {
             return;
         }
@@ -307,21 +299,29 @@ impl GuiShell {
             return;
         }
         let row = &mut self.rows[index];
+        let Staged::Replace {
+            preview, artifact, ..
+        } = &mut row.staged
+        else {
+            return;
+        };
         match result {
             Ok(staged) => {
-                if let Some(summary) = replace_skip_summary(Some(&staged.changes)) {
-                    self.status_message = Some(BannerMessage::Raw(summary));
-                }
+                let summary = replace_skip_summary(Some(&staged.changes));
                 row.replace_changes = Some(staged.changes);
-                row.replace_preview = Some(staged.preview);
-                row.dirty_artifact = Some(staged.artifact);
+                *preview = Some(staged.preview);
+                *artifact = Some(staged.artifact);
                 row.replace_artifact_generation = Some(revision);
+                if let Some(summary) = summary {
+                    self.report_edit_detail(summary);
+                }
             }
             Err(error) => {
-                row.dirty_artifact = None;
+                *artifact = None;
+                row.status = FileStatus::Error(error.clone());
                 row.replace_changes = None;
                 row.replace_artifact_generation = None;
-                self.status_message = Some(BannerMessage::Raw(error));
+                self.report_edit_detail(error);
             }
         }
         cx.notify();
@@ -381,13 +381,15 @@ impl GuiShell {
                 let Some(row_index) = shell.index_of_row_id(row_id) else {
                     continue;
                 };
-                match shell.rows[row_index].dirty_kind {
-                    Some(DirtyKind::SceneEdits) => {
+                match &shell.rows[row_index].staged {
+                    Staged::SceneEdits { .. } => {
                         if let Some(target) =
                             path_owner_delete_target_for_entry(&shell.rows[row_index], entry_index)
                                 .filter(|target| {
                                     shell.rows[row_index]
-                                        .pending_path_owner_delete_targets
+                                        .staged
+                                        .owner_delete()
+                                        .targets
                                         .contains(target)
                                 })
                         {
@@ -396,14 +398,16 @@ impl GuiShell {
                                 .or_default()
                                 .insert(target);
                         } else if shell.rows[row_index]
-                            .path_overrides
+                            .staged
+                            .overrides()
                             .contains_key(&entry_index)
                         {
                             replace_targets.push((row_id, entry_index));
                         }
                     }
                     _ if shell.rows[row_index]
-                        .path_overrides
+                        .staged
+                        .overrides()
                         .contains_key(&entry_index) =>
                     {
                         replace_targets.push((row_id, entry_index));
@@ -597,7 +601,7 @@ impl GuiShell {
             let planned_edits = row_targets
                 .into_iter()
                 .map(|(row_index, overrides)| {
-                    let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                    let mut next_overrides = shell.rows[row_index].staged.overrides().clone();
                     for (entry_index, next_value) in overrides {
                         next_overrides.insert(entry_index, next_value);
                     }
@@ -662,7 +666,7 @@ impl GuiShell {
             let planned_edits = row_targets
                 .into_iter()
                 .map(|(row_index, overrides)| {
-                    let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                    let mut next_overrides = shell.rows[row_index].staged.overrides().clone();
                     for (entry_index, next_value) in overrides {
                         next_overrides.insert(entry_index, next_value);
                     }
@@ -808,7 +812,7 @@ impl GuiShell {
 
         let mut planned_edits = Vec::new();
         for (row_index, row_plans) in row_targets {
-            let mut next_overrides = self.rows[row_index].path_overrides.clone();
+            let mut next_overrides = self.rows[row_index].staged.overrides().clone();
             for plan in row_plans {
                 let Some(current_value) =
                     self.current_path_value(&self.rows[row_index], plan.entry_index)
@@ -827,7 +831,7 @@ impl GuiShell {
         let planned_edits = planned_edits
             .into_iter()
             .filter(|(row_index, next_overrides)| {
-                self.rows[*row_index].path_overrides != *next_overrides
+                self.rows[*row_index].staged.overrides() != next_overrides
             })
             .collect::<Vec<_>>();
 
@@ -992,7 +996,7 @@ impl GuiShell {
                     return;
                 };
 
-                let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                let mut next_overrides = shell.rows[row_index].staged.overrides().clone();
                 for entry_index in entry_indices {
                     let Some(current_value) =
                         shell.current_path_value(&shell.rows[row_index], entry_index)
@@ -1061,8 +1065,8 @@ impl GuiShell {
             let requires_scene_edit_restaging = planned_edits.iter().any(|(row_index, _)| {
                 let row = &self.rows[*row_index];
                 row.scene_edits_are_staged()
-                    || !row.pending_clean_targets.is_empty()
-                    || !row.pending_path_owner_delete_targets.is_empty()
+                    || !row.staged.clean().targets.is_empty()
+                    || !row.staged.owner_delete().targets.is_empty()
             });
             let mut prepared_edits = Vec::with_capacity(planned_edits.len());
             for (row_index, next_overrides) in planned_edits {
@@ -1108,57 +1112,47 @@ impl GuiShell {
                 let row_path = self.rows[row_index].path.clone();
                 let mut revision = None;
                 let mut summary = "cleared".to_string();
-                let pending_clean_targets = self.rows[row_index].pending_clean_targets.clone();
-                let pending_path_owner_delete_targets = self.rows[row_index]
-                    .pending_path_owner_delete_targets
-                    .clone();
+                let pending_clean_targets = self.rows[row_index].staged.clean().targets.clone();
+                let pending_path_owner_delete_targets =
+                    self.rows[row_index].staged.owner_delete().targets.clone();
                 let restage_scene_edits = self.rows[row_index].scene_edits_are_staged()
                     || !pending_clean_targets.is_empty()
                     || !pending_path_owner_delete_targets.is_empty();
                 let row = &mut self.rows[row_index];
-                row.path_overrides = next_overrides;
-                row.replace_generation = row.replace_generation.wrapping_add(1);
-                row.replace_artifact_generation = None;
                 if restage_scene_edits {
-                    row.replace_preview = None;
-                    summary = if row.path_overrides.is_empty() {
-                        "scene edits restaged".to_string()
-                    } else {
-                        format!("{} composite path edit(s) staged", row.path_overrides.len())
-                    };
-                } else {
-                    row.dirty_artifact = None;
-                    row.replace_changes = None;
-                    row.staged_audit_mode = None;
-                    row.staged_audit_report = None;
-                    row.staged_audit_plan_fingerprint = None;
-                    row.staged_paths_report = None;
-                    row.staged_dump_report = None;
-                    row.staged_source_bytes = None;
-                    row.pending_clean_targets.clear();
-                    row.pending_clean_source = None;
-                    row.pending_path_owner_delete_targets.clear();
-                    row.clean_preview = None;
-                    row.path_owner_delete_preview = None;
-                    match preview {
-                        Some(preview) => {
-                            let matched = preview.matched_count;
-                            row.dirty_kind = Some(DirtyKind::Replace);
-                            row.replace_preview = Some(preview);
-                            row.status = FileStatus::Dirty;
-                            summary = format!("{matched} match(es) staged");
-                            revision = Some(row.replace_generation);
-                        }
-                        None => {
-                            row.dirty_kind = None;
-                            row.replace_preview = None;
-                            row.status = if row.paths_report.is_some() {
-                                FileStatus::Audited
-                            } else {
-                                FileStatus::Idle
-                            };
-                        }
+                    row.remember_restage();
+                }
+                row.replace_generation = row
+                    .replace_generation
+                    .checked_add(1)
+                    .expect("replace generation exhausted");
+                row.replace_artifact_generation = None;
+                row.applied_replace_preview = None;
+                row.replace_changes = None;
+                if restage_scene_edits {
+                    if let Staged::SceneEdits { overrides, .. } = &mut row.staged {
+                        *overrides = next_overrides;
                     }
+                } else {
+                    row.staged = match preview {
+                        Some(preview) => {
+                            summary = format!("{} match(es) staged", preview.matched_count);
+                            revision = Some(row.replace_generation);
+                            Staged::Replace {
+                                overrides: next_overrides,
+                                preview: Some(preview),
+                                artifact: None,
+                            }
+                        }
+                        None => Staged::None,
+                    };
+                    row.status = if row.dirty() {
+                        FileStatus::Dirty
+                    } else if row.paths_report.is_some() {
+                        FileStatus::Audited
+                    } else {
+                        FileStatus::Idle
+                    };
                     row.sync_findings_count();
                 }
                 self.refresh_row_path_resolution_state(row_index);
@@ -1176,7 +1170,7 @@ impl GuiShell {
                 } else {
                     inline_job_records.push((row_path, summary, false));
                     if let Some(revision) = revision {
-                        self.spawn_replace_artifact_refresh(row_id, revision, window, cx);
+                        self.spawn_replace_artifact_refresh(row_id, revision, cx);
                     }
                     if let Some(edit_sequence) = edit_sequence {
                         self.complete_edit_transaction_success(edit_sequence, row_id);
@@ -1214,8 +1208,12 @@ impl GuiShell {
         let edit_targets = edit_targets
             .into_iter()
             .filter(|(row_id, entry_index)| {
-                self.index_of_row_id(*row_id)
-                    .is_some_and(|index| self.rows[index].path_overrides.contains_key(entry_index))
+                self.index_of_row_id(*row_id).is_some_and(|index| {
+                    self.rows[index]
+                        .staged
+                        .overrides()
+                        .contains_key(entry_index)
+                })
             })
             .collect::<Vec<_>>();
         if !self.admit_history_restore(edit_targets.iter().map(|(row_id, _)| *row_id), cx) {
@@ -1250,7 +1248,7 @@ impl GuiShell {
 
         let mut planned_edits = Vec::new();
         for (row_index, entry_indices) in row_targets {
-            let mut next_overrides = self.rows[row_index].path_overrides.clone();
+            let mut next_overrides = self.rows[row_index].staged.overrides().clone();
             for entry_index in entry_indices {
                 next_overrides.remove(&entry_index);
             }
@@ -1278,7 +1276,7 @@ impl GuiShell {
                 .filter_map(|(index, targets)| {
                     let row = shell.rows.get(index)?;
                     let targets = targets
-                        .intersection(&row.pending_path_owner_delete_targets)
+                        .intersection(&row.staged.owner_delete().targets)
                         .cloned()
                         .collect::<BTreeSet<_>>();
                     (!targets.is_empty()).then_some((index, targets))
@@ -1298,16 +1296,15 @@ impl GuiShell {
             let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
             let edit_sequence = shell.begin_edit_transaction(&row_indices);
             for (row_index, targets) in targets_by_row {
-                let mut next_path_owner_delete_targets = shell.rows[row_index]
-                    .pending_path_owner_delete_targets
-                    .clone();
+                let mut next_path_owner_delete_targets =
+                    shell.rows[row_index].staged.owner_delete().targets.clone();
                 for target in targets {
                     next_path_owner_delete_targets.remove(&target);
                 }
 
-                let next_clean_targets = shell.rows[row_index].pending_clean_targets.clone();
+                let next_clean_targets = shell.rows[row_index].staged.clean().targets.clone();
                 if next_clean_targets.is_empty() && next_path_owner_delete_targets.is_empty() {
-                    shell.clear_clean_state_for_row(row_index, true, edit_sequence, cx);
+                    shell.clear_clean_state_for_row(row_index, true, edit_sequence, window, cx);
                 } else {
                     shell.stage_scene_edits_for_row(
                         row_index,
@@ -1345,66 +1342,25 @@ impl GuiShell {
         let before = self.capture_row_edit_states(&row_indices);
         for row_index in row_indices {
             let row_path = self.rows[row_index].path.clone();
-            if !self.rows[row_index].path_overrides.is_empty() {
-                let row = &mut self.rows[row_index];
-                row.path_overrides.clear();
-                row.dirty_artifact = None;
-                row.replace_changes = None;
-                row.dirty_kind = None;
-                row.clean_preview = None;
-                row.replace_preview = None;
-                row.ascii_report = None;
-                row.path_owner_delete_preview = None;
-                row.pending_clean_targets.clear();
-                row.pending_clean_source = None;
-                row.pending_path_owner_delete_targets.clear();
-                row.staged_audit_mode = None;
-                row.staged_audit_report = None;
-                row.staged_audit_plan_fingerprint = None;
-                row.staged_paths_report = None;
-                row.staged_dump_report = None;
-                row.staged_source_bytes = None;
-                row.replace_artifact_generation = None;
-                row.status = if row.audit_report.is_some()
-                    || row.paths_report.is_some()
-                    || row.dump_report.is_some()
-                {
-                    FileStatus::Audited
-                } else {
-                    FileStatus::Idle
-                };
-                row.sync_findings_count();
-                self.refresh_row_path_resolution_state(row_index);
+            let row = &mut self.rows[row_index];
+            row.staged = Staged::None;
+            row.replace_changes = None;
+            row.applied_replace_preview = None;
+            row.replace_artifact_generation = None;
+            row.replace_generation = row
+                .replace_generation
+                .checked_add(1)
+                .expect("replace generation exhausted");
+            row.status = if row.audit_report.is_some()
+                || row.paths_report.is_some()
+                || row.dump_report.is_some()
+            {
+                FileStatus::Audited
             } else {
-                let row = &mut self.rows[row_index];
-                row.dirty_artifact = None;
-                row.replace_changes = None;
-                row.dirty_kind = None;
-                row.clean_preview = None;
-                row.replace_preview = None;
-                row.ascii_report = None;
-                row.path_owner_delete_preview = None;
-                row.pending_clean_targets.clear();
-                row.pending_clean_source = None;
-                row.pending_path_owner_delete_targets.clear();
-                row.staged_audit_mode = None;
-                row.staged_audit_report = None;
-                row.staged_audit_plan_fingerprint = None;
-                row.staged_paths_report = None;
-                row.staged_dump_report = None;
-                row.staged_source_bytes = None;
-                row.replace_artifact_generation = None;
-                row.status = if row.audit_report.is_some()
-                    || row.paths_report.is_some()
-                    || row.dump_report.is_some()
-                {
-                    FileStatus::Audited
-                } else {
-                    FileStatus::Idle
-                };
-                row.sync_findings_count();
-                self.refresh_row_path_resolution_state(row_index);
-            }
+                FileStatus::Idle
+            };
+            row.sync_findings_count();
+            self.refresh_row_path_resolution_state(row_index);
             self.record_job("undo", row_path, None, "cleared".to_string(), false);
         }
 
@@ -1420,6 +1376,7 @@ impl GuiShell {
         row_index: usize,
         record_undo: bool,
         edit_sequence: Option<u64>,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(row_id) = self.rows.get(row_index).map(|row| row.id) else {
@@ -1453,25 +1410,28 @@ impl GuiShell {
         if !self.admit_mutation(row_id, RowMutation::SceneEdit, cx) {
             return;
         }
-
         let row = &mut self.rows[row_index];
-        row.dirty_artifact = None;
+        let overrides = row.staged.overrides().clone();
+        row.staged = if overrides.is_empty() {
+            Staged::None
+        } else {
+            Staged::Replace {
+                overrides,
+                preview: None,
+                artifact: None,
+            }
+        };
         row.replace_changes = None;
-        row.clean_preview = None;
-        row.path_owner_delete_preview = None;
-        row.pending_clean_targets.clear();
-        row.pending_clean_source = None;
-        row.pending_path_owner_delete_targets.clear();
-        row.staged_audit_mode = None;
-        row.staged_audit_report = None;
-        row.staged_audit_plan_fingerprint = None;
-        row.staged_paths_report = None;
-        row.staged_dump_report = None;
-        row.staged_source_bytes = None;
-        if matches!(row.dirty_kind, Some(DirtyKind::SceneEdits)) {
-            row.dirty_kind = None;
-        }
-        row.status = if row.audit_report.is_some()
+        row.applied_replace_preview = None;
+        row.replace_artifact_generation = None;
+        row.replace_generation = row
+            .replace_generation
+            .checked_add(1)
+            .expect("replace generation exhausted");
+        let revision = row.replace_generation;
+        row.status = if row.dirty() {
+            FileStatus::Dirty
+        } else if row.audit_report.is_some()
             || row.paths_report.is_some()
             || row.dump_report.is_some()
         {
@@ -1480,6 +1440,8 @@ impl GuiShell {
             FileStatus::Idle
         };
         row.sync_findings_count();
+        self.refresh_row_path_resolution_state(row_index);
+        self.spawn_replace_artifact_refresh(row_id, revision, cx);
     }
 
     pub(super) fn stage_scene_edits_for_row(
@@ -1505,7 +1467,7 @@ impl GuiShell {
 
         if clean_targets.is_empty()
             && path_owner_delete_targets.is_empty()
-            && self.rows[row_index].path_overrides.is_empty()
+            && self.rows[row_index].staged.overrides().is_empty()
         {
             self.clear_staged_scene_edits_for_row(row_index, cx);
             if let Some(edit_sequence) = edit_sequence {
@@ -1528,8 +1490,34 @@ impl GuiShell {
             .analyzed_audit_mode
             .unwrap_or(self.state.audit_mode);
         let base_report = self.rows[row_index].paths_report.clone();
-        let path_overrides = self.rows[row_index].path_overrides.clone();
+        let path_overrides = self.rows[row_index].staged.overrides().clone();
         let clean_source = self.rows[row_index].clean_source_for_targets(&clean_targets);
+        let row = &mut self.rows[row_index];
+        row.remember_restage();
+        row.staged = Staged::SceneEdits {
+            clean: CleanEdits {
+                targets: clean_targets.clone(),
+                preview: row.staged.clean().preview.clone(),
+                source: match &clean_source {
+                    Ok(source) => source.clone(),
+                    Err(_) => row.staged.clean().source.clone(),
+                },
+            },
+            owner_delete: OwnerEdits {
+                targets: path_owner_delete_targets.clone(),
+                preview: row.staged.owner_delete().preview.clone(),
+            },
+            overrides: path_overrides.clone(),
+            artifact: None,
+            staged_reports: Box::new(row.staged.reports().clone()),
+        };
+        row.applied_replace_preview = None;
+        row.replace_changes = None;
+        row.replace_artifact_generation = None;
+        row.replace_generation = row
+            .replace_generation
+            .checked_add(1)
+            .expect("replace generation exhausted");
         let named_targets_only = clean_targets.iter().all(|target| {
             matches!(
                 target,
@@ -1624,6 +1612,8 @@ impl GuiShell {
                 .map_err(|err| err.to_string())?;
                 let replace_changes =
                     (!path_overrides.is_empty()).then(|| staged.changes.path_replacements.clone());
+                let replace_preview = (!path_overrides.is_empty())
+                    .then(|| composed_replace_preview(&edit_plan, &staged));
                 let staged_source_bytes = staged.artifact.bytes.clone();
                 let analyzed = analyze_row_bytes_with_options(
                     &path,
@@ -1643,6 +1633,7 @@ impl GuiShell {
                 Ok(RowJobResult::SceneEdits {
                     clean_source,
                     replace_changes,
+                    replace_preview,
                     audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
                     staged,
                     audit_mode,
@@ -1674,11 +1665,9 @@ impl GuiShell {
             return;
         }
 
-        let path_owner_delete_targets = self.rows[row_index]
-            .pending_path_owner_delete_targets
-            .clone();
+        let path_owner_delete_targets = self.rows[row_index].staged.owner_delete().targets.clone();
         if targets.is_empty() && path_owner_delete_targets.is_empty() {
-            self.clear_clean_state_for_row(row_index, false, edit_sequence, cx);
+            self.clear_clean_state_for_row(row_index, false, edit_sequence, window, cx);
             return;
         }
         self.stage_scene_edits_for_row(
@@ -1792,8 +1781,16 @@ impl GuiShell {
                 row.row_keys.iter().filter_map(|key| {
                     let index = self.index_of_row_id(key.row_id)?;
                     (audit_row_clean_eligibility(&self.rows[index], row.clean_target.as_ref())
-                        == AuditRowCleanState::Available)
-                        .then_some(key.row_id)
+                        == AuditRowCleanState::Available
+                        || (row.clean_target.is_some()
+                            && matches!(
+                                self.can_mutate(key.row_id, RowMutation::SceneEdit),
+                                Err(MutateBlocked::Busy {
+                                    operation: RowOperation::Clean | RowOperation::DeleteOwnerNodes,
+                                    ..
+                                })
+                            )))
+                    .then_some(key.row_id)
                 })
             })
             .collect();
@@ -1807,7 +1804,7 @@ impl GuiShell {
                 let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
                 let edit_sequence = shell.begin_edit_transaction(&row_indices);
                 for (row_index, targets) in targets_by_row {
-                    let mut next_targets = shell.rows[row_index].pending_clean_targets.clone();
+                    let mut next_targets = shell.rows[row_index].staged.clean().targets.clone();
                     next_targets.extend(targets);
                     shell.stage_clean_targets_for_row(
                         row_index,
@@ -1836,7 +1833,14 @@ impl GuiShell {
                 };
                 for key in row.row_keys {
                     if let Some(index) = shell.index_of_row_id(key.row_id)
-                        && shell.rows[index].pending_clean_targets.contains(&target)
+                        && shell.rows[index].staged.clean().targets.contains(&target)
+                        && (!shell.rows[index].is_processing()
+                            || shell.rows[index]
+                                .staged
+                                .clean()
+                                .preview
+                                .as_ref()
+                                .is_some_and(|preview| preview.cleaned_targets.contains(&target)))
                     {
                         targets_by_row
                             .entry(index)
@@ -1855,16 +1859,15 @@ impl GuiShell {
             let row_indices = targets_by_row.keys().copied().collect::<Vec<_>>();
             let edit_sequence = shell.begin_edit_transaction(&row_indices);
             for (row_index, targets) in targets_by_row {
-                let mut next_targets = shell.rows[row_index].pending_clean_targets.clone();
+                let mut next_targets = shell.rows[row_index].staged.clean().targets.clone();
                 for target in targets {
                     next_targets.remove(&target);
                 }
                 if next_targets.is_empty() {
-                    let path_owner_delete_targets = shell.rows[row_index]
-                        .pending_path_owner_delete_targets
-                        .clone();
+                    let path_owner_delete_targets =
+                        shell.rows[row_index].staged.owner_delete().targets.clone();
                     if path_owner_delete_targets.is_empty() {
-                        shell.clear_clean_state_for_row(row_index, true, edit_sequence, cx);
+                        shell.clear_clean_state_for_row(row_index, true, edit_sequence, window, cx);
                     } else {
                         shell.stage_scene_edits_for_row(
                             row_index,
@@ -1894,16 +1897,16 @@ impl GuiShell {
     pub(super) fn seed_replace_dialog_source_cache(
         &self,
     ) -> BTreeMap<u64, ReplaceDialogSourceCacheEntry> {
-        self.ready_selected_indices()
-            .into_iter()
-            .filter_map(|index| {
-                let row = self.rows.get(index)?;
+        self.rows
+            .iter()
+            .filter(|row| self.can_mutate(row.id, RowMutation::PathEdit).is_ok())
+            .filter_map(|row| {
                 let report = row.display_paths_report().cloned()?;
                 Some((
                     row.id,
                     ReplaceDialogSourceCacheEntry {
                         report,
-                        base_overrides: row.path_overrides.clone(),
+                        base_overrides: row.staged.overrides().clone(),
                     },
                 ))
             })
@@ -1984,13 +1987,11 @@ impl GuiShell {
                 if targets.is_empty() {
                     continue;
                 }
-                let mut next_targets = shell.rows[row_index]
-                    .pending_path_owner_delete_targets
-                    .clone();
+                let mut next_targets = shell.rows[row_index].staged.owner_delete().targets.clone();
                 next_targets.extend(targets);
                 shell.stage_scene_edits_for_row(
                     row_index,
-                    shell.rows[row_index].pending_clean_targets.clone(),
+                    shell.rows[row_index].staged.clean().targets.clone(),
                     next_targets,
                     ResultTab::Paths,
                     edit_sequence,
@@ -2020,4 +2021,41 @@ pub(super) fn replace_skip_summary(changes: Option<&PathReplaceChanges>) -> Opti
         skipped.unterminated_tail,
         offset
     ))
+}
+
+fn composed_replace_preview(
+    plan: &SceneEditPlan,
+    staged: &CompositeSceneEditsStageResult,
+) -> PathReplacePreview {
+    use maya_scene_kit_edit::scene::{PathReplacePreviewItem, SceneEditStatus};
+    let mut items = BTreeMap::<usize, PathReplacePreviewItem>::new();
+    for record in &staged.changes.records {
+        if record.status != SceneEditStatus::Applied {
+            continue;
+        }
+        let SceneEditIntent::Path(replacement) = &record.intent else {
+            continue;
+        };
+        let entry = &plan.report.entries[replacement.entry_index];
+        let item = items
+            .entry(replacement.entry_index)
+            .or_insert_with(|| PathReplacePreviewItem {
+                entry_index: replacement.entry_index,
+                node_type: entry.node_type.clone(),
+                node_name: entry.node_name.clone(),
+                attr: entry.attr.clone(),
+                before_value: replacement.before_value.clone(),
+                after_value: replacement.after_value.clone(),
+                replacement_count: 0,
+            });
+        item.replacement_count += 1;
+    }
+    PathReplacePreview {
+        input_path: staged.preview.input_path.clone(),
+        scene_format: staged.preview.scene_format,
+        operation_mode: staged.preview.operation_mode,
+        validation_state: staged.preview.validation_state,
+        matched_count: staged.changes.path_replacements.replacement_count,
+        items: items.into_values().collect(),
+    }
 }

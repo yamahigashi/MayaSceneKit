@@ -386,14 +386,14 @@ impl GuiShell {
             let planned_edits = row_targets
                 .into_iter()
                 .map(|(row_index, overrides)| {
-                    let mut next_overrides = shell.rows[row_index].path_overrides.clone();
+                    let mut next_overrides = shell.rows[row_index].staged.overrides().clone();
                     for (entry_index, next_value) in overrides {
                         next_overrides.insert(entry_index, next_value);
                     }
                     (row_index, next_overrides)
                 })
                 .filter(|(row_index, next_overrides)| {
-                    shell.rows[*row_index].path_overrides != *next_overrides
+                    shell.rows[*row_index].staged.overrides() != next_overrides
                 })
                 .collect::<Vec<_>>();
 

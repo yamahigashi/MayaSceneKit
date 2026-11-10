@@ -749,7 +749,8 @@ impl GuiShell {
                                         .map(|(entry_index, entry)| {
                                             (
                                                 entry_index,
-                                                row.path_overrides
+                                                row.staged
+                                                    .overrides()
                                                     .get(&entry_index)
                                                     .cloned()
                                                     .unwrap_or_else(|| entry.value.clone()),

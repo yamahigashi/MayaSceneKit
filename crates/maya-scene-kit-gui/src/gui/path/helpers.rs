@@ -145,9 +145,11 @@ pub(in crate::gui) fn path_owner_delete_staged_for_entry(
     let Some(target) = path_owner_delete_target_for_entry(row, entry_index) else {
         return false;
     };
-    row.pending_path_owner_delete_targets.contains(&target)
+    row.staged.owner_delete().targets.contains(&target)
         || row
-            .path_owner_delete_preview
+            .staged
+            .owner_delete()
+            .preview
             .as_ref()
             .is_some_and(|preview| preview.deleted_targets.contains(&target))
 }
@@ -277,7 +279,8 @@ pub(in crate::gui) fn effective_path_value_for_entry(
     let report = row.display_paths_report()?;
     let entry = report.entries.get(entry_index)?;
     Some(
-        row.path_overrides
+        row.staged
+            .overrides()
             .get(&entry_index)
             .cloned()
             .unwrap_or_else(|| entry.value.clone()),

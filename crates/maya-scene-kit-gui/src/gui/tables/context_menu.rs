@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::super::{
-    AuditModePreference, AuditRowCleanState, AuditTableRow, DirtyKind, ExecutionCleanTarget,
+    AuditModePreference, AuditRowCleanState, AuditTableRow, ExecutionCleanTarget,
     PathCollectRewriteMode, PathEditTargets, SceneRow, clean_targets_for_threat_findings,
     path_edit::{
         absolute_override_value_for_entry, missing_path_entry_file_name,
@@ -103,10 +103,6 @@ fn file_context_row_indices(rows: &[SceneRow], row_id: u64) -> Option<Vec<usize>
 
 fn file_context_scene_edit_allowed(row: &SceneRow) -> bool {
     super::super::check_row_mutation(Some(row), super::super::RowMutation::SceneEdit).is_ok()
-        && !matches!(
-            row.dirty_kind,
-            Some(DirtyKind::Replace | DirtyKind::ToAscii)
-        )
 }
 
 fn file_context_has_available_clean_targets(
@@ -118,7 +114,7 @@ fn file_context_has_available_clean_targets(
     }
     clean_targets_for_threat_findings(row)
         .into_iter()
-        .any(|target| !row.pending_clean_targets.contains(&target))
+        .any(|target| !row.staged.clean().targets.contains(&target))
 }
 
 fn file_context_can_stage_ui_configuration_script_node(row: &SceneRow) -> bool {
@@ -128,7 +124,9 @@ fn file_context_can_stage_ui_configuration_script_node(row: &SceneRow) -> bool {
             .iter()
             .any(|entry| entry.name == "uiConfigurationScriptNode")
     }) && !row
-        .pending_clean_targets
+        .staged
+        .clean()
+        .targets
         .contains(&ExecutionCleanTarget::ScriptNode {
             node_name: "uiConfigurationScriptNode".to_string(),
         })

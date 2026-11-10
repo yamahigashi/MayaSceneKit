@@ -78,12 +78,11 @@ impl GuiShell {
     }
 
     pub(super) fn open_replace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let captured_row_ids = self
-            .ready_selected_indices()
-            .into_iter()
-            .filter_map(|index| self.rows.get(index).map(|row| row.id))
-            .collect::<Vec<_>>();
-        self.open_replace_dialog_for_rows(captured_row_ids, None, window, cx);
+        let row_ids = self.row_ids_for_indices(&self.selected_indices());
+        self.with_mutation_targets(row_ids, RowMutation::PathEdit, cx, |shell, indices, cx| {
+            let captured = shell.row_ids_for_indices(&indices);
+            shell.open_replace_dialog_for_rows(captured, None, window, cx);
+        });
     }
 
     pub(super) fn open_replace_dialog_for_path_targets(
@@ -128,6 +127,13 @@ impl GuiShell {
         self.replace_to_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.replace_dialog = Some(ReplaceDialogState {
+            captured_generations: captured_row_ids
+                .iter()
+                .filter_map(|id| {
+                    self.index_of_row_id(*id)
+                        .map(|index| (*id, self.rows[index].replace_generation))
+                })
+                .collect(),
             captured_row_ids,
             path_targets,
             path_type_filter: default_path_type_filter(),
@@ -348,107 +354,136 @@ impl GuiShell {
         } else {
             None
         };
-        let mut planned_overrides = dialog_state
+        let planned_overrides = dialog_state
             .preview
             .as_ref()
             .map(|preview| preview.planned_overrides.clone())
             .unwrap_or_default();
         let source_cache = dialog_state.source_cache.clone();
-        let (indices, rejected) = self.mutation_targets(
+        let generations = dialog_state.captured_generations.clone();
+        let (indices, mut rejected) = self.mutation_targets(
             planned_overrides
                 .iter()
                 .filter(|(_, overrides)| !overrides.is_empty())
-                .map(|(row_id, _)| *row_id),
+                .map(|(id, _)| *id),
             RowMutation::PathEdit,
         );
         let accepted = self
             .row_ids_for_indices(&indices)
             .into_iter()
             .collect::<BTreeSet<_>>();
-        planned_overrides.retain(|(row_id, _)| accepted.contains(row_id));
-        if indices.is_empty() {
-            self.report_replace_rejections(rejected, 0, cx);
-            if self.status_message.is_none() {
-                self.status_message = previous_banner;
-            }
-            return;
-        }
-        let mut applied = 0;
-        let target_indices = planned_overrides
-            .iter()
-            .filter_map(|(row_id, overrides)| {
-                (!overrides.is_empty())
-                    .then(|| self.index_of_row_id(*row_id))
-                    .flatten()
-            })
-            .collect::<Vec<_>>();
-        let path_order_snapshot = self.capture_path_order_snapshot();
-        let before = self.capture_row_edit_states(&target_indices);
-
+        let mut planned_edits = Vec::new();
         for (row_id, overrides) in planned_overrides {
             if overrides.is_empty() {
+                rejected.skipped += 1;
+                continue;
+            }
+            if !accepted.contains(&row_id) {
                 continue;
             }
             let Some(index) = self.index_of_row_id(row_id) else {
                 continue;
             };
-            let Some(source_cache_entry) = source_cache.get(&row_id).cloned() else {
+            let Some(cached) = source_cache.get(&row_id) else {
+                rejected.skipped += 1;
                 continue;
             };
-            let options = self.scene_materialize_options(OperationMode::Forensic);
-            let preview = match preview_replace_scene_paths_with_overrides_in_report_with_options(
-                &source_cache_entry.report,
-                &overrides,
-                &options,
-            ) {
-                Ok(preview) => preview,
-                Err(err) => {
-                    self.status_message = Some(BannerMessage::Raw(err.to_string()));
+            let row = &self.rows[index];
+            let same_report = row.paths_report.as_ref().is_none_or(|report| {
+                report.entries.len() == cached.report.entries.len()
+                    && report.source == cached.report.source
+                    && overrides.iter().all(|replacement| {
+                        let index = replacement.entry_index;
+                        match (report.entries.get(index), cached.report.entries.get(index)) {
+                            (Some(current), Some(original)) => {
+                                current.value == original.value
+                                    && current.node_type == original.node_type
+                                    && current.node_name == original.node_name
+                                    && current.attr == original.attr
+                            }
+                            _ => false,
+                        }
+                    })
+            });
+            if generations.get(&row_id) != Some(&row.replace_generation) || !same_report {
+                rejected.blocked.push((
+                    row_id,
+                    MutateBlocked::StalePreview {
+                        name: row.name.clone(),
+                    },
+                ));
+                continue;
+            }
+            let mut merged = row.staged.overrides().clone();
+            for replacement in overrides {
+                let Some(entry) = cached.report.entries.get(replacement.entry_index) else {
+                    continue;
+                };
+                let target = PathOwnerDeleteTarget {
+                    node_type: entry.node_type.clone(),
+                    node_name: entry.node_name.clone(),
+                };
+                if row.staged.owner_delete().targets.contains(&target) {
                     continue;
                 }
-            };
-            let overrides_by_entry = path_overrides_from_replace_preview(&preview);
-            let matched = preview.matched_count;
-            let row_path = self.rows[index].path.clone();
-            let mut revision = None;
-            if let Some(row) = self.rows.get_mut(index) {
-                row.paths_report = Some(source_cache_entry.report.clone());
-                row.path_overrides = overrides_by_entry;
-                row.dirty_kind = Some(DirtyKind::Replace);
-                row.replace_preview = Some(preview);
-                row.dirty_artifact = None;
-                row.path_owner_delete_preview = None;
-                row.replace_generation = row.replace_generation.wrapping_add(1);
-                row.replace_artifact_generation = None;
-                row.status = FileStatus::Dirty;
-                revision = Some(row.replace_generation);
+                if replacement.after_value == entry.value {
+                    merged.remove(&replacement.entry_index);
+                } else {
+                    merged.insert(replacement.entry_index, replacement.after_value);
+                }
             }
-            applied += 1;
-            self.refresh_row_path_resolution_state(index);
-            self.record_job(
-                operation_key(RowOperation::Replace),
-                row_path,
-                None,
-                format!("{matched} match(es) staged"),
-                false,
-            );
-            if let Some(revision) = revision {
-                self.spawn_replace_artifact_refresh(row_id, revision, window, cx);
+            if &merged == row.staged.overrides() {
+                rejected.skipped += 1;
+                continue;
             }
+            let replacements = merged
+                .iter()
+                .filter_map(|(index, value)| {
+                    cached
+                        .report
+                        .entries
+                        .get(*index)
+                        .map(|entry| PathReplaceOverride {
+                            entry_index: *index,
+                            before_value: entry.value.clone(),
+                            after_value: value.clone(),
+                        })
+                })
+                .collect::<Vec<_>>();
+            let options = self.scene_materialize_options(OperationMode::Forensic);
+            if let Err(error) = preview_replace_scene_paths_with_overrides_in_report_with_options(
+                &cached.report,
+                &replacements,
+                &options,
+            ) {
+                self.report_edit_detail(error.to_string());
+                rejected.skipped += 1;
+                continue;
+            }
+            if self.rows[index].paths_report.is_none() {
+                self.rows[index].paths_report = Some(cached.report.clone());
+            }
+            planned_edits.push((index, merged));
         }
-        if !before.is_empty() {
-            self.push_edit_history(before);
+        let mut applied = planned_edits.len();
+        if applied > 0 {
+            if self
+                .apply_path_override_updates(planned_edits, window, cx)
+                .is_err()
+            {
+                rejected.skipped += applied;
+                applied = 0;
+            }
+            self.clear_replace_dialog_state(window, cx);
+            window.close_dialog(cx);
+            self.set_tab(ResultTab::Paths, window, cx);
         }
-        self.preserve_path_order_after_path_mutation(path_order_snapshot);
-        self.refresh_app_menus(window, cx);
-
-        self.clear_replace_dialog_state(window, cx);
-        window.close_dialog(cx);
-        self.set_tab(ResultTab::Paths, window, cx);
+        rejected.changed = Some(applied);
         self.report_replace_rejections(rejected, applied, cx);
         if self.status_message.is_none() {
             self.status_message = previous_banner;
         }
+        self.refresh_file_table(cx);
         cx.notify();
     }
 
@@ -458,9 +493,7 @@ impl GuiShell {
         applied: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.status_message.is_none()
-            && let Some(skipped) = rejected.banner()
-        {
+        if let Some(skipped) = rejected.banner() {
             let summary = format!(
                 "{} file(s) staged; {}",
                 applied,

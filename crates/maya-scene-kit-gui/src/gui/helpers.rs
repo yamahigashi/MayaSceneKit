@@ -254,10 +254,25 @@ pub(super) fn audit_row_clean_state(
     if eligibility == AuditRowCleanState::Unsupported {
         return eligibility;
     }
-    if check_row_mutation(Some(row), RowMutation::SceneEdit).is_err() {
-        return AuditRowCleanState::Busy;
+    audit_clean_state_for_mutation(
+        eligibility,
+        check_row_mutation(Some(row), RowMutation::SceneEdit),
+    )
+}
+
+pub(super) fn audit_clean_state_for_mutation(
+    eligibility: AuditRowCleanState,
+    mutation: Result<(), MutateBlocked>,
+) -> AuditRowCleanState {
+    match mutation {
+        Err(MutateBlocked::Busy { .. }) => AuditRowCleanState::Busy,
+        Err(MutateBlocked::Edit { .. }) => AuditRowCleanState::BlockedByOtherDirty,
+        Err(MutateBlocked::Staged { .. }) => AuditRowCleanState::Staged,
+        Err(MutateBlocked::Missing | MutateBlocked::StalePreview { .. }) => {
+            AuditRowCleanState::Unsupported
+        }
+        Ok(()) => eligibility,
     }
-    eligibility
 }
 
 pub(super) fn audit_row_clean_eligibility(
@@ -266,13 +281,8 @@ pub(super) fn audit_row_clean_eligibility(
 ) -> AuditRowCleanState {
     match clean_target {
         None => AuditRowCleanState::Unsupported,
-        Some(target) if row.pending_clean_targets.contains(target) => AuditRowCleanState::Staged,
-        Some(_)
-            if matches!(
-                row.dirty_kind,
-                Some(DirtyKind::Replace | DirtyKind::ToAscii)
-            ) =>
-        {
+        Some(target) if row.staged.clean().targets.contains(target) => AuditRowCleanState::Staged,
+        Some(_) if matches!(row.staged, Staged::ToAscii { .. }) => {
             AuditRowCleanState::BlockedByOtherDirty
         }
         Some(_) => AuditRowCleanState::Available,
@@ -280,7 +290,7 @@ pub(super) fn audit_row_clean_eligibility(
 }
 
 fn audit_item_dirty(row: &SceneRow, clean_target: Option<&ExecutionCleanTarget>) -> bool {
-    clean_target.is_some_and(|target| row.pending_clean_targets.contains(target))
+    clean_target.is_some_and(|target| row.staged.clean().targets.contains(target))
 }
 
 fn audit_source_line(row: &SceneRow, origin: &ExecutionOrigin) -> Option<usize> {
@@ -712,11 +722,12 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                     continue;
                 }
                 let value = row
-                    .path_overrides
+                    .staged
+                    .overrides()
                     .get(&entry_index)
                     .cloned()
                     .unwrap_or_else(|| entry.value.clone());
-                let is_dirty = row.path_overrides.contains_key(&entry_index)
+                let is_dirty = row.staged.overrides().contains_key(&entry_index)
                     || path_owner_delete_dirty_for_entry(row, entry_index);
                 let resolution = row.path_resolution(entry_index, &value).cloned();
                 let value_style = resolution
@@ -816,7 +827,7 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                     });
                 }
             }
-        } else if let Some(preview) = row.replace_preview.as_ref() {
+        } else if let Some(preview) = row.replace_preview().as_ref() {
             if !preview.items.is_empty() {
                 contributed = true;
             }
@@ -946,11 +957,15 @@ fn path_owner_delete_dirty_for_entry(row: &SceneRow, entry_index: usize) -> bool
     let Some(entry) = report.entries.get(entry_index) else {
         return false;
     };
-    row.pending_path_owner_delete_targets
+    row.staged
+        .owner_delete()
+        .targets
         .iter()
         .any(|target| target.node_type == entry.node_type && target.node_name == entry.node_name)
         || row
-            .path_owner_delete_preview
+            .staged
+            .owner_delete()
+            .preview
             .as_ref()
             .is_some_and(|preview| {
                 preview.deleted_targets.iter().any(|target| {
@@ -959,6 +974,7 @@ fn path_owner_delete_dirty_for_entry(row: &SceneRow, entry_index: usize) -> bool
             })
 }
 
+#[cfg(test)]
 pub(super) fn path_overrides_from_replace_preview(
     preview: &PathReplacePreview,
 ) -> BTreeMap<usize, String> {
@@ -972,7 +988,8 @@ pub(super) fn path_overrides_from_replace_preview(
 pub(super) fn replace_overrides_for_row(row: &SceneRow) -> Option<Vec<PathReplaceOverride>> {
     let report = row.display_paths_report()?;
     Some(
-        row.path_overrides
+        row.staged
+            .overrides()
             .iter()
             .filter_map(|(entry_index, after_value)| {
                 report
@@ -1927,7 +1944,7 @@ pub(super) fn analyze_row_with_options(
                 plan,
             )?;
             result.audit_file_state = audit_file_state;
-            Ok(RowJobResult::Analyze(result))
+            Ok(RowJobResult::Analyze(Box::new(result)))
         }
         Err(
             maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { .. }
@@ -1942,7 +1959,7 @@ pub(super) fn analyze_row_with_options(
                 fingerprint_audit_plan(plan),
             )
             .map_err(|err| err.to_string())?;
-            Ok(RowJobResult::Analyze(AnalyzeRowResult {
+            Ok(RowJobResult::Analyze(Box::new(AnalyzeRowResult {
                 audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state,
                 audit_report,
@@ -1952,7 +1969,7 @@ pub(super) fn analyze_row_with_options(
                 audit_snapshot: Some(audit_snapshot),
                 audit_mode,
                 elapsed: started_at.elapsed(),
-            }))
+            })))
         }
         Err(err) => Err(err.to_string()),
     }
@@ -2208,6 +2225,41 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
             ],
         ),
         BannerMessage::RowMutationMissing => i18n.text("banner.row_mutation_missing"),
+        BannerMessage::EditRowsSkipped {
+            busy,
+            staged,
+            stale,
+            name,
+            missing_artifacts,
+            skipped,
+            changed,
+            saving,
+            details,
+        } => {
+            let mut parts = Vec::new();
+            if *saving {
+                parts.push(i18n.text("banner.save_in_progress"));
+            }
+            if let Some(changed) = changed {
+                parts.push(i18n.format(
+                    "banner.edit_rows_changed",
+                    &[("count", changed.to_string())],
+                ));
+            }
+            parts.push(i18n.format(
+                "banner.edit_rows_skipped",
+                &[
+                    ("busy", busy.to_string()),
+                    ("staged", staged.to_string()),
+                    ("stale", stale.to_string()),
+                    ("name", name.clone()),
+                    ("missing_artifacts", missing_artifacts.to_string()),
+                    ("skipped", skipped.to_string()),
+                ],
+            ));
+            parts.extend(details.iter().cloned());
+            parts.join(" ")
+        }
         BannerMessage::BusyRowsSkipped { count, saving } => {
             let skipped = i18n.format(
                 "banner.replace_busy_skipped",

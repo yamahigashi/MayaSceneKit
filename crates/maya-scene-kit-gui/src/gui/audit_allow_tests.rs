@@ -5,7 +5,10 @@ use maya_scene_kit_observe::scene::evidence::{ExecutionLanguage, ExecutionTrigge
 use tempfile::tempdir;
 
 use super::*;
-use crate::persistence::{UserAllowlistDocument, read_user_allowlist};
+use crate::{
+    gui::tests::test_overrides,
+    persistence::{UserAllowlistDocument, read_user_allowlist},
+};
 
 const SCENE: &str = concat!(
     "//Maya ASCII 2026 scene\n",
@@ -523,14 +526,17 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
         );
         shell.rows[0].busy = None;
         shell.rows[0].status = FileStatus::Audited;
-        shell.rows[0]
-            .path_overrides
-            .insert(0, "asset/example/file.fbx".into());
+        shell.rows[0].staged = Staged::Replace {
+            overrides: BTreeMap::new(),
+            preview: None,
+            artifact: None,
+        };
+        test_overrides(&mut shell.rows[0].staged).insert(0, "asset/example/file.fbx".into());
         assert_eq!(
             shell.audit_detail_allow_disabled_reason(),
             Some("audit_allow.dirty")
         );
-        shell.rows[0].path_overrides.clear();
+        test_overrides(&mut shell.rows[0].staged).clear();
         shell.rows[0].analyzed_audit_mode = None;
         assert_eq!(
             shell.audit_detail_allow_disabled_reason(),

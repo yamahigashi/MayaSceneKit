@@ -239,6 +239,7 @@ struct GuiShell {
     next_row_job_id: u64,
     audit_refresh_batch_depth: usize,
     mutation_banner_depth: usize,
+    mutation_rejected_rows: BTreeSet<u64>,
     audit_refresh_pending: bool,
     #[cfg(test)]
     audit_refresh_count: usize,
@@ -538,26 +539,11 @@ struct SceneRowEditState {
     audit_file_state: Option<GuiFileState>,
     status: FileStatus,
     findings: usize,
-    clean_preview: Option<ExecutionCleanPreview>,
-    replace_preview: Option<PathReplacePreview>,
     replace_changes: Option<PathReplaceChanges>,
-    ascii_report: Option<MayaAsciiConversionReport>,
-    path_owner_delete_preview: Option<PathOwnerDeletePreview>,
-    dirty_artifact: Option<StagedSceneArtifact>,
-    dirty_kind: Option<DirtyKind>,
-    pending_clean_targets: BTreeSet<ExecutionCleanTarget>,
-    pending_clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
-    pending_path_owner_delete_targets: BTreeSet<PathOwnerDeleteTarget>,
     audit_plan_fingerprint: Option<String>,
-    staged_audit_mode: Option<AuditModePreference>,
-    staged_audit_report: Option<AuditReport>,
-    staged_audit_plan_fingerprint: Option<String>,
-    staged_paths_report: Option<ScenePathsReport>,
-    staged_dump_report: Option<SceneDumpReport>,
-    staged_source_bytes: Option<Vec<u8>>,
-    path_overrides: BTreeMap<usize, String>,
-    replace_generation: u64,
     replace_artifact_generation: Option<u64>,
+    staged: Staged,
+    applied_replace_preview: Option<PathReplacePreview>,
 }
 
 struct PendingEditTransaction {
@@ -834,29 +820,16 @@ struct SceneRow {
     paths_report: Option<ScenePathsReport>,
     dump_report: Option<SceneDumpReport>,
     analyzed_audit_mode: Option<AuditModePreference>,
-    clean_preview: Option<ExecutionCleanPreview>,
-    replace_preview: Option<PathReplacePreview>,
     replace_changes: Option<PathReplaceChanges>,
-    ascii_report: Option<MayaAsciiConversionReport>,
-    path_owner_delete_preview: Option<PathOwnerDeletePreview>,
-    dirty_artifact: Option<StagedSceneArtifact>,
-    dirty_kind: Option<DirtyKind>,
-    pending_clean_targets: BTreeSet<ExecutionCleanTarget>,
-    pending_clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
-    pending_path_owner_delete_targets: BTreeSet<PathOwnerDeleteTarget>,
     audit_plan_fingerprint: Option<String>,
-    staged_audit_mode: Option<AuditModePreference>,
-    staged_audit_report: Option<AuditReport>,
-    staged_audit_plan_fingerprint: Option<String>,
-    staged_paths_report: Option<ScenePathsReport>,
-    staged_dump_report: Option<SceneDumpReport>,
-    staged_source_bytes: Option<Vec<u8>>,
-    path_overrides: BTreeMap<usize, String>,
     path_resolution_cache: BTreeMap<usize, PathResolutionCacheEntry>,
     missing_path_count_cache: Option<usize>,
     path_resolution_revision: u64,
     replace_generation: u64,
     replace_artifact_generation: Option<u64>,
+    staged: Staged,
+    restage_rollback: Option<RestageRollback>,
+    applied_replace_preview: Option<PathReplacePreview>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1005,6 +978,7 @@ struct ReplaceDialogSourceCacheEntry {
 
 #[derive(Clone, Debug)]
 struct ReplaceDialogState {
+    captured_generations: BTreeMap<u64, u64>,
     captured_row_ids: Vec<u64>,
     path_targets: Option<BTreeMap<u64, BTreeSet<usize>>>,
     path_type_filter: BTreeSet<PathTypeFilter>,
@@ -1142,6 +1116,17 @@ enum BannerMessage {
         operation: RowOperation,
     },
     RowMutationMissing,
+    EditRowsSkipped {
+        busy: usize,
+        staged: usize,
+        name: String,
+        stale: usize,
+        missing_artifacts: usize,
+        skipped: usize,
+        changed: Option<usize>,
+        saving: bool,
+        details: Vec<String>,
+    },
     BusyRowsSkipped {
         count: usize,
         saving: bool,
@@ -1153,13 +1138,6 @@ enum BannerMessage {
     NothingSelectedDirtyToSave,
     NothingToUndo,
     NothingToRedo,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DirtyKind {
-    SceneEdits,
-    Replace,
-    ToAscii,
 }
 
 struct AnalyzeRowResult {
@@ -1339,24 +1317,11 @@ impl SceneRow {
             paths_report: None,
             dump_report: None,
             analyzed_audit_mode: None,
-            clean_preview: None,
-            replace_preview: None,
             replace_changes: None,
-            ascii_report: None,
-            path_owner_delete_preview: None,
-            dirty_artifact: None,
-            dirty_kind: None,
-            pending_clean_targets: BTreeSet::new(),
-            pending_clean_source: None,
-            pending_path_owner_delete_targets: BTreeSet::new(),
-            staged_audit_mode: None,
-            staged_audit_report: None,
+            staged: Staged::None,
+            restage_rollback: None,
+            applied_replace_preview: None,
             audit_plan_fingerprint: None,
-            staged_audit_plan_fingerprint: None,
-            staged_paths_report: None,
-            staged_dump_report: None,
-            staged_source_bytes: None,
-            path_overrides: BTreeMap::new(),
             path_resolution_cache: BTreeMap::new(),
             missing_path_count_cache: None,
             path_resolution_revision: 0,
@@ -1396,7 +1361,8 @@ impl SceneRow {
             .map(|(entry_index, entry)| {
                 (
                     entry_index,
-                    self.path_overrides
+                    self.staged
+                        .overrides()
                         .get(&entry_index)
                         .cloned()
                         .unwrap_or_else(|| entry.value.clone()),
@@ -1444,7 +1410,8 @@ impl SceneRow {
                 .enumerate()
                 .filter(|(entry_index, entry)| {
                     let effective_value = self
-                        .path_overrides
+                        .staged
+                        .overrides()
                         .get(entry_index)
                         .map(String::as_str)
                         .unwrap_or(entry.value.as_str());
@@ -1494,29 +1461,37 @@ impl SceneRow {
     }
 
     fn dirty(&self) -> bool {
-        self.dirty_artifact.is_some()
-            || !self.path_overrides.is_empty()
-            || !self.pending_clean_targets.is_empty()
-            || !self.pending_path_owner_delete_targets.is_empty()
+        match &self.staged {
+            Staged::None => false,
+            Staged::Replace {
+                overrides,
+                artifact,
+                ..
+            } => artifact.is_some() || !overrides.is_empty(),
+            Staged::SceneEdits {
+                clean,
+                owner_delete,
+                overrides,
+                artifact,
+                ..
+            } => {
+                artifact.is_some()
+                    || !overrides.is_empty()
+                    || !clean.targets.is_empty()
+                    || !owner_delete.targets.is_empty()
+            }
+            Staged::ToAscii { artifact, .. } => artifact.is_some(),
+        }
     }
 
     fn has_staged_edits(&self) -> bool {
-        self.dirty()
-            || self.dirty_kind.is_some()
-            || self.clean_preview.is_some()
-            || self.replace_preview.is_some()
-            || self.path_owner_delete_preview.is_some()
-            || self.ascii_report.is_some()
-            || self.staged_audit_mode.is_some()
-            || self.staged_audit_report.is_some()
-            || self.staged_audit_plan_fingerprint.is_some()
-            || self.staged_paths_report.is_some()
-            || self.staged_dump_report.is_some()
-            || self.staged_source_bytes.is_some()
+        !matches!(self.staged, Staged::None)
     }
 
     fn effective_findings_count(&self) -> usize {
-        self.staged_audit_report
+        self.staged
+            .reports()
+            .audit_report
             .as_ref()
             .map(|report| report.finding_count() - report.allowed_finding_count())
             .or_else(|| {
@@ -1556,7 +1531,7 @@ impl SceneRow {
     }
 
     fn scene_edits_are_staged(&self) -> bool {
-        matches!(self.dirty_kind, Some(DirtyKind::SceneEdits))
+        matches!(self.staged, Staged::SceneEdits { .. })
     }
 
     fn analysis_current_for(&self, audit_mode: AuditModePreference) -> bool {
@@ -1577,9 +1552,9 @@ impl SceneRow {
     }
 
     fn replace_artifact_is_current(&self) -> bool {
-        self.dirty_kind == Some(DirtyKind::Replace)
-            && !self.path_overrides.is_empty()
-            && self.dirty_artifact.is_some()
+        matches!(self.staged, Staged::Replace { .. })
+            && !self.staged.overrides().is_empty()
+            && self.staged.artifact().is_some()
             && self.replace_artifact_generation == Some(self.replace_generation)
     }
 
@@ -1602,20 +1577,21 @@ impl SceneRow {
             return Ok(None);
         }
         let retained = targets
-            .intersection(&self.pending_clean_targets)
+            .intersection(&self.staged.clean().targets)
             .next()
             .is_some();
-        let pending_source = if retained {
-            Some(
-                self.pending_clean_source
-                    .as_ref()
-                    .ok_or_else(|| "missing recorded clean observation fingerprint".to_string())?,
-            )
-        } else {
-            None
-        };
+        let pending_source =
+            if retained {
+                Some(
+                    self.staged.clean().source.as_ref().ok_or_else(|| {
+                        "missing recorded clean observation fingerprint".to_string()
+                    })?,
+                )
+            } else {
+                None
+            };
         let has_new_targets = targets
-            .difference(&self.pending_clean_targets)
+            .difference(&self.staged.clean().targets)
             .next()
             .is_some();
         let source = if has_new_targets {
@@ -1642,31 +1618,23 @@ impl SceneRow {
         Ok(Some(source.clone()))
     }
 
+    fn replace_preview(&self) -> &Option<PathReplacePreview> {
+        match &self.staged {
+            Staged::Replace { preview, .. } => preview,
+            _ => &self.applied_replace_preview,
+        }
+    }
+
     fn edit_state(&self) -> SceneRowEditState {
         SceneRowEditState {
             audit_report: self.audit_report.clone(),
             audit_file_state: self.audit_file_state,
             status: self.status.clone(),
             findings: self.findings,
-            clean_preview: self.clean_preview.clone(),
-            replace_preview: self.replace_preview.clone(),
+            staged: self.staged.clone(),
+            applied_replace_preview: self.applied_replace_preview.clone(),
             replace_changes: self.replace_changes.clone(),
-            ascii_report: self.ascii_report.clone(),
-            path_owner_delete_preview: self.path_owner_delete_preview.clone(),
-            dirty_artifact: self.dirty_artifact.clone(),
-            dirty_kind: self.dirty_kind,
-            pending_clean_targets: self.pending_clean_targets.clone(),
-            pending_clean_source: self.pending_clean_source.clone(),
-            pending_path_owner_delete_targets: self.pending_path_owner_delete_targets.clone(),
-            staged_audit_mode: self.staged_audit_mode,
-            staged_audit_report: self.staged_audit_report.clone(),
             audit_plan_fingerprint: self.audit_plan_fingerprint.clone(),
-            staged_audit_plan_fingerprint: self.staged_audit_plan_fingerprint.clone(),
-            staged_paths_report: self.staged_paths_report.clone(),
-            staged_dump_report: self.staged_dump_report.clone(),
-            staged_source_bytes: self.staged_source_bytes.clone(),
-            path_overrides: self.path_overrides.clone(),
-            replace_generation: self.replace_generation,
             replace_artifact_generation: self.replace_artifact_generation,
         }
     }
@@ -1676,26 +1644,23 @@ impl SceneRow {
         self.set_audit_report(state.audit_report.clone(), state.audit_file_state);
         self.status = state.status.clone();
         self.findings = state.findings;
-        self.clean_preview = state.clean_preview.clone();
-        self.replace_preview = state.replace_preview.clone();
+        self.staged = state.staged.clone();
+        self.applied_replace_preview = state.applied_replace_preview.clone();
         self.replace_changes = state.replace_changes.clone();
-        self.ascii_report = state.ascii_report.clone();
-        self.path_owner_delete_preview = state.path_owner_delete_preview.clone();
-        self.dirty_artifact = state.dirty_artifact.clone();
-        self.dirty_kind = state.dirty_kind;
-        self.pending_clean_targets = state.pending_clean_targets.clone();
-        self.pending_clean_source = state.pending_clean_source.clone();
-        self.pending_path_owner_delete_targets = state.pending_path_owner_delete_targets.clone();
-        self.staged_audit_mode = state.staged_audit_mode;
-        self.staged_audit_report = state.staged_audit_report.clone();
         self.audit_plan_fingerprint = state.audit_plan_fingerprint.clone();
-        self.staged_audit_plan_fingerprint = state.staged_audit_plan_fingerprint.clone();
-        self.staged_paths_report = state.staged_paths_report.clone();
-        self.staged_dump_report = state.staged_dump_report.clone();
-        self.staged_source_bytes = state.staged_source_bytes.clone();
-        self.path_overrides = state.path_overrides.clone();
-        self.replace_generation = state.replace_generation;
+        self.replace_generation = self
+            .replace_generation
+            .checked_add(1)
+            .expect("replace generation exhausted");
         self.replace_artifact_generation = state.replace_artifact_generation;
+        if let Staged::Replace { artifact, .. } = &mut self.staged {
+            *artifact = None;
+            self.replace_artifact_generation = None;
+        }
+        if matches!(self.staged, Staged::None) {
+            self.replace_changes = None;
+            self.applied_replace_preview = None;
+        }
         self.sync_findings_count();
         self.refresh_missing_path_count_cache();
         Ok(())
@@ -1706,20 +1671,10 @@ impl SceneRowEditState {
     fn same_as(&self, other: &Self) -> bool {
         self.status == other.status
             && self.findings == other.findings
-            && self.clean_preview == other.clean_preview
-            && self.replace_preview == other.replace_preview
+            && self.staged.same_as(&other.staged)
+            && self.applied_replace_preview == other.applied_replace_preview
             && self.replace_changes == other.replace_changes
-            && self.path_owner_delete_preview == other.path_owner_delete_preview
-            && self.dirty_artifact == other.dirty_artifact
-            && self.dirty_kind == other.dirty_kind
-            && self.pending_clean_targets == other.pending_clean_targets
-            && self.pending_clean_source == other.pending_clean_source
-            && self.pending_path_owner_delete_targets == other.pending_path_owner_delete_targets
-            && self.staged_audit_mode == other.staged_audit_mode
-            && self.path_overrides == other.path_overrides
-            && self.replace_generation == other.replace_generation
             && self.replace_artifact_generation == other.replace_artifact_generation
-            && ascii_report_same(&self.ascii_report, &other.ascii_report)
     }
 }
 
@@ -1747,11 +1702,28 @@ fn ascii_report_same(
 }
 
 #[allow(clippy::large_enum_variant)]
+enum SavePromotion {
+    Unanalyzed,
+    SceneEdits(StagedReports),
+}
+
+impl SceneRow {
+    fn save_promotion(&self) -> SavePromotion {
+        match &self.staged {
+            Staged::SceneEdits { staged_reports, .. } => {
+                SavePromotion::SceneEdits(staged_reports.as_ref().clone())
+            }
+            _ => SavePromotion::Unanalyzed,
+        }
+    }
+}
+
 enum RowJobResult {
-    Analyze(AnalyzeRowResult),
+    Analyze(Box<AnalyzeRowResult>),
     SceneEdits {
         clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
         replace_changes: Option<PathReplaceChanges>,
+        replace_preview: Option<PathReplacePreview>,
         staged: CompositeSceneEditsStageResult,
         audit_mode: AuditModePreference,
         staged_audit_report: AuditReport,
@@ -1765,6 +1737,7 @@ enum RowJobResult {
         artifact: StagedSceneArtifact,
     },
     Save {
+        promotion: SavePromotion,
         observation_error: Option<String>,
         saved_paths_report: Option<ScenePathsReport>,
         replace_changes: Option<PathReplaceChanges>,
@@ -1785,6 +1758,8 @@ mod ignore_dialog;
 mod jobs;
 mod max_bytes_dialog;
 mod menu;
+mod staged;
+use staged::*;
 mod mutation;
 use mutation::*;
 mod path;
