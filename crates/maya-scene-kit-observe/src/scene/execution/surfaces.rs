@@ -1787,6 +1787,14 @@ fn collect_mb_native_script_surfaces(
             else {
                 continue;
             };
+            let attr_name = if form_type == "SCRP" {
+                execution_semantics
+                    .canonical_attr("script", &attr_name)
+                    .unwrap_or(&attr_name)
+                    .to_string()
+            } else {
+                attr_name
+            };
             attr_values.push((
                 attr_name,
                 value,
@@ -2531,6 +2539,61 @@ mod tests {
                 &input[range.start..range.end],
                 "setAttr \".b\" -type \"string\" 7;"
             );
+        }
+    }
+
+    #[test]
+    fn mb_script_long_names_preserve_values_across_flag_chunks() {
+        for flags_first in [true, false] {
+            let chunk = |tag: &str, attr: &str, value: &[u8]| {
+                let mut payload = format!("{attr}\0\0").into_bytes();
+                payload.extend_from_slice(value);
+                build_mb_chunk(tag, &payload)
+            };
+            let flags = [
+                chunk("FLGS", "scriptType", &0.0f64.to_be_bytes()),
+                chunk("FLGS", "sourceType", &0.0f64.to_be_bytes()),
+                chunk("FLGS", "before", b"Sample"),
+                chunk("FLGS", "after", b"Sample"),
+            ];
+            let values = [
+                chunk("DBLE", "scriptType", &1.0f64.to_be_bytes()),
+                chunk("DBLE", "sourceType", &1.0f64.to_be_bytes()),
+                chunk("STR ", "before", b"print('Example')"),
+                chunk("STR ", "after", b"print('Sample')"),
+            ];
+            let mut children = vec![build_mb_chunk("CREA", b"ExampleScript\0")];
+            if flags_first {
+                children.extend_from_slice(&flags);
+            }
+            children.extend_from_slice(&values);
+            if !flags_first {
+                children.extend_from_slice(&flags);
+            }
+            let mut bytes = std::fs::read(repo_root().join("tests/02/sphere.mb")).unwrap();
+            let original_len = bytes.len();
+            bytes.extend_from_slice(&build_mb_form("SCRP", &children));
+            let size = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
+            let size = size + (bytes.len() - original_len) as u64;
+            bytes[8..16].copy_from_slice(&size.to_be_bytes());
+            let mb = crate::mb::parse_bytes(bytes).unwrap();
+            let coverage = collect_execution_coverage_from_mb(&mb).unwrap();
+            let surfaces: Vec<_> = coverage
+                .surfaces
+                .iter()
+                .filter(|surface| surface.origin.node_name.as_deref() == Some("ExampleScript"))
+                .collect();
+            assert_eq!(surfaces.len(), 2);
+            for (surface, attr, text) in [
+                (&surfaces[0], ".a", "print('Sample')"),
+                (&surfaces[1], ".b", "print('Example')"),
+            ] {
+                assert_eq!(surface.origin.attr_name.as_deref(), Some(attr));
+                assert_eq!(surface.text.as_ref(), text);
+                assert_eq!(surface.origin.trigger, ExecutionTrigger::FileOpen);
+                assert_eq!(surface.origin.lang, ExecutionLanguage::Python);
+                assert!(!surface.origin.overwritten);
+            }
         }
     }
 
