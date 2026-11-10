@@ -329,12 +329,15 @@ impl GuiShell {
         &self,
         edit_targets: &PathEditTargets,
     ) -> Vec<PathEditTargets> {
-        let edit_targets = normalize_path_edit_targets(edit_targets.clone());
-        if edit_targets.is_empty() {
-            Vec::new()
+        let rows = if self.selected_path_rows.contains(edit_targets) {
+            self.selected_path_rows.iter().cloned().collect()
         } else {
-            vec![edit_targets]
-        }
+            vec![edit_targets.clone()]
+        };
+        rows.into_iter()
+            .map(normalize_path_edit_targets)
+            .filter(|targets| !targets.is_empty())
+            .collect()
     }
 
     pub(super) fn undo_context_path_targets(

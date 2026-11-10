@@ -6408,7 +6408,9 @@ fn path_context_undo_delete_owner_targets_clear_all_selected_rows_in_same_file(
 }
 
 #[gpui::test]
-fn path_context_delete_owner_targets_only_stage_clicked_row_in_same_file(cx: &mut TestAppContext) {
+fn path_context_delete_owner_targets_stage_all_selected_entries_in_same_file(
+    cx: &mut TestAppContext,
+) {
     let (shell, visual_cx) = open_test_shell(cx);
     let dir = tempdir().expect("tmpdir");
     let scene = dir.path().join("scene.ma");
@@ -6421,6 +6423,53 @@ fn path_context_delete_owner_targets_only_stage_clicked_row_in_same_file(cx: &mu
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
             shell.rows = vec![row];
             shell.selected_path_rows = BTreeSet::from([vec![(1, 0)], vec![(1, 1)]]);
+
+            let selected_rows = shell.context_delete_owner_rows(&vec![(1, 0)]);
+            shell.run_delete_selected_path_owner_nodes(selected_rows, window, cx);
+        });
+    });
+    visual_cx.run_until_parked();
+
+    visual_cx.update(|_, app| {
+        let shell = shell.read(app);
+        assert_eq!(
+            shell.rows[0].pending_path_owner_delete_targets,
+            BTreeSet::from([
+                PathOwnerDeleteTarget {
+                    node_type: "file".to_string(),
+                    node_name: "file1".to_string(),
+                },
+                PathOwnerDeleteTarget {
+                    node_type: "file".to_string(),
+                    node_name: "file2".to_string(),
+                },
+            ]),
+            "delete-owner context action should stage both selected owner targets",
+        );
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(
+            shell.rows[0].dirty_artifact.is_some(),
+            "multi-entry owner delete should still produce a saveable staged artifact",
+        );
+    });
+}
+
+#[gpui::test]
+fn path_context_delete_owner_targets_stage_only_clicked_entry_outside_selection(
+    cx: &mut TestAppContext,
+) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let scene = dir.path().join("scene.ma");
+    write_path_owner_delete_scene(&scene);
+
+    visual_cx.update(|window, app| {
+        shell.update(app, |shell, cx| {
+            let mut row = test_row(1, &scene);
+            row.selected = true;
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            shell.rows = vec![row];
+            shell.selected_path_rows = BTreeSet::from([vec![(1, 1)]]);
 
             let selected_rows = shell.context_delete_owner_rows(&vec![(1, 0)]);
             shell.run_delete_selected_path_owner_nodes(selected_rows, window, cx);
