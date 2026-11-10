@@ -10,6 +10,14 @@ pub struct ExecutionSourceRange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionOrigin {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overwritten_by_connection: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_source_plug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_source_range: Option<ExecutionSourceRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_range: Option<ExecutionSourceRange>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overwritten: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_index: Option<usize>,
@@ -48,6 +56,10 @@ pub struct ExecutionOrigin {
 impl ExecutionOrigin {
     pub fn without_chunk_address() -> Self {
         Self {
+            overwritten_by_connection: false,
+            connection_source_plug: None,
+            connection_source_range: None,
+            connection_range: None,
             overwritten: false,
             assignment_index: None,
             lang: ExecutionLanguage::Unknown,

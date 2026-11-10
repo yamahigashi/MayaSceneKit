@@ -27,7 +27,31 @@ pub(in crate::cli) fn render_unit_summary_text(
             summary.origin.assignment_index.unwrap_or_default()
         ));
     }
+    for field in render_connection_fields(&summary.origin) {
+        text.push(' ');
+        text.push_str(&field);
+    }
     text
+}
+
+fn render_connection_fields(origin: &ExecutionOrigin) -> Vec<String> {
+    let mut fields = Vec::new();
+    if origin.overwritten_by_connection {
+        fields.push("overwritten-by-connection".to_string());
+    }
+    if let Some(source) = &origin.connection_source_plug {
+        fields.push(format!("connection_source={source}"));
+        if let Some(range) = origin.connection_range {
+            fields.push(format!("connection_range={}..{}", range.start, range.end));
+        }
+        if let Some(range) = origin.connection_source_range {
+            fields.push(format!(
+                "source_assignment_range={}..{}",
+                range.start, range.end
+            ));
+        }
+    }
+    fields
 }
 
 pub(in crate::cli) fn summarize_unit_reason(summary: &ExecutionUnitSummary) -> String {
@@ -93,6 +117,7 @@ pub(in crate::cli) fn render_grouped_audit_hit_text(
             surface.origin.assignment_index.unwrap_or_default()
         ));
     }
+    parts.extend(render_connection_fields(&surface.origin));
     parts.extend(render_chunk_address_fields(&surface.origin));
     parts.push(format!(
         "msg=\"{}\"",
@@ -143,6 +168,7 @@ pub(in crate::cli) fn render_grouped_review_signal_text(
             surface.origin.assignment_index.unwrap_or_default()
         ));
     }
+    parts.extend(render_connection_fields(&surface.origin));
     parts.extend(render_chunk_address_fields(&surface.origin));
     parts.push(format!(
         "msg=\"{}\"",
@@ -224,6 +250,16 @@ pub(in crate::cli) fn group_audit_hit_indexes(report: &AuditReport) -> Vec<(usiz
                 .iter()
                 .map(render_audit_evidence)
                 .collect::<Vec<_>>(),
+            overwritten_by_connection: surface.origin.overwritten_by_connection,
+            connection_source: surface.origin.connection_source_plug.as_deref(),
+            connection_range: surface
+                .origin
+                .connection_range
+                .map(|range| (range.start, range.end)),
+            connection_source_range: surface
+                .origin
+                .connection_source_range
+                .map(|range| (range.start, range.end)),
             overwritten: surface.origin.overwritten,
             assignment_index: surface.origin.assignment_index,
             lang: surface.origin.lang.as_str(),
@@ -264,6 +300,16 @@ pub(in crate::cli) fn group_review_signal_indexes(report: &AuditReport) -> Vec<(
                 .iter()
                 .map(render_audit_evidence)
                 .collect::<Vec<_>>(),
+            overwritten_by_connection: surface.origin.overwritten_by_connection,
+            connection_source: surface.origin.connection_source_plug.as_deref(),
+            connection_range: surface
+                .origin
+                .connection_range
+                .map(|range| (range.start, range.end)),
+            connection_source_range: surface
+                .origin
+                .connection_source_range
+                .map(|range| (range.start, range.end)),
             overwritten: surface.origin.overwritten,
             assignment_index: surface.origin.assignment_index,
             lang: surface.origin.lang.as_str(),
@@ -547,6 +593,10 @@ struct GroupedAuditHitKey<'a> {
     sink: &'a str,
     message: String,
     evidence: Vec<String>,
+    overwritten_by_connection: bool,
+    connection_source: Option<&'a str>,
+    connection_range: Option<(usize, usize)>,
+    connection_source_range: Option<(usize, usize)>,
     overwritten: bool,
     assignment_index: Option<usize>,
     lang: &'a str,
@@ -567,6 +617,10 @@ struct GroupedReviewSignalKey<'a> {
     review_id: &'a str,
     message: String,
     evidence: Vec<String>,
+    overwritten_by_connection: bool,
+    connection_source: Option<&'a str>,
+    connection_range: Option<(usize, usize)>,
+    connection_source_range: Option<(usize, usize)>,
     overwritten: bool,
     assignment_index: Option<usize>,
     lang: &'a str,

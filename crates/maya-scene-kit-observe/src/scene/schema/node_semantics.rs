@@ -24,6 +24,8 @@ pub(crate) struct NodeExecutionSemantics {
     profiles_by_node: HashMap<String, Vec<NodeExecutionProfile>>,
     profile_node_by_typeid: HashMap<u32, String>,
     ma_capture_attr_selectors: HashSet<RawMaNodeAttrSelector>,
+    ambiguous_ma_execution_attrs: HashSet<String>,
+    canonical_attrs_by_node: HashMap<String, HashMap<String, String>>,
 }
 
 impl NodeExecutionSemantics {
@@ -35,6 +37,17 @@ impl NodeExecutionSemantics {
             .get(&node_type)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn canonical_attr<'a>(&'a self, node_type: &str, attr: &str) -> Option<&'a str> {
+        self.canonical_attrs_by_node
+            .get(&normalize_lookup_token(node_type)?)?
+            .get(attr.trim_start_matches('.'))
+            .map(String::as_str)
+    }
+
+    pub(crate) fn ma_execution_attr_is_ambiguous(&self, attr: &str) -> bool {
+        self.ambiguous_ma_execution_attrs.contains(attr)
     }
 
     pub(crate) fn ma_capture_attr_selectors(&self) -> &HashSet<RawMaNodeAttrSelector> {
@@ -278,6 +291,47 @@ fn load_parsed_node_info_from_paths(
         }
     }
 
+    let mut short_names = HashSet::new();
+    for entry in merged_nodes.values() {
+        for profile in &entry.execution_profiles {
+            match &profile.kind {
+                NodeExecutionProfileKind::ScriptNode(profile) => {
+                    short_names.extend(profile.body_attrs.iter().cloned());
+                    short_names.extend(profile.trigger_attr.iter().cloned());
+                    short_names.extend(profile.language_attr.iter().cloned());
+                }
+                NodeExecutionProfileKind::AttrCallbacks(profile) => {
+                    short_names.extend(profile.attrs.iter().map(|attr| attr.short_name.clone()));
+                }
+            }
+        }
+    }
+    let mut ambiguous_ma_execution_attrs: HashSet<_> = short_names
+        .into_iter()
+        .filter(|name| {
+            merged_nodes
+                .values()
+                .filter(|entry| entry.attr_aliases.contains_key(name))
+                .take(2)
+                .count()
+                > 1
+        })
+        .collect();
+    ambiguous_ma_execution_attrs.extend(["a", "b", "st", "stp", "e", "ixp"].map(str::to_string));
+
+    let canonical_attrs_by_node = merged_nodes
+        .iter()
+        .map(|(node_type, entry)| {
+            (
+                node_type.clone(),
+                entry
+                    .attr_aliases
+                    .iter()
+                    .map(|(alias, (short, _))| (alias.clone(), short.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
     let mut typeid_to_typename = HashMap::new();
     let mut angular_attrs = HashMap::new();
     let mut profiles_by_node = HashMap::new();
@@ -340,11 +394,6 @@ fn load_parsed_node_info_from_paths(
                 .cloned()
                 .collect();
             for selector in selectors {
-                if node_type == "script"
-                    && matches!(selector.attr.as_str(), ".b" | ".a" | ".st" | ".stp")
-                {
-                    continue;
-                }
                 for (alias, (short, _)) in &entry.attr_aliases {
                     if selector.attr == format!(".{short}") {
                         ma_capture_attr_selectors.insert(RawMaNodeAttrSelector {
@@ -365,6 +414,8 @@ fn load_parsed_node_info_from_paths(
             profiles_by_node,
             profile_node_by_typeid,
             ma_capture_attr_selectors,
+            ambiguous_ma_execution_attrs,
+            canonical_attrs_by_node,
         },
     })
 }

@@ -30,6 +30,15 @@ impl MaObservationData {
         self.dump_sections().script_entries.as_slice()
     }
 
+    pub(crate) fn execution_connections(
+        &self,
+    ) -> Result<&maya_scene_kit_formats::ma::raw_dump::RawMaConnections, SceneToolError> {
+        if self.selective_sections_include_execution_attrs {
+            return Ok(&self.selective_sections().connections);
+        }
+        Ok(&self.execution_sections()?.connections)
+    }
+
     pub(crate) fn execution_node_attr_values(
         &self,
     ) -> Result<&[RawMaNodeAttrValue], SceneToolError> {

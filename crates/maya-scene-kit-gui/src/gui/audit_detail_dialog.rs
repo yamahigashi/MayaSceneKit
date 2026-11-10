@@ -86,6 +86,10 @@ pub(super) fn match_audit_surface_text(
         let ExecutionOrigin {
             lang: _,
             source_kind: _,
+            overwritten_by_connection,
+            connection_source_plug,
+            connection_source_range,
+            connection_range,
             overwritten,
             assignment_index,
             trigger,
@@ -102,7 +106,11 @@ pub(super) fn match_audit_surface_text(
             chunk_child_alignment,
             chunk_child_header_size,
         } = origin;
-        overwritten == &target.overwritten
+        overwritten_by_connection == &target.overwritten_by_connection
+            && connection_source_plug == &target.connection_source_plug
+            && connection_source_range == &target.connection_source_range
+            && connection_range == &target.connection_range
+            && overwritten == &target.overwritten
             && assignment_index == &target.assignment_index
             && trigger == &target.trigger
             && surface_kind == &target.surface_kind

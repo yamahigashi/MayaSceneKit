@@ -149,26 +149,37 @@ pub(crate) fn create_node_flag(flag: &str) -> Option<CreateNodeFlag> {
     FLAGS.get(flag.strip_prefix('-')?).copied()
 }
 
-pub(crate) fn setattr_flag_arity(flag: &str) -> Option<usize> {
-    static FLAGS: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
-        let mut flags = HashMap::new();
-        let Some(schema) = MAYA_COMMAND_REGISTRY.lookup("setAttr") else {
-            return flags;
-        };
+fn command_flag_arities(command: &str) -> HashMap<String, FlagArity> {
+    let mut flags = HashMap::new();
+    if let Some(schema) = MAYA_COMMAND_REGISTRY.lookup(command) {
         for flag in schema.flags.iter() {
-            let arity = match flag.arity_by_mode.create {
-                FlagArity::None => 0,
-                FlagArity::Exact(count) => usize::from(count),
-                FlagArity::Range { max, .. } => usize::from(max),
-            };
-            flags.insert(flag.long_name.to_string(), arity);
+            flags.insert(flag.long_name.to_string(), flag.arity_by_mode.create);
             if let Some(short) = &flag.short_name {
-                flags.insert(short.to_string(), arity);
+                flags.insert(short.to_string(), flag.arity_by_mode.create);
             }
         }
-        flags
-    });
-    FLAGS.get(flag.trim_start_matches('-')).copied()
+    }
+    flags
+}
+
+pub(crate) fn setattr_flag_arity(flag: &str) -> Option<usize> {
+    static FLAGS: LazyLock<HashMap<String, FlagArity>> =
+        LazyLock::new(|| command_flag_arities("setAttr"));
+    match FLAGS.get(flag.trim_start_matches('-'))? {
+        FlagArity::None => Some(0),
+        FlagArity::Exact(count) => Some(usize::from(*count)),
+        FlagArity::Range { max, .. } => Some(usize::from(*max)),
+    }
+}
+
+pub(crate) fn connect_attr_flag_arity(flag: &str) -> Option<usize> {
+    static FLAGS: LazyLock<HashMap<String, FlagArity>> =
+        LazyLock::new(|| command_flag_arities("connectAttr"));
+    match FLAGS.get(flag.trim_start_matches('-'))? {
+        FlagArity::None => Some(0),
+        FlagArity::Exact(count) => Some(usize::from(*count)),
+        FlagArity::Range { .. } => None,
+    }
 }
 
 pub(crate) fn unquoted_range_value(text: Cow<'_, str>) -> Cow<'_, str> {

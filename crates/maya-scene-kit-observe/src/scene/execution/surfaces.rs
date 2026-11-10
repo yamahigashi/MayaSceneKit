@@ -82,12 +82,14 @@ pub(crate) struct ExecutionCoverageCollection {
 pub(crate) fn collect_execution_coverage_from_ma_parts(
     script_nodes: &[RawMaScriptEntry],
     node_attr_values: &[RawMaNodeAttrValue],
+    connections: &maya_scene_kit_formats::ma::raw_dump::RawMaConnections,
     top_level: &mel::MelAuditTopLevelFacts,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
     collect_ma_coverage(
         script_nodes,
         node_attr_values,
+        connections,
         top_level,
         execution_semantics,
     )
@@ -133,6 +135,7 @@ pub(crate) fn collect_execution_coverage_from_mb_with_budget(
 fn collect_ma_coverage(
     script_nodes: &[RawMaScriptEntry],
     node_attr_values: &[RawMaNodeAttrValue],
+    connections: &maya_scene_kit_formats::ma::raw_dump::RawMaConnections,
     top_level: &mel::MelAuditTopLevelFacts,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
@@ -146,11 +149,34 @@ fn collect_ma_coverage(
         &mut assignment_issues,
     ));
     attributes.sort_by_key(|(start, _)| *start);
+    let (connected, connected_targets, connected_controls) = collect_ma_connections(
+        connections,
+        script_nodes,
+        execution_semantics,
+        &mut assignment_issues,
+    );
     let mut surfaces: Vec<_> = before
         .into_iter()
         .chain(attributes)
-        .map(|(_, surface)| surface)
+        .map(|(start, mut surface)| {
+            if let Some(id) = connections.direct_assignments.get(&start) {
+                surface.origin.overwritten_by_connection =
+                    connected_targets.get(id).is_some_and(|(node_type, attrs)| {
+                        let spelling = surface.origin.attr_name.as_deref().unwrap_or_default();
+                        let canonical = execution_semantics
+                            .canonical_attr(node_type, spelling)
+                            .unwrap_or(spelling.trim_start_matches('.'));
+                        attrs.contains(canonical)
+                    });
+                if connected_controls.contains(id) {
+                    surface.origin.lang = ExecutionLanguage::Unknown;
+                    surface.origin.trigger = ExecutionTrigger::Unknown;
+                }
+            }
+            surface
+        })
         .collect();
+    surfaces.extend(connected);
     let coverage_issues = top_level
         .diagnostics
         .iter()
@@ -296,6 +322,224 @@ fn collect_ma_coverage(
     })
 }
 
+fn connection_destination_attr(
+    plug: &maya_scene_kit_formats::ma::raw_dump::RawMaConnectionPlug,
+    semantics: &NodeExecutionSemantics,
+) -> Option<String> {
+    let last = plug.attr.rsplit('.').next()?.split('[').next()?;
+    let spelling = format!(".{last}");
+    semantics
+        .ma_capture_attr_selectors()
+        .iter()
+        .filter(|selector| {
+            selector.attr == spelling
+                && (selector.node_type.is_empty()
+                    || ma_effective_node_type(
+                        plug.node_type.as_deref().unwrap_or_default(),
+                        &plug.owner,
+                    )
+                    .eq_ignore_ascii_case(&selector.node_type))
+                && selector
+                    .node_name
+                    .as_deref()
+                    .is_none_or(|name| name == plug.owner)
+        })
+        .max_by_key(|selector| (!selector.node_type.is_empty(), selector.node_name.is_some()))
+        .map(|selector| selector.canonical_attr.clone())
+}
+
+type MaConnectedTargets = std::collections::HashMap<u32, (String, HashSet<String>)>;
+
+fn collect_ma_connections(
+    connections: &maya_scene_kit_formats::ma::raw_dump::RawMaConnections,
+    scripts: &[RawMaScriptEntry],
+    semantics: &NodeExecutionSemantics,
+    issues: &mut Vec<ExecutionCoverageIssueRecord>,
+) -> (
+    Vec<ExecutionSurfaceRecord>,
+    MaConnectedTargets,
+    HashSet<u32>,
+) {
+    let mut surfaces = Vec::new();
+    let mut scripts_by_id = std::collections::HashMap::new();
+    for script in scripts {
+        for assignment in &script.assignments {
+            if let Some(id) = connections.direct_assignments.get(&assignment.start) {
+                scripts_by_id.entry(*id).or_insert(script);
+            }
+        }
+    }
+    let mut targets = MaConnectedTargets::new();
+    let mut controls = HashSet::new();
+    for connection in &connections.connections {
+        let dst = &connection.destination;
+        let node_type =
+            ma_effective_node_type(dst.node_type.as_deref().unwrap_or_default(), &dst.owner);
+        let canonical = connection_destination_attr(dst, semantics);
+        if node_type == "script" && matches!(canonical.as_deref(), Some(".st" | ".stp")) {
+            if let Some(id) = dst.history_id {
+                controls.insert(id);
+            }
+        }
+    }
+    for connection in &connections.connections {
+        let src = &connection.source;
+        let dst = &connection.destination;
+        let node_type =
+            ma_effective_node_type(dst.node_type.as_deref().unwrap_or_default(), &dst.owner);
+        if dst.is_default && semantics.profiles_for_node(node_type).is_empty() {
+            continue;
+        }
+        let canonical = connection_destination_attr(dst, semantics);
+        let history = src.key.and_then(|key| connections.assignments.get(&key));
+        let candidate = dst
+            .attr
+            .rsplit('.')
+            .next()
+            .unwrap_or(&dst.attr)
+            .split('[')
+            .next()
+            .unwrap_or("");
+        let unknown_candidate = node_type.is_empty()
+            && !dst.is_default
+            && semantics
+                .ma_capture_attr_selectors()
+                .iter()
+                .any(|selector| selector.attr.strip_prefix('.') == Some(candidate))
+            && (!semantics.ma_execution_attr_is_ambiguous(candidate)
+                || history.is_some()
+                || (src.history_id.is_none() && !dst.owner.contains(':')));
+        if canonical.is_none() && !unknown_candidate {
+            continue;
+        }
+        let attr = canonical.unwrap_or_else(|| format!(".{candidate}"));
+        let mut origin = ExecutionOrigin {
+            node_name: Some(dst.owner.clone()),
+            attr_name: Some(attr.clone()),
+            connection_source_plug: Some(format!("{}.{}", src.owner, src.attr)),
+            connection_range: Some(ExecutionSourceRange {
+                start: connection.start,
+                end: connection.end,
+            }),
+            source_range: Some(ExecutionSourceRange {
+                start: connection.start,
+                end: connection.end,
+            }),
+            ..ExecutionOrigin::without_chunk_address()
+        };
+        let mut issue = |reason: String, origin: &ExecutionOrigin| {
+            issues.push(ExecutionCoverageIssueRecord {
+                kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+                detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic: reason },
+                origin: Some(origin.clone()),
+                preview: PreviewWindowSpec::new(Arc::from(""), 0, 0),
+            });
+        };
+        if node_type.is_empty() || dst.attr.contains(['.', '[']) {
+            issue("cannot resolve connection destination".into(), &origin);
+            continue;
+        }
+        if node_type == "script" && matches!(attr.as_str(), ".st" | ".stp") {
+            issue(
+                "cannot determine connected trigger / language".into(),
+                &origin,
+            );
+            continue;
+        }
+        if let Some(id) = dst.history_id {
+            targets
+                .entry(id)
+                .or_insert_with(|| (node_type.to_string(), HashSet::new()))
+                .1
+                .insert(attr.trim_start_matches('.').to_string());
+        }
+        if node_type == "script" {
+            origin.surface_kind = ExecutionSurfaceKind::ScriptNodeBody;
+            let script = dst
+                .history_id
+                .and_then(|id| scripts_by_id.get(&id).copied());
+            let (trigger, lang) = script
+                .map(ma_script_execution_context)
+                .unwrap_or((ExecutionTrigger::Manual, ExecutionLanguage::Mel));
+            origin.trigger = trigger;
+            origin.lang = lang;
+            origin.source_kind = script
+                .and_then(|node| script_node_source_kind(node.script_type(), node.source_type()))
+                .or_else(|| (attr == ".a").then(|| "a".to_string()));
+        } else {
+            let Some(template) = ma_callback_origin(node_type, &dst.owner, &attr, semantics) else {
+                continue;
+            };
+            origin = ExecutionOrigin {
+                source_range: origin.source_range,
+                connection_range: origin.connection_range,
+                connection_source_plug: origin.connection_source_plug,
+                ..template
+            };
+        }
+        if dst.history_id.is_some_and(|id| controls.contains(&id)) {
+            origin.trigger = ExecutionTrigger::Unknown;
+            origin.lang = ExecutionLanguage::Unknown;
+        }
+        if src.history_id.is_none() || src.attr.contains(['.', '[']) {
+            issue("cannot resolve connection source".into(), &origin);
+            continue;
+        }
+        let key = src.key.expect("resolved source key");
+        if connections.ambiguous_aliases.contains(&key) {
+            issue("connection source alias is unresolved".into(), &origin);
+        }
+        let source_type = src.node_type.as_deref().unwrap_or_default();
+        let source_attr = semantics.canonical_attr(source_type, &src.attr);
+        if src
+            .history_id
+            .and_then(|id| connections.incoming.get(&id))
+            .is_some_and(|attrs| {
+                attrs.iter().any(|attr| {
+                    match (source_attr, semantics.canonical_attr(source_type, attr)) {
+                        (Some(source), Some(incoming)) => source == incoming,
+                        _ => true,
+                    }
+                })
+            })
+        {
+            issue(
+                "connection source has an incoming connection; multiple hops are unresolved".into(),
+                &origin,
+            );
+        }
+        let Some(history) = history else {
+            issue("connection source has no string assignment".into(), &origin);
+            continue;
+        };
+        for (index, assignment) in history.iter().enumerate() {
+            let mut origin = origin.clone();
+            origin.overwritten = index + 1 != history.len();
+            origin.assignment_index = Some(index);
+            origin.connection_source_range = Some(ExecutionSourceRange {
+                start: assignment.start,
+                end: assignment.end,
+            });
+            match &assignment.value {
+                Some(value) if !value.is_empty() => surfaces.push(ExecutionSurfaceRecord {
+                    text: Arc::from(value.as_str()),
+                    origin,
+                    requires_mel_modeling: true,
+                }),
+                Some(_) => {}
+                None => issue(
+                    format!(
+                        "cannot read connection source assignment at {}..{}",
+                        assignment.start, assignment.end
+                    ),
+                    &origin,
+                ),
+            }
+        }
+    }
+    (surfaces, targets, controls)
+}
+
 fn collect_ma_script_node_surfaces(
     script_nodes: &[RawMaScriptEntry],
 ) -> Vec<(usize, ExecutionSurfaceRecord)> {
@@ -413,6 +657,45 @@ fn collect_ma_script_assignment_issues(
     issues
 }
 
+fn ma_callback_origin(
+    node_type: &str,
+    node_name: &str,
+    attr: &str,
+    semantics: &NodeExecutionSemantics,
+) -> Option<ExecutionOrigin> {
+    let attr_name = attr.trim_start_matches('.');
+    let mut origin = ExecutionOrigin {
+        node_name: Some(node_name.to_string()),
+        attr_name: Some(attr.to_string()),
+        surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
+        ..ExecutionOrigin::without_chunk_address()
+    };
+    for profile in semantics.profiles_for_node(node_type) {
+        if let NodeExecutionProfileKind::AttrCallbacks(profile) = &profile.kind {
+            if profile
+                .attrs
+                .iter()
+                .any(|candidate| candidate.short_name == attr_name)
+            {
+                origin.lang = profile.default_language;
+                origin.trigger = profile.default_trigger;
+                origin.source_kind = semantics
+                    .source_label(node_type, attr_name)
+                    .map(str::to_string)
+                    .or_else(|| Some(attr_name.to_string()));
+                return Some(origin);
+            }
+        }
+    }
+    if is_generic_execution_attr_name(attr_name) {
+        origin.lang = ExecutionLanguage::Mel;
+        origin.trigger = generic_execution_attr_trigger(attr_name);
+        origin.source_kind = Some(attr_name.to_string());
+        return Some(origin);
+    }
+    None
+}
+
 fn collect_ma_profile_node_attr_surfaces(
     node_attr_values: &[RawMaNodeAttrValue],
     execution_semantics: &NodeExecutionSemantics,
@@ -420,7 +703,7 @@ fn collect_ma_profile_node_attr_surfaces(
 ) -> Vec<(usize, ExecutionSurfaceRecord)> {
     let mut surfaces = Vec::new();
     for value in node_attr_values {
-        let node_type = ma_node_attr_effective_node_type(value);
+        let node_type = ma_effective_node_type(&value.node_type, &value.node_name);
         if node_type.is_empty() {
             continue;
         }
@@ -510,22 +793,13 @@ fn collect_ma_profile_node_attr_surfaces(
                         value.start,
                         ExecutionSurfaceRecord {
                             text: Arc::<str>::from(body.as_str()),
-                            origin: ExecutionOrigin {
-                                lang: profile.default_language,
-                                trigger: profile.default_trigger,
-                                surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
-                                node_name: Some(value.node_name.clone()),
-                                attr_name: Some(value.attr.clone()),
-                                source_range: None,
-                                source_kind: execution_semantics
-                                    .source_label(node_type, attr_name)
-                                    .map(str::to_string)
-                                    .or_else(|| Some(attr_name.to_string())),
-                                chunk_form: None,
-                                chunk_tag: None,
-                                chunk_node_offset: None,
-                                ..ExecutionOrigin::without_chunk_address()
-                            },
+                            origin: ma_callback_origin(
+                                node_type,
+                                &value.node_name,
+                                &value.attr,
+                                execution_semantics,
+                            )
+                            .expect("matched callback profile"),
                             requires_mel_modeling: true,
                         },
                     ));
@@ -547,19 +821,13 @@ fn collect_ma_profile_node_attr_surfaces(
             value.start,
             ExecutionSurfaceRecord {
                 text: Arc::<str>::from(body.as_str()),
-                origin: ExecutionOrigin {
-                    lang: ExecutionLanguage::Mel,
-                    trigger: generic_execution_attr_trigger(attr_name),
-                    surface_kind: ExecutionSurfaceKind::NodeAttrCallback,
-                    node_name: Some(value.node_name.clone()),
-                    attr_name: Some(value.attr.clone()),
-                    source_range: None,
-                    source_kind: Some(attr_name.to_string()),
-                    chunk_form: None,
-                    chunk_tag: None,
-                    chunk_node_offset: None,
-                    ..ExecutionOrigin::without_chunk_address()
-                },
+                origin: ma_callback_origin(
+                    node_type,
+                    &value.node_name,
+                    &value.attr,
+                    execution_semantics,
+                )
+                .expect("generic callback attribute"),
                 requires_mel_modeling: true,
             },
         ));
@@ -603,11 +871,11 @@ fn generic_execution_attr_trigger(attr_name: &str) -> ExecutionTrigger {
     }
 }
 
-fn ma_node_attr_effective_node_type(value: &RawMaNodeAttrValue) -> &str {
-    if !value.node_type.is_empty() {
-        return value.node_type.as_str();
+fn ma_effective_node_type<'a>(node_type: &'a str, node_name: &str) -> &'a str {
+    if !node_type.is_empty() {
+        return node_type;
     }
-    match value.node_name.as_str() {
+    match node_name {
         "defaultRenderGlobals" => "renderGlobals",
         _ => "",
     }
@@ -623,7 +891,7 @@ fn ma_node_u32_attr(
     node_attr_values
         .iter()
         .find(|value| {
-            ma_node_attr_effective_node_type(value) == node_type
+            ma_effective_node_type(&value.node_type, &value.node_name) == node_type
                 && value.node_name == node_name
                 && value.attr == attr_path
         })
@@ -793,6 +1061,7 @@ fn collect_mb_coverage(
                     chunk_child_header_size: raw.chunk_ref.child_header_size,
                     overwritten: false,
                     assignment_index: None,
+                    ..ExecutionOrigin::without_chunk_address()
                 }),
                 preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
             });
@@ -1462,6 +1731,7 @@ mod tests {
             } else {
                 &[]
             },
+            &sections.connections,
             &sections.audit_top_level,
             &semantics,
         )
@@ -1804,6 +2074,7 @@ mod tests {
             let coverage = collect_execution_coverage_from_ma_parts(
                 &sections.dump_sections.script_entries,
                 &[],
+                &sections.connections,
                 &sections.audit_top_level,
                 &semantics,
             )
@@ -1829,6 +2100,7 @@ mod tests {
                 let coverage = collect_execution_coverage_from_ma_parts(
                     &[],
                     &[],
+                    &sections.connections,
                     &sections.audit_top_level,
                     &semantics,
                 )
@@ -1857,6 +2129,7 @@ mod tests {
             let actual = collect_execution_coverage_from_ma_parts(
                 &sections.dump_sections.script_entries,
                 &[],
+                &sections.connections,
                 &sections.audit_top_level,
                 &semantics,
             )
@@ -1866,6 +2139,7 @@ mod tests {
             let expected = collect_execution_coverage_from_ma_parts(
                 &direct_scripts,
                 &[],
+                &Default::default(),
                 &direct_facts,
                 &semantics,
             )
@@ -1901,9 +2175,14 @@ mod tests {
         let top_level = mel::collect_top_level_audit_candidates_from_bytes(input.as_bytes());
         let semantics = node_execution_semantics_with_registry(default_schema_registry())
             .expect("execution semantics");
-        let coverage =
-            collect_execution_coverage_from_ma_parts(&script_entries, &[], &top_level, &semantics)
-                .expect("coverage");
+        let coverage = collect_execution_coverage_from_ma_parts(
+            &script_entries,
+            &[],
+            &Default::default(),
+            &top_level,
+            &semantics,
+        )
+        .expect("coverage");
         let surfaces = coverage.surfaces;
 
         assert!(surfaces.iter().any(|surface| {
@@ -2053,9 +2332,14 @@ mod tests {
         let top_level = mel::collect_top_level_audit_candidates_from_bytes(input.as_bytes());
         let semantics = node_execution_semantics_with_registry(default_schema_registry())
             .expect("execution semantics");
-        let coverage =
-            collect_execution_coverage_from_ma_parts(&script_entries, &[], &top_level, &semantics)
-                .expect("coverage");
+        let coverage = collect_execution_coverage_from_ma_parts(
+            &script_entries,
+            &[],
+            &Default::default(),
+            &top_level,
+            &semantics,
+        )
+        .expect("coverage");
 
         assert!(coverage.surfaces.iter().any(|surface| {
             surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelCommand
@@ -2082,6 +2366,7 @@ mod tests {
         let coverage = collect_execution_coverage_from_ma_parts(
             &sections.dump_sections.script_entries,
             &sections.node_attr_values,
+            &sections.connections,
             &sections.audit_top_level,
             &semantics,
         )
@@ -2123,6 +2408,7 @@ mod tests {
         let coverage = collect_execution_coverage_from_ma_parts(
             sections.dump_sections.script_entries.as_slice(),
             sections.node_attr_values.as_slice(),
+            &sections.connections,
             &sections.audit_top_level,
             &semantics,
         )
@@ -2170,6 +2456,7 @@ mod tests {
         let coverage = collect_execution_coverage_from_ma_parts(
             sections.dump_sections.script_entries.as_slice(),
             sections.node_attr_values.as_slice(),
+            &sections.connections,
             &sections.audit_top_level,
             &semantics,
         )

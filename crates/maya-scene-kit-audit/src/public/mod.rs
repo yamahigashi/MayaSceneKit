@@ -262,6 +262,12 @@ pub mod allowlist {
         ] {
             hash_string(&mut hasher, value);
         }
+        if let Some(source_plug) = &origin.connection_source_plug {
+            hash_string(&mut hasher, "conn");
+            hash_string(&mut hasher, source_plug);
+            hash_string(&mut hasher, origin.node_name.as_deref().unwrap_or_default());
+            hash_string(&mut hasher, origin.attr_name.as_deref().unwrap_or_default());
+        }
         AllowlistHash(hasher.finalize().into())
     }
 }

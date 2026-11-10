@@ -172,3 +172,38 @@ mod assignment_tests {
         assert_eq!(duplicate.script_entries[1].body(), "Example");
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct RawMaConnections {
+    pub connections: Vec<RawMaConnection>,
+    pub assignments: std::collections::HashMap<u64, Vec<RawMaConnectionAssignment>>,
+    pub incoming: std::collections::HashMap<u32, std::collections::HashSet<String>>,
+    pub unresolved_incoming: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    pub ambiguous_aliases: std::collections::HashSet<u64>,
+    pub direct_assignments: std::collections::HashMap<usize, u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawMaConnectionPlug {
+    pub owner: String,
+    pub node_type: Option<String>,
+    pub is_default: bool,
+    pub attr: String,
+    pub history_id: Option<u32>,
+    pub key: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawMaConnection {
+    pub source: RawMaConnectionPlug,
+    pub destination: RawMaConnectionPlug,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawMaConnectionAssignment {
+    pub start: usize,
+    pub end: usize,
+    pub value: Option<String>,
+}

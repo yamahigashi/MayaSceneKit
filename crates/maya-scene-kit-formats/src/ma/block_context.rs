@@ -137,11 +137,17 @@ pub(crate) struct BlockTracker {
     pub(crate) reported_unbound: bool,
     pub(crate) reported_selected: bool,
     node_types: HashMap<String, Option<ContextWord>>,
+    history_ids: HashMap<String, u32>,
+    next_history_id: u32,
+    pub(crate) current_history_id: Option<u32>,
 }
 
 impl Default for BlockTracker {
     fn default() -> Self {
         Self {
+            history_ids: HashMap::from([("defaultRenderGlobals".to_string(), 0)]),
+            next_history_id: 1,
+            current_history_id: None,
             context: BlockContext::None,
             context_is_named_owner: false,
             reported_unbound: false,
@@ -155,6 +161,13 @@ impl Default for BlockTracker {
 }
 
 impl BlockTracker {
+    pub(crate) fn history_id(&self, name: &str) -> Option<u32> {
+        if name.contains('|') {
+            return None;
+        }
+        self.history_ids.get(name.trim_start_matches(':')).copied()
+    }
+
     pub(crate) fn contains_name(&self, name: &str) -> bool {
         self.node_types.contains_key(name.trim_start_matches(':'))
     }
@@ -170,12 +183,14 @@ impl BlockTracker {
     }
 
     pub(crate) fn invalidate_all_names(&mut self) {
+        self.history_ids.clear();
         for node_type in self.node_types.values_mut() {
             *node_type = None;
         }
     }
 
     pub(crate) fn invalidate_name(&mut self, name: &str) {
+        self.history_ids.remove(name.trim_start_matches(':'));
         self.node_types
             .insert(name.trim_start_matches(':').to_string(), None);
     }
@@ -194,6 +209,11 @@ impl BlockTracker {
                     return false;
                 }
                 let collision = self.node_types.contains_key(new);
+                if let Some(id) = self.history_ids.remove(old) {
+                    if !collision {
+                        self.history_ids.insert(new.to_string(), id);
+                    }
+                }
                 if let Some(node_type) = self.node_types.remove(old)
                     && !collision
                 {
@@ -235,6 +255,14 @@ impl BlockTracker {
                 if let BlockContext::Node { node_type, name } = &context {
                     let decoded_name = name.value(source);
                     let name = decoded_name.trim_start_matches(':');
+                    let id = self.next_history_id;
+                    self.next_history_id += 1;
+                    if !self.node_types.contains_key(name) {
+                        self.history_ids.insert(name.to_string(), id);
+                    }
+                    if !skip_select {
+                        self.current_history_id = Some(id);
+                    }
                     let value = Some(node_type.clone());
                     if !skip_select {
                         self.context_is_named_owner = !self.node_types.contains_key(name);
@@ -283,6 +311,11 @@ impl BlockTracker {
                         target.is_default = false;
                     }
                 }
+                self.current_history_id = if let [target] = targets.as_slice() {
+                    self.history_id(&target.name)
+                } else {
+                    None
+                };
                 if targets.is_empty() {
                     BlockContext::None
                 } else {
@@ -294,6 +327,9 @@ impl BlockTracker {
             self.reported_unbound = false;
         }
         self.reported_selected = false;
+        if matches!(context, BlockContext::None) {
+            self.current_history_id = None;
+        }
         self.context = context;
         true
     }

@@ -79,6 +79,15 @@ pub(in crate::cli) fn render_execution_origin_json(
         "chunk_child_alignment": origin.chunk_child_alignment,
         "chunk_child_header_size": origin.chunk_child_header_size,
     });
+    if origin.overwritten_by_connection {
+        value["overwritten_by_connection"] = json!(true);
+    }
+    if let Some(source) = &origin.connection_source_plug {
+        value["connection_source_plug"] = json!(source);
+        value["connection_source_range"] = json!(origin.connection_source_range);
+        value["connection_range"] = json!(origin.connection_range);
+        value["assignment_index"] = json!(origin.assignment_index);
+    }
     if origin.overwritten {
         value["overwritten"] = json!(true);
         value["assignment_index"] = json!(origin.assignment_index);

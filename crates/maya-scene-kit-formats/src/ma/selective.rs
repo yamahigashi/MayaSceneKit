@@ -21,8 +21,8 @@ use crate::{
     ma::{
         block_context::{BlockCommand, BlockContext, BlockTracker, ContextWord, SelectedTarget},
         commands::{
-            MAYA_COMMAND_REGISTRY, Token, bare_token, create_node_flag, setattr_flag_arity,
-            token_text, tokenize_command, unquoted_range_value,
+            MAYA_COMMAND_REGISTRY, Token, bare_token, connect_attr_flag_arity, create_node_flag,
+            setattr_flag_arity, token_text, tokenize_command, unquoted_range_value,
         },
         lexer::{
             is_reference_attr, parse_ma_quoted_literal, parse_setattr_string_value_tail,
@@ -30,6 +30,7 @@ use crate::{
         },
         parse::validate_string_concat_expression_prefix,
         raw_dump::{
+            RawMaConnection, RawMaConnectionAssignment, RawMaConnectionPlug, RawMaConnections,
             RawMaDumpSections, RawMaNodeAttrSelector, RawMaNodeAttrValue, RawMaRequireEntry,
             RawMaRequireKind, RawMaScriptAssignment, RawMaScriptEntry,
         },
@@ -47,6 +48,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct RawMaSelectiveSections {
+    pub connections: RawMaConnections,
     pub dump_sections: RawMaDumpSections,
     pub scene_paths: Vec<ScenePathEntry>,
     pub node_attr_values: Vec<RawMaNodeAttrValue>,
@@ -682,8 +684,21 @@ fn command_schema_has_script_flag(head: &str) -> bool {
     })
 }
 
+struct ConnectionAssignmentRange {
+    command: TextRange,
+    value: ConnectionValueRange,
+}
+
+enum ConnectionValueRange {
+    String(Vec<TextRange>),
+    Unreadable,
+}
+
 #[derive(Default)]
 struct SelectiveScanSink {
+    connections: RawMaConnections,
+    connection_attrs: HashMap<String, u32>,
+    connection_history: HashMap<u64, Vec<ConnectionAssignmentRange>>,
     requires: Vec<String>,
     seen_requires: HashSet<String>,
     require_entries: Vec<RawMaRequireEntry>,
@@ -749,7 +764,14 @@ impl LightItemSink for SelectiveScanSink {
                 if indented_top_level {
                     self.push_indented_top_level_diagnostic(command.span);
                 }
+                if head == Some("connectAttr") {
+                    self.collect_connection(source, &command);
+                }
+                if head == Some("addAttr") {
+                    self.collect_connection_aliases(source, &command);
+                }
                 if head == Some("setAttr") {
+                    self.collect_connection_assignment(source, &command);
                     self.collect_setattr(
                         source,
                         &command,
@@ -794,6 +816,9 @@ impl LightItemSink for SelectiveScanSink {
                         "dynamic execution attribute path requires conservative audit coverage",
                     );
                 }
+                if span_text.split_whitespace().next() == Some("connectAttr") {
+                    self.push_context_diagnostic(span, "cannot determine connectAttr destination");
+                }
                 self.push_top_level_statement(span, head);
             }
             _ => {}
@@ -802,6 +827,317 @@ impl LightItemSink for SelectiveScanSink {
 }
 
 impl SelectiveScanSink {
+    fn connection_key(&mut self, id: u32, attr: &str) -> u64 {
+        let next = self.connection_attrs.len() as u32;
+        let attr_id = *self
+            .connection_attrs
+            .entry(attr.to_string())
+            .or_insert(next);
+        (u64::from(id) << 32) | u64::from(attr_id)
+    }
+
+    fn connection_attr_key(&mut self, id: u32, node_type: &str, owner: &str, attr: &str) -> u64 {
+        let spelling = format!(".{attr}");
+        if !(self.execution_attr_names.contains(attr)
+            || node_type == "script" && script_attr(&spelling).is_some())
+        {
+            return self.connection_key(id, attr);
+        }
+        let canonical = self
+            .selected_node_attr_selectors
+            .iter()
+            .filter(|selector| {
+                selector.attr == spelling
+                    && (selector.node_type.is_empty()
+                        || selector.node_type.eq_ignore_ascii_case(node_type))
+                    && selector
+                        .node_name
+                        .as_deref()
+                        .is_none_or(|name| name == owner)
+            })
+            .max_by_key(|selector| (!selector.node_type.is_empty(), selector.node_name.is_some()))
+            .map(|selector| selector.canonical_attr.trim_start_matches('.').to_string())
+            .or_else(|| {
+                (node_type == "script")
+                    .then(|| {
+                        script_attr(&spelling)
+                            .map(|value| value.trim_start_matches('.').to_string())
+                    })
+                    .flatten()
+            });
+        self.connection_key(id, canonical.as_deref().unwrap_or(attr))
+    }
+
+    fn connection_plug(
+        &mut self,
+        source: LightSourceView<'_>,
+        plug: &str,
+    ) -> Option<RawMaConnectionPlug> {
+        let (owner, attr) = plug.split_once('.')?;
+        let owner = owner.trim_start_matches(':');
+        let target = self.tracker.resolve(owner, source);
+        let history_id = self.tracker.history_id(owner);
+        let key = history_id.map(|id| {
+            self.connection_attr_key(id, target.node_type.as_deref().unwrap_or(""), owner, attr)
+        });
+        Some(RawMaConnectionPlug {
+            owner: owner.to_string(),
+            attr: attr.to_string(),
+            node_type: if owner.contains('|') {
+                None
+            } else {
+                target.node_type
+            },
+            is_default: target.is_default
+                || (plug.starts_with(':')
+                    && matches!(
+                        owner,
+                        "creasePartition"
+                            | "persp"
+                            | "perspShape"
+                            | "front"
+                            | "frontShape"
+                            | "side"
+                            | "sideShape"
+                            | "top"
+                            | "topShape"
+                    )),
+            history_id,
+            key,
+        })
+    }
+
+    fn collect_connection(&mut self, source: LightSourceView<'_>, command: &LightCommandSurface) {
+        let mut positional = Vec::new();
+        let mut index = 0;
+        let mut valid = command.opaque_tail.is_none();
+        while let Some(word) = command.words.get(index) {
+            if let LightWord::Flag { text, .. } = word {
+                let flag = source_ascii_slice(source, *text)
+                    .unwrap_or("")
+                    .trim_start_matches('-');
+                let arity = connect_attr_flag_arity(flag);
+                let Some(arity) = arity else {
+                    valid = false;
+                    break;
+                };
+                if index + arity >= command.words.len() {
+                    valid = false;
+                    break;
+                }
+                if command.words[index + 1..index + 1 + arity]
+                    .iter()
+                    .any(|arg| static_context_word(source, command, arg).is_none())
+                {
+                    valid = false;
+                }
+                index += arity + 1;
+            } else {
+                if let Some(value) = static_context_word(source, command, word) {
+                    positional.push(value.into_owned());
+                } else {
+                    valid = false;
+                }
+                index += 1;
+            }
+        }
+        if !valid || positional.len() != 2 {
+            self.push_context_diagnostic(command.span, "cannot determine connectAttr destination");
+            return;
+        }
+        if !positional[0].contains('.') {
+            return;
+        }
+        let Some(dst) = self.connection_plug(source, &positional[1]) else {
+            return;
+        };
+        if let Some(id) = dst.history_id {
+            self.connections
+                .incoming
+                .entry(id)
+                .or_default()
+                .insert(dst.attr.clone());
+        } else {
+            self.connections
+                .unresolved_incoming
+                .entry(dst.owner.clone())
+                .or_default()
+                .insert(dst.attr.clone());
+        }
+        let last = dst
+            .attr
+            .rsplit('.')
+            .next()
+            .unwrap_or(&dst.attr)
+            .split('[')
+            .next()
+            .unwrap_or("");
+        if !self.execution_attr_names.contains(last)
+            && script_attr(&format!(".{last}")).is_none()
+            && !matches!(last, "e" | "expression" | "ixp" | "internalExpression")
+        {
+            return;
+        }
+        let Some(src) = self.connection_plug(source, &positional[0]) else {
+            return;
+        };
+        self.connections.connections.push(RawMaConnection {
+            source: src,
+            destination: dst,
+            start: range_start(command.span) as usize,
+            end: range_end(command.span) as usize,
+        });
+    }
+
+    fn collect_connection_aliases(
+        &mut self,
+        source: LightSourceView<'_>,
+        command: &LightCommandSurface,
+    ) {
+        let Some(id) = self.tracker.current_history_id else {
+            return;
+        };
+        let mut long = None;
+        let mut short = None;
+        for words in command.words.windows(2) {
+            let flag = source_ascii_slice(source, words[0].range()).unwrap_or("");
+            if matches!(flag, "-ln" | "-longName") {
+                long = static_context_word(source, command, &words[1]);
+            }
+            if matches!(flag, "-sn" | "-shortName") {
+                short = static_context_word(source, command, &words[1]);
+            }
+        }
+        if let (Some(long), Some(short)) = (long, short) {
+            if long != short {
+                for attr in [long, short] {
+                    let key = self.connection_key(id, &attr);
+                    self.connections.ambiguous_aliases.insert(key);
+                }
+            }
+        }
+    }
+
+    fn collect_connection_assignment(
+        &mut self,
+        source: LightSourceView<'_>,
+        command: &LightCommandSurface,
+    ) {
+        let mut index = 0;
+        let mut plug = None;
+        let mut numeric = true;
+        let mut has_value = false;
+        let mut typed_string = false;
+        let mut explicit_type = false;
+        let mut valid = true;
+        let mut value_ranges = Vec::new();
+        while let Some(word) = command.words.get(index) {
+            if let LightWord::Flag { text, .. } = word {
+                let flag = source_ascii_slice(source, *text).unwrap_or("");
+                let Some(arity) = setattr_flag_arity(flag) else {
+                    numeric = false;
+                    has_value = true;
+                    valid = false;
+                    break;
+                };
+                if index + arity >= command.words.len() && command.opaque_tail.is_none() {
+                    valid = false;
+                    numeric = false;
+                    has_value = true;
+                }
+                if matches!(flag, "-type" | "-typ") {
+                    explicit_type = true;
+                    typed_string = command
+                        .words
+                        .get(index + 1)
+                        .is_some_and(|arg| decoded_range_value(source, arg.range()) == "string");
+                    if typed_string {
+                        numeric = false;
+                        has_value = true;
+                    }
+                }
+                index += arity + 1;
+                continue;
+            }
+            if plug.is_none() {
+                plug = static_context_word(source, command, word);
+                if plug.as_ref().is_none_or(|plug| {
+                    plug.split_once('.')
+                        .is_none_or(|(_, attr)| attr.contains(['.', '[']))
+                }) {
+                    return;
+                }
+            } else {
+                value_ranges.push(word.range());
+                has_value = true;
+                numeric &= source_ascii_slice(source, word.range())
+                    .is_some_and(|text| text.parse::<f64>().is_ok());
+            }
+            index += 1;
+        }
+        if let Some(tail) = command.opaque_tail {
+            value_ranges.push(tail);
+            has_value = true;
+            numeric = false;
+        }
+        let Some(plug) = plug else {
+            return;
+        };
+        let Some((owner, attr)) = plug.split_once('.') else {
+            return;
+        };
+        let id = if owner.is_empty() {
+            self.tracker.current_history_id
+        } else {
+            self.tracker.history_id(owner)
+        };
+        let Some(id) = id else {
+            return;
+        };
+        if attr.contains(['.', '[']) {
+            return;
+        }
+        self.connections
+            .direct_assignments
+            .insert(range_start(command.span) as usize, id);
+        if !has_value || (numeric && !typed_string) {
+            return;
+        }
+        let node_type = if owner.is_empty() {
+            context_binding(
+                source,
+                &self.tracker.context,
+                &self.selected_node_attr_selectors,
+            )
+            .map(|(node_type, _)| node_type.into_owned())
+            .unwrap_or_default()
+        } else {
+            self.tracker
+                .resolve(owner, source)
+                .node_type
+                .unwrap_or_default()
+        };
+        let key = self.connection_attr_key(id, &node_type, owner, attr);
+        let quoted = !explicit_type
+            && value_ranges.first().is_some_and(|range| {
+                source_decoded_cow(source, *range)
+                    .trim_start()
+                    .starts_with('"')
+            });
+        let value = if valid && (typed_string || quoted) {
+            ConnectionValueRange::String(value_ranges)
+        } else {
+            ConnectionValueRange::Unreadable
+        };
+        self.connection_history
+            .entry(key)
+            .or_default()
+            .push(ConnectionAssignmentRange {
+                command: command.span,
+                value,
+            });
+    }
+
     fn update_context(
         &mut self,
         source: LightSourceView<'_>,
@@ -994,7 +1330,26 @@ impl SelectiveScanSink {
                 ..
             }
         );
+        let created_name = match &transition {
+            BlockCommand::Create {
+                context: BlockContext::Node { name, .. },
+                ..
+            } if !self.connections.unresolved_incoming.is_empty() => {
+                Some(name.value(source).trim_start_matches(':').to_string())
+            }
+            _ => None,
+        };
         let changed = self.tracker.on_command(transition, source);
+        if let Some(name) = created_name
+            && let Some(id) = self.tracker.history_id(&name)
+            && let Some(attrs) = self.connections.unresolved_incoming.remove(&name)
+        {
+            self.connections
+                .incoming
+                .entry(id)
+                .or_default()
+                .extend(attrs);
+        }
         if renamed || changed || skipped {
             if !renamed {
                 flush_active_block(
@@ -1369,7 +1724,44 @@ impl SelectiveScanSink {
                 .chain(self.audit_items.iter().map(audit_item_source_span)),
         );
 
+        let referenced: HashSet<_> = self
+            .connections
+            .connections
+            .iter()
+            .filter_map(|connection| connection.source.key)
+            .collect();
+        for (key, ranges) in self.connection_history {
+            if !referenced.contains(&key) {
+                continue;
+            }
+            let assignments = ranges
+                .into_iter()
+                .map(|assignment| {
+                    let value = match assignment.value {
+                        ConnectionValueRange::Unreadable => None,
+                        ConnectionValueRange::String(ranges) => {
+                            let mut tail = String::new();
+                            for range in ranges {
+                                if !tail.is_empty() {
+                                    tail.push(' ');
+                                }
+                                tail.push_str(&source_decoded_cow(source, range));
+                            }
+                            tail.push(';');
+                            parse_setattr_string_value_tail(&tail)
+                        }
+                    };
+                    RawMaConnectionAssignment {
+                        start: range_start(assignment.command) as usize,
+                        end: range_end(assignment.command) as usize,
+                        value,
+                    }
+                })
+                .collect();
+            self.connections.assignments.insert(key, assignments);
+        }
         RawMaSelectiveSections {
+            connections: self.connections,
             dump_sections: RawMaDumpSections {
                 requires: self.requires,
                 require_entries: self.require_entries,
@@ -1721,7 +2113,11 @@ mod tests {
                     "{input}"
                 );
                 if !executable {
-                    assert_eq!(!facts.diagnostics.is_empty(), diagnostic, "{input}");
+                    assert_eq!(
+                        !facts.diagnostics.is_empty(),
+                        diagnostic || !padding.is_empty() || tail.starts_with('('),
+                        "{input}"
+                    );
                 }
             }
         }
@@ -1799,6 +2195,9 @@ mod tests {
                 let facts =
                     extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
                 assert_eq!(facts.items.len(), count, "{input}");
+                if head == "connectAttr" {
+                    assert!(!facts.diagnostics.is_empty(), "{input}");
+                }
             }
         }
         let input = "select -ne \"Example\";select -ne {system(\"Example\")};";
@@ -1814,13 +2213,13 @@ mod tests {
         use crate::mel::MelAuditTopLevelItemFact;
         let cases = [
             ("select system(\"echo Example\");", 1, false),
-            ("connectAttr python(\"x\") \"Sample.tx\";", 1, false),
+            ("connectAttr python(\"x\") \"Sample.tx\";", 1, true),
             ("rename \"Example\" mm.eval(\"print 1\");", 1, false),
             ("setAttr \".tx\" \x60system \"echo Example\"\x60;", 1, false),
             (
                 "createNode transform -n \"Example\";\n    connectAttr \x60system \"echo Example\"\x60 \"Example.tx\" \"Sample.tx\";",
                 1,
-                false,
+                true,
             ),
             (
                 "file -r -ns \"Example\" \x60system \"echo Example\"\x60 \"asset/example/file.ma\";",
@@ -1860,7 +2259,7 @@ mod tests {
             (
                 "connectAttr (\"Example\" + system(\"echo Example\") + \".tx\") \"Sample.tx\";",
                 1,
-                false,
+                true,
             ),
             (
                 "createNode script -n \"ExampleScript\";\n    setAttr \".st\" \x60system \"echo Example\"\x60;",

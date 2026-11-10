@@ -440,6 +440,7 @@ mod tests {
                     chunk_child_header_size: Some(16),
                     overwritten: false,
                     assignment_index: None,
+                    ..crate::scene::ExecutionOrigin::without_chunk_address()
                 },
                 preview: "Source".to_string(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,

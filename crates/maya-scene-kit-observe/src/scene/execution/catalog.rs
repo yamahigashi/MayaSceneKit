@@ -79,6 +79,7 @@ pub(crate) fn build_observed_execution_core(
             surfaces::collect_execution_coverage_from_ma_parts(
                 data.script_entries(),
                 data.execution_node_attr_values()?,
+                data.execution_connections()?,
                 data.top_level(),
                 semantics.as_ref(),
             )
