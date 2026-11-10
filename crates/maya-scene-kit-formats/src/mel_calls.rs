@@ -13,7 +13,7 @@ use maya_mel::{
         Parse, ParseMode, ParseOptions, SharedParse, parse_shared_bytes,
         parse_shared_source_with_options, parse_source_with_options,
     },
-    sema,
+    sema::{self, command_schema::CommandRegistry},
     syntax::SourceView,
 };
 
@@ -1156,6 +1156,9 @@ fn is_bare_identifier(text: &str) -> bool {
     chars.all(|ch| matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
 }
 
+const CODE_LIKE_MIN_NESTING_DEPTH: usize = 8;
+const CODE_LIKE_MIN_STATEMENTS: usize = 16;
+
 fn is_code_like_rendered_text(text: &str) -> bool {
     if contains_exec_entry(text, "python")
         || contains_exec_entry(text, "eval")
@@ -1163,15 +1166,42 @@ fn is_code_like_rendered_text(text: &str) -> bool {
     {
         return true;
     }
+    let mut budgets = MelParseBudget::default()
+        .with_max_bytes(text.len().max(1).saturating_mul(4).min(64 * 1024))
+        .to_parse_budgets();
+    budgets.max_nesting_depth = budgets.max_nesting_depth.max(CODE_LIKE_MIN_NESTING_DEPTH);
+    budgets.max_statements = budgets.max_statements.max(CODE_LIKE_MIN_STATEMENTS);
     let parse = parse_source_with_options(
         text,
         ParseOptions {
             mode: ParseMode::AllowTrailingStmtWithoutSemi,
-            budgets: MelParseBudget::default()
-                .with_max_bytes(text.len().max(1).saturating_mul(4).min(64 * 1024))
-                .to_parse_budgets(),
+            budgets,
         },
     );
+    if let [Item::Stmt(stmt)] = parse.syntax.items.as_slice()
+        && let Stmt::Expr {
+            expr: Expr::Invoke(invoke),
+            ..
+        } = stmt.as_ref()
+        && let InvokeSurface::ShellLike {
+            words,
+            captured: false,
+            ..
+        } = &invoke.surface
+        && words
+            .iter()
+            .all(|word| matches!(word, ShellWord::BareWord { .. }))
+    {
+        // The permissive parser also represents namespace and plug names as shell calls.
+        let name = text.trim();
+        if name
+            .split([':', '.'])
+            .all(|part| part == part.trim() && is_bare_identifier(part))
+            && MayaCommandRegistry::new().lookup(name).is_none()
+        {
+            return false;
+        }
+    }
     contains_any_invoke(&parse.syntax)
 }
 
@@ -1368,6 +1398,35 @@ mod tests {
             crate::mel::MelResolvedStringKind::ProcReference
         );
         assert_eq!(fact.rendered_text.as_deref(), Some("safeProc"));
+    }
+
+    #[test]
+    fn bare_names_are_not_code_like_but_explicit_invocations_are() {
+        for name in ["Example_Control", "Example:Sample", "Example.translateX"] {
+            assert!(!super::is_code_like_rendered_text(name), "{name}");
+        }
+        for code in [
+            "quit",
+            "ExampleProc()",
+            "ExampleProc;",
+            "ExampleProc 1",
+            "Example; Sample",
+        ] {
+            assert!(super::is_code_like_rendered_text(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn short_assembled_system_call_is_code_like() {
+        let source = r#"$Example = "sys" + "tem(\"echo Example\")"; eval($Example);"#;
+        assert!(source.len() < 100);
+        let facts = collect_call_facts(source);
+        let fact = facts
+            .sink_arg_facts
+            .iter()
+            .find(|fact| fact.rendered_text.as_deref() == Some(r#"system("echo Example")"#))
+            .expect("assembled system call");
+        assert!(fact.code_like);
     }
 
     #[test]
