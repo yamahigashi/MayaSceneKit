@@ -1185,7 +1185,7 @@ fn write_python2_print_concat_scene(path: &std::path::Path) {
     write_manual_python_scene(
         path,
         concat!(
-            "print 'start scriptNode gimmickGrp'\\n",
+            "print 'start scriptNode ExampleGroup'\\n",
             "dLayer = 'Sample:ExampleGroup:ExampleLayer'\\n",
             "cmds.setAttr(dLayer + '.color', 13)"
         ),

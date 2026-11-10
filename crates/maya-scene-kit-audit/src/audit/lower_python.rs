@@ -1738,7 +1738,7 @@ mod tests {
     #[test]
     fn collect_python_signals_normalizes_python2_print_statements() {
         assert!(!has_parse_failure(
-            "print 'start scriptNode gimmickGrp'\nprint 'done'"
+            "print 'start scriptNode ExampleGroup'\nprint 'done'"
         ));
     }
 
