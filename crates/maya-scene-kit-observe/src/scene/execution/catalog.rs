@@ -19,6 +19,11 @@ use super::{
         collect_static_maya_mel_eval_payloads, is_maya_mel_eval_call, parse_python_compat_suite,
         static_string_expr,
     },
+    python_walk::{
+        PythonAstVisitor, PythonBody, PythonWalkPoint,
+        bindings::{BodyBindings, enter_body_bindings, leave_body_bindings},
+        walk_expr, walk_stmt, walk_suite,
+    },
     surfaces,
 };
 use crate::scene::{
@@ -558,7 +563,7 @@ fn summarize_python_surface(
     };
 
     let mut visitor = PythonEffectVisitor::default();
-    visitor.visit_suite(&program);
+    walk_suite(&mut visitor, &program);
     visitor.finish()
 }
 
@@ -724,8 +729,8 @@ fn should_model_as_execution_unit(origin: &ExecutionOrigin) -> bool {
 }
 
 struct PythonEffectVisitor {
-    module_aliases: HashMap<String, String>,
-    string_values: HashMap<String, Option<String>>,
+    module_aliases: BodyBindings,
+    string_values: BodyBindings,
     effect: ExecutionEffectClass,
     semantic_class: ExecutionSemanticClass,
     certainty: EffectCertainty,
@@ -736,8 +741,8 @@ struct PythonEffectVisitor {
 impl Default for PythonEffectVisitor {
     fn default() -> Self {
         Self {
-            module_aliases: HashMap::new(),
-            string_values: HashMap::new(),
+            module_aliases: BodyBindings::default(),
+            string_values: BodyBindings::default(),
             effect: ExecutionEffectClass::PureComputation,
             semantic_class: ExecutionSemanticClass::General,
             certainty: EffectCertainty::Proven,
@@ -747,15 +752,46 @@ impl Default for PythonEffectVisitor {
     }
 }
 
-impl PythonEffectVisitor {
-    fn visit_suite(&mut self, suite: &ast::Suite) {
-        for stmt in suite {
-            self.saw_any_stmt = true;
-            self.visit_stmt(stmt);
-        }
+impl PythonAstVisitor for PythonEffectVisitor {
+    fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+        self.saw_any_stmt = true;
+        self.record_statement(stmt);
+        walk_stmt(self, stmt);
+        self.record_assignment(stmt);
     }
 
-    fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+    fn visit_expr(&mut self, expr: &ast::Expr) {
+        if let ast::Expr::Call(call) = expr {
+            self.record_call(call);
+        }
+        walk_expr(self, expr);
+    }
+
+    fn enter_body(&mut self, body: PythonBody<'_>) {
+        enter_body_bindings(body, &mut self.module_aliases, &mut self.string_values);
+    }
+
+    fn leave_body(&mut self, _body: PythonBody<'_>) {
+        leave_body_bindings(&mut self.module_aliases, &mut self.string_values, true);
+    }
+
+    fn at_point(&mut self, point: PythonWalkPoint<'_>) {
+        match point {
+            PythonWalkPoint::AfterForIter(target) | PythonWalkPoint::AfterDeleteTarget(target) => {
+                self.clear_string_target(target);
+            }
+            PythonWalkPoint::AfterWithVars(item) => {
+                if let Some(target) = &item.optional_vars {
+                    self.clear_string_target(target);
+                }
+            }
+            PythonWalkPoint::BeforeHandlerBody(_) | PythonWalkPoint::AfterComprehensionIter(_) => {}
+        }
+    }
+}
+
+impl PythonEffectVisitor {
+    fn record_statement(&mut self, stmt: &ast::Stmt) {
         match stmt {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
@@ -773,7 +809,7 @@ impl PythonEffectVisitor {
                                 .to_string()
                         });
                     self.module_aliases
-                        .insert(local_name, alias.name.as_str().to_string());
+                        .insert(local_name, Some(alias.name.as_str().to_string()));
                     self.raise(
                         ExecutionEffectClass::ExternalDependency,
                         ExecutionSemanticClass::DependencyWrite,
@@ -794,7 +830,7 @@ impl PythonEffectVisitor {
                         .map(ToString::to_string)
                         .unwrap_or_else(|| alias.name.to_string());
                     self.module_aliases
-                        .insert(local_name, format!("{module}.{}", alias.name));
+                        .insert(local_name, Some(format!("{module}.{}", alias.name)));
                 }
                 self.raise(
                     ExecutionEffectClass::ExternalDependency,
@@ -806,105 +842,30 @@ impl PythonEffectVisitor {
                     },
                 );
             }
-            ast::Stmt::FunctionDef(function) => self.visit_suite(&function.body),
-            ast::Stmt::AsyncFunctionDef(function) => self.visit_suite(&function.body),
-            ast::Stmt::ClassDef(class_def) => self.visit_suite(&class_def.body),
-            ast::Stmt::For(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.iter);
-                self.clear_string_target(&stmt.target);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
+            ast::Stmt::Raise(_) => {
+                self.raise(
+                    ExecutionEffectClass::UIImpact,
+                    ExecutionSemanticClass::General,
+                    EffectCertainty::Proven,
+                    ExecutionReason::Static {
+                        value: StaticExecutionReason::PythonRaiseDetected,
+                    },
+                );
             }
-            ast::Stmt::AsyncFor(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.iter);
-                self.clear_string_target(&stmt.target);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::While(stmt) => {
-                self.visit_expr(&stmt.test);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::If(stmt) => {
-                self.visit_expr(&stmt.test);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::With(stmt) => {
-                for item in &stmt.items {
-                    self.visit_expr(&item.context_expr);
-                    if let Some(vars) = &item.optional_vars {
-                        self.visit_expr(vars);
-                        self.clear_string_target(vars);
-                    }
-                }
-                self.visit_suite(&stmt.body);
-            }
-            ast::Stmt::AsyncWith(stmt) => {
-                for item in &stmt.items {
-                    self.visit_expr(&item.context_expr);
-                    if let Some(vars) = &item.optional_vars {
-                        self.visit_expr(vars);
-                        self.clear_string_target(vars);
-                    }
-                }
-                self.visit_suite(&stmt.body);
-            }
-            ast::Stmt::Try(stmt) => {
-                self.visit_suite(&stmt.body);
-                for handler in &stmt.handlers {
-                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    if let Some(expr) = &handler.type_ {
-                        self.visit_expr(expr);
-                    }
-                    self.visit_suite(&handler.body);
-                }
-                self.visit_suite(&stmt.orelse);
-                self.visit_suite(&stmt.finalbody);
-            }
-            ast::Stmt::TryStar(stmt) => {
-                self.visit_suite(&stmt.body);
-                for handler in &stmt.handlers {
-                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    if let Some(expr) = &handler.type_ {
-                        self.visit_expr(expr);
-                    }
-                    self.visit_suite(&handler.body);
-                }
-                self.visit_suite(&stmt.orelse);
-                self.visit_suite(&stmt.finalbody);
-            }
-            ast::Stmt::Match(stmt) => {
-                self.visit_expr(&stmt.subject);
-                for case in &stmt.cases {
-                    if let Some(guard) = &case.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_suite(&case.body);
-                }
-            }
-            ast::Stmt::Return(stmt) => {
-                if let Some(expr) = &stmt.value {
-                    self.visit_expr(expr);
-                }
-            }
+            _ => {}
+        }
+    }
+
+    fn record_assignment(&mut self, stmt: &ast::Stmt) {
+        match stmt {
             ast::Stmt::Assign(stmt) => {
-                for target in &stmt.targets {
-                    self.visit_expr(target);
-                }
-                self.visit_expr(&stmt.value);
                 let string_value = static_string_expr(&stmt.value, &self.string_values);
                 for target in &stmt.targets {
                     self.record_string_target(target, string_value.clone());
                 }
             }
             ast::Stmt::AnnAssign(stmt) => {
-                self.visit_expr(&stmt.target);
                 if let Some(expr) = &stmt.value {
-                    self.visit_expr(expr);
                     self.record_string_target(
                         &stmt.target,
                         static_string_expr(expr, &self.string_values),
@@ -914,193 +875,62 @@ impl PythonEffectVisitor {
                 }
             }
             ast::Stmt::AugAssign(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.value);
                 self.clear_string_target(&stmt.target);
-            }
-            ast::Stmt::Expr(stmt) => self.visit_expr(&stmt.value),
-            ast::Stmt::Assert(stmt) => {
-                self.visit_expr(&stmt.test);
-                if let Some(expr) = &stmt.msg {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Delete(stmt) => {
-                for expr in &stmt.targets {
-                    self.visit_expr(expr);
-                    self.clear_string_target(expr);
-                }
-            }
-            ast::Stmt::Raise(stmt) => {
-                self.raise(
-                    ExecutionEffectClass::UIImpact,
-                    ExecutionSemanticClass::General,
-                    EffectCertainty::Proven,
-                    ExecutionReason::Static {
-                        value: StaticExecutionReason::PythonRaiseDetected,
-                    },
-                );
-                if let Some(expr) = &stmt.exc {
-                    self.visit_expr(expr);
-                }
-                if let Some(expr) = &stmt.cause {
-                    self.visit_expr(expr);
-                }
             }
             _ => {}
         }
     }
 
-    fn visit_expr(&mut self, expr: &ast::Expr) {
-        match expr {
-            ast::Expr::Call(call) => {
-                if is_maya_mel_eval_call(&call.func, &self.module_aliases) {
-                    if call.args.is_empty()
-                        || call
-                            .args
-                            .first()
-                            .and_then(|arg| static_string_expr(arg, &self.string_values))
-                            .is_none()
-                    {
-                        self.raise(
-                            ExecutionEffectClass::Unknown,
-                            ExecutionSemanticClass::UnknownWrite,
-                            EffectCertainty::Uncertain,
-                            ExecutionReason::Static {
-                                value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
-                            },
-                        );
-                    }
-                    self.visit_expr(&call.func);
-                    for arg in &call.args {
-                        self.visit_expr(arg);
-                    }
-                    for keyword in &call.keywords {
-                        self.visit_expr(&keyword.value);
-                    }
-                    return;
-                }
-                let name = call_target_name(&call.func);
-                match name {
-                    Some(name) => {
-                        if let Some(rule) = classify_python_call_target(&name) {
-                            self.raise(
-                                rule.effect,
-                                rule.semantic_class,
-                                rule.certainty,
-                                rule.reason(&name),
-                            );
-                        } else {
-                            self.raise(
-                                ExecutionEffectClass::Unknown,
-                                ExecutionSemanticClass::UnknownWrite,
-                                EffectCertainty::Uncertain,
-                                ExecutionReason::Named {
-                                    template:
-                                        ExecutionReasonTemplate::UnclassifiedPythonCallDetected,
-                                    value: name,
-                                },
-                            );
-                        }
-                    }
-                    None => self.raise(
+    fn record_call(&mut self, call: &ast::ExprCall) {
+        if is_maya_mel_eval_call(&call.func, &self.module_aliases) {
+            if call.args.is_empty()
+                || call
+                    .args
+                    .first()
+                    .and_then(|arg| static_string_expr(arg, &self.string_values))
+                    .is_none()
+            {
+                self.raise(
+                    ExecutionEffectClass::Unknown,
+                    ExecutionSemanticClass::UnknownWrite,
+                    EffectCertainty::Uncertain,
+                    ExecutionReason::Static {
+                        value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
+                    },
+                );
+            }
+            return;
+        }
+        let name = call_target_name(&call.func);
+        match name {
+            Some(name) => {
+                if let Some(rule) = classify_python_call_target(&name) {
+                    self.raise(
+                        rule.effect,
+                        rule.semantic_class,
+                        rule.certainty,
+                        rule.reason(&name),
+                    );
+                } else {
+                    self.raise(
                         ExecutionEffectClass::Unknown,
                         ExecutionSemanticClass::UnknownWrite,
                         EffectCertainty::Uncertain,
-                        ExecutionReason::Static {
-                            value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
+                        ExecutionReason::Named {
+                            template: ExecutionReasonTemplate::UnclassifiedPythonCallDetected,
+                            value: name,
                         },
-                    ),
-                }
-                self.visit_expr(&call.func);
-                for arg in &call.args {
-                    self.visit_expr(arg);
-                }
-                for keyword in &call.keywords {
-                    self.visit_expr(&keyword.value);
+                    );
                 }
             }
-            ast::Expr::BoolOp(expr) => {
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::NamedExpr(expr) => {
-                self.visit_expr(&expr.target);
-                self.visit_expr(&expr.value);
-            }
-            ast::Expr::BinOp(expr) => {
-                self.visit_expr(&expr.left);
-                self.visit_expr(&expr.right);
-            }
-            ast::Expr::UnaryOp(expr) => self.visit_expr(&expr.operand),
-            ast::Expr::Lambda(expr) => self.visit_expr(&expr.body),
-            ast::Expr::IfExp(expr) => {
-                self.visit_expr(&expr.test);
-                self.visit_expr(&expr.body);
-                self.visit_expr(&expr.orelse);
-            }
-            ast::Expr::Dict(expr) => {
-                for key in expr.keys.iter().flatten() {
-                    self.visit_expr(key);
-                }
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::Set(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::ListComp(expr) => self.visit_expr(&expr.elt),
-            ast::Expr::SetComp(expr) => self.visit_expr(&expr.elt),
-            ast::Expr::DictComp(expr) => {
-                self.visit_expr(&expr.key);
-                self.visit_expr(&expr.value);
-            }
-            ast::Expr::GeneratorExp(expr) => self.visit_expr(&expr.elt),
-            ast::Expr::Await(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Yield(expr) => {
-                if let Some(value) = &expr.value {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::YieldFrom(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Compare(expr) => {
-                self.visit_expr(&expr.left);
-                for comparator in &expr.comparators {
-                    self.visit_expr(comparator);
-                }
-            }
-            ast::Expr::Attribute(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Subscript(expr) => {
-                self.visit_expr(&expr.value);
-                self.visit_expr(&expr.slice);
-            }
-            ast::Expr::Starred(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Slice(expr) => {
-                if let Some(lower) = &expr.lower {
-                    self.visit_expr(lower);
-                }
-                if let Some(upper) = &expr.upper {
-                    self.visit_expr(upper);
-                }
-                if let Some(step) = &expr.step {
-                    self.visit_expr(step);
-                }
-            }
-            ast::Expr::List(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::Tuple(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            _ => {}
+            None => self.raise(
+                ExecutionEffectClass::Unknown,
+                ExecutionSemanticClass::UnknownWrite,
+                EffectCertainty::Uncertain,
+                ExecutionReason::Static {
+                    value: StaticExecutionReason::UnresolvedPythonCallTargetDetected,
+                },
+            ),
         }
     }
 
@@ -1147,7 +977,7 @@ impl PythonEffectVisitor {
     fn clear_string_target(&mut self, target: &ast::Expr) {
         match target {
             ast::Expr::Name(name) => {
-                self.string_values.remove(name.id.as_str());
+                self.string_values.insert(name.id.to_string(), None);
             }
             ast::Expr::Tuple(expr) => {
                 for elt in &expr.elts {
@@ -1265,3 +1095,7 @@ mod tests {
         assert_eq!(certainty, EffectCertainty::Uncertain);
     }
 }
+
+#[cfg(test)]
+#[path = "python_walk/observe_tests.rs"]
+mod walk_tests;

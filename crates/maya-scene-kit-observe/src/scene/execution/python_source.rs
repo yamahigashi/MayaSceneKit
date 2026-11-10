@@ -3,6 +3,12 @@ use std::sync::OnceLock;
 use regex::Regex;
 use rustpython_parser::{Parse, ast};
 
+use super::python_walk::{
+    PythonAstVisitor, PythonBody, PythonWalkPoint,
+    bindings::{BodyBindings, enter_body_bindings, leave_body_bindings},
+    walk_expr, walk_stmt, walk_suite,
+};
+
 pub(crate) fn parse_python_compat_suite(source: &str) -> Option<ast::Suite> {
     ast::Suite::parse(source, "<observe>").ok().or_else(|| {
         let normalized = normalize_python_compat_source(source);
@@ -15,7 +21,7 @@ pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str) -> Vec<String>
         return Vec::new();
     };
     let mut visitor = MayaMelEvalVisitor::default();
-    visitor.visit_suite(&program);
+    walk_suite(&mut visitor, &program);
     visitor.payloads
 }
 
@@ -205,19 +211,50 @@ fn find_top_level_keyword(text: &str, needle: &str) -> Option<usize> {
 
 #[derive(Default)]
 struct MayaMelEvalVisitor {
-    module_aliases: std::collections::HashMap<String, String>,
-    string_values: std::collections::HashMap<String, Option<String>>,
+    module_aliases: BodyBindings,
+    string_values: BodyBindings,
     payloads: Vec<String>,
 }
 
-impl MayaMelEvalVisitor {
-    fn visit_suite(&mut self, suite: &ast::Suite) {
-        for stmt in suite {
-            self.visit_stmt(stmt);
+impl PythonAstVisitor for MayaMelEvalVisitor {
+    fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+        self.record_statement(stmt);
+        walk_stmt(self, stmt);
+        self.record_assignment(stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &ast::Expr) {
+        if let ast::Expr::Call(call) = expr {
+            self.record_call(call);
+        }
+        walk_expr(self, expr);
+    }
+
+    fn at_point(&mut self, point: PythonWalkPoint<'_>) {
+        match point {
+            PythonWalkPoint::AfterForIter(target) | PythonWalkPoint::AfterDeleteTarget(target) => {
+                self.clear_string_target(target);
+            }
+            PythonWalkPoint::AfterWithVars(item) => {
+                if let Some(target) = &item.optional_vars {
+                    self.clear_string_target(target);
+                }
+            }
+            PythonWalkPoint::BeforeHandlerBody(_) | PythonWalkPoint::AfterComprehensionIter(_) => {}
         }
     }
 
-    fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+    fn enter_body(&mut self, body: PythonBody<'_>) {
+        enter_body_bindings(body, &mut self.module_aliases, &mut self.string_values);
+    }
+
+    fn leave_body(&mut self, _body: PythonBody<'_>) {
+        leave_body_bindings(&mut self.module_aliases, &mut self.string_values, false);
+    }
+}
+
+impl MayaMelEvalVisitor {
+    fn record_statement(&mut self, stmt: &ast::Stmt) {
         match stmt {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
@@ -235,60 +272,13 @@ impl MayaMelEvalVisitor {
                     }
                 }
             }
-            ast::Stmt::FunctionDef(function) => self.visit_suite(&function.body),
-            ast::Stmt::AsyncFunctionDef(function) => self.visit_suite(&function.body),
-            ast::Stmt::ClassDef(class_def) => self.visit_suite(&class_def.body),
-            ast::Stmt::For(stmt) => {
-                self.visit_expr(&stmt.iter);
-                self.clear_string_target(&stmt.target);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::AsyncFor(stmt) => {
-                self.visit_expr(&stmt.iter);
-                self.clear_string_target(&stmt.target);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::While(stmt) => {
-                self.visit_expr(&stmt.test);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::If(stmt) => {
-                self.visit_expr(&stmt.test);
-                self.visit_suite(&stmt.body);
-                self.visit_suite(&stmt.orelse);
-            }
-            ast::Stmt::With(stmt) => {
-                for item in &stmt.items {
-                    self.visit_expr(&item.context_expr);
-                    if let Some(vars) = &item.optional_vars {
-                        self.clear_string_target(vars);
-                    }
-                }
-                self.visit_suite(&stmt.body);
-            }
-            ast::Stmt::AsyncWith(stmt) => {
-                for item in &stmt.items {
-                    self.visit_expr(&item.context_expr);
-                    if let Some(vars) = &item.optional_vars {
-                        self.clear_string_target(vars);
-                    }
-                }
-                self.visit_suite(&stmt.body);
-            }
-            ast::Stmt::Try(stmt) => {
-                self.visit_suite(&stmt.body);
-                for handler in &stmt.handlers {
-                    let ast::ExceptHandler::ExceptHandler(handler) = handler;
-                    self.visit_suite(&handler.body);
-                }
-                self.visit_suite(&stmt.orelse);
-                self.visit_suite(&stmt.finalbody);
-            }
+            _ => {}
+        }
+    }
+
+    fn record_assignment(&mut self, stmt: &ast::Stmt) {
+        match stmt {
             ast::Stmt::Assign(stmt) => {
-                self.visit_expr(&stmt.value);
                 let value = static_string_expr(&stmt.value, &self.string_values);
                 for target in &stmt.targets {
                     self.record_string_target(target, value.clone());
@@ -296,7 +286,6 @@ impl MayaMelEvalVisitor {
             }
             ast::Stmt::AnnAssign(stmt) => {
                 if let Some(value_expr) = &stmt.value {
-                    self.visit_expr(value_expr);
                     self.record_string_target(
                         &stmt.target,
                         static_string_expr(value_expr, &self.string_values),
@@ -306,142 +295,20 @@ impl MayaMelEvalVisitor {
                 }
             }
             ast::Stmt::AugAssign(stmt) => {
-                self.visit_expr(&stmt.value);
                 self.clear_string_target(&stmt.target);
             }
-            ast::Stmt::Expr(stmt) => self.visit_expr(&stmt.value),
-            ast::Stmt::Return(stmt) => {
-                if let Some(expr) = &stmt.value {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Delete(stmt) => {
-                for target in &stmt.targets {
-                    self.clear_string_target(target);
-                }
-            }
-            ast::Stmt::Assert(stmt) => {
-                self.visit_expr(&stmt.test);
-                if let Some(expr) = &stmt.msg {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Raise(stmt) => {
-                if let Some(expr) = &stmt.exc {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Global(_)
-            | ast::Stmt::Nonlocal(_)
-            | ast::Stmt::Pass(_)
-            | ast::Stmt::Break(_)
-            | ast::Stmt::Continue(_)
-            | ast::Stmt::TypeAlias(_)
-            | ast::Stmt::Match(_)
-            | ast::Stmt::TryStar(_) => {}
+            _ => {}
         }
     }
 
-    fn visit_expr(&mut self, expr: &ast::Expr) {
-        match expr {
-            ast::Expr::Call(call) => {
-                if is_maya_mel_eval_call(&call.func, &self.module_aliases)
-                    && let Some(payload) = call
-                        .args
-                        .first()
-                        .and_then(|arg| static_string_expr(arg, &self.string_values))
-                {
-                    self.payloads.push(payload);
-                }
-                self.visit_expr(&call.func);
-                for arg in &call.args {
-                    self.visit_expr(arg);
-                }
-                for keyword in &call.keywords {
-                    self.visit_expr(&keyword.value);
-                }
-            }
-            ast::Expr::BoolOp(expr) => {
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::NamedExpr(expr) => {
-                self.visit_expr(&expr.target);
-                self.visit_expr(&expr.value);
-            }
-            ast::Expr::BinOp(expr) => {
-                self.visit_expr(&expr.left);
-                self.visit_expr(&expr.right);
-            }
-            ast::Expr::UnaryOp(expr) => self.visit_expr(&expr.operand),
-            ast::Expr::Lambda(expr) => self.visit_expr(&expr.body),
-            ast::Expr::IfExp(expr) => {
-                self.visit_expr(&expr.test);
-                self.visit_expr(&expr.body);
-                self.visit_expr(&expr.orelse);
-            }
-            ast::Expr::Dict(expr) => {
-                for key in expr.keys.iter().flatten() {
-                    self.visit_expr(key);
-                }
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::Set(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::ListComp(expr) => self.visit_expr(&expr.elt),
-            ast::Expr::SetComp(expr) => self.visit_expr(&expr.elt),
-            ast::Expr::DictComp(expr) => {
-                self.visit_expr(&expr.key);
-                self.visit_expr(&expr.value);
-            }
-            ast::Expr::GeneratorExp(expr) => self.visit_expr(&expr.elt),
-            ast::Expr::Await(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Yield(expr) => {
-                if let Some(value) = &expr.value {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::YieldFrom(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Compare(expr) => {
-                self.visit_expr(&expr.left);
-                for comparator in &expr.comparators {
-                    self.visit_expr(comparator);
-                }
-            }
-            ast::Expr::Attribute(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Subscript(expr) => {
-                self.visit_expr(&expr.value);
-                self.visit_expr(&expr.slice);
-            }
-            ast::Expr::Starred(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Slice(expr) => {
-                if let Some(lower) = &expr.lower {
-                    self.visit_expr(lower);
-                }
-                if let Some(upper) = &expr.upper {
-                    self.visit_expr(upper);
-                }
-                if let Some(step) = &expr.step {
-                    self.visit_expr(step);
-                }
-            }
-            ast::Expr::List(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::Tuple(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            _ => {}
+    fn record_call(&mut self, call: &ast::ExprCall) {
+        if is_maya_mel_eval_call(&call.func, &self.module_aliases)
+            && let Some(payload) = call
+                .args
+                .first()
+                .and_then(|arg| static_string_expr(arg, &self.string_values))
+        {
+            self.payloads.push(payload);
         }
     }
 
@@ -458,7 +325,7 @@ impl MayaMelEvalVisitor {
                 .to_string()
         });
         self.module_aliases
-            .insert(local_name, module_name.to_string());
+            .insert(local_name, Some(module_name.to_string()));
     }
 
     fn record_import_from_alias(
@@ -471,7 +338,7 @@ impl MayaMelEvalVisitor {
             .map(ToString::to_string)
             .unwrap_or_else(|| imported_name.to_string());
         self.module_aliases
-            .insert(local_name, format!("{module_name}.{imported_name}"));
+            .insert(local_name, Some(format!("{module_name}.{imported_name}")));
     }
 
     fn record_string_target(&mut self, target: &ast::Expr, value: Option<String>) {
@@ -497,7 +364,7 @@ impl MayaMelEvalVisitor {
     fn clear_string_target(&mut self, target: &ast::Expr) {
         match target {
             ast::Expr::Name(name) => {
-                self.string_values.remove(name.id.as_str());
+                self.string_values.insert(name.id.to_string(), None);
             }
             ast::Expr::Tuple(expr) => {
                 for elt in &expr.elts {
@@ -517,7 +384,7 @@ impl MayaMelEvalVisitor {
 
 pub(crate) fn is_maya_mel_eval_call(
     func: &ast::Expr,
-    module_aliases: &std::collections::HashMap<String, String>,
+    module_aliases: &std::collections::HashMap<String, Option<String>>,
 ) -> bool {
     let ast::Expr::Attribute(attr) = func else {
         return false;
@@ -532,10 +399,10 @@ pub(crate) fn is_maya_mel_eval_call(
 
 fn module_name_for_expr(
     expr: &ast::Expr,
-    module_aliases: &std::collections::HashMap<String, String>,
+    module_aliases: &std::collections::HashMap<String, Option<String>>,
 ) -> Option<String> {
     match expr {
-        ast::Expr::Name(name) => module_aliases.get(name.id.as_str()).cloned(),
+        ast::Expr::Name(name) => module_aliases.get(name.id.as_str()).cloned().flatten(),
         ast::Expr::Attribute(attr) => {
             let mut base = module_name_for_expr(&attr.value, module_aliases)?;
             base.push('.');
@@ -566,10 +433,18 @@ pub(crate) fn static_string_expr(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use rustpython_parser::{Parse, ast};
 
     use super::{collect_static_maya_mel_eval_payloads, normalize_python_compat_source};
+
+    pub(in crate::scene::execution) fn collect_payloads_from_suite(
+        program: &[ast::Stmt],
+    ) -> Vec<String> {
+        let mut visitor = super::MayaMelEvalVisitor::default();
+        super::walk_suite(&mut visitor, program);
+        visitor.payloads
+    }
 
     #[test]
     fn normalizes_python2_print_statements() {

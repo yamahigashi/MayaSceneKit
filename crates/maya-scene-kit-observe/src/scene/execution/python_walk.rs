@@ -1,3 +1,5 @@
+pub(crate) mod bindings;
+
 use rustpython_parser::ast;
 
 #[derive(Clone, Copy)]
@@ -35,6 +37,15 @@ pub enum PythonWalkPoint<'a> {
     AfterComprehensionIter(&'a ast::Comprehension),
 }
 
+#[derive(Clone, Copy)]
+pub enum PythonBody<'a> {
+    MatchCase(&'a ast::MatchCase),
+    TryStarBody,
+    TryStarHandler(&'a ast::ExceptHandlerExceptHandler),
+    TryStarElse,
+    TryStarFinally,
+}
+
 pub trait PythonAstVisitor {
     fn visit_stmt(&mut self, stmt: &ast::Stmt) {
         walk_stmt(self, stmt);
@@ -50,6 +61,8 @@ pub trait PythonAstVisitor {
     }
     fn enter_scope(&mut self, _scope: PythonScope<'_>) {}
     fn leave_scope(&mut self, _scope: PythonScope<'_>) {}
+    fn enter_body(&mut self, _body: PythonBody<'_>) {}
+    fn leave_body(&mut self, _body: PythonBody<'_>) {}
     fn at_point(&mut self, _point: PythonWalkPoint<'_>) {}
 }
 
@@ -113,6 +126,16 @@ fn scoped_suite<V: PythonAstVisitor + ?Sized>(
     v.leave_scope(scope);
 }
 
+fn notified_suite<V: PythonAstVisitor + ?Sized>(
+    v: &mut V,
+    kind: PythonBody<'_>,
+    body: &[ast::Stmt],
+) {
+    v.enter_body(kind);
+    walk_suite(v, body);
+    v.leave_body(kind);
+}
+
 fn with_items<V: PythonAstVisitor + ?Sized>(v: &mut V, items: &[ast::WithItem]) {
     for item in items {
         v.visit_expr(&item.context_expr);
@@ -121,11 +144,19 @@ fn with_items<V: PythonAstVisitor + ?Sized>(v: &mut V, items: &[ast::WithItem]) 
     }
 }
 
-fn handlers<V: PythonAstVisitor + ?Sized>(v: &mut V, handlers: &[ast::ExceptHandler]) {
+fn handlers<V: PythonAstVisitor + ?Sized>(
+    v: &mut V,
+    handlers: &[ast::ExceptHandler],
+    is_star: bool,
+) {
     for ast::ExceptHandler::ExceptHandler(handler) in handlers {
         optional(v, handler.type_.as_deref());
         v.at_point(PythonWalkPoint::BeforeHandlerBody(handler));
-        walk_suite(v, &handler.body);
+        if is_star {
+            notified_suite(v, PythonBody::TryStarHandler(handler), &handler.body);
+        } else {
+            walk_suite(v, &handler.body);
+        }
     }
 }
 
@@ -239,8 +270,10 @@ pub fn walk_stmt<V: PythonAstVisitor + ?Sized>(v: &mut V, stmt: &ast::Stmt) {
             v.visit_expr(&s.subject);
             for case in &s.cases {
                 v.visit_pattern(&case.pattern);
+                v.enter_body(PythonBody::MatchCase(case));
                 optional(v, case.guard.as_deref());
                 walk_suite(v, &case.body);
+                v.leave_body(PythonBody::MatchCase(case));
             }
         }
         ast::Stmt::Raise(s) => {
@@ -249,15 +282,15 @@ pub fn walk_stmt<V: PythonAstVisitor + ?Sized>(v: &mut V, stmt: &ast::Stmt) {
         }
         ast::Stmt::Try(s) => {
             walk_suite(v, &s.body);
-            handlers(v, &s.handlers);
+            handlers(v, &s.handlers, false);
             walk_suite(v, &s.orelse);
             walk_suite(v, &s.finalbody);
         }
         ast::Stmt::TryStar(s) => {
-            walk_suite(v, &s.body);
-            handlers(v, &s.handlers);
-            walk_suite(v, &s.orelse);
-            walk_suite(v, &s.finalbody);
+            notified_suite(v, PythonBody::TryStarBody, &s.body);
+            handlers(v, &s.handlers, true);
+            notified_suite(v, PythonBody::TryStarElse, &s.orelse);
+            notified_suite(v, PythonBody::TryStarFinally, &s.finalbody);
         }
         ast::Stmt::Assert(s) => {
             v.visit_expr(&s.test);
