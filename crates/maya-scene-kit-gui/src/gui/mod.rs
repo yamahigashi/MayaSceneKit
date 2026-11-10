@@ -806,6 +806,7 @@ struct SceneRow {
     modified: Option<SystemTime>,
     selected: bool,
     status: FileStatus,
+    busy: Option<RowOperation>,
     findings: usize,
     scene_workspace_root: Option<PathBuf>,
     audit_report: Option<AuditReport>,
@@ -1121,7 +1122,6 @@ struct AnalyzeRowResult {
 #[derive(Clone, PartialEq, Eq)]
 enum FileStatus {
     Idle,
-    Processing(RowOperation),
     Audited,
     Dirty,
     Saved,
@@ -1129,24 +1129,19 @@ enum FileStatus {
 }
 
 impl FileStatus {
-    fn is_processing(&self) -> bool {
-        matches!(self, Self::Processing(_))
-    }
-
     fn filter_matches(&self, filter: StatusFilter) -> bool {
         match filter {
             StatusFilter::All => true,
             StatusFilter::Dirty => matches!(self, Self::Dirty),
             StatusFilter::Error => matches!(self, Self::Error(_)),
             StatusFilter::Audited => matches!(self, Self::Audited | Self::Saved),
-            StatusFilter::Processing => matches!(self, Self::Processing(_)),
+            StatusFilter::Processing => false,
         }
     }
 
     fn label(&self, i18n: &I18n) -> String {
         match self {
             Self::Idle => i18n.text("file_status.idle"),
-            Self::Processing(operation) => operation_label(i18n, *operation),
             Self::Audited => i18n.text("file_status.audited"),
             Self::Dirty => i18n.text("file_status.dirty"),
             Self::Saved => i18n.text("file_status.saved"),
@@ -1168,7 +1163,6 @@ impl FileStatus {
             Self::Dirty => WARN_SOFT,
             Self::Saved => SUCCESS_SOFT,
             Self::Error(_) => ERROR_SOFT,
-            Self::Processing(_) => PANEL_ALT_BG,
             Self::Idle | Self::Audited => PANEL_BG,
         }
     }
@@ -1215,6 +1209,29 @@ impl MaxBytesDialogState {
 }
 
 impl SceneRow {
+    fn status_label(&self, i18n: &I18n) -> String {
+        self.busy.map_or_else(
+            || self.status.label(i18n),
+            |operation| operation_label(i18n, operation),
+        )
+    }
+
+    fn status_tone(&self) -> u32 {
+        if self.is_processing() {
+            PANEL_ALT_BG
+        } else {
+            self.status.tone()
+        }
+    }
+
+    fn status_filter_matches(&self, filter: StatusFilter) -> bool {
+        if self.is_processing() {
+            matches!(filter, StatusFilter::All | StatusFilter::Processing)
+        } else {
+            self.status.filter_matches(filter)
+        }
+    }
+
     fn from_path(id: u64, path: PathBuf) -> Option<Self> {
         let metadata = fs::metadata(&path).ok()?;
         if !metadata.is_file() {
@@ -1258,6 +1275,7 @@ impl SceneRow {
             modified: None,
             selected: false,
             status: FileStatus::Idle,
+            busy: None,
             findings: 0,
             scene_workspace_root: None,
             audit_report: None,
@@ -1483,7 +1501,7 @@ impl SceneRow {
     }
 
     fn is_processing(&self) -> bool {
-        self.status.is_processing()
+        self.busy.is_some()
     }
 
     fn replace_artifact_is_current(&self) -> bool {

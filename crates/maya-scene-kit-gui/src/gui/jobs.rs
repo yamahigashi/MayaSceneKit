@@ -312,7 +312,7 @@ impl GuiShell {
     pub(super) fn is_saving(&self) -> bool {
         self.rows
             .iter()
-            .any(|row| matches!(row.status, FileStatus::Processing(RowOperation::Save)))
+            .any(|row| row.busy == Some(RowOperation::Save))
     }
 
     pub(super) fn refresh_row_path_resolution_state(&mut self, row_index: usize) {
@@ -426,9 +426,7 @@ impl GuiShell {
                             let targets = target_ids
                                 .into_iter()
                                 .filter_map(|id| shell.index_of_row_id(id))
-                                .filter(|&index| {
-                                    !matches!(shell.rows[index].status, FileStatus::Processing(_))
-                                })
+                                .filter(|&index| !shell.rows[index].is_processing())
                                 .collect();
                             shell.spawn_save_jobs(targets, window, cx);
                         },
@@ -668,6 +666,7 @@ impl GuiShell {
     ) {
         let message = error.to_string();
         let row_id = self.rows[index].id;
+        self.rows[index].busy = None;
         self.rows[index].status = FileStatus::Error(message.clone());
         if matches!(operation, RowOperation::Analyze) {
             self.record_auto_analyze_job(self.rows[index].path.clone(), message, true);
@@ -726,6 +725,7 @@ impl GuiShell {
             return;
         };
 
+        self.rows[index].busy = None;
         match result {
             RowJobResult::Analyze(result) => {
                 let AnalyzeRowResult {
@@ -988,7 +988,7 @@ impl GuiShell {
         } else {
             None
         };
-        self.rows[index].status = FileStatus::Processing(operation);
+        self.rows[index].busy = Some(operation);
         let path = self.rows[index].path.clone();
         let view = cx.entity();
 

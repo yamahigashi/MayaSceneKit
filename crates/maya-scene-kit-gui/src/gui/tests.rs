@@ -1280,7 +1280,7 @@ fn clean_undo_restores_pre_processing_status(cx: &mut TestAppContext) {
             let edit_sequence = shell
                 .begin_edit_transaction(&[0])
                 .expect("edit transaction");
-            shell.rows[0].status = FileStatus::Processing(RowOperation::Clean);
+            shell.rows[0].busy = Some(RowOperation::Clean);
             shell.apply_job_result(
                 1,
                 RowOperation::Clean,
@@ -1352,8 +1352,8 @@ fn bulk_clean_undo_restores_all_rows_after_out_of_order_completion(cx: &mut Test
             let edit_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("edit transaction");
-            shell.rows[0].status = FileStatus::Processing(RowOperation::Clean);
-            shell.rows[1].status = FileStatus::Processing(RowOperation::Clean);
+            shell.rows[0].busy = Some(RowOperation::Clean);
+            shell.rows[1].busy = Some(RowOperation::Clean);
 
             shell.apply_job_result(
                 2,
@@ -1506,11 +1506,11 @@ fn undo_history_respects_action_order_not_completion_order(cx: &mut TestAppConte
             let first_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("first sequence");
-            shell.rows[0].status = FileStatus::Processing(RowOperation::Clean);
-            shell.rows[1].status = FileStatus::Processing(RowOperation::Clean);
+            shell.rows[0].busy = Some(RowOperation::Clean);
+            shell.rows[1].busy = Some(RowOperation::Clean);
 
             let second_sequence = shell.begin_edit_transaction(&[2]).expect("second sequence");
-            shell.rows[2].status = FileStatus::Processing(RowOperation::Clean);
+            shell.rows[2].busy = Some(RowOperation::Clean);
 
             shell.apply_job_result(
                 3,
@@ -1570,8 +1570,8 @@ fn bulk_clean_failure_only_records_successful_subset(cx: &mut TestAppContext) {
             let edit_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("edit transaction");
-            shell.rows[0].status = FileStatus::Processing(RowOperation::Clean);
-            shell.rows[1].status = FileStatus::Processing(RowOperation::Clean);
+            shell.rows[0].busy = Some(RowOperation::Clean);
+            shell.rows[1].busy = Some(RowOperation::Clean);
 
             shell.apply_job_result(
                 1,
@@ -1616,8 +1616,8 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
             let edit_sequence = shell
                 .begin_edit_transaction(&[0, 1])
                 .expect("edit transaction");
-            shell.rows[0].status = FileStatus::Processing(RowOperation::Clean);
-            shell.rows[1].status = FileStatus::Processing(RowOperation::Clean);
+            shell.rows[0].busy = Some(RowOperation::Clean);
+            shell.rows[1].busy = Some(RowOperation::Clean);
 
             shell.apply_job_result(
                 1,
@@ -3247,7 +3247,7 @@ fn file_context_menu_state_disables_delete_ui_configuration_script_node_for_proc
     let path = dir.path().join("processing_delete_ui_config.ma");
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
-    row.status = FileStatus::Processing(RowOperation::Analyze);
+    row.busy = Some(RowOperation::Analyze);
 
     let state = file_context_menu_state(&[row], 1, AuditModePreference::StrictDefault);
 
@@ -5254,7 +5254,7 @@ fn workspace_auto_analysis_dispatch_respects_parallelism_preference(cx: &mut Tes
             shell
                 .rows
                 .iter()
-                .filter(|row| row.status == FileStatus::Processing(RowOperation::Analyze))
+                .filter(|row| row.busy == Some(RowOperation::Analyze))
                 .count(),
             32
         );
@@ -5305,7 +5305,7 @@ fn workspace_auto_analysis_suppresses_low_priority_during_cache_restore(cx: &mut
             shell
                 .rows
                 .iter()
-                .filter(|row| row.status == FileStatus::Processing(RowOperation::Analyze))
+                .filter(|row| row.busy == Some(RowOperation::Analyze))
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![1]
@@ -5345,10 +5345,7 @@ fn selected_auto_analysis_still_dispatches_during_cache_restore(cx: &mut TestApp
 
         assert_eq!(shell.auto_analyze_queue.in_flight_len(), 1);
         assert_eq!(shell.auto_analyze_queue.pending_low.len(), 2);
-        assert!(matches!(
-            shell.rows[1].status,
-            FileStatus::Processing(RowOperation::Analyze)
-        ));
+        assert!(matches!(shell.rows[1].busy, Some(RowOperation::Analyze)));
     });
 }
 
@@ -7138,7 +7135,7 @@ fn file_context_delete_ui_configuration_script_node_skips_processing_rows(cx: &m
             let mut row_b = test_row(2, &scene_b);
             row_b.selected = true;
             row_b.dump_report = result_b.dump_report.clone();
-            row_b.status = FileStatus::Processing(RowOperation::Analyze);
+            row_b.busy = Some(RowOperation::Analyze);
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
 
@@ -8052,7 +8049,7 @@ fn path_context_menu_state_disables_search_for_processing_missing_targets() {
 
     let mut row = test_row(1, &scene);
     row.selected = true;
-    row.status = FileStatus::Processing(RowOperation::Analyze);
+    row.busy = Some(RowOperation::Analyze);
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
     row.refresh_path_resolution_cache();
 
@@ -8082,7 +8079,7 @@ fn path_context_menu_state_search_skips_processing_targets_when_editable_missing
     first_row.refresh_path_resolution_cache();
     let mut second_row = test_row(2, &second_scene);
     second_row.selected = true;
-    second_row.status = FileStatus::Processing(RowOperation::Analyze);
+    second_row.busy = Some(RowOperation::Analyze);
     second_row.paths_report =
         Some(collect_scene_paths(&second_scene, PathKind::File).expect("paths"));
     second_row.refresh_path_resolution_cache();
@@ -12622,7 +12619,7 @@ fn save_overlay_blocks_workspace_handlers(cx: &mut TestAppContext) {
             .state
             .set_workspace_root(Some(dir.path().to_path_buf()));
         let mut row = test_row(1, &dir.path().join("TestScene.ma"));
-        row.status = FileStatus::Processing(RowOperation::Save);
+        row.busy = Some(RowOperation::Save);
         shell.replace_rows(vec![row]);
         shell.on_menu_select_folder(&super::MenuSelectFolder, window, cx);
         assert!(matches!(
@@ -12744,10 +12741,7 @@ fn save_guard_blocks_undo_and_redo(cx: &mut TestAppContext) {
             shell.status_message,
             Some(BannerMessage::SaveInProgress)
         ));
-        assert!(matches!(
-            shell.rows[0].status,
-            FileStatus::Processing(RowOperation::Save)
-        ));
+        assert!(matches!(shell.rows[0].busy, Some(RowOperation::Save)));
         assert!(shell.is_saving());
         assert_eq!(shell.undo_stack.len(), undo_count);
         shell.status_message = None;
@@ -12756,10 +12750,7 @@ fn save_guard_blocks_undo_and_redo(cx: &mut TestAppContext) {
             shell.status_message,
             Some(BannerMessage::SaveInProgress)
         ));
-        assert!(matches!(
-            shell.rows[0].status,
-            FileStatus::Processing(RowOperation::Save)
-        ));
+        assert!(matches!(shell.rows[0].busy, Some(RowOperation::Save)));
         assert!(shell.is_saving());
     });
 }

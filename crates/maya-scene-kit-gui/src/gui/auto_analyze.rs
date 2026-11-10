@@ -450,7 +450,7 @@ impl GuiShell {
             self.auto_analyze_queue.complete(row_id);
             return;
         };
-        self.rows[index].status = FileStatus::Processing(RowOperation::Analyze);
+        self.rows[index].busy = Some(RowOperation::Analyze);
         let path = self.rows[index].path.clone();
         let plan = Arc::clone(&self.audit_plan);
         let load_options = self.scene_load_options();

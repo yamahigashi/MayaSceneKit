@@ -298,9 +298,11 @@ fn default_enabled() -> bool {
 }
 
 fn file_status_key(row: &SceneRow) -> String {
+    if row.is_processing() {
+        return "processing".to_string();
+    }
     match &row.status {
         super::FileStatus::Idle => "idle",
-        super::FileStatus::Processing(_) => "processing",
         super::FileStatus::Audited => "audited",
         super::FileStatus::Dirty => "dirty",
         super::FileStatus::Saved => "saved",

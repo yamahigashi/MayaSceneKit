@@ -516,11 +516,12 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
         }
         shell.rows[0].audit_report.as_mut().unwrap().findings[key.item_index].code =
             AuditFindingCode::MelExec;
-        shell.rows[0].status = FileStatus::Processing(RowOperation::Analyze);
+        shell.rows[0].busy = Some(RowOperation::Analyze);
         assert_eq!(
             shell.audit_detail_allow_disabled_reason(),
             Some("audit_allow.busy")
         );
+        shell.rows[0].busy = None;
         shell.rows[0].status = FileStatus::Audited;
         shell.rows[0]
             .path_overrides

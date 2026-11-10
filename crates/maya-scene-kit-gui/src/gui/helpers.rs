@@ -1253,7 +1253,7 @@ pub(super) fn compute_visible_row_indices_for(
         .iter()
         .enumerate()
         .filter(|(_, row)| {
-            row.status.filter_matches(state.status_filter)
+            row.status_filter_matches(state.status_filter)
                 && file_list_filters_match(row, state)
                 && (tokens.is_empty()
                     || matches_search_tokens(searchable_text_for_row(row, state), &tokens))
@@ -1265,7 +1265,7 @@ pub(super) fn compute_visible_row_indices_for(
             } else {
                 match sort.key {
                     FileSortKey::Name => key.0 = workspace_relative_display_path(&row.path, state),
-                    FileSortKey::Status => key.0 = row.status.label(&locale_i18n),
+                    FileSortKey::Status => key.0 = row.status_label(&locale_i18n),
                     FileSortKey::Workspace => key.1 = row.scene_workspace_root.is_none(),
                     FileSortKey::Findings => key.2 = row.effective_findings_count(),
                     FileSortKey::Missing => {
@@ -1365,11 +1365,11 @@ pub(super) fn build_single_file_table_row(
         selected: row.selected,
         dirty: row.dirty(),
         is_processing: row.is_processing(),
-        tone: row.status.tone(),
+        tone: row.status_tone(),
         state_mark: file_row_state_mark(row),
         name: workspace_relative_display_path(&row.path, state),
         has_scene_workspace: row.scene_workspace_root.is_some(),
-        status: row.status.label(i18n),
+        status: row.status_label(i18n),
         findings: row.effective_findings_count().to_string(),
         missing: missing_path_count_for_row(row)
             .map(|count| count.to_string())
@@ -1380,8 +1380,11 @@ pub(super) fn build_single_file_table_row(
 }
 
 pub(super) fn file_row_state_mark(row: &SceneRow) -> Option<RowStateMark> {
-    if row.dirty() || matches!(row.status, FileStatus::Dirty) {
+    if row.dirty() || (!row.is_processing() && matches!(row.status, FileStatus::Dirty)) {
         return Some(RowStateMark::Modified);
+    }
+    if row.is_processing() {
+        return None;
     }
     match row.status {
         FileStatus::Error(_) => Some(RowStateMark::Error),
@@ -1595,9 +1598,8 @@ pub(super) fn compare_rows_for_sort(
             .cmp(&right.scene_workspace_root.is_none())
             .then_with(|| left.path.cmp(&right.path)),
         FileSortKey::Status => left
-            .status
-            .label(&locale_i18n)
-            .cmp(&right.status.label(&locale_i18n)),
+            .status_label(&locale_i18n)
+            .cmp(&right.status_label(&locale_i18n)),
         FileSortKey::Findings => left
             .effective_findings_count()
             .cmp(&right.effective_findings_count())
