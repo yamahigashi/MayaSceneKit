@@ -514,3 +514,114 @@ fn conditional_callable_candidates_reach_finally_and_following_calls() {
     }
     assert!(missed.is_empty(), "lost branch semantics: {missed:#?}");
 }
+
+#[test]
+fn wildcard_imports_block_builtin_fallback_but_preserve_explicit_bindings() {
+    let mut failures = Vec::new();
+    for source in [
+        "from sample import *\nprint('Example')",
+        "from sample import *\nexec('Example')",
+        "from sample import *\ndef Example():\n    print('Example')",
+        "class Example:\n    from sample import *\n    print('Example')",
+    ] {
+        if count(source, AuditFindingCode::PythonUnresolvedCallTarget) != 1
+            || count(source, AuditFindingCode::PythonExec) != 0
+        {
+            failures.push(source);
+        }
+    }
+    for source in [
+        "from sample import *\nprint = len\nprint('Example')",
+        "from sample import *\nfrom builtins import print\nprint('Example')",
+        "from sample import *\nExample('Example')",
+        "from maya.cmds import *\nfile(q=True)",
+        "class Example:\n    from sample import *\n    def Sample():\n        print('Example')",
+    ] {
+        if count(source, AuditFindingCode::PythonUnresolvedCallTarget) != 0 {
+            failures.push(source);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "incorrect wildcard lookup: {failures:#?}"
+    );
+}
+
+#[test]
+fn literal_iteration_targets_share_assignment_destructuring() {
+    let mut failures = Vec::new();
+    for source in [
+        "for example, sample in [(exec, print)]:\n    example('Example')",
+        "for [example, sample] in [[exec, print]]:\n    example('Example')",
+        "for example, sample in [(print, print), (exec, print)]:\n    example('Example')",
+        "for (example, sample), other in [((exec, print), 0)]:\n    example('Example')",
+        "[example('Example') for example, sample in [(exec, print)]]",
+        "{example('Example') for example, sample in [(exec, print)]}",
+        "{0: example('Example') for example, sample in [(exec, print)]}",
+        "(example('Example') for example, sample in [(exec, print)])",
+        "run = exec\n[run('Example') for run, sample in [(run, print)]]",
+    ] {
+        if count(source, AuditFindingCode::PythonExec) != 1
+            || count(source, AuditFindingCode::PythonUnresolvedCallTarget) != 0
+        {
+            failures.push(source);
+        }
+    }
+    for source in [
+        "run = exec\nfor run, sample in Example:\n    run('Example')",
+        "run = exec\nfor run, sample in [(print,)]:\n    run('Example')",
+        "run = exec\n[run('Example') for run, sample in [Example]]",
+    ] {
+        if count(source, AuditFindingCode::PythonExec) != 0
+            || count(source, AuditFindingCode::PythonUnresolvedCallTarget) != 1
+        {
+            failures.push(source);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "lost iterable destructuring: {failures:#?}"
+    );
+}
+
+#[test]
+fn assignment_forms_preserve_concrete_and_unresolved_targets() {
+    assert_eq!(
+        count(
+            "run = exec\nrun += [sample]\nrun('Example')",
+            AuditFindingCode::PythonUnresolvedCallTarget
+        ),
+        1
+    );
+    for source in [
+        "example, *sample = exec, print\nexample('Example')",
+        "run: object = exec\nrun('Example')",
+    ] {
+        assert_eq!(count(source, AuditFindingCode::PythonExec), 1, "{source}");
+        assert_eq!(
+            count(source, AuditFindingCode::PythonUnresolvedCallTarget),
+            0,
+            "{source}"
+        );
+    }
+    let deleted = "run = exec\ndel run\nrun('Example')";
+    assert_eq!(count(deleted, AuditFindingCode::PythonExec), 0);
+    assert_eq!(
+        count(deleted, AuditFindingCode::PythonUnresolvedCallTarget),
+        0
+    );
+    assert_eq!(
+        count(
+            "from sample import *\nprint('Example')",
+            AuditFindingCode::PythonUnresolvedCallTarget
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            "from sample import *\nprint = len\nprint('Example')",
+            AuditFindingCode::PythonUnresolvedCallTarget
+        ),
+        0
+    );
+}

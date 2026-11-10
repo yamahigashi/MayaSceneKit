@@ -12,8 +12,8 @@ mod maya;
 mod scope;
 pub(crate) use maya::{MayaCall, MayaKind};
 use scope::{
-    Binding, LocalBindings, Scope, ScopeKind, add_first_comprehension_iterable, collect_arguments,
-    collect_local_bindings, collect_pattern_bindings, in_iterable,
+    AssignmentValue, Binding, LocalBindings, Scope, ScopeKind, add_first_comprehension_iterable,
+    collect_arguments, collect_local_bindings, collect_pattern_bindings, in_iterable,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +82,7 @@ pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
         return signals;
     };
     let mut visitor = SignalVisitor::default();
-    visitor.enter(ScopeKind::Module, collect_local_bindings(&program));
+    visitor.enter(ScopeKind::Module, LocalBindings::default());
     walk_suite(&mut visitor, &program);
     visitor
         .signals
@@ -105,7 +105,8 @@ struct SignalVisitor {
     pending_definition_safe: bool,
     handler_ends: HashMap<u32, Vec<String>>,
     pending_evaluations: HashMap<ast::text_size::TextRange, BindingEvaluation>,
-    evaluated_bindings: HashMap<ast::text_size::TextRange, Binding>,
+    evaluated_values: HashMap<ast::text_size::TextRange, AssignmentValue>,
+    safe_builtins: std::cell::RefCell<HashMap<String, bool>>,
 }
 
 enum BindingEvaluation {
@@ -237,15 +238,25 @@ impl PythonAstVisitor for SignalVisitor {
                 }
             }
             ast::Stmt::ImportFrom(import) => {
+                if import.names.iter().any(|alias| alias.name.as_str() == "*") {
+                    self.scopes
+                        .last_mut()
+                        .expect("import scope")
+                        .wildcard_import = true;
+                }
                 if let Some(module) = &import.module {
                     self.record_capability_module(module.as_str());
                     self.record_hard_markers(hard_markers_for_imported_module(module.as_str()));
                     for alias in &import.names {
-                        if alias.name.as_str() == "*" && is_maya_target(module.as_str()) {
-                            self.signals.push(PythonSignal::MayaUncertain {
-                                message: "Maya wildcard import leaves callable bindings unresolved"
-                                    .to_string(),
-                            });
+                        if alias.name.as_str() == "*" {
+                            if is_maya_target(module.as_str()) {
+                                self.signals.push(PythonSignal::MayaUncertain {
+                                    message:
+                                        "Maya wildcard import leaves callable bindings unresolved"
+                                            .to_string(),
+                                });
+                            }
+                            continue;
                         }
                         self.record_hard_markers(hard_markers_for_imported_name(
                             module.as_str(),
@@ -271,10 +282,8 @@ impl PythonAstVisitor for SignalVisitor {
                                 .into_iter()
                                 .collect(),
                                 strings: Vec::new(),
-                                known_safe: scope::safe_imported_callable(
-                                    module,
-                                    alias.name.as_str(),
-                                ),
+                                known_safe: self
+                                    .safe_imported_callable(module, alias.name.as_str()),
                                 ..Binding::default()
                             },
                             false,
@@ -282,6 +291,9 @@ impl PythonAstVisitor for SignalVisitor {
                     }
                 } else {
                     for alias in &import.names {
+                        if alias.name.as_str() == "*" {
+                            continue;
+                        }
                         self.bind_name(
                             &alias_local_name(alias.name.as_str(), alias.asname.as_ref()),
                             Binding::default(),
@@ -382,10 +394,10 @@ impl PythonAstVisitor for SignalVisitor {
         }
         if let Some(evaluation) = self.pending_evaluations.remove(&expr.range()) {
             let binding = match evaluation {
-                BindingEvaluation::Value => self.assigned_value(expr),
+                BindingEvaluation::Value => AssignmentValue::Single(self.assigned_value(expr)),
                 BindingEvaluation::Iterable => self.iterable_value(expr),
             };
-            self.evaluated_bindings.insert(expr.range(), binding);
+            self.evaluated_values.insert(expr.range(), binding);
         }
         self.iterable_ranges.truncate(previous_ranges);
     }
@@ -475,7 +487,7 @@ impl PythonAstVisitor for SignalVisitor {
                     .last()
                     .map(|iter| self.iterable_value(iter))
                     .unwrap_or_default();
-                self.bind_target(target, binding, false);
+                self.bind_prepared_target(target, binding, false);
             }
             PythonWalkPoint::AfterDeleteTarget(target) => self.delete_target(target),
             PythonWalkPoint::AfterWithVars(item) => {
@@ -501,10 +513,10 @@ impl PythonAstVisitor for SignalVisitor {
             }
             PythonWalkPoint::AfterComprehensionIter(generator) => {
                 let binding = self
-                    .evaluated_bindings
+                    .evaluated_values
                     .remove(&generator.iter.range())
                     .unwrap_or_else(|| self.iterable_value(&generator.iter));
-                self.bind_target(&generator.target, binding, false);
+                self.bind_prepared_target(&generator.target, binding, false);
             }
         }
     }
@@ -561,14 +573,15 @@ impl SignalVisitor {
             }
         }
         let unbound_local = binding.unbound_local;
-        let hidden = self.hidden_value(&call.func);
-        let shadowed_target = !binding.known_safe
-            && (!hidden.aliases.is_empty()
+        let shadowed_target = !binding.known_safe && {
+            let hidden = self.hidden_value(&call.func);
+            !hidden.aliases.is_empty()
                 || !hidden.capabilities.is_empty()
                 || hidden.modules.iter().any(|target| {
                     maya::classify(target, call)
                         .is_some_and(|operation| !operation.operations.is_empty())
-                }));
+                })
+        };
         let known =
             concrete_maya || !binding.aliases.is_empty() || !binding.capabilities.is_empty();
         for kind in binding.aliases {
@@ -593,7 +606,7 @@ impl SignalVisitor {
                         "python call target named \u{0060}python\u{0060} is not a Python built-in"
                             .to_string(),
                 });
-            } else if shadowed_target || unbound_local {
+            } else if shadowed_target || unbound_local || self.wildcard_call_target(&call.func) {
                 self.signals.push(PythonSignal::UnresolvedCallTarget {
                     message: format!(
                         "shadowed Python call target at byte {} cannot be resolved statically",

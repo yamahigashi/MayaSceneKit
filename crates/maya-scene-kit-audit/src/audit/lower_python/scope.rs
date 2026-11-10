@@ -43,6 +43,62 @@ fn extend_unique<T: PartialEq>(values: &mut Vec<T>, additions: Vec<T>) {
     }
 }
 
+pub(super) enum AssignmentValue {
+    Single(Binding),
+    Sequence(Vec<Self>),
+}
+
+impl Default for AssignmentValue {
+    fn default() -> Self {
+        Self::Single(Binding::default())
+    }
+}
+
+impl AssignmentValue {
+    pub(super) fn into_binding(self) -> Binding {
+        match self {
+            Self::Single(binding) => binding,
+            Self::Sequence(_) => Binding::default(),
+        }
+    }
+
+    fn extend(&mut self, other: Self) {
+        match (self, other) {
+            (Self::Sequence(values), Self::Sequence(others)) if values.len() == others.len() => {
+                for (value, other) in values.iter_mut().zip(others) {
+                    value.extend(other);
+                }
+            }
+            (value, other) => {
+                let mut binding = std::mem::take(value).into_binding();
+                binding.extend(other.into_binding());
+                *value = Self::Single(binding);
+            }
+        }
+    }
+}
+
+fn prepare_value_assignment(
+    target: &ast::Expr,
+    value: AssignmentValue,
+) -> Vec<(&ast::Expr, Binding)> {
+    let targets = match target {
+        ast::Expr::Tuple(value) => Some(&value.elts),
+        ast::Expr::List(value) => Some(&value.elts),
+        _ => None,
+    };
+    match (targets, value) {
+        (Some(targets), AssignmentValue::Sequence(values)) if targets.len() == values.len() => {
+            targets
+                .iter()
+                .zip(values)
+                .flat_map(|(target, value)| prepare_value_assignment(target, value))
+                .collect()
+        }
+        (_, value) => vec![(target, value.into_binding())],
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Scope {
     pub kind: ScopeKind,
@@ -53,6 +109,7 @@ pub(super) struct Scope {
     pub bound: HashSet<String>,
     pub globals: HashSet<String>,
     pub nonlocals: HashSet<String>,
+    pub wildcard_import: bool,
     candidates: HashMap<String, Binding>,
     shadowed: HashMap<String, Binding>,
     safe_callables: HashSet<String>,
@@ -158,7 +215,7 @@ impl SignalVisitor {
             if let Some(owner) = self.declared_owner(index, name) {
                 return Some(owner);
             }
-            if scope.bound.contains(name) {
+            if scope.bound.contains(name) || scope.wildcard_import {
                 return Some(index);
             }
         }
@@ -167,12 +224,18 @@ impl SignalVisitor {
 
     fn binding_scope(&self, name: &str) -> Option<usize> {
         self.binding_scope_from(name, self.scopes.len().checked_sub(1)?, false)
-            .filter(|&index| index != 0 || self.scopes[index].bound.contains(name))
+            .filter(|&index| {
+                index != 0
+                    || self.scopes[index].bound.contains(name)
+                    || self.scopes[index].wildcard_import
+            })
     }
 
     pub(super) fn resolve_name_from(&self, name: &str, last: usize) -> Binding {
         if let Some(index) = self.binding_scope_from(name, last, false)
-            && (index != 0 || self.scopes[index].bound.contains(name))
+            && (index != 0
+                || self.scopes[index].bound.contains(name)
+                || self.scopes[index].wildcard_import)
         {
             return self.scopes[index].binding(name);
         }
@@ -187,6 +250,20 @@ impl SignalVisitor {
             .unwrap_or_else(|| builtin_binding(name))
     }
 
+    pub(super) fn wildcard_call_target(&self, expr: &ast::Expr) -> bool {
+        let ast::Expr::Name(name) = expr else {
+            return false;
+        };
+        self.binding_scope(name.id.as_str()).is_some_and(|owner| {
+            let scope = &self.scopes[owner];
+            scope.wildcard_import
+                && !scope.bound.contains(name.id.as_str())
+                && (direct_call_kind(name.id.as_str()).is_some()
+                    || direct_capability(name.id.as_str()).is_some()
+                    || self.observed_safe_builtin(name.id.as_str()))
+        })
+    }
+
     pub(super) fn hidden_value(&self, expr: &ast::Expr) -> Binding {
         match expr {
             ast::Expr::Name(name) => self
@@ -195,7 +272,7 @@ impl SignalVisitor {
                 .cloned()
                 .unwrap_or_default(),
             ast::Expr::Attribute(attr) => {
-                member_binding(self.hidden_value(&attr.value), attr.attr.as_str())
+                self.member_binding(self.hidden_value(&attr.value), attr.attr.as_str())
             }
             _ => Binding::default(),
         }
@@ -220,7 +297,7 @@ impl SignalVisitor {
                 ..Binding::default()
             },
             ast::Expr::Attribute(attr) => {
-                member_binding(self.resolve_value(&attr.value), attr.attr.as_str())
+                self.member_binding(self.resolve_value(&attr.value), attr.attr.as_str())
             }
             ast::Expr::Call(call) => {
                 let mut binding = Binding::default();
@@ -256,7 +333,7 @@ impl SignalVisitor {
         if let ast::Expr::Name(name) = expr
             && self.binding_scope(name.id.as_str()).is_none()
         {
-            binding.known_safe = observed_safe_builtin(name.id.as_str());
+            binding.known_safe = self.observed_safe_builtin(name.id.as_str());
         }
         if let Some(value) = tracked_python_string_value(expr, self) {
             binding.strings = vec![value];
@@ -264,14 +341,34 @@ impl SignalVisitor {
         binding
     }
 
-    pub(super) fn iterable_value(&self, expr: &ast::Expr) -> Binding {
+    fn assignment_value(&self, expr: &ast::Expr) -> AssignmentValue {
+        match expr {
+            ast::Expr::Tuple(value) => AssignmentValue::Sequence(
+                value
+                    .elts
+                    .iter()
+                    .map(|expr| self.assignment_value(expr))
+                    .collect(),
+            ),
+            ast::Expr::List(value) => AssignmentValue::Sequence(
+                value
+                    .elts
+                    .iter()
+                    .map(|expr| self.assignment_value(expr))
+                    .collect(),
+            ),
+            _ => AssignmentValue::Single(self.assigned_value(expr)),
+        }
+    }
+
+    pub(super) fn iterable_value(&self, expr: &ast::Expr) -> AssignmentValue {
         let values = match expr {
             ast::Expr::List(value) => &value.elts,
             ast::Expr::Tuple(value) => &value.elts,
             ast::Expr::Set(value) => &value.elts,
-            _ => return Binding::default(),
+            _ => return AssignmentValue::default(),
         };
-        let mut bindings = values.iter().map(|value| self.assigned_value(value));
+        let mut bindings = values.iter().map(|value| self.assignment_value(value));
         let mut binding = bindings.next().unwrap_or_default();
         for value in bindings {
             binding.extend(value);
@@ -288,11 +385,13 @@ impl SignalVisitor {
         }
         let owner = self.declared_owner(index, name).unwrap_or(index);
         let hidden = self.hidden_name(name, owner);
-        self.scopes[owner]
-            .shadowed
-            .entry(name.to_string())
-            .or_default()
-            .extend(hidden);
+        if hidden != Binding::default() {
+            self.scopes[owner]
+                .shadowed
+                .entry(name.to_string())
+                .or_default()
+                .extend(hidden);
+        }
         let candidate = self.deferred_write(owner, index);
         let before = self.resolve_name_from(name, owner);
         for conditional in &mut self.conditional_bindings {
@@ -399,26 +498,17 @@ impl SignalVisitor {
         target: &'a ast::Expr,
         value: &ast::Expr,
     ) -> Vec<(&'a ast::Expr, Binding)> {
-        let targets = match target {
-            ast::Expr::Tuple(value) => Some(&value.elts),
-            ast::Expr::List(value) => Some(&value.elts),
-            _ => None,
-        };
-        let values = match value {
-            ast::Expr::Tuple(value) => Some(&value.elts),
-            ast::Expr::List(value) => Some(&value.elts),
-            _ => None,
-        };
-        if let (Some(targets), Some(values)) = (targets, values)
-            && targets.len() == values.len()
-        {
-            targets
-                .iter()
-                .zip(values)
-                .flat_map(|(target, value)| self.prepare_assignment(target, value))
-                .collect()
-        } else {
-            vec![(target, self.assigned_value(value))]
+        prepare_value_assignment(target, self.assignment_value(value))
+    }
+
+    pub(super) fn bind_prepared_target(
+        &mut self,
+        target: &ast::Expr,
+        value: AssignmentValue,
+        named_expr: bool,
+    ) {
+        for (target, binding) in prepare_value_assignment(target, value) {
+            self.bind_target(target, binding, named_expr);
         }
     }
 
@@ -489,9 +579,10 @@ impl SignalVisitor {
                 .default
                 .as_ref()
                 .map(|default| {
-                    self.evaluated_bindings
+                    self.evaluated_values
                         .remove(&default.range())
                         .expect("evaluated parameter default")
+                        .into_binding()
                 })
                 .unwrap_or_default();
             self.bind_name(arg.def.arg.as_str(), binding, false);
@@ -674,47 +765,56 @@ fn builtin_binding(name: &str) -> Binding {
     }
 }
 
-fn member_binding(receiver: Binding, member: &str) -> Binding {
-    let mut members = receiver.modules.into_iter().map(|module| Binding {
-        aliases: qualified_call_kind(&module, member).into_iter().collect(),
-        capabilities: capability_for_module_member(&module, member)
-            .into_iter()
-            .collect(),
-        known_safe: safe_imported_callable(&module, member),
-        modules: vec![format!("{module}.{member}")],
-        ..Binding::default()
-    });
-    let mut binding = members.next().unwrap_or_default();
-    for member in members {
-        binding.extend(member);
+impl SignalVisitor {
+    fn member_binding(&self, receiver: Binding, member: &str) -> Binding {
+        let mut members = receiver.modules.into_iter().map(|module| Binding {
+            aliases: qualified_call_kind(&module, member).into_iter().collect(),
+            capabilities: capability_for_module_member(&module, member)
+                .into_iter()
+                .collect(),
+            known_safe: self.safe_imported_callable(&module, member),
+            modules: vec![format!("{module}.{member}")],
+            ..Binding::default()
+        });
+        let mut binding = members.next().unwrap_or_default();
+        for member in members {
+            binding.extend(member);
+        }
+        binding
     }
-    binding
-}
 
-pub(super) fn safe_imported_callable(module: &str, name: &str) -> bool {
-    module == "builtins" && observed_safe_builtin(name)
-}
+    pub(super) fn safe_imported_callable(&self, module: &str, name: &str) -> bool {
+        module == "builtins" && self.observed_safe_builtin(name)
+    }
 
-fn observed_safe_builtin(name: &str) -> bool {
-    use maya_scene_kit_observe::scene::evidence::{
-        EffectCertainty, ExecutionEffectClass, ExecutionLanguage,
-    };
-    maya_scene_kit_observe::scene::execution::observe_source_text(
-        &format!("{name}()"),
-        ExecutionLanguage::Python,
-    )
-    .is_ok_and(|catalog| {
-        catalog.unit_summaries.len() == 1
-            && catalog.unit_summaries.iter().all(|unit| {
-                unit.certainty == EffectCertainty::Proven
-                    && matches!(
-                        unit.effect,
-                        ExecutionEffectClass::PureComputation
-                            | ExecutionEffectClass::DiagnosticOutput
-                            | ExecutionEffectClass::SceneReadOnly
-                    )
-            })
-    })
+    fn observed_safe_builtin(&self, name: &str) -> bool {
+        if let Some(safe) = self.safe_builtins.borrow().get(name).copied() {
+            return safe;
+        }
+        use maya_scene_kit_observe::scene::evidence::{
+            EffectCertainty, ExecutionEffectClass, ExecutionLanguage,
+        };
+        let safe = maya_scene_kit_observe::scene::execution::observe_source_text(
+            &format!("{name}()"),
+            ExecutionLanguage::Python,
+        )
+        .is_ok_and(|catalog| {
+            catalog.unit_summaries.len() == 1
+                && catalog.unit_summaries.iter().all(|unit| {
+                    unit.certainty == EffectCertainty::Proven
+                        && matches!(
+                            unit.effect,
+                            ExecutionEffectClass::PureComputation
+                                | ExecutionEffectClass::DiagnosticOutput
+                                | ExecutionEffectClass::SceneReadOnly
+                        )
+                })
+        });
+        self.safe_builtins
+            .borrow_mut()
+            .insert(name.to_string(), safe);
+        safe
+    }
 }
 
 pub(super) fn collect_arguments(args: &ast::Arguments, names: &mut HashSet<String>) {
