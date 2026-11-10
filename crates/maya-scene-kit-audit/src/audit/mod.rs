@@ -237,8 +237,8 @@ fn evaluate_catalog(
         dependency_facts,
         mut unknown_semantics,
         digests: observed_digests,
-        coverage_state,
-        coverage_issues,
+        mut coverage_state,
+        mut coverage_issues,
     } = catalog;
     let surface_count = observed_surfaces.len();
     let mut mel_surface_facts_cache = HashMap::<Arc<str>, Arc<_>>::with_capacity(surface_count);
@@ -259,19 +259,21 @@ fn evaluate_catalog(
     let mut findings = Vec::new();
     let mut review_signals = Vec::new();
     let mut surface_index = 0usize;
+    let mut analysis_cache = analyze::DerivedAnalysisCache::default();
+    let mut depth_coverage = analyze::DepthLimitCoverage::default();
 
     while surface_index < surfaces.len() {
-        let analysis = {
-            let surface = &surfaces[surface_index];
-            findings.extend(surface_uncertainty_findings(surface_index, surface));
+        let surface = &surfaces[surface_index];
+        let analysis = analysis_cache.analyze(surface_index, surface, |surface_index, surface| {
+            let mut prefix = surface_uncertainty_findings(surface_index, surface);
             if has_custom_rules {
-                findings.extend(analyze::findings_for_custom_rules(
+                prefix.extend(analyze::findings_for_custom_rules(
                     surface_index,
                     surface,
                     &plan.rules,
                 ));
             }
-            match surface.origin.lang {
+            let mut analysis = match surface.origin.lang {
                 ExecutionLanguage::Python => {
                     analyze::analyze_python_surface(surface_index, surface)
                 }
@@ -282,12 +284,26 @@ fn evaluate_catalog(
                         &mut mel_surface_facts_cache,
                     )
                 }
+            };
+            if !prefix.is_empty() {
+                prefix.append(&mut analysis.findings);
+                analysis.findings = prefix;
             }
-        };
+            analysis
+        });
         findings.extend(analysis.findings);
         review_signals.extend(analysis.review_signals);
         unknown_semantics.extend(analysis.unknown_semantics);
-        surfaces.extend(analysis.derived_surfaces);
+        let issue_count = coverage_issues.len();
+        for derived in analysis.derived_surfaces {
+            if depth_coverage.retain(surface_index, &derived, &mut coverage_issues) {
+                surfaces.push(derived);
+            }
+        }
+        if coverage_issues.len() > issue_count && coverage_state == ExecutionCoverageState::Complete
+        {
+            coverage_state = ExecutionCoverageState::Incomplete;
+        }
         surfaces[surface_index].discard_analysis_state();
         surface_index += 1;
     }

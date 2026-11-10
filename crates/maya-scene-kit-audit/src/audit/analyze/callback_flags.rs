@@ -103,6 +103,8 @@ pub(super) fn analyze_callback_flags(
                 let mel = collect_cached_mel_surface_facts(mel_surface_facts_cache, &body);
                 derived_surfaces.push(AnalysisSurface {
                     root_index: surface.root_index,
+                    literal_eval_depth: surface.literal_eval_depth,
+                    parent_position: Some((fact.span.start, fact.span.end)),
                     preview: preview_window(
                         &body,
                         0,
@@ -145,7 +147,7 @@ fn is_empty_callback_placeholder(text: &str) -> bool {
     inner.trim().is_empty()
 }
 
-fn collect_cached_mel_surface_facts(
+pub(super) fn collect_cached_mel_surface_facts(
     cache: &mut HashMap<Arc<str>, Arc<MelSurfaceFacts>>,
     source: &Arc<str>,
 ) -> Arc<MelSurfaceFacts> {

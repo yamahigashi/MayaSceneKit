@@ -30,6 +30,8 @@ fn sink_word_scan_tracks_whole_word_hits_without_overlap() {
 fn parser_backed_lookup_matches_call_name_case_insensitively() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"source "evil.mel""#),
         preview: r#"source "evil.mel""#.to_string(),
         origin: ExecutionOrigin {
@@ -73,6 +75,8 @@ fn parser_backed_lookup_matches_call_name_case_insensitively() {
 fn mel_exec_command_emits_dedicated_finding() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"exec "SampleTool.exe";"#),
         preview: "exec".to_string(),
         origin: ExecutionOrigin {
@@ -105,6 +109,8 @@ fn mel_exec_command_emits_dedicated_finding() {
 fn mel_exec_detection_does_not_scan_nested_python_strings() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"python("exec('print(1)')");"#),
         preview: "python".to_string(),
         origin: ExecutionOrigin {
@@ -146,6 +152,8 @@ fn mel_exec_detection_does_not_scan_nested_python_strings() {
 fn callback_inline_body_emits_review_signal_and_derived_surface() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"modelEditor -e -editorChanged "print \"ok\";" modelPanel4;"#),
         preview: "modelEditor".to_string(),
         origin: ExecutionOrigin {
@@ -206,6 +214,8 @@ fn callback_inline_body_emits_review_signal_and_derived_surface() {
 fn bare_identifier_callback_flag_emits_review_signal_only() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"modelEditor -e -editorChanged "safeProc" modelPanel4;"#),
         preview: "modelEditor".to_string(),
         origin: ExecutionOrigin {
@@ -258,6 +268,8 @@ fn bare_identifier_callback_flag_emits_review_signal_only() {
 fn empty_braced_callback_flag_is_ignored() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"nodeOutliner -e -selectCommand "{}" outlinerPanel1;"#),
         preview: "nodeOutliner".to_string(),
         origin: ExecutionOrigin {
@@ -290,6 +302,8 @@ fn empty_braced_callback_flag_is_ignored() {
 fn bare_mel_variable_is_not_obfuscation_marker() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"$editorName = "panel1"; modelEditor -q -camera $editorName;"#),
         preview: "$editorName".to_string(),
         origin: ExecutionOrigin {
@@ -332,6 +346,8 @@ fn bare_mel_variable_is_not_obfuscation_marker() {
 fn mel_sink_finding_uses_rendered_body_as_preview_override() {
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(r#"eval("print \"sample\";");"#),
         preview: "eval".to_string(),
         origin: ExecutionOrigin {
@@ -384,6 +400,8 @@ fn dynamic_mel_sink_finding_uses_sink_span_preview_override() {
     );
     let surface = AnalysisSurface {
         root_index: 0,
+        literal_eval_depth: 0,
+        parent_position: None,
         text: Arc::from(source),
         preview: "float $ExampleFrame = frame".to_string(),
         origin: ExecutionOrigin {
@@ -456,4 +474,282 @@ fn dynamic_mel_sink_preview_truncates_long_lines_on_char_boundary() {
     assert!(preview.len() <= 12 * 1024);
     assert!(preview.is_char_boundary(preview.len()));
     assert!(preview.ends_with(" [... omitted after ...]"));
+}
+
+fn literal_sink_surface(body: &str) -> AnalysisSurface {
+    AnalysisSurface {
+        root_index: 3,
+        literal_eval_depth: 0,
+        parent_position: None,
+        text: Arc::from(body),
+        preview: body.into(),
+        origin: ExecutionOrigin {
+            lang: ExecutionLanguage::Mel,
+            trigger: ExecutionTrigger::FileOpen,
+            surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+            ..ExecutionOrigin::without_chunk_address()
+        },
+        derivation: AuditSurfaceDerivation::Observed,
+        mel: Some(Arc::new(collect_mel_surface_facts(body))),
+    }
+}
+
+#[test]
+fn literal_sink_calls_preserve_every_body_and_parser_fallback() {
+    for sink in ["python", "eval", "evalDeferred"] {
+        for function_syntax in [false, true] {
+            let bodies = if sink == "python" {
+                [
+                    "print('Example')",
+                    "import subprocess; subprocess.call(['echo', 'Example'])",
+                ]
+            } else {
+                ["print(1)", "exec(\"Example\")"]
+            };
+            let text = bodies
+                .map(|body| {
+                    let quoted = serde_json::to_string(body).unwrap();
+                    if function_syntax {
+                        format!("{sink}({quoted});")
+                    } else {
+                        format!("{sink} {quoted};")
+                    }
+                })
+                .join(" ");
+            let surface = literal_sink_surface(&text);
+            let facts = surface.mel.as_ref().unwrap();
+            if function_syntax && sink == "python" {
+                assert_eq!(facts.sink_arg_facts.len(), 2);
+                assert_ne!(facts.sink_arg_facts[0].span, facts.sink_arg_facts[1].span);
+            }
+            for retained_facts in [2, 1, 0] {
+                let mut surface = surface.clone();
+                Arc::make_mut(surface.mel.as_mut().unwrap())
+                    .sink_arg_facts
+                    .truncate(retained_facts);
+                let analysis = analyze_mel_surface(0, &surface, &mut Default::default());
+                assert_eq!(
+                    analysis.derived_surfaces.len(),
+                    2,
+                    "{sink}, function={function_syntax}, facts={retained_facts}"
+                );
+                assert_eq!(analysis.findings.len(), 2);
+                for (derived, body) in analysis.derived_surfaces.iter().zip(bodies) {
+                    assert_eq!(derived.text.as_ref(), body);
+                    assert_eq!(derived.root_index, 3);
+                    assert_eq!(derived.origin.trigger, surface.origin.trigger);
+                }
+                let dangerous = &analysis.derived_surfaces[1];
+                let nested = if sink == "python" {
+                    super::analyze_python_surface(1, dangerous)
+                } else {
+                    analyze_mel_surface(1, dangerous, &mut Default::default())
+                };
+                assert!(nested.findings.iter().any(|finding| finding.code.as_str()
+                    == if sink == "python" {
+                        "python_subprocess"
+                    } else {
+                        "mel_exec"
+                    }));
+            }
+        }
+    }
+}
+
+#[test]
+fn literal_and_dynamic_sink_arguments_are_order_independent() {
+    for sink in ["python", "eval", "evalDeferred"] {
+        for args in [
+            ["\"print(1)\"", "$Example", "\"exec('Example')\""],
+            ["\"exec('Example')\"", "$Example", "\"print(1)\""],
+        ] {
+            let text = args.map(|arg| format!("{sink}({arg});")).join(" ");
+            let analysis =
+                analyze_mel_surface(0, &literal_sink_surface(&text), &mut Default::default());
+            assert_eq!(analysis.findings.len(), 3, "{text}");
+            assert_eq!(analysis.derived_surfaces.len(), 2);
+            assert!(
+                analysis
+                    .derived_surfaces
+                    .iter()
+                    .any(|surface| surface.text.as_ref() == "exec('Example')")
+            );
+        }
+    }
+}
+
+#[test]
+fn literal_eval_reaches_system_body() {
+    let body = "eval(\"system(\\\"echo Example\\\")\");";
+    let analysis = analyze_mel_surface(0, &literal_sink_surface(body), &mut Default::default());
+    assert_eq!(analysis.derived_surfaces.len(), 1);
+    assert_eq!(
+        analysis.derived_surfaces[0].text.as_ref(),
+        "system(\"echo Example\")"
+    );
+    assert_eq!(
+        analysis.derived_surfaces[0].origin.lang,
+        ExecutionLanguage::Mel
+    );
+}
+
+#[test]
+fn repeated_literal_analysis_preserves_each_occurrence() {
+    let mut cache = super::cache::DerivedAnalysisCache::default();
+    let mut surface = literal_sink_surface("eval(\"exec(\\\"Example\\\")\");");
+    surface.derivation = AuditSurfaceDerivation::MelCallbackLiteral;
+    let mut analyses = 0;
+    for (index, depth) in [(11, 0), (12, 7)] {
+        surface.literal_eval_depth = depth;
+        let analysis = cache.analyze(index, &surface, |index, surface| {
+            analyses += 1;
+            analyze_mel_surface(index, surface, &mut Default::default())
+        });
+        assert_eq!(analysis.findings.len(), 1);
+        assert_eq!(analysis.findings[0].surface_index, index);
+        assert_eq!(analysis.derived_surfaces.len(), 1);
+        assert_eq!(analysis.derived_surfaces[0].root_index, surface.root_index);
+        assert_eq!(analysis.derived_surfaces[0].literal_eval_depth, depth + 1);
+    }
+    assert_eq!(analyses, 1);
+    surface.root_index += 1;
+    cache.analyze(13, &surface, |index, surface| {
+        analyses += 1;
+        analyze_mel_surface(index, surface, &mut Default::default())
+    });
+    assert_eq!(analyses, 2);
+    let mut python = literal_sink_surface("exec('Example')");
+    python.origin.lang = ExecutionLanguage::Python;
+    python.derivation = AuditSurfaceDerivation::MelPythonLiteralBridge;
+    let mut python_analyses = 0;
+    for index in [21, 22] {
+        let analysis = cache.analyze(index, &python, |index, surface| {
+            python_analyses += 1;
+            super::analyze_python_surface(index, surface)
+        });
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .any(|finding| finding.code.as_str() == "python_pyexec")
+        );
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .all(|finding| finding.surface_index == index)
+        );
+    }
+    assert_eq!(python_analyses, 1);
+}
+
+#[test]
+fn variable_literal_eval_retains_its_call_position_once() {
+    let body = "string $Example = \"exec(\\\"Example\\\")\";\neval($Example);";
+    let surface = literal_sink_surface(body);
+    let facts = surface.mel.as_ref().unwrap();
+    let call = facts
+        .calls
+        .iter()
+        .find(|call| call.name.as_ref() == "eval")
+        .unwrap();
+    let fact = facts
+        .sink_arg_facts
+        .iter()
+        .find(|fact| {
+            fact.sink_kind == maya_scene_kit_observe::scene::execution::MelSinkArgKind::Eval
+        })
+        .unwrap();
+    assert_eq!(fact.span.start, body.rfind("$Example").unwrap());
+    assert!(call.span_start <= fact.span.start && fact.span.end <= call.span_end);
+    let analysis = analyze_mel_surface(17, &surface, &mut Default::default());
+    assert_eq!(analysis.findings.len(), 1);
+    assert_eq!(analysis.findings[0].code.as_str(), "mel_eval");
+    assert_eq!(analysis.findings[0].surface_index, 17);
+    assert_eq!(analysis.derived_surfaces.len(), 1);
+    assert_eq!(
+        analysis.derived_surfaces[0].parent_position,
+        Some((call.span_start, call.span_end))
+    );
+}
+
+#[test]
+fn repeated_depth_limit_position_is_reported_once_per_surface() {
+    let mut coverage = super::cache::DepthLimitCoverage::default();
+    let mut surface = literal_sink_surface("print(1)");
+    surface.literal_eval_depth = 9;
+    surface.parent_position = Some((0, 10));
+    let mut issues = Vec::new();
+    for _ in 0..4 {
+        assert!(!coverage.retain(11, &surface, &mut issues));
+    }
+    assert_eq!(issues.len(), 1);
+    assert!(!coverage.retain(12, &surface, &mut issues));
+    assert_eq!(issues.len(), 2);
+    for index in 13..111 {
+        assert!(!coverage.retain(index, &surface, &mut issues));
+    }
+    assert_eq!(issues.len(), 100);
+    assert!(!coverage.retain(11, &surface, &mut issues));
+    assert_eq!(issues.len(), 100);
+    for index in 111..115 {
+        assert!(!coverage.retain(index, &surface, &mut issues));
+    }
+    assert_eq!(issues.len(), 101);
+    surface.literal_eval_depth = 8;
+    assert!(coverage.retain(115, &surface, &mut issues));
+    assert_eq!(issues.len(), 101);
+}
+
+#[test]
+fn nested_sink_arguments_belong_to_their_own_call() {
+    let surface = literal_sink_surface("eval(eval(\"print(1)\"));");
+    let analysis = analyze_mel_surface(0, &surface, &mut Default::default());
+    assert_eq!(analysis.findings.len(), 2);
+    assert_eq!(analysis.derived_surfaces.len(), 1);
+    let inner = surface
+        .mel
+        .as_ref()
+        .unwrap()
+        .calls
+        .iter()
+        .filter(|call| call.name.as_ref() == "eval")
+        .max_by_key(|call| call.span_start)
+        .unwrap();
+    assert_eq!(
+        analysis.derived_surfaces[0].parent_position,
+        Some((inner.span_start, inner.span_end))
+    );
+}
+
+#[test]
+fn repeated_literal_bodies_share_text_and_keep_positions() {
+    for sink in ["python", "eval", "evalDeferred"] {
+        let body = format!("{sink}(\"print(1)\"); {sink}(\"print(1)\");");
+        for use_facts in [true, false] {
+            let mut surface = literal_sink_surface(&body);
+            if !use_facts {
+                Arc::make_mut(surface.mel.as_mut().unwrap())
+                    .sink_arg_facts
+                    .clear();
+            }
+            let analysis = analyze_mel_surface(19, &surface, &mut Default::default());
+            assert_eq!(analysis.findings.len(), 2);
+            assert!(
+                analysis
+                    .findings
+                    .iter()
+                    .all(|finding| finding.surface_index == 19)
+            );
+            assert_eq!(analysis.derived_surfaces.len(), 2);
+            assert!(Arc::ptr_eq(
+                &analysis.derived_surfaces[0].text,
+                &analysis.derived_surfaces[1].text
+            ));
+            assert_ne!(
+                analysis.derived_surfaces[0].parent_position,
+                analysis.derived_surfaces[1].parent_position
+            );
+        }
+    }
 }

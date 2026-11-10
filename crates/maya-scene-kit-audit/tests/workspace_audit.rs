@@ -1981,7 +1981,7 @@ fn allowlist_report_json_compatibility() {
     let mut report = audit_script_nodes(&source, &audit_plan()).expect("audit");
     report.scene_path = PathBuf::from("Example.ma");
     const BASELINE: &str = r###"{"scene_path":"Example.ma","scene_format":"ma","profile":"strict_default","validation_state":"validated","effective_rules":[],"surface_count":1,"coverage_state":"complete","coverage_issues":[],"blocked_on_uncertainty":false,"disposition":"deny_malicious","unit_summaries":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"effect":"external_dependency","semantic_class":"dependency_write","certainty":"proven","preview":"exec \"Example\"","reasons":[{"kind":"named","template":"external_dependency_mel_command_detected","value":"exec"}]}],"dependency_facts":[{"kind":"require","risk":"informational","target":"requires maya \"2026\";","detail":{"kind":"require"},"origin":null}],"unknown_semantics":[],"digests":{"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","schema_bundle_sha256":null,"policy_bundle_sha256":null},"notices":[],"surfaces":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"preview":"exec \"Example\"","derivation":"observed"}],"review_signals":[],"findings":[{"code":"mel_exec","severity":"critical","surface_index":0,"sink":"mel_exec","rule":null,"detail":{"kind":"static","value":"mel_exec_command_detected"},"evidence":[{"kind":"key_value","key":"node_name","value":"ExampleScriptNode"},{"kind":"key_value","key":"command","value":"exec"},{"kind":"free_text","value":"fixed literal command: Example"}],"preview_override":"Example"}]}"###;
-    const IDENTITY: &str = r###"{"cache_schema_version":17,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
+    const IDENTITY: &str = r###"{"cache_schema_version":18,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
     assert_eq!(serde_json::to_vec(&report).unwrap(), BASELINE.as_bytes());
     let empty_plan =
         audit_plan().with_allowlist(maya_scene_kit_audit::scene::AuditAllowlist::default());
@@ -2473,4 +2473,116 @@ fn reference_graph_scene_limit_rejects_second_child() {
             .count(),
         1
     );
+}
+
+fn audit_example_mel_body(body: &str, expression: bool) -> AuditReport {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    let (node_type, attr, settings) = if expression {
+        ("expression", ".ixp", "")
+    } else {
+        ("script", ".b", "setAttr \".st\" 1;\n")
+    };
+    write_scene(
+        &path,
+        &format!(
+            "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode {node_type} -n \"Example\";\n{settings}setAttr \"{attr}\" -type \"string\" \"{}\";\n",
+            escape_ma_string(body)
+        ),
+    );
+    audit_script_nodes(&path, &audit_plan()).unwrap()
+}
+
+#[test]
+fn audit_multiple_python_bodies_retain_later_dangerous_body() {
+    for expression in [true, false] {
+        let report = audit_example_mel_body(
+            "python(\"print('Example')\"); python(\"import subprocess; subprocess.call(['echo', 'Example'])\");",
+            expression,
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code.as_str() == "python_subprocess")
+        );
+        assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+        assert_eq!(
+            report
+                .surfaces
+                .iter()
+                .filter(
+                    |surface| surface.derivation == AuditSurfaceDerivation::MelPythonLiteralBridge
+                )
+                .count(),
+            2
+        );
+        if expression {
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .all(|finding| finding.code.as_str() != "mel_python")
+            );
+        }
+    }
+}
+
+#[test]
+fn audit_nested_literal_eval_depth_is_bounded_and_reported() {
+    for mixed in [false, true] {
+        for callback in [false, true] {
+            for depth in [7, 8, 9] {
+                let mut body = "exec(\"Example\");".to_string();
+                for level in 0..depth {
+                    let sink = if mixed && level % 2 == 0 {
+                        "evalDeferred"
+                    } else {
+                        "eval"
+                    };
+                    body = format!(
+                        "python(\"print(1)\"); {sink}({}); evalDeferred(\"print(1)\");",
+                        serde_json::to_string(&body).unwrap()
+                    );
+                    if callback && level == 3 {
+                        body =
+                            format!("button -command {};", serde_json::to_string(&body).unwrap());
+                    }
+                }
+                let report = audit_example_mel_body(&body, false);
+                assert_eq!(
+                    report
+                        .findings
+                        .iter()
+                        .any(|finding| finding.code.as_str() == "mel_exec"),
+                    depth <= 8,
+                    "depth={depth}, mixed={mixed}, callback={callback}"
+                );
+                let depth_issues = report.coverage_issues.iter().filter(|issue| matches!(&issue.detail, ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } if diagnostic.contains("literal evaluation depth"))).collect::<Vec<_>>();
+                assert_eq!(depth_issues.len(), 2 * usize::from(depth > 8));
+                if depth > 8 {
+                    assert_eq!(report.coverage_state, ExecutionCoverageState::Incomplete);
+                    assert!(report.blocked_on_uncertainty);
+                    assert!(depth_issues[0].origin.is_some());
+                } else {
+                    assert_eq!(report.coverage_state, ExecutionCoverageState::Complete);
+                    assert!(report.coverage_issues.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn audit_depth_limit_issues_are_capped_across_surfaces() {
+    let mut body = "eval(\"print(1)\");\n".repeat(60);
+    for _ in 0..8 {
+        body = format!("eval({});", serde_json::to_string(&body).unwrap());
+    }
+    let repeated = format!("{body}\n{body}");
+    let report = audit_example_mel_body(&repeated, false);
+    assert_eq!(report.coverage_state, ExecutionCoverageState::Incomplete);
+    assert!(report.blocked_on_uncertainty);
+    assert_eq!(report.coverage_issues.len(), 101);
+    assert_eq!(report.coverage_issues.iter().filter(|issue| matches!(&issue.detail, ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } if diagnostic.contains("further depth-limit issues were suppressed"))).count(), 1);
 }

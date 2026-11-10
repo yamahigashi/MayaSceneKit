@@ -8,6 +8,8 @@ use crate::scene::{
 #[derive(Debug, Clone)]
 pub(crate) struct AnalysisSurface {
     pub(crate) root_index: usize,
+    pub(crate) literal_eval_depth: usize,
+    pub(crate) parent_position: Option<(usize, usize)>,
     pub(crate) text: Arc<str>,
     pub(crate) preview: String,
     pub(crate) origin: ExecutionOrigin,
@@ -15,7 +17,7 @@ pub(crate) struct AnalysisSurface {
     pub(crate) mel: Option<Arc<MelSurfaceFacts>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SurfaceAnalysis {
     pub(crate) findings: Vec<AuditFinding>,
     pub(crate) unknown_semantics: Vec<crate::scene::UnknownSemanticFact>,
@@ -27,6 +29,8 @@ impl AnalysisSurface {
     pub(crate) fn observed(root_index: usize, surface: ObservedExecutionSurface) -> Self {
         Self {
             root_index,
+            literal_eval_depth: 0,
+            parent_position: None,
             text: surface.surface.text,
             preview: surface.surface.preview,
             origin: surface.surface.origin,
