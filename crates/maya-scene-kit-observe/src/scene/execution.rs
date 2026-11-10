@@ -3,6 +3,7 @@ pub(crate) mod dependency;
 mod effect_registry;
 mod mel_surface;
 mod python_source;
+pub mod python_walk;
 pub(crate) mod surfaces;
 
 use std::sync::Arc;

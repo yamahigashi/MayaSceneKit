@@ -1,6 +1,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use maya_scene_kit_observe::scene::execution::normalize_python_compat_source;
+use maya_scene_kit_observe::scene::execution::{
+    normalize_python_compat_source,
+    python_walk::{
+        PythonAstVisitor, PythonScope, PythonWalkPoint, walk_expr, walk_stmt, walk_suite,
+    },
+};
 use rustpython_parser::{Parse, ast};
 
 mod maya;
@@ -76,7 +81,7 @@ pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
     visitor.module_alias_scopes.push(HashMap::new());
     visitor.capability_alias_scopes.push(HashMap::new());
     visitor.string_value_scopes.push(HashMap::new());
-    visitor.visit_suite(&program);
+    walk_suite(&mut visitor, &program);
     visitor
         .signals
         .extend(autorun_persistence_marker_signals(source));
@@ -97,61 +102,7 @@ struct SignalVisitor {
     conditional_bindings: Vec<(usize, BTreeSet<String>)>,
 }
 
-impl SignalVisitor {
-    fn visit_suite(&mut self, suite: &ast::Suite) {
-        for stmt in suite {
-            self.visit_stmt(stmt);
-        }
-    }
-
-    fn visit_nested_suite(&mut self, suite: &ast::Suite, args: Option<&ast::Arguments>) {
-        self.alias_scopes.push(HashMap::new());
-        self.module_alias_scopes
-            .push(self.module_alias_scopes.last().cloned().unwrap_or_default());
-        self.capability_alias_scopes.push(HashMap::new());
-        self.string_value_scopes.push(HashMap::new());
-        if let Some(args) = args {
-            self.shadow_arguments(args);
-            let mut names = HashSet::new();
-            collect_local_bindings(suite, &mut names);
-            for name in names {
-                self.set_module_alias(&name, None);
-            }
-        }
-        self.visit_suite(suite);
-        self.alias_scopes.pop();
-        self.module_alias_scopes.pop();
-        self.capability_alias_scopes.pop();
-        self.string_value_scopes.pop();
-    }
-
-    fn shadow_arguments(&mut self, args: &ast::Arguments) {
-        for arg in args
-            .posonlyargs
-            .iter()
-            .chain(&args.args)
-            .chain(&args.kwonlyargs)
-        {
-            self.set_module_alias(arg.def.arg.as_str(), None);
-        }
-        for arg in args.vararg.iter().chain(&args.kwarg) {
-            self.set_module_alias(arg.arg.as_str(), None);
-        }
-    }
-
-    fn visit_argument_defaults(&mut self, args: &ast::Arguments) {
-        for arg in args
-            .posonlyargs
-            .iter()
-            .chain(&args.args)
-            .chain(&args.kwonlyargs)
-        {
-            if let Some(value) = &arg.default {
-                self.visit_expr(value);
-            }
-        }
-    }
-
+impl PythonAstVisitor for SignalVisitor {
     fn visit_stmt(&mut self, stmt: &ast::Stmt) {
         let conditional_aliases = matches!(
             stmt,
@@ -168,6 +119,7 @@ impl SignalVisitor {
             self.conditional_bindings
                 .push((self.module_alias_scopes.len(), BTreeSet::new()));
         }
+        walk_stmt(self, stmt);
         match stmt {
             ast::Stmt::Import(import) => {
                 for alias in &import.names {
@@ -227,170 +179,7 @@ impl SignalVisitor {
                     }
                 }
             }
-            ast::Stmt::FunctionDef(function) => {
-                self.visit_argument_defaults(&function.args);
-                for decorator in &function.decorator_list {
-                    self.visit_expr(decorator);
-                }
-                self.set_module_alias(function.name.as_str(), None);
-                self.visit_nested_suite(&function.body, Some(&function.args));
-            }
-            ast::Stmt::AsyncFunctionDef(function) => {
-                self.visit_argument_defaults(&function.args);
-                for decorator in &function.decorator_list {
-                    self.visit_expr(decorator);
-                }
-                self.set_module_alias(function.name.as_str(), None);
-                self.visit_nested_suite(&function.body, Some(&function.args));
-            }
-            ast::Stmt::ClassDef(class_def) => {
-                self.set_module_alias(class_def.name.as_str(), None);
-                self.visit_nested_suite(&class_def.body, None);
-            }
-            ast::Stmt::For(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.iter);
-                self.clear_aliases_for_target(&stmt.target);
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-                for stmt in &stmt.orelse {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::AsyncFor(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.iter);
-                self.clear_aliases_for_target(&stmt.target);
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-                for stmt in &stmt.orelse {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::While(stmt) => {
-                self.visit_expr(&stmt.test);
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-                for stmt in &stmt.orelse {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::If(stmt) => {
-                self.visit_expr(&stmt.test);
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-                for stmt in &stmt.orelse {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::With(stmt) => {
-                for item in &stmt.items {
-                    self.visit_expr(&item.context_expr);
-                    if let Some(expr) = &item.optional_vars {
-                        self.visit_expr(expr);
-                        self.clear_aliases_for_target(expr);
-                    }
-                }
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::AsyncWith(stmt) => {
-                for item in &stmt.items {
-                    self.visit_expr(&item.context_expr);
-                    if let Some(expr) = &item.optional_vars {
-                        self.visit_expr(expr);
-                        self.clear_aliases_for_target(expr);
-                    }
-                }
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::Try(stmt) => {
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-                for handler in &stmt.handlers {
-                    match handler {
-                        ast::ExceptHandler::ExceptHandler(handler) => {
-                            if let Some(expr) = &handler.type_ {
-                                self.visit_expr(expr);
-                            }
-                            if let Some(name) = &handler.name {
-                                self.set_module_alias(name.as_str(), None);
-                            }
-                            for stmt in &handler.body {
-                                self.visit_stmt(stmt);
-                            }
-                        }
-                    }
-                }
-                for stmt in &stmt.orelse {
-                    self.visit_stmt(stmt);
-                }
-                for stmt in &stmt.finalbody {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::TryStar(stmt) => {
-                for stmt in &stmt.body {
-                    self.visit_stmt(stmt);
-                }
-                for handler in &stmt.handlers {
-                    match handler {
-                        ast::ExceptHandler::ExceptHandler(handler) => {
-                            if let Some(expr) = &handler.type_ {
-                                self.visit_expr(expr);
-                            }
-                            if let Some(name) = &handler.name {
-                                self.set_module_alias(name.as_str(), None);
-                            }
-                            for stmt in &handler.body {
-                                self.visit_stmt(stmt);
-                            }
-                        }
-                    }
-                }
-                for stmt in &stmt.orelse {
-                    self.visit_stmt(stmt);
-                }
-                for stmt in &stmt.finalbody {
-                    self.visit_stmt(stmt);
-                }
-            }
-            ast::Stmt::Match(stmt) => {
-                self.visit_expr(&stmt.subject);
-                for case in &stmt.cases {
-                    if let Some(expr) = &case.guard {
-                        self.visit_expr(expr);
-                    }
-                    for stmt in &case.body {
-                        self.visit_stmt(stmt);
-                    }
-                }
-            }
-            ast::Stmt::Expr(stmt) => self.visit_expr(&stmt.value),
-            ast::Stmt::Return(stmt) => {
-                if let Some(expr) = &stmt.value {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Delete(stmt) => {
-                for expr in &stmt.targets {
-                    self.visit_expr(expr);
-                    self.clear_aliases_for_target(expr);
-                }
-            }
             ast::Stmt::Assign(stmt) => {
-                for expr in &stmt.targets {
-                    self.visit_expr(expr);
-                }
-                self.visit_expr(&stmt.value);
                 let alias_kind = call_kind(
                     &stmt.value,
                     self.current_aliases(),
@@ -412,15 +201,10 @@ impl SignalVisitor {
                 }
             }
             ast::Stmt::AugAssign(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.value);
                 self.clear_aliases_for_target(&stmt.target);
             }
             ast::Stmt::AnnAssign(stmt) => {
-                self.visit_expr(&stmt.target);
-                self.visit_expr(&stmt.annotation);
                 if let Some(expr) = &stmt.value {
-                    self.visit_expr(expr);
                     let alias_kind =
                         call_kind(expr, self.current_aliases(), self.current_module_aliases());
                     let module_alias = imported_module_name(expr, self.current_module_aliases());
@@ -439,26 +223,7 @@ impl SignalVisitor {
                     self.clear_aliases_for_target(&stmt.target);
                 }
             }
-            ast::Stmt::Assert(stmt) => {
-                self.visit_expr(&stmt.test);
-                if let Some(expr) = &stmt.msg {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Raise(stmt) => {
-                if let Some(expr) = &stmt.exc {
-                    self.visit_expr(expr);
-                }
-                if let Some(expr) = &stmt.cause {
-                    self.visit_expr(expr);
-                }
-            }
-            ast::Stmt::Global(_)
-            | ast::Stmt::Nonlocal(_)
-            | ast::Stmt::Pass(_)
-            | ast::Stmt::Break(_)
-            | ast::Stmt::Continue(_)
-            | ast::Stmt::TypeAlias(_) => {}
+            _ => {}
         }
         if let Some(before) = conditional_aliases {
             let after = self.current_module_aliases().cloned().unwrap_or_default();
@@ -485,166 +250,140 @@ impl SignalVisitor {
 
     fn visit_expr(&mut self, expr: &ast::Expr) {
         match expr {
-            ast::Expr::BoolOp(expr) => {
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::NamedExpr(expr) => {
-                self.visit_expr(&expr.value);
-                let target = imported_module_name(&expr.value, self.current_module_aliases());
-                self.record_module_alias_assignment(&expr.target, target);
-            }
-            ast::Expr::BinOp(expr) => {
-                self.visit_expr(&expr.left);
-                self.visit_expr(&expr.right);
-            }
-            ast::Expr::UnaryOp(expr) => self.visit_expr(&expr.operand),
-            ast::Expr::Lambda(expr) => {
-                self.visit_argument_defaults(&expr.args);
-                self.module_alias_scopes
-                    .push(self.current_module_aliases().cloned().unwrap_or_default());
-                self.shadow_arguments(&expr.args);
-                self.visit_expr(&expr.body);
-                self.module_alias_scopes.pop();
-            }
-            ast::Expr::IfExp(expr) => {
-                self.visit_expr(&expr.test);
-                self.visit_expr(&expr.body);
-                self.visit_expr(&expr.orelse);
-            }
-            ast::Expr::Dict(expr) => {
-                for key in expr.keys.iter().flatten() {
-                    self.visit_expr(key);
-                }
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::Set(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::ListComp(expr) => {
-                self.module_alias_scopes
-                    .push(self.current_module_aliases().cloned().unwrap_or_default());
-                self.visit_comprehensions(&expr.generators);
-                self.visit_expr(&expr.elt);
-                self.module_alias_scopes.pop();
-            }
-            ast::Expr::SetComp(expr) => {
-                self.module_alias_scopes
-                    .push(self.current_module_aliases().cloned().unwrap_or_default());
-                self.visit_comprehensions(&expr.generators);
-                self.visit_expr(&expr.elt);
-                self.module_alias_scopes.pop();
-            }
-            ast::Expr::DictComp(expr) => {
-                self.module_alias_scopes
-                    .push(self.current_module_aliases().cloned().unwrap_or_default());
-                self.visit_comprehensions(&expr.generators);
-                self.visit_expr(&expr.key);
-                self.visit_expr(&expr.value);
-                self.module_alias_scopes.pop();
-            }
-            ast::Expr::GeneratorExp(expr) => {
-                self.module_alias_scopes
-                    .push(self.current_module_aliases().cloned().unwrap_or_default());
-                self.visit_comprehensions(&expr.generators);
-                self.visit_expr(&expr.elt);
-                self.module_alias_scopes.pop();
-            }
-            ast::Expr::Await(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Yield(expr) => {
-                if let Some(value) = &expr.value {
-                    self.visit_expr(value);
-                }
-            }
-            ast::Expr::YieldFrom(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Compare(expr) => {
-                self.visit_expr(&expr.left);
-                for comp in &expr.comparators {
-                    self.visit_expr(comp);
-                }
-            }
             ast::Expr::Call(expr) => {
                 self.record_hard_markers(hard_markers_for_call(expr));
                 self.visit_call(expr);
-                self.visit_expr(&expr.func);
-                for arg in &expr.args {
-                    self.visit_expr(arg);
-                }
-                for keyword in &expr.keywords {
-                    self.visit_expr(&keyword.value);
-                }
-            }
-            ast::Expr::FormattedValue(expr) => self.visit_expr(&expr.value),
-            ast::Expr::JoinedStr(expr) => {
-                for value in &expr.values {
-                    self.visit_expr(value);
-                }
             }
             ast::Expr::Attribute(expr) => {
-                self.record_hard_markers(hard_markers_for_attribute(expr));
-                self.visit_expr(&expr.value);
+                self.record_hard_markers(hard_markers_for_attribute(expr))
             }
             ast::Expr::Subscript(expr) => {
-                self.record_hard_markers(hard_markers_for_subscript(expr));
-                self.visit_expr(&expr.value);
-                self.visit_expr(&expr.slice);
+                self.record_hard_markers(hard_markers_for_subscript(expr))
             }
             ast::Expr::Name(name) => {
-                self.record_hard_markers(hard_markers_for_name(name.id.as_str()));
-            }
-            ast::Expr::Constant(_)
-            | ast::Expr::Starred(_)
-            | ast::Expr::List(_)
-            | ast::Expr::Tuple(_)
-            | ast::Expr::Slice(_) => self.visit_child_exprs(expr),
-        }
-    }
-
-    fn visit_child_exprs(&mut self, expr: &ast::Expr) {
-        match expr {
-            ast::Expr::Attribute(expr) => self.visit_expr(&expr.value),
-            ast::Expr::Subscript(expr) => {
-                self.visit_expr(&expr.value);
-                self.visit_expr(&expr.slice);
-            }
-            ast::Expr::Starred(expr) => self.visit_expr(&expr.value),
-            ast::Expr::List(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::Tuple(expr) => {
-                for elt in &expr.elts {
-                    self.visit_expr(elt);
-                }
-            }
-            ast::Expr::Slice(expr) => {
-                if let Some(lower) = &expr.lower {
-                    self.visit_expr(lower);
-                }
-                if let Some(upper) = &expr.upper {
-                    self.visit_expr(upper);
-                }
-                if let Some(step) = &expr.step {
-                    self.visit_expr(step);
-                }
+                self.record_hard_markers(hard_markers_for_name(name.id.as_str()))
             }
             _ => {}
         }
+        let comprehension = matches!(
+            expr,
+            ast::Expr::ListComp(_)
+                | ast::Expr::SetComp(_)
+                | ast::Expr::DictComp(_)
+                | ast::Expr::GeneratorExp(_)
+        );
+        // Iterable assignments must not escape into the enclosing analysis frame.
+        if comprehension {
+            self.alias_scopes
+                .push(self.current_aliases().cloned().unwrap_or_default());
+            self.module_alias_scopes
+                .push(self.current_module_aliases().cloned().unwrap_or_default());
+            self.capability_alias_scopes.push(
+                self.current_capability_aliases()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            self.string_value_scopes
+                .push(self.current_string_values().cloned().unwrap_or_default());
+        }
+        walk_expr(self, expr);
+        if comprehension {
+            self.alias_scopes.pop();
+            self.module_alias_scopes.pop();
+            self.capability_alias_scopes.pop();
+            self.string_value_scopes.pop();
+        }
+        if let ast::Expr::NamedExpr(expr) = expr {
+            let target = imported_module_name(&expr.value, self.current_module_aliases());
+            self.record_module_alias_assignment(&expr.target, target);
+        }
     }
 
-    fn visit_comprehensions(&mut self, generators: &[ast::Comprehension]) {
-        for generator in generators {
-            self.visit_expr(&generator.iter);
-            self.record_module_alias_assignment(&generator.target, None);
-            for condition in &generator.ifs {
-                self.visit_expr(condition);
+    fn enter_scope(&mut self, scope: PythonScope<'_>) {
+        match scope {
+            PythonScope::FunctionBody { name, args, body }
+            | PythonScope::AsyncFunctionBody { name, args, body } => {
+                self.set_module_alias(name.as_str(), None);
+                self.push_body_scope();
+                self.shadow_arguments(args);
+                let mut names = HashSet::new();
+                collect_local_bindings(body, &mut names);
+                for name in names {
+                    self.set_module_alias(&name, None);
+                }
             }
+            PythonScope::ClassBody { name, .. } => {
+                self.set_module_alias(name.as_str(), None);
+                self.push_body_scope();
+            }
+            PythonScope::LambdaBody { args, .. } => {
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
+                self.shadow_arguments(args);
+            }
+            PythonScope::Comprehension { .. } => {
+                self.module_alias_scopes
+                    .push(self.current_module_aliases().cloned().unwrap_or_default());
+            }
+        }
+    }
+
+    fn leave_scope(&mut self, scope: PythonScope<'_>) {
+        match scope {
+            PythonScope::FunctionBody { .. }
+            | PythonScope::AsyncFunctionBody { .. }
+            | PythonScope::ClassBody { .. } => {
+                self.alias_scopes.pop();
+                self.capability_alias_scopes.pop();
+                self.string_value_scopes.pop();
+            }
+            PythonScope::LambdaBody { .. } | PythonScope::Comprehension { .. } => {}
+        }
+        self.module_alias_scopes.pop();
+    }
+
+    fn at_point(&mut self, point: PythonWalkPoint<'_>) {
+        match point {
+            PythonWalkPoint::AfterForIter(target) | PythonWalkPoint::AfterDeleteTarget(target) => {
+                self.clear_aliases_for_target(target)
+            }
+            PythonWalkPoint::AfterWithVars(item) => {
+                if let Some(target) = &item.optional_vars {
+                    self.clear_aliases_for_target(target);
+                }
+            }
+            PythonWalkPoint::BeforeHandlerBody(handler) => {
+                if let Some(name) = &handler.name {
+                    self.set_module_alias(name.as_str(), None);
+                }
+            }
+            PythonWalkPoint::AfterComprehensionIter(generator) => {
+                self.record_module_alias_assignment(&generator.target, None)
+            }
+        }
+    }
+}
+
+impl SignalVisitor {
+    fn push_body_scope(&mut self) {
+        self.alias_scopes.push(HashMap::new());
+        self.module_alias_scopes
+            .push(self.module_alias_scopes.last().cloned().unwrap_or_default());
+        self.capability_alias_scopes.push(HashMap::new());
+        self.string_value_scopes.push(HashMap::new());
+    }
+
+    fn shadow_arguments(&mut self, args: &ast::Arguments) {
+        for arg in args
+            .posonlyargs
+            .iter()
+            .chain(&args.args)
+            .chain(&args.kwonlyargs)
+        {
+            self.set_module_alias(arg.def.arg.as_str(), None);
+        }
+        for arg in args.vararg.iter().chain(&args.kwarg) {
+            self.set_module_alias(arg.arg.as_str(), None);
         }
     }
 
@@ -1837,3 +1576,6 @@ mod tests {
         }));
     }
 }
+
+#[cfg(test)]
+mod skeleton_tests;
