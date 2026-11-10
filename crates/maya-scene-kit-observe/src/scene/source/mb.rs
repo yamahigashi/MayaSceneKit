@@ -4,7 +4,7 @@ use std::{
 };
 
 use maya_scene_kit_formats::mb::{
-    MayaBinaryFile, collect_rtft_owner_traces_from_mb,
+    MayaBinaryFile, MbParseBudget, MbSectionScan, MbSectionScanState,
     paths::{MbRtftOwnerTrace, MbScenePathEntry},
 };
 
@@ -18,14 +18,23 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct RawMbSelectiveSections {
+    pub(crate) section_state: MbSectionScanState,
     pub(crate) scene_paths: Vec<ScenePathEntry>,
     pub(crate) script_entries: Vec<ScriptNodeEntry>,
 }
 
-pub(crate) fn collect_raw_mb_selective_sections(mb: &MayaBinaryFile) -> RawMbSelectiveSections {
+pub(crate) fn collect_raw_mb_selective_sections(
+    mb: &MayaBinaryFile,
+    budget: &MbParseBudget,
+) -> RawMbSelectiveSections {
+    let paths = collect_raw_mb_scene_paths(mb, budget);
+    let scripts = collect_raw_mb_script_entries(mb, budget);
+    let mut section_state = paths.state;
+    section_state.merge(scripts.state);
     RawMbSelectiveSections {
-        scene_paths: collect_raw_mb_scene_paths(mb),
-        script_entries: collect_raw_mb_script_entries(mb),
+        scene_paths: paths.value,
+        script_entries: scripts.value,
+        section_state,
     }
 }
 
@@ -37,12 +46,20 @@ pub(crate) fn canonical_scene_path_entry_kind(entry: &ScenePathEntry) -> PathKin
     }
 }
 
-pub(crate) fn collect_raw_mb_scene_paths(mb: &MayaBinaryFile) -> Vec<ScenePathEntry> {
-    let raw_entries = maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(mb);
+pub(crate) fn collect_raw_mb_scene_paths(
+    mb: &MayaBinaryFile,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<ScenePathEntry>> {
+    let raw_entries =
+        maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb_with_budget(mb, budget);
+    let mut state = raw_entries.state;
+    let raw_entries = raw_entries.value;
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let mut raw_file_meta = build_raw_mb_file_meta_index(&raw_entries);
-    let owner_trace_meta = build_mb_file_owner_trace_index_from_root(mb);
+    let owner_trace_meta = build_mb_file_owner_trace_index_from_root(mb, budget);
+    state.merge(owner_trace_meta.state);
+    let owner_trace_meta = owner_trace_meta.value;
 
     for entry in raw_entries {
         let kind = canonical_raw_mb_scene_path_kind(&entry);
@@ -93,7 +110,7 @@ pub(crate) fn collect_raw_mb_scene_paths(mb: &MayaBinaryFile) -> Vec<ScenePathEn
         }
     }
 
-    out
+    MbSectionScan { value: out, state }
 }
 
 fn canonical_raw_mb_scene_path_kind(entry: &MbScenePathEntry) -> PathKind {
@@ -104,25 +121,40 @@ fn canonical_raw_mb_scene_path_kind(entry: &MbScenePathEntry) -> PathKind {
     }
 }
 
-pub(crate) fn collect_raw_mb_script_entries(mb: &MayaBinaryFile) -> Vec<ScriptNodeEntry> {
-    maya_scene_kit_formats::mb::extract_raw_script_entries_from_mb(mb)
-        .into_iter()
-        .map(|(name, body)| ScriptNodeEntry { name, body })
-        .collect()
+pub(crate) fn collect_raw_mb_script_entries(
+    mb: &MayaBinaryFile,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<ScriptNodeEntry>> {
+    let scanned = maya_scene_kit_formats::mb::paths::extract_raw_script_entries_from_mb_with_budget(
+        mb, budget,
+    );
+    MbSectionScan {
+        value: scanned
+            .value
+            .into_iter()
+            .map(|(name, body)| ScriptNodeEntry { name, body })
+            .collect(),
+        state: scanned.state,
+    }
 }
 
 fn build_mb_file_owner_trace_index_from_root(
     mb: &MayaBinaryFile,
-) -> BTreeMap<String, ScenePathMeta> {
+    budget: &MbParseBudget,
+) -> MbSectionScan<BTreeMap<String, ScenePathMeta>> {
+    let scanned = maya_scene_kit_formats::mb::paths::collect_rtft_owner_traces_from_mb_with_budget(
+        mb, budget,
+    );
     let mut index = BTreeMap::new();
-
-    for trace in collect_rtft_owner_traces_from_mb(mb) {
+    for trace in scanned.value {
         index
             .entry(trace.node_name.clone())
             .or_insert_with(|| map_mb_owner_trace_meta_ref(&trace));
     }
-
-    index
+    MbSectionScan {
+        value: index,
+        state: scanned.state,
+    }
 }
 
 fn build_raw_mb_file_meta_index(

@@ -7,10 +7,10 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
+use super::{MbParseBudget, MbSectionScan, MbSectionScanState};
 use crate::{
     mb::{
-        Chunk, FourCC, LayoutHints, MayaBinaryFile, encode_root_chunk,
-        parse_section_chunks_with_hints, resolve_section_layout_hints,
+        Chunk, FourCC, LayoutHints, MayaBinaryFile, encode_root_chunk, resolve_section_layout_hints,
     },
     reference_semantics::{
         ScenePathAttrKind, classify_scene_path_attr, normalize_reference_file_type_token,
@@ -60,7 +60,21 @@ pub struct MbRtftOwnerTrace {
     pub trace_child_header_size: Option<usize>,
 }
 
-pub fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> Vec<String> {
+pub fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> MbSectionScan<Vec<String>> {
+    scan_raw_script_nodes_in_mb_with_budget(
+        data,
+        root,
+        root.section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub fn scan_raw_script_nodes_in_mb_with_budget(
+    data: &[u8],
+    root: &Chunk,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<String>> {
+    let mut state = super::scan_root_sections(data, root, budget);
     let mut names = Vec::new();
     for child in root.children() {
         if child.form_type().is_none_or(|f| f != "SCRP") {
@@ -76,15 +90,40 @@ pub fn scan_raw_script_nodes_in_mb(data: &[u8], root: &Chunk) -> Vec<String> {
         let child_alignment = hints.alignment().map(|a| a.get());
         let child_header_size = hints.header_format().map(|f| f.header_size());
         let payload = &data[child.payload_offset()..child.payload_end()];
-        let name =
-            extract_mb_script_node_name_with_layout(payload, child_alignment, child_header_size)
-                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
+        let name = extract_mb_script_node_name_with_layout(
+            payload,
+            child_alignment,
+            child_header_size,
+            budget,
+        );
+        state.merge(name.state);
+        let name = name
+            .value
+            .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
         names.push(name);
     }
-    names
+    MbSectionScan {
+        value: names,
+        state,
+    }
 }
 
-pub fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, String)> {
+pub fn extract_raw_script_entries_from_mb(
+    mb: &MayaBinaryFile,
+) -> MbSectionScan<Vec<(String, String)>> {
+    extract_raw_script_entries_from_mb_with_budget(
+        mb,
+        mb.root()
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub fn extract_raw_script_entries_from_mb_with_budget(
+    mb: &MayaBinaryFile,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<(String, String)>> {
+    let mut state = super::scan_root_sections(mb.data(), mb.root(), budget);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -102,17 +141,30 @@ pub fn extract_raw_script_entries_from_mb(mb: &MayaBinaryFile) -> Vec<(String, S
         let child_alignment = hints.alignment().map(|a| a.get());
         let child_header_size = hints.header_format().map(|f| f.header_size());
         let payload = &mb.data()[child.payload_offset()..child.payload_end()];
-        let name =
-            extract_mb_script_node_name_with_layout(payload, child_alignment, child_header_size)
-                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
-        let body =
-            extract_script_body_from_scrp_with_layout(payload, child_alignment, child_header_size);
+        let name = extract_mb_script_node_name_with_layout(
+            payload,
+            child_alignment,
+            child_header_size,
+            budget,
+        );
+        state.merge(name.state);
+        let name = name
+            .value
+            .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
+        let body = extract_script_body_from_scrp_with_layout(
+            payload,
+            child_alignment,
+            child_header_size,
+            budget,
+        );
+        state.merge(body.state);
+        let body = body.value;
         if seen.insert((name.clone(), body.clone())) {
             out.push((name, body));
         }
     }
 
-    out
+    MbSectionScan { value: out, state }
 }
 
 pub fn remove_raw_script_nodes_from_mb(
@@ -122,11 +174,19 @@ pub fn remove_raw_script_nodes_from_mb(
     remove_raw_script_nodes_with_selection(data, root, MbNameSelection::All)
 }
 
+pub type MbScriptNodeFormSelection = (Vec<(String, usize)>, Vec<String>);
+
 pub fn locate_raw_script_node_forms_in_mb_by_name(
     data: &[u8],
     root: &Chunk,
     selection: MbNameSelection<'_>,
-) -> (Vec<(String, usize)>, Vec<String>) {
+) -> MbSectionScan<MbScriptNodeFormSelection> {
+    let mut state = super::scan_root_sections(
+        data,
+        root,
+        root.section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     let target_all = matches!(selection, MbNameSelection::All);
     let target_names = match selection {
         MbNameSelection::All => &[],
@@ -154,9 +214,17 @@ pub fn locate_raw_script_node_forms_in_mb_by_name(
         let child_alignment = hints.alignment().map(|a| a.get());
         let child_header_size = hints.header_format().map(|f| f.header_size());
         let payload = &data[child.payload_offset()..child.payload_end()];
-        let name =
-            extract_mb_script_node_name_with_layout(payload, child_alignment, child_header_size)
-                .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
+        let name = extract_mb_script_node_name_with_layout(
+            payload,
+            child_alignment,
+            child_header_size,
+            root.section_budget()
+                .unwrap_or(&crate::mb::MbParseBudget::default()),
+        );
+        state.merge(name.state);
+        let name = name
+            .value
+            .unwrap_or_else(|| format!("<SCRP@0x{:X}>", child.offset()));
         let payload_text = String::from_utf8_lossy(payload);
         let matched_target = targets
             .iter()
@@ -169,7 +237,10 @@ pub fn locate_raw_script_node_forms_in_mb_by_name(
         removed_names.push(matched_target.unwrap_or(name.as_str()).to_string());
     }
 
-    (removed_locators, removed_names)
+    MbSectionScan {
+        value: (removed_locators, removed_names),
+        state,
+    }
 }
 
 pub type MbRootFormRemoval = (Vec<u8>, Vec<(String, usize)>);
@@ -179,7 +250,7 @@ pub fn remove_root_forms_from_mb_by_locator(
     root: &Chunk,
     target_forms: &[(String, usize)],
 ) -> Result<MbRootFormRemoval, crate::mb::MbRewriteError> {
-    crate::mb::require_complete_mb_tree(root)?;
+    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
     let children = root.children();
     if children.is_empty() {
         return Ok((data.to_vec(), vec![]));
@@ -233,9 +304,9 @@ fn remove_raw_script_nodes_with_selection(
     root: &Chunk,
     selection: MbNameSelection<'_>,
 ) -> Result<(Vec<u8>, Vec<String>), crate::mb::MbRewriteError> {
-    crate::mb::require_complete_mb_tree(root)?;
+    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
     let (removed_locators, removed_names) =
-        locate_raw_script_node_forms_in_mb_by_name(data, root, selection);
+        locate_raw_script_node_forms_in_mb_by_name(data, root, selection).value;
     if removed_names.is_empty() {
         return Ok((data.to_vec(), vec![]));
     }
@@ -246,31 +317,73 @@ fn remove_raw_script_nodes_with_selection(
     Ok((encoded, removed_names))
 }
 
-pub fn extract_raw_scene_paths_from_mb(mb: &MayaBinaryFile) -> Vec<MbScenePathEntry> {
-    extract_raw_scene_paths_from_mb_parts(mb.data(), mb.root())
+pub fn extract_raw_scene_paths_from_mb(
+    mb: &MayaBinaryFile,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
+    extract_raw_scene_paths_from_mb_with_budget(
+        mb,
+        mb.root()
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub fn extract_raw_scene_paths_from_mb_with_budget(
+    mb: &MayaBinaryFile,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
+    extract_raw_scene_paths_from_mb_parts_with_budget(mb.data(), mb.root(), budget)
 }
 
 pub(crate) fn extract_raw_scene_paths_from_mb_parts(
     data: &[u8],
     root: &Chunk,
-) -> Vec<MbScenePathEntry> {
-    let records = extract_raw_scene_path_records_from_mb_parts(data, root);
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
+    extract_raw_scene_paths_from_mb_parts_with_budget(
+        data,
+        root,
+        root.section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub(crate) fn extract_raw_scene_paths_from_mb_parts_with_budget(
+    data: &[u8],
+    root: &Chunk,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
+    let records = extract_raw_scene_path_records_from_mb_parts_with_budget(data, root, budget);
+    let state = records.state;
     let mut out = Vec::new();
     let mut seen = HashMap::<u64, Vec<usize>>::new();
 
-    for e in records {
+    for e in records.value {
         if push_unique_scene_path_entry(&out, &mut seen, &e) {
             out.push(e);
         }
     }
 
-    out
+    MbSectionScan { value: out, state }
 }
 
 pub(crate) fn extract_raw_scene_path_records_from_mb_parts(
     data: &[u8],
     root: &Chunk,
-) -> Vec<MbScenePathEntry> {
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
+    extract_raw_scene_path_records_from_mb_parts_with_budget(
+        data,
+        root,
+        root.section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub(crate) fn extract_raw_scene_path_records_from_mb_parts_with_budget(
+    data: &[u8],
+    root: &Chunk,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
+    let mut state = super::scan_root_sections(data, root, budget);
     let mut out = Vec::new();
 
     for child in root.children() {
@@ -286,42 +399,45 @@ pub(crate) fn extract_raw_scene_path_records_from_mb_parts(
         let payload = &data[child.payload_offset()..child.payload_end()];
 
         if child.form_type().is_some_and(|f| f == "FREF") {
-            for e in extract_reference_entries_from_fref_payload(
+            let scanned = extract_reference_entries_from_fref_payload(
                 payload,
                 child.offset(),
                 child_alignment,
                 child_header_size,
-            ) {
-                out.push(e);
-            }
+                budget,
+            );
+            state.merge(scanned.state);
+            out.extend(scanned.value);
             continue;
         }
         if child.form_type().is_some_and(|f| f == "FRDI") {
-            for e in extract_reference_entries_from_frdi_payload(
+            let scanned = extract_reference_entries_from_frdi_payload(
                 payload,
                 child.offset(),
                 child_alignment,
                 child_header_size,
-            ) {
-                out.push(e);
-            }
+                budget,
+            );
+            state.merge(scanned.state);
+            out.extend(scanned.value);
             continue;
         }
         if child.form_type().is_some_and(|f| f == "RTFT") {
-            for e in extract_file_entries_from_rtft_payload(
+            let scanned = extract_file_entries_from_rtft_payload(
                 payload,
                 child.offset(),
                 child_alignment,
                 child_header_size,
                 Some(&child.tag().to_string()),
-            ) {
-                out.push(e);
-            }
+                budget,
+            );
+            state.merge(scanned.state);
+            out.extend(scanned.value);
             continue;
         }
     }
 
-    out
+    MbSectionScan { value: out, state }
 }
 
 fn push_unique_scene_path_entry(
@@ -354,7 +470,22 @@ fn scene_path_entry_fingerprint(entry: &MbScenePathEntry) -> u64 {
     hasher.finish()
 }
 
-pub fn collect_rtft_owner_traces_from_mb(mb: &MayaBinaryFile) -> Vec<MbRtftOwnerTrace> {
+pub fn collect_rtft_owner_traces_from_mb(
+    mb: &MayaBinaryFile,
+) -> MbSectionScan<Vec<MbRtftOwnerTrace>> {
+    collect_rtft_owner_traces_from_mb_with_budget(
+        mb,
+        mb.root()
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub fn collect_rtft_owner_traces_from_mb_with_budget(
+    mb: &MayaBinaryFile,
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbRtftOwnerTrace>> {
+    let state = super::scan_root_sections(mb.data(), mb.root(), budget);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
@@ -406,41 +537,54 @@ pub fn collect_rtft_owner_traces_from_mb(mb: &MayaBinaryFile) -> Vec<MbRtftOwner
         }
     }
 
-    out
+    MbSectionScan { value: out, state }
 }
 
 pub fn extract_mb_script_node_name_with_layout(
     payload: &[u8],
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
-) -> Option<String> {
+    budget: &MbParseBudget,
+) -> MbSectionScan<Option<String>> {
     if payload.len() < 4 || &payload[..4] != b"SCRP" {
-        return None;
+        return MbSectionScan {
+            value: None,
+            state: MbSectionScanState::Complete,
+        };
     }
-    extract_mb_form_node_name_with_layout(payload, child_alignment, child_header_size)
+    extract_mb_form_node_name_with_layout(payload, child_alignment, child_header_size, budget)
 }
 
 pub fn extract_mb_form_node_name_with_layout(
     payload: &[u8],
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
-) -> Option<String> {
+    budget: &MbParseBudget,
+) -> MbSectionScan<Option<String>> {
     if payload.len() < 4 {
-        return None;
+        return MbSectionScan {
+            value: None,
+            state: MbSectionScanState::Complete,
+        };
     }
-    let parsed = parse_section_chunks_with_hints(
+    let parsed = super::parse_section_chunks_with_hints_with_budget(
         &payload[4..],
         LayoutHints::from_numeric(child_alignment, child_header_size),
+        budget,
     );
-    for chunk in parsed.into_chunks() {
+    let state = parsed.state();
+    for chunk in parsed.chunks() {
         if chunk.tag() == "CREA" {
             if let Some(name) = decode_crea_name_from_payload(chunk.payload(&payload[4..])) {
-                return Some(name);
+                return MbSectionScan {
+                    value: Some(name),
+                    state,
+                };
             }
             break;
         }
     }
-    None
+    MbSectionScan { value: None, state }
 }
 
 pub fn decode_best_effort_script_text(payload: &[u8]) -> String {
@@ -464,16 +608,22 @@ fn extract_script_body_from_scrp_with_layout(
     payload: &[u8],
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
-) -> String {
+    budget: &MbParseBudget,
+) -> MbSectionScan<String> {
     if payload.len() < 4 {
-        return String::new();
+        return MbSectionScan {
+            value: String::new(),
+            state: MbSectionScanState::Complete,
+        };
     }
     let mut bodies = Vec::new();
-    let parsed = parse_section_chunks_with_hints(
+    let parsed = super::parse_section_chunks_with_hints_with_budget(
         &payload[4..],
         LayoutHints::from_numeric(child_alignment, child_header_size),
+        budget,
     );
-    for chunk in parsed.into_chunks() {
+    let state = parsed.state();
+    for chunk in parsed.chunks() {
         if chunk.tag() != "STR " {
             continue;
         }
@@ -486,7 +636,10 @@ fn extract_script_body_from_scrp_with_layout(
             }
         }
     }
-    bodies.join("\n").trim().to_string()
+    MbSectionScan {
+        value: bodies.join("\n").trim().to_string(),
+        state,
+    }
 }
 
 fn extract_file_entries_from_rtft_payload(
@@ -495,17 +648,26 @@ fn extract_file_entries_from_rtft_payload(
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
     _parent_tag: Option<&str>,
-) -> Vec<MbScenePathEntry> {
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
     if payload.len() < 4 {
-        return Vec::new();
+        return MbSectionScan {
+            value: Vec::new(),
+            state: MbSectionScanState::Complete,
+        };
     }
     let inner = &payload[4..];
-    let parsed = parse_section_chunks_with_hints(
+    let parsed = super::parse_section_chunks_with_hints_with_budget(
         inner,
         LayoutHints::from_numeric(child_alignment, child_header_size),
+        budget,
     );
+    let state = parsed.state();
     if parsed.chunks().is_empty() {
-        return Vec::new();
+        return MbSectionScan {
+            value: Vec::new(),
+            state,
+        };
     }
 
     let mut node_name = format!("<RTFT@0x{offset:X}>");
@@ -536,7 +698,7 @@ fn extract_file_entries_from_rtft_payload(
         attrs.push(format!("{attr_name}={value}"));
     }
 
-    paths
+    let value = paths
         .into_iter()
         .map(|(path, chunk_start)| MbScenePathEntry {
             node_type: "file".to_string(),
@@ -559,7 +721,8 @@ fn extract_file_entries_from_rtft_payload(
                 trace_child_header_size: child_header_size,
             }),
         })
-        .collect()
+        .collect();
+    MbSectionScan { value, state }
 }
 
 fn file_texture_attr_name_from_fields(fields: &[String]) -> Option<String> {
@@ -582,18 +745,24 @@ fn extract_reference_entries_from_fref_payload(
     offset: usize,
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
-) -> Vec<MbScenePathEntry> {
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
     if payload.len() < 4 {
-        return Vec::new();
+        return MbSectionScan {
+            value: Vec::new(),
+            state: MbSectionScanState::Complete,
+        };
     }
     let inner = &payload[4..];
-    let parsed = parse_section_chunks_with_hints(
+    let parsed = super::parse_section_chunks_with_hints_with_budget(
         inner,
         LayoutHints::from_numeric(child_alignment, child_header_size),
+        budget,
     );
+    let state = parsed.state();
 
     let mut out = Vec::new();
-    for chunk in parsed.into_chunks() {
+    for chunk in parsed.chunks() {
         if chunk.tag() != "FREF" {
             continue;
         }
@@ -607,7 +776,7 @@ fn extract_reference_entries_from_fref_payload(
             out.push(entry);
         }
     }
-    out
+    MbSectionScan { value: out, state }
 }
 
 fn extract_reference_entries_from_frdi_payload(
@@ -615,18 +784,24 @@ fn extract_reference_entries_from_frdi_payload(
     offset: usize,
     child_alignment: Option<usize>,
     child_header_size: Option<usize>,
-) -> Vec<MbScenePathEntry> {
+    budget: &MbParseBudget,
+) -> MbSectionScan<Vec<MbScenePathEntry>> {
     if payload.len() < 4 {
-        return Vec::new();
+        return MbSectionScan {
+            value: Vec::new(),
+            state: MbSectionScanState::Complete,
+        };
     }
     let inner = &payload[4..];
-    let parsed = parse_section_chunks_with_hints(
+    let parsed = super::parse_section_chunks_with_hints_with_budget(
         inner,
         LayoutHints::from_numeric(child_alignment, child_header_size),
+        budget,
     );
+    let state = parsed.state();
 
     let mut out = Vec::new();
-    for chunk in parsed.into_chunks() {
+    for chunk in parsed.chunks() {
         if chunk.tag() != "FRDI" {
             continue;
         }
@@ -640,7 +815,7 @@ fn extract_reference_entries_from_frdi_payload(
             out.push(entry);
         }
     }
-    out
+    MbSectionScan { value: out, state }
 }
 
 fn decode_reference_from_fref_chunk(
@@ -1133,7 +1308,7 @@ mod tests {
     fn extract_raw_scene_paths_reads_rtft_entries_from_fixture() {
         let source = repo_root().join("tests/fixtures/mb/owner_delete/file_owner_delete.mb");
         let parsed = parse_file(&source).expect("parse fixture");
-        let entries = extract_raw_scene_paths_from_mb(&parsed);
+        let entries = extract_raw_scene_paths_from_mb(&parsed).value;
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].node_type, "file");
@@ -1181,8 +1356,15 @@ mod tests {
         let mut payload = b"RTFT".to_vec();
         payload.extend_from_slice(&crea);
         payload.extend_from_slice(&path);
-        let entries =
-            extract_file_entries_from_rtft_payload(&payload, 0x40, Some(8), Some(16), None);
+        let entries = extract_file_entries_from_rtft_payload(
+            &payload,
+            0x40,
+            Some(8),
+            Some(16),
+            None,
+            &crate::mb::MbParseBudget::default(),
+        )
+        .value;
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].node_name, "psdTex1");
@@ -1206,7 +1388,14 @@ mod tests {
         payload.extend_from_slice(&crea);
 
         assert_eq!(
-            extract_mb_form_node_name_with_layout(&payload, Some(8), Some(16)).as_deref(),
+            extract_mb_form_node_name_with_layout(
+                &payload,
+                Some(8),
+                Some(16),
+                &crate::mb::MbParseBudget::default()
+            )
+            .value
+            .as_deref(),
             Some("ExampleExpression")
         );
     }
@@ -1216,7 +1405,7 @@ mod tests {
         let source =
             repo_root().join("tests/fixtures/mb/owner_delete/connected_file_owner_delete.mb");
         let parsed = parse_file(&source).expect("parse fixture");
-        let traces = collect_rtft_owner_traces_from_mb(&parsed);
+        let traces = collect_rtft_owner_traces_from_mb(&parsed).value;
 
         assert_eq!(traces.len(), 2);
         assert_eq!(traces[0].node_name, "ExampleFileA");

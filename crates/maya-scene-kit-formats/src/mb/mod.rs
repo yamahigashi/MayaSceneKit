@@ -7,19 +7,20 @@ pub mod rewrite;
 pub use maya_mb::{
     BudgetContext, ByteSpan, Chunk, ChunkLayout, EncodeError, FourCC, FourCCParseError,
     HeaderFormat, LayoutHints, MayaBinaryFile, MayaBinaryParseError, MbChildren, MbCompleteness,
-    MbParseBudget, MbParseBudgetLimit, MbTruncationReason, ReadField, SectionChunk, parse_bytes,
-    parse_bytes_with_budget, parse_file, parse_file_with_budget, parse_section_chunks_with_hints,
-    resolve_section_layout_hints, visit_group_chunks_with_layout,
-    visit_group_chunks_with_layout_with_budget, walk_group_chunks_with_layout,
-    walk_group_chunks_with_layout_with_budget,
+    MbParseBudget, MbParseBudgetLimit, MbSectionScanState, MbTruncationReason, MbWalkResult,
+    ReadField, SectionChunk, parse_bytes, parse_bytes_with_budget, parse_file,
+    parse_file_with_budget, parse_section_chunks_with_hints,
+    parse_section_chunks_with_hints_with_budget, resolve_section_layout_hints,
+    visit_group_chunks_with_layout, visit_group_chunks_with_layout_with_budget,
+    walk_group_chunks_with_layout, walk_group_chunks_with_layout_with_budget,
 };
 
 pub(crate) use self::rewrite::encode_root_chunk;
 pub use self::{
     head::{
         HeadMetadata, MbRequiresEntry, MbRootFormsAndRequiresRemoval, extract_head_metadata,
-        remove_plugin_requires_from_mb, remove_root_forms_and_plugin_requires_from_mb,
-        render_requires_entry,
+        extract_head_metadata_with_budget, remove_plugin_requires_from_mb,
+        remove_root_forms_and_plugin_requires_from_mb, render_requires_entry,
     },
     paths::{
         MbNameSelection, MbRootFormRemoval, collect_rtft_owner_traces_from_mb,
@@ -32,3 +33,19 @@ pub use self::{
         replace_scene_paths_in_mb_cow, require_complete_mb_tree,
     },
 };
+
+/// Checks root child sections using the raw walk's layout rules and bounded budget.
+pub(crate) fn scan_root_sections(
+    data: &[u8],
+    root: &Chunk,
+    budget: &MbParseBudget,
+) -> MbSectionScanState {
+    root.scan_root_sections(data, budget)
+        .unwrap_or(MbSectionScanState::Stopped)
+}
+
+#[derive(Debug, Clone)]
+pub struct MbSectionScan<T> {
+    pub value: T,
+    pub state: MbSectionScanState,
+}

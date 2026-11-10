@@ -14,24 +14,30 @@ use crate::{
 };
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn collect_raw_chunk_records(mb: &MayaBinaryFile) -> Vec<RawChunkRecord> {
+pub(crate) fn collect_raw_chunk_records(
+    mb: &MayaBinaryFile,
+) -> (Vec<RawChunkRecord>, crate::mb::MbSectionScanState) {
     collect_raw_chunk_records_inner(mb, None).expect("unbudgeted raw inventory should not fail")
 }
 
 pub(crate) fn collect_raw_chunk_records_with_budget(
     mb: &MayaBinaryFile,
     budget: &MbParseBudget,
-) -> Result<Vec<RawChunkRecord>, MayaBinaryParseError> {
+) -> Result<(Vec<RawChunkRecord>, crate::mb::MbSectionScanState), MayaBinaryParseError> {
     collect_raw_chunk_records_inner(mb, Some(budget))
 }
 
 fn collect_raw_chunk_records_inner(
     mb: &MayaBinaryFile,
     budget: Option<&MbParseBudget>,
-) -> Result<Vec<RawChunkRecord>, MayaBinaryParseError> {
+) -> Result<(Vec<RawChunkRecord>, crate::mb::MbSectionScanState), MayaBinaryParseError> {
     let mut raw_chunks = Vec::new();
+    let mut state = crate::mb::MbSectionScanState::Complete;
 
     for child in mb.root().children() {
+        if !child.is_group() {
+            continue;
+        }
         let form = child.form_type().map(|f| f.to_string()).unwrap_or_default();
         let hints = resolve_section_layout_hints(
             child.tag(),
@@ -63,7 +69,7 @@ fn collect_raw_chunk_records_inner(
                 payload_span: chunk.payload_span().offset(child.payload_offset() + 4),
             });
         };
-        match budget {
+        state.merge(match budget {
             Some(budget) => visit_group_chunks_with_layout_with_budget(
                 inner_data,
                 hints,
@@ -72,10 +78,10 @@ fn collect_raw_chunk_records_inner(
                 &mut push_raw_chunk,
             )?,
             None => visit_group_chunks_with_layout(inner_data, hints, &mut push_raw_chunk),
-        }
+        });
     }
 
-    Ok(raw_chunks)
+    Ok((raw_chunks, state))
 }
 
 pub(crate) fn collect_decoded_chunk_records(

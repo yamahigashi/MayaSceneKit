@@ -26,6 +26,7 @@ use crate::{
 };
 
 pub(crate) struct MbDecodedArtifacts {
+    pub(crate) section_state: crate::mb::MbSectionScanState,
     pub(crate) raw_chunks: Vec<RawChunkRecord>,
     pub(crate) decoded_chunks: Vec<DecodedChunkRecord>,
     pub(crate) decode_qualities: Vec<crate::scene::ir::DecodeQualityRecord>,
@@ -44,12 +45,14 @@ pub(crate) struct MbReadSession {
     budget: MbParseBudget,
     decoded: OnceLock<Result<Arc<MbDecodedArtifacts>, MayaBinaryParseError>>,
     scene_facts: OnceLock<Result<Arc<MbSceneFacts>, MayaBinaryParseError>>,
-    build: OnceLock<Result<Arc<SceneBuildOutput>, MayaBinaryParseError>>,
+    build: OnceLock<
+        Result<Arc<(SceneBuildOutput, crate::mb::MbSectionScanState)>, MayaBinaryParseError>,
+    >,
     integrity: OnceLock<Result<SceneIntegritySummary, MayaBinaryParseError>>,
     scene_paths: OnceLock<Result<Arc<[ScenePathEntry]>, MayaBinaryParseError>>,
     selective_sections: OnceLock<Arc<RawMbSelectiveSections>>,
-    requires: OnceLock<Arc<[String]>>,
-    require_entries: OnceLock<Arc<[SceneDumpRequireEntry]>>,
+    requires: OnceLock<crate::mb::MbSectionScan<Vec<String>>>,
+    require_entries: OnceLock<crate::mb::MbSectionScan<Vec<SceneDumpRequireEntry>>>,
 }
 
 impl MbReadSession {
@@ -121,7 +124,7 @@ impl MbReadSession {
 
     pub(crate) fn build(&self) -> Result<&SceneBuildOutput, SceneToolError> {
         if let Some(result) = self.build.get() {
-            return map_cached_arc_parse_result(result);
+            return map_cached_arc_parse_result(result).map(|value| &value.0);
         }
 
         let decoded = self.decoded()?;
@@ -129,14 +132,15 @@ impl MbReadSession {
         let build = Ok(Arc::new(builder::build_scene_model_from_decoded_chunks(
             Arc::clone(self.mb.data_arc()),
             decoded.raw_chunks.clone(),
+            decoded.section_state,
             decoded.decoded_chunks.clone(),
             scene_facts.nodes.clone(),
             scene_facts.reference_files.clone(),
-            self.schema_context()?.registry(),
             TypeIdResolverStatus::Provided,
         )));
         let _ = self.build.set(build);
         map_cached_arc_parse_result(self.build.get().expect("mb build initialized"))
+            .map(|value| &value.0)
     }
 
     pub(crate) fn integrity(&self) -> Result<&SceneIntegritySummary, SceneToolError> {
@@ -156,14 +160,16 @@ impl MbReadSession {
 
     pub(crate) fn requires(&self) -> &[String] {
         self.requires
-            .get_or_init(|| Arc::from(mb_extract::extract_requires_from_mb(&self.mb)))
-            .as_ref()
+            .get_or_init(|| mb_extract::extract_requires_from_mb(&self.mb, &self.budget))
+            .value
+            .as_slice()
     }
 
     pub(crate) fn require_entries(&self) -> &[SceneDumpRequireEntry] {
         self.require_entries
-            .get_or_init(|| Arc::from(mb_extract::extract_require_entries_from_mb(&self.mb)))
-            .as_ref()
+            .get_or_init(|| mb_extract::extract_require_entries_from_mb(&self.mb, &self.budget))
+            .value
+            .as_slice()
     }
 
     pub(crate) fn scene_paths_all(&self) -> Result<&[ScenePathEntry], SceneToolError> {
@@ -182,6 +188,25 @@ impl MbReadSession {
         self.selective_sections().script_entries.as_slice()
     }
 
+    pub(crate) fn section_state(&self) -> crate::mb::MbSectionScanState {
+        let mut state = self.selective_sections().section_state;
+        state.merge(
+            self.require_entries
+                .get_or_init(|| mb_extract::extract_require_entries_from_mb(&self.mb, &self.budget))
+                .state,
+        );
+        if let Some(Ok(decoded)) = self.decoded.get() {
+            state.merge(decoded.section_state);
+        }
+        if let Some(Ok(build)) = self.build.get() {
+            state.merge(build.1);
+        }
+        if let Some(requires) = self.requires.get() {
+            state.merge(requires.state);
+        }
+        state
+    }
+
     pub(crate) fn budget(&self) -> &MbParseBudget {
         &self.budget
     }
@@ -197,7 +222,8 @@ impl MbReadSession {
             return map_cached_parse_result(result);
         }
 
-        let raw_chunks = collect_raw_chunk_records_with_budget(&self.mb, &self.budget)?;
+        let (raw_chunks, section_state) =
+            collect_raw_chunk_records_with_budget(&self.mb, &self.budget)?;
         let decoded_chunks = collect_decoded_chunk_records(
             &raw_chunks,
             self.mb.data(),
@@ -205,6 +231,7 @@ impl MbReadSession {
         );
         let decode_qualities = collect_decode_quality_records(&decoded_chunks);
         let decoded = Ok(Arc::new(MbDecodedArtifacts {
+            section_state,
             raw_chunks,
             decoded_chunks,
             decode_qualities,
@@ -236,7 +263,12 @@ impl MbReadSession {
 
     fn selective_sections(&self) -> &RawMbSelectiveSections {
         self.selective_sections
-            .get_or_init(|| Arc::new(mb::collect_raw_mb_selective_sections(&self.mb)))
+            .get_or_init(|| {
+                Arc::new(mb::collect_raw_mb_selective_sections(
+                    &self.mb,
+                    &self.budget,
+                ))
+            })
             .as_ref()
     }
 
@@ -249,9 +281,12 @@ impl MbReadSession {
 
     #[cfg(test)]
     pub(crate) fn cached_build_ptr(&self) -> Option<*const SceneBuildOutput> {
-        self.build
-            .get()
-            .and_then(|result| result.as_ref().ok().map(Arc::as_ptr))
+        self.build.get().and_then(|result| {
+            result
+                .as_ref()
+                .ok()
+                .map(|value| &value.0 as *const SceneBuildOutput)
+        })
     }
 }
 

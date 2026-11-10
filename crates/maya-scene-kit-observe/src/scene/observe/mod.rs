@@ -1174,7 +1174,7 @@ mod tests {
             exact_err.budget_limit(),
             Some(MbParseBudgetLimit::MaxChildrenPerGroup)
         );
-        assert!(!adaptive_raw.is_empty());
+        assert!(!adaptive_raw.0.is_empty());
     }
 
     #[test]
@@ -1212,7 +1212,7 @@ mod tests {
             exact_err.budget_limit(),
             Some(MbParseBudgetLimit::MaxTotalChunks)
         );
-        assert!(!adaptive_raw.is_empty());
+        assert!(!adaptive_raw.0.is_empty());
     }
 
     #[test]

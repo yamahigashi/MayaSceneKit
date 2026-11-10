@@ -137,6 +137,7 @@ pub fn collect_raw_chunks(path: impl AsRef<Path>) -> Result<Vec<RawChunkDump>, S
     }
     let mb = parse_file(scene_path)?;
     Ok(collect_raw_chunk_records(&mb)
+        .0
         .into_iter()
         .map(|raw| {
             let payload = raw.payload(mb.data()).to_vec();

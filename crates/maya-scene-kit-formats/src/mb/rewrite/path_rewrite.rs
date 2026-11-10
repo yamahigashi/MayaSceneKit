@@ -5,7 +5,7 @@ use maya_mb::ParsedSection;
 // MB rewrite helpers intentionally stay chunk-oriented so replacement can preserve
 // binary layout details without becoming the canonical semantic inspection path.
 use crate::mb::{
-    Chunk, ChunkLayout, FourCC, LayoutHints, parse_section_chunks_with_hints,
+    Chunk, ChunkLayout, FourCC, LayoutHints, parse_section_chunks_with_hints_with_budget,
     paths::{extract_raw_scene_path_records_from_mb_parts, extract_raw_scene_paths_from_mb_parts},
     resolve_section_layout_hints,
     rewrite::{encode_chunk, encode_root_chunk, rewrite_attr_payload_string_preserving_shape},
@@ -38,7 +38,7 @@ fn replace_raw_scene_paths_in_mb_with_rules<'a>(
     compiled_rules: &CompiledPathReplaceRules,
     accept_payload: &impl Fn(usize, usize) -> bool,
 ) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
-    crate::mb::require_complete_mb_tree(root)?;
+    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
     if compiled_rules.is_empty() || root.children().is_empty() {
         return Ok((Cow::Borrowed(data), 0));
     }
@@ -127,7 +127,7 @@ pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
     root: &Chunk,
     replacements: &[(usize, String)],
 ) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
-    crate::mb::require_complete_mb_tree(root)?;
+    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
     if replacements.is_empty() || root.children().is_empty() {
         return Ok((Cow::Borrowed(data), 0));
     }
@@ -222,7 +222,13 @@ fn rewrite_rtft_child(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -304,7 +310,13 @@ fn rewrite_fref_child(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -371,7 +383,13 @@ fn rewrite_frdi_child(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -438,7 +456,13 @@ fn rewrite_head_child(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -511,7 +535,13 @@ fn rewrite_rtft_child_by_targets(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -593,7 +623,13 @@ fn rewrite_frdi_child_by_targets(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -672,7 +708,13 @@ fn rewrite_fref_child_by_targets(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -984,8 +1026,8 @@ fn replacement_targets_for_mb(
     root: &Chunk,
     replacements: &[(usize, String)],
 ) -> HashMap<TargetKey, String> {
-    let entries = extract_raw_scene_paths_from_mb_parts(data, root);
-    let physical_entries = extract_raw_scene_path_records_from_mb_parts(data, root);
+    let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
+    let physical_entries = extract_raw_scene_path_records_from_mb_parts(data, root).value;
     let mut out = HashMap::new();
 
     for (index, after_value) in replacements {
@@ -1476,7 +1518,7 @@ mod tests {
         let output = dir.path().join("dst.mb");
         std::fs::write(&input, &mb).expect("write");
         let parsed = parse_file(&input).expect("parse");
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root()).value;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value, "asset/example/old_scene.mb");
 
@@ -1553,7 +1595,7 @@ mod tests {
             parsed.root().children()[1].form_type(),
             Some(FourCC::new(*b"FRDI"))
         );
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root()).value;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value, "asset/example/old_scene.mb");
         let targets = super::replacement_targets_for_mb(
@@ -1626,7 +1668,7 @@ mod tests {
         let output = dir.path().join("dst.mb");
         std::fs::write(&input, &mb).expect("write");
         let parsed = parse_file(&input).expect("parse");
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root()).value;
         assert_eq!(entries.len(), 2);
 
         let (rewritten, count) = replace_scene_paths_in_mb_by_index(
@@ -1681,7 +1723,7 @@ mod tests {
         let output = dir.path().join("dst.mb");
         std::fs::write(&input, &mb).expect("write");
         let parsed = parse_file(&input).expect("parse");
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root()).value;
         assert_eq!(entries.len(), 2);
 
         let (rewritten, count) = replace_scene_paths_in_mb_by_index(
@@ -1736,7 +1778,7 @@ mod tests {
         let output = dir.path().join("dst.mb");
         std::fs::write(&input, &mb).expect("write");
         let parsed = parse_file(&input).expect("parse");
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root()).value;
         assert_eq!(entries.len(), 2);
 
         let (rewritten, count) = replace_scene_paths_in_mb_by_index(
@@ -1789,7 +1831,7 @@ mod tests {
         let output = dir.path().join("dst.mb");
         std::fs::write(&input, &mb).expect("write");
         let parsed = parse_file(&input).expect("parse");
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&mb, parsed.root()).value;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value, "asset/example/ExampleAsset.fbx");
 
@@ -2128,7 +2170,7 @@ mod tests {
         assert!(replace_scene_paths_in_mb_by_index(&source, malformed.root(), &[]).is_err());
         let source = with_opaque_tail(&source, &[0xFA, 0xFB]);
         let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
-        let entries = super::extract_raw_scene_paths_from_mb_parts(&source, parsed.root());
+        let entries = super::extract_raw_scene_paths_from_mb_parts(&source, parsed.root()).value;
         assert_eq!(entries.len(), 2);
         let first = entries
             .iter()
@@ -2153,6 +2195,7 @@ mod tests {
         assert_eq!(count, 2);
         let output = crate::mb::parse_bytes(rewritten.clone()).unwrap();
         let values = super::extract_raw_scene_paths_from_mb_parts(&rewritten, output.root())
+            .value
             .into_iter()
             .map(|entry| entry.value)
             .collect::<Vec<_>>();

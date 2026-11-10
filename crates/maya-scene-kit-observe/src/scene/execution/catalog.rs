@@ -87,6 +87,7 @@ pub(crate) fn build_observed_execution_core(
             surfaces::collect_execution_coverage_from_mb_with_budget(
                 &session.mb,
                 &session.completeness,
+                session.section_state(),
                 session.budget(),
                 session.schema_context()?.registry(),
                 session

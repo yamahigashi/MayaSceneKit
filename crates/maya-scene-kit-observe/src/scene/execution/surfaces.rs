@@ -8,8 +8,7 @@ use maya_scene_kit_formats::{
 use crate::{
     mb::{
         FourCC, LayoutHints, MbChildren, MbCompleteness, MbParseBudget, MbTruncationReason,
-        parse_section_chunks_with_hints, resolve_section_layout_hints,
-        visit_group_chunks_with_layout_with_budget,
+        resolve_section_layout_hints, visit_group_chunks_with_layout_with_budget,
     },
     scene::{
         ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind, ExecutionLanguage,
@@ -103,10 +102,11 @@ pub(crate) fn collect_execution_coverage_from_mb(
         registry.as_ref(),
     )
     .map_err(SceneToolError::Config)?;
-    collect_execution_coverage_from_mb_with_budget(
+    collect_mb_coverage(
         mb,
         &mb.completeness(),
-        &MbParseBudget::default(),
+        crate::mb::extract_head_metadata_with_budget(mb, &MbParseBudget::default()).section_state,
+        None,
         registry,
         semantics.as_ref(),
     )
@@ -115,11 +115,19 @@ pub(crate) fn collect_execution_coverage_from_mb(
 pub(crate) fn collect_execution_coverage_from_mb_with_budget(
     mb: &crate::mb::MayaBinaryFile,
     completeness: &MbCompleteness,
+    extraction_state: crate::mb::MbSectionScanState,
     budget: &MbParseBudget,
     registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    collect_mb_coverage(mb, completeness, budget, registry, execution_semantics)
+    collect_mb_coverage(
+        mb,
+        completeness,
+        extraction_state,
+        Some(budget),
+        registry,
+        execution_semantics,
+    )
 }
 
 fn collect_ma_coverage(
@@ -664,15 +672,24 @@ fn classify_top_level_other(source_text: &str) -> Option<&'static str> {
 fn collect_mb_coverage(
     mb: &crate::mb::MayaBinaryFile,
     completeness: &MbCompleteness,
-    budget: &MbParseBudget,
+    extraction_state: crate::mb::MbSectionScanState,
+    budget: Option<&MbParseBudget>,
     registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    let surfaces = collect_mb_native_script_surfaces(mb, execution_semantics);
+    let (surfaces, mut section_state) = collect_mb_native_script_surfaces(
+        mb,
+        execution_semantics,
+        budget.unwrap_or(&MbParseBudget::default()),
+    );
+    section_state.merge(extraction_state);
     let mut coverage_issues = Vec::new();
     let dispatcher = DecoderDispatcher::new(registry);
 
     for child in mb.root().children() {
+        if !child.is_group() {
+            continue;
+        }
         let form = child.form_type().map(|f| f.to_string()).unwrap_or_default();
         let hints = resolve_section_layout_hints(
             child.tag(),
@@ -690,7 +707,7 @@ fn collect_mb_coverage(
             &[]
         };
 
-        visit_group_chunks_with_layout_with_budget(inner_data, hints, 2, budget, |chunk| {
+        let visit = |chunk: crate::mb::SectionChunk| {
             if raw_chunk_form_is_known_benign_container(form.as_str()) {
                 return;
             }
@@ -779,7 +796,13 @@ fn collect_mb_coverage(
                 }),
                 preview: PreviewWindowSpec::prefix(Arc::<str>::from(text)),
             });
-        })?;
+        };
+        section_state.merge(match budget {
+            Some(budget) => {
+                visit_group_chunks_with_layout_with_budget(inner_data, hints, 2, budget, visit)?
+            }
+            None => crate::mb::visit_group_chunks_with_layout(inner_data, hints, visit),
+        });
     }
 
     if let MbCompleteness::Truncated { .. } = completeness {
@@ -807,6 +830,17 @@ fn collect_mb_coverage(
         });
     }
 
+    if matches!(completeness, MbCompleteness::Complete)
+        && section_state == crate::mb::MbSectionScanState::Stopped
+    {
+        let reason = "MB section scan stopped".to_string();
+        coverage_issues.push(ExecutionCoverageIssueRecord {
+            kind: ExecutionCoverageIssueKind::UnexplainedRawMbPayload,
+            preview: PreviewWindowSpec::prefix(Arc::from(reason.as_str())),
+            detail: ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason },
+            origin: None,
+        });
+    }
     Ok(ExecutionCoverageCollection {
         surfaces,
         coverage_issues,
@@ -845,12 +879,17 @@ fn collect_mb_script_body_assignments<'a>(
 fn collect_mb_native_script_surfaces(
     mb: &crate::mb::MayaBinaryFile,
     execution_semantics: &NodeExecutionSemantics,
-) -> Vec<ExecutionSurfaceRecord> {
+    budget: &MbParseBudget,
+) -> (Vec<ExecutionSurfaceRecord>, crate::mb::MbSectionScanState) {
     let mut surfaces = Vec::new();
+    let mut state = crate::mb::MbSectionScanState::Complete;
     let mut seen = HashSet::new();
     let mut script_offsets = HashSet::new();
 
     for child in mb.root().children() {
+        if !child.is_group() {
+            continue;
+        }
         let Some(form_type) = child.form_type().map(|f| f.to_string()) else {
             continue;
         };
@@ -868,22 +907,22 @@ fn collect_mb_native_script_surfaces(
             continue;
         }
 
+        let parsed =
+            crate::mb::parse_section_chunks_with_hints_with_budget(&payload[4..], hints, budget);
+        state.merge(parsed.state());
         let mut selected_node_name = None;
         let node_type = form_typeid(&form_type)
             .and_then(|typeid| execution_semantics.node_type_for_typeid(typeid));
         let mut node_type = node_type.map(str::to_string);
         if form_type == "SLCT" {
-            let selected = parse_section_chunks_with_hints(&payload[4..], hints)
-                .chunks()
-                .iter()
-                .find_map(|chunk| {
-                    if chunk.tag() != "SLCT" {
-                        return None;
-                    }
-                    let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
-                    let trimmed = text.trim_matches(char::from(0)).trim();
-                    (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
-                });
+            let selected = parsed.chunks().iter().find_map(|chunk| {
+                if chunk.tag() != "SLCT" {
+                    return None;
+                }
+                let text = String::from_utf8_lossy(chunk.payload(&payload[4..]));
+                let trimmed = text.trim_matches(char::from(0)).trim();
+                (!trimmed.is_empty()).then(|| trimmed.trim_start_matches(':').to_string())
+            });
             node_type = node_type.or_else(|| {
                 selected
                     .as_deref()
@@ -896,7 +935,6 @@ fn collect_mb_native_script_surfaces(
             .as_deref()
             .map(|node_type| execution_semantics.profiles_for_node(node_type))
             .unwrap_or(&[]);
-        let parsed = parse_section_chunks_with_hints(&payload[4..], hints);
         let mut node_name = format!("<{}@0x{:X}>", form_type, child.offset());
         if let Some(selected_node_name) = &selected_node_name {
             node_name = selected_node_name.clone();
@@ -905,7 +943,9 @@ fn collect_mb_native_script_surfaces(
                 payload,
                 child_alignment,
                 child_header_size,
+                budget,
             )
+            .value
         {
             node_name = decoded_node_name;
         }
@@ -913,7 +953,7 @@ fn collect_mb_native_script_surfaces(
         let mut source_type = None;
         let mut attr_values = Vec::<(String, Vec<u8>, String, usize)>::new();
 
-        for chunk in parsed.into_chunks() {
+        for chunk in parsed.chunks() {
             if chunk.tag() == "CREA" || (form_type == "SCRP" && chunk.tag() == "FLGS") {
                 continue;
             }
@@ -1066,7 +1106,7 @@ fn collect_mb_native_script_surfaces(
         }
     }
 
-    surfaces
+    (surfaces, state)
 }
 
 fn profile_matches_attr(profiles: &[NodeExecutionProfile], attr_name: &str) -> bool {
@@ -1194,6 +1234,7 @@ fn decode_raw_chunk_text(tag: &str, payload: &[u8]) -> Option<String> {
 
 fn raw_chunk_tag_may_contain_execution_text(tag: FourCC, payload_len: usize) -> bool {
     match tag.as_ascii() {
+        None => false,
         Some("STR ") => true,
         // Reference/path inventory chunks can contain words such as "Source" in
         // exporter metadata, but they are dependency evidence rather than code.
@@ -2338,5 +2379,73 @@ mod tests {
             assert_eq!(coverage.coverage_issues.len(), count, "{form}/{tag}");
             assert!(coverage.surfaces.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod section_state_tests {
+    use super::*;
+
+    #[test]
+    fn native_selection_retains_scan_stop_without_a_profile() {
+        let bytes = b"FOR4\0\0\0\x20MayaFOR4\0\0\0\x14SLCTDATA\0\0\0\0DATA\0\0\0\0".to_vec();
+        let mb = crate::mb::parse_bytes(bytes).unwrap();
+        let registry = crate::scene::schema::default_schema_registry();
+        let semantics =
+            crate::scene::schema::node_semantics::node_execution_semantics_with_registry(registry)
+                .unwrap();
+        let budget = MbParseBudget {
+            max_children_per_group: 1,
+            ..MbParseBudget::default()
+        };
+        let (surfaces, state) = collect_mb_native_script_surfaces(&mb, semantics.as_ref(), &budget);
+        assert!(surfaces.is_empty());
+        assert_eq!(state, crate::mb::MbSectionScanState::Stopped);
+    }
+    #[test]
+    fn soft_depth_stop_reaches_one_issue_and_rewrite_refusal() {
+        fn chunk(tag: &[u8; 4], aux: u32, payload: &[u8], wide: bool) -> Vec<u8> {
+            let mut bytes = tag.to_vec();
+            if wide {
+                bytes.extend_from_slice(&aux.to_be_bytes());
+                bytes.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+            } else {
+                bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            }
+            bytes.extend_from_slice(payload);
+            bytes.resize(bytes.len().next_multiple_of(4), 0);
+            bytes
+        }
+        fn group(tag: &[u8; 4], form: &[u8; 4], inner: &[u8], wide: bool) -> Vec<u8> {
+            let mut payload = form.to_vec();
+            payload.extend_from_slice(inner);
+            chunk(tag, 0, &payload, wide)
+        }
+        let mut nested = chunk(b"DATA", 0, &[], false);
+        for _ in 0..130 {
+            nested = group(b"FOR4", b"TEST", &nested, false);
+        }
+        let leaf = chunk(b"DATA", 8, &nested, true);
+        let section = group(b"FOR4", b"TEST", &leaf, true);
+        let bytes = group(
+            b"FOR8",
+            b"Maya",
+            &group(b"FOR8", b"HEAD", &section, true),
+            true,
+        );
+        let mb = crate::mb::parse_bytes(bytes).unwrap();
+        assert!(matches!(mb.completeness(), MbCompleteness::Complete));
+        let soft = crate::mb::walk_group_chunks_with_layout(
+            &section,
+            LayoutHints::new().with_header_format(crate::mb::HeaderFormat::EightByte),
+        );
+        assert_eq!(soft.state, crate::mb::MbSectionScanState::Stopped);
+        let coverage = collect_execution_coverage_from_mb(&mb).unwrap();
+        assert_eq!(coverage.coverage_issues.len(), 1);
+        assert!(matches!(&coverage.coverage_issues[0].detail,
+            ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason } if reason == "MB section scan stopped"));
+        let error =
+            crate::mb::rewrite::require_complete_mb_sections(mb.data(), mb.root()).unwrap_err();
+        assert!(error.to_string().contains("depth budget"), "{error}");
     }
 }

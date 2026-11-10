@@ -19,7 +19,7 @@ pub use crate::scene::{
 };
 use crate::{
     addattr_semantics::{AddAttrAngularSemantics, add_attr_semantics},
-    mb::extract_head_metadata,
+    mb::extract_head_metadata_with_budget,
     scene::{
         LoadOptions, SceneFormat, SceneToolError,
         analyze::analyze_scene_model,
@@ -38,6 +38,8 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct MbRecoveryBundle {
+    #[allow(dead_code)]
+    pub(crate) section_state: crate::mb::MbSectionScanState,
     pub header: RecoveredHeader,
     pub scene: RecoveredScene,
     pub issues: Vec<NodeRecoveryIssue>,
@@ -67,8 +69,12 @@ pub fn recover_mb_scene(
     let session = MbReadSession::load_raw(path, Some(Arc::clone(&schema_context)), &budget)?;
     let build = session.build()?;
 
+    let metadata = extract_head_metadata_with_budget(&session.mb, &budget);
+    let mut section_state = session.section_state();
+    section_state.merge(metadata.section_state);
     Ok(MbRecoveryBundle {
-        header: RecoveredHeader::from(extract_head_metadata(&session.mb)),
+        section_state,
+        header: RecoveredHeader::from(metadata),
         scene: RecoveredScene::from_scene_model(build.scene.clone()),
         issues: analyze_scene_model(&build.scene, &build.artifacts)
             .into_iter()

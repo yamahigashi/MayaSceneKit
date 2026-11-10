@@ -17,7 +17,7 @@ pub(crate) fn build_scene_model(
     mb: &MayaBinaryFile,
     typeid_resolver: Option<&TypeIdTypeNameResolver>,
     registry: Arc<SchemaRegistry>,
-) -> SceneBuildOutput {
+) -> (SceneBuildOutput, crate::mb::MbSectionScanState) {
     let (default_typeid_resolver, typeid_resolver_status) = if typeid_resolver.is_none() {
         match build_typeid_typename_resolver_with_registry(registry.as_ref()) {
             Ok(resolver) => (Some(resolver), TypeIdResolverStatus::LoadedDefault),
@@ -27,10 +27,11 @@ pub(crate) fn build_scene_model(
         (None, TypeIdResolverStatus::Provided)
     };
     let typeid_resolver = typeid_resolver.or(default_typeid_resolver.as_ref());
-    let raw_chunks = recover::collect_raw_chunk_records(mb);
+    let (raw_chunks, state) = recover::collect_raw_chunk_records(mb);
     build_scene_model_from_raw_chunks(
         Arc::clone(mb.data_arc()),
         raw_chunks,
+        state,
         typeid_resolver,
         registry,
         typeid_resolver_status,
@@ -43,11 +44,12 @@ pub(crate) fn build_scene_model_with_budget(
     typeid_resolver: &TypeIdTypeNameResolver,
     registry: Arc<SchemaRegistry>,
     budget: &MbParseBudget,
-) -> Result<SceneBuildOutput, MayaBinaryParseError> {
-    let raw_chunks = recover::collect_raw_chunk_records_with_budget(mb, budget)?;
+) -> Result<(SceneBuildOutput, crate::mb::MbSectionScanState), MayaBinaryParseError> {
+    let (raw_chunks, state) = recover::collect_raw_chunk_records_with_budget(mb, budget)?;
     Ok(build_scene_model_from_raw_chunks(
         Arc::clone(mb.data_arc()),
         raw_chunks,
+        state,
         Some(typeid_resolver),
         registry,
         TypeIdResolverStatus::Provided,
@@ -57,36 +59,40 @@ pub(crate) fn build_scene_model_with_budget(
 pub(crate) fn build_scene_model_from_decoded_chunks(
     raw_source: Arc<[u8]>,
     raw_chunks: Vec<crate::scene::ir::RawChunkRecord>,
+    state: crate::mb::MbSectionScanState,
     decoded_chunks: Vec<crate::scene::ir::DecodedChunkRecord>,
     nodes: Vec<crate::scene::ir::RecoveredNode>,
     reference_files: Vec<crate::scene::ir::ReferenceFileOp>,
-    _registry: Arc<SchemaRegistry>,
     typeid_resolver_status: TypeIdResolverStatus,
-) -> SceneBuildOutput {
+) -> (SceneBuildOutput, crate::mb::MbSectionScanState) {
     let decode_qualities = recover::collect_decode_quality_records(&decoded_chunks);
-    SceneBuildOutput {
-        scene: SceneModel {
-            nodes,
-            select_blocks: recover::recover_select_blocks(&decoded_chunks),
-            links: recover::recover_links_from_cons(&decoded_chunks),
-            reference_files,
+    (
+        SceneBuildOutput {
+            scene: SceneModel {
+                nodes,
+                select_blocks: recover::recover_select_blocks(&decoded_chunks),
+                links: recover::recover_links_from_cons(&decoded_chunks),
+                reference_files,
+            },
+            artifacts: SceneArtifacts {
+                raw_source,
+                raw_chunks,
+                decode_qualities,
+            },
+            typeid_resolver_status,
         },
-        artifacts: SceneArtifacts {
-            raw_source,
-            raw_chunks,
-            decode_qualities,
-        },
-        typeid_resolver_status,
-    }
+        state,
+    )
 }
 
 fn build_scene_model_from_raw_chunks(
     raw_source: Arc<[u8]>,
     raw_chunks: Vec<crate::scene::ir::RawChunkRecord>,
+    state: crate::mb::MbSectionScanState,
     typeid_resolver: Option<&TypeIdTypeNameResolver>,
     registry: Arc<SchemaRegistry>,
     typeid_resolver_status: TypeIdResolverStatus,
-) -> SceneBuildOutput {
+) -> (SceneBuildOutput, crate::mb::MbSectionScanState) {
     let decoded_chunks = recover::collect_decoded_chunk_records(
         &raw_chunks,
         raw_source.as_ref(),
@@ -97,10 +103,10 @@ fn build_scene_model_from_raw_chunks(
     build_scene_model_from_decoded_chunks(
         raw_source,
         raw_chunks,
+        state,
         decoded_chunks,
         nodes,
         reference_files,
-        registry,
         typeid_resolver_status,
     )
 }
@@ -178,7 +184,7 @@ mod tests {
                 crate::scene::schema::locator::SchemaPaths::from_defaults(),
             )),
         );
-        let model = &output.scene;
+        let model = &output.0.scene;
 
         assert!(model.nodes.iter().any(|n| n.name == "persp"));
         assert!(model.nodes.iter().any(|n| n.node_type.as_ref() == "script"));
@@ -209,9 +215,10 @@ mod tests {
             LinkOp::Connect { src, dst, .. }
                 if src == "polySphere1.out" && dst == "pSphereShape1.i"
         )));
-        assert!(!output.artifacts.raw_chunks.is_empty());
+        assert!(!output.0.artifacts.raw_chunks.is_empty());
         assert!(
             output
+                .0
                 .artifacts
                 .raw_chunks
                 .iter()
@@ -234,6 +241,7 @@ mod tests {
             )),
         );
         let script_nodes = output
+            .0
             .scene
             .nodes
             .iter()
@@ -250,7 +258,7 @@ mod tests {
             })
         }));
         assert_eq!(
-            output.typeid_resolver_status,
+            output.0.typeid_resolver_status,
             TypeIdResolverStatus::LoadedDefault
         );
     }
@@ -270,7 +278,7 @@ mod tests {
             None,
             Arc::new(crate::scene::schema::SchemaRegistry::new(paths)),
         );
-        match output.typeid_resolver_status {
+        match output.0.typeid_resolver_status {
             TypeIdResolverStatus::DefaultLoadFailed { message } => {
                 assert!(message.contains("node_info.yaml"));
             }

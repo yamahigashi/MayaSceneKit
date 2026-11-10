@@ -24,8 +24,11 @@ pub use self::{
         parse_bytes_with_budget, parse_file, parse_file_with_budget,
     },
     raw_walk::{
-        visit_group_chunks_with_layout, visit_group_chunks_with_layout_with_budget,
+        MbWalkResult, visit_group_chunks_with_layout, visit_group_chunks_with_layout_with_budget,
         walk_group_chunks_with_layout, walk_group_chunks_with_layout_with_budget,
     },
-    section::{HeaderFormat, ParsedSection, SectionChunk, parse_section_chunks_with_hints},
+    section::{
+        HeaderFormat, MbSectionScanState, ParsedSection, SectionChunk,
+        parse_section_chunks_with_hints, parse_section_chunks_with_hints_with_budget,
+    },
 };

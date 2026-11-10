@@ -52,8 +52,15 @@ pub(super) fn collect_scene_dependency_facts(
         }
         ObservationData::Mb { session } => {
             let requires = observation.requires()?;
+            // Dependency facts describe only decoded prefix values. Missing suffixes
+            // cannot invalidate those facts; session.section_state supplies the
+            // separate execution-catalog coverage issue for an incomplete scan.
             let scene_paths =
-                maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&session.mb);
+                maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb_with_budget(
+                    &session.mb,
+                    session.budget(),
+                )
+                .value;
             let base_fact_count = requires.len() + scene_paths.len();
             facts.reserve(base_fact_count);
             let mut seen = HashSet::with_capacity(base_fact_count);

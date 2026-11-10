@@ -5,8 +5,11 @@ use crate::{
     scene::ir::{ChunkRef, RawChunkRecord},
 };
 
-pub(crate) fn collect_raw_chunk_records(mb: &MayaBinaryFile) -> Vec<RawChunkRecord> {
+pub(crate) fn collect_raw_chunk_records(
+    mb: &MayaBinaryFile,
+) -> (Vec<RawChunkRecord>, crate::mb::MbSectionScanState) {
     let mut raw_chunks = Vec::new();
+    let mut state = crate::mb::MbSectionScanState::Complete;
 
     for child in mb.root().children() {
         let form = child.form_type().map(|f| f.to_string()).unwrap_or_default();
@@ -25,7 +28,9 @@ pub(crate) fn collect_raw_chunk_records(mb: &MayaBinaryFile) -> Vec<RawChunkReco
         } else {
             &[]
         };
-        for chunk in walk_group_chunks_with_layout(inner_data, hints) {
+        let walked = walk_group_chunks_with_layout(inner_data, hints);
+        state.merge(walked.state);
+        for chunk in walked.chunks {
             raw_chunks.push(RawChunkRecord {
                 chunk_ref: ChunkRef {
                     form: form.clone(),
@@ -42,5 +47,5 @@ pub(crate) fn collect_raw_chunk_records(mb: &MayaBinaryFile) -> Vec<RawChunkReco
         }
     }
 
-    raw_chunks
+    (raw_chunks, state)
 }

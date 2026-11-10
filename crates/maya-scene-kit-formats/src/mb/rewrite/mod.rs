@@ -10,27 +10,52 @@ pub use self::path_rewrite::{
 };
 
 #[derive(Debug, Clone)]
-pub struct MbRewriteError {
-    pub completeness: crate::mb::MbCompleteness,
+pub enum MbRewriteError {
+    IncompleteTree(crate::mb::MbCompleteness),
+    SectionScanStopped,
+    Parse(crate::mb::MayaBinaryParseError),
 }
 
 impl std::fmt::Display for MbRewriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cannot rewrite incomplete Maya Binary tree: {}",
-            self.completeness
-        )
+        match self {
+            Self::IncompleteTree(completeness) => write!(
+                f,
+                "cannot rewrite incomplete Maya Binary tree: {completeness}"
+            ),
+            Self::Parse(error) => write!(f, "cannot rewrite Maya Binary: {error}"),
+            Self::SectionScanStopped => {
+                f.write_str("cannot rewrite Maya Binary: MB section scan stopped")
+            }
+        }
     }
 }
-
 impl std::error::Error for MbRewriteError {}
 
 pub fn require_complete_mb_tree(root: &crate::mb::Chunk) -> Result<(), MbRewriteError> {
     match root.completeness() {
         crate::mb::MbCompleteness::Complete => Ok(()),
-        completeness => Err(MbRewriteError { completeness }),
+        completeness => Err(MbRewriteError::IncompleteTree(completeness)),
     }
+}
+
+pub fn require_complete_mb_sections(
+    data: &[u8],
+    root: &crate::mb::Chunk,
+) -> Result<(), MbRewriteError> {
+    require_complete_mb_tree(root)?;
+    if root
+        .scan_root_sections(
+            data,
+            root.section_budget()
+                .unwrap_or(&crate::mb::MbParseBudget::default()),
+        )
+        .map_err(MbRewriteError::Parse)?
+        == crate::mb::MbSectionScanState::Stopped
+    {
+        return Err(MbRewriteError::SectionScanStopped);
+    }
+    Ok(())
 }
 
 pub(crate) fn child_span_end(root: &crate::mb::Chunk, child: &crate::mb::Chunk) -> usize {

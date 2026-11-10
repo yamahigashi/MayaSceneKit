@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use thiserror::Error;
@@ -390,15 +390,69 @@ pub struct Chunk {
     aux: u32,
     size: usize,
     payload_offset: usize,
-    payload_end: usize,
     form_type: Option<FourCC>,
     /// Resolved layout of group children, even when expansion is skipped.
     /// Leaves have no child layout; FOR8/Maya children use alignment 4.
     child_layout: Option<ChunkLayout>,
     children: MbChildren,
+    source: Option<Arc<ParsedSource>>,
+}
+
+#[derive(Debug)]
+struct ParsedSource {
+    budget: MbParseBudget,
+    data: Option<Arc<[u8]>>,
+    section_state: OnceLock<Result<crate::MbSectionScanState, MayaBinaryParseError>>,
 }
 
 impl Chunk {
+    /// The original parse budget for a group section; leaves have no section.
+    pub fn section_budget(&self) -> Option<&MbParseBudget> {
+        self.source.as_ref().map(|source| &source.budget)
+    }
+
+    /// Scans group children using raw-walk layout rules. For the original root
+    /// buffer and parse budget, clones share one cached result, including errors.
+    pub fn scan_root_sections(
+        &self,
+        data: &[u8],
+        budget: &MbParseBudget,
+    ) -> Result<crate::MbSectionScanState, MayaBinaryParseError> {
+        let scan = || {
+            let mut state = crate::MbSectionScanState::Complete;
+            for child in self.children().iter().filter(|child| child.is_group()) {
+                let hints = crate::resolve_section_layout_hints(
+                    child.tag(),
+                    child.form_type(),
+                    child
+                        .child_layout()
+                        .map_or_else(crate::LayoutHints::new, crate::LayoutHints::from),
+                );
+                let payload = &data[child.payload_offset()..child.payload_end()];
+                state.merge(crate::visit_group_chunks_with_layout_with_budget(
+                    payload.get(4..).unwrap_or_default(),
+                    hints,
+                    2,
+                    budget,
+                    |_| {},
+                )?);
+            }
+            Ok(state)
+        };
+        if let Some(source) = &self.source
+            && self.offset == 0
+            && budget == &source.budget
+            && source
+                .data
+                .as_ref()
+                .is_some_and(|original| std::ptr::eq(original.as_ref(), data))
+        {
+            source.section_state.get_or_init(scan).clone()
+        } else {
+            scan()
+        }
+    }
+
     /// The original chunk tag.
     pub fn tag(&self) -> FourCC {
         self.tag
@@ -428,7 +482,7 @@ impl Chunk {
     /// The exclusive payload end as an absolute byte offset from [`MayaBinaryFile::data`].
     /// A group payload includes its four-byte form type.
     pub fn payload_end(&self) -> usize {
-        self.payload_end
+        self.payload_offset + self.size
     }
 
     /// The form type of a group, or `None` for a leaf.
@@ -544,7 +598,7 @@ impl MayaBinaryFile {
     }
 
     pub fn payload<'a>(&'a self, chunk: &Chunk) -> &'a [u8] {
-        &self.data[chunk.payload_offset..chunk.payload_end]
+        &self.data[chunk.payload_offset..chunk.payload_end()]
     }
 
     pub fn completeness(&self) -> MbCompleteness {
@@ -638,10 +692,12 @@ pub fn parse_bytes_with_budget(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ParseBudgetState<'a> {
     budget: &'a MbParseBudget,
     total_chunks: usize,
+    sections_match_tree: bool,
+    source: Arc<ParsedSource>,
 }
 
 impl<'a> ParseBudgetState<'a> {
@@ -649,6 +705,12 @@ impl<'a> ParseBudgetState<'a> {
         Self {
             budget,
             total_chunks: 0,
+            sections_match_tree: true,
+            source: Arc::new(ParsedSource {
+                budget: *budget,
+                data: None,
+                section_state: OnceLock::new(),
+            }),
         }
     }
 
@@ -667,7 +729,7 @@ enum ParseChunkStatus {
     BudgetExhausted,
 }
 
-fn parse_stream(data: &[u8], budget: &MbParseBudget) -> Result<Chunk, MayaBinaryParseError> {
+fn parse_stream(data: &Arc<[u8]>, budget: &MbParseBudget) -> Result<Chunk, MayaBinaryParseError> {
     if data.len() < 8 {
         return Err(MayaBinaryParseError::StreamTooShort {
             actual: data.len(),
@@ -683,6 +745,7 @@ fn parse_stream(data: &[u8], budget: &MbParseBudget) -> Result<Chunk, MayaBinary
         }
     };
     let mut state = ParseBudgetState::new(budget);
+    Arc::get_mut(&mut state.source).expect("unique source").data = Some(Arc::clone(data));
     let ParseChunkStatus::Parsed((root, next)) =
         parse_chunk(data, 0, data.len(), 1, 0, root_format, &mut state)?
     else {
@@ -701,6 +764,15 @@ fn parse_stream(data: &[u8], budget: &MbParseBudget) -> Result<Chunk, MayaBinary
             next,
             len: data.len(),
         });
+    }
+    // A complete tree with identical section layouts has already checked the
+    // same tags, bounds, padding, and a budget at least as strict as each walk.
+    // Mixed layouts and unexpanded prefixes still require the raw scanner.
+    if state.sections_match_tree {
+        let _ = state
+            .source
+            .section_state
+            .set(Ok(crate::MbSectionScanState::Complete));
     }
     Ok(root)
 }
@@ -762,6 +834,12 @@ fn parse_chunk(
         form_type = Some(read_tag(data, payload_offset)?);
         let preferred_layout = resolve_parser_group_layout(tag, form_type, header_format);
         child_layout = Some(preferred_layout);
+        if depth >= 2
+            && crate::LayoutHints::from(preferred_layout)
+                != crate::resolve_section_layout_hints(tag, form_type, crate::LayoutHints::new())
+        {
+            state.sections_match_tree = false;
+        }
 
         if should_expand_group(depth, state.budget) {
             children = parse_children_with_format(
@@ -775,6 +853,9 @@ fn parse_chunk(
             );
         } else {
             children = MbChildren::NotExpanded;
+        }
+        if !matches!(children, MbChildren::Complete(_)) {
+            state.sections_match_tree = false;
         }
     }
 
@@ -806,10 +887,10 @@ fn parse_chunk(
             aux,
             size,
             payload_offset,
-            payload_end,
             form_type,
             child_layout,
             children,
+            source: child_layout.map(|_| Arc::clone(&state.source)),
         },
         next_offset,
     )))
@@ -839,9 +920,7 @@ fn read_tag(data: &[u8], offset: usize) -> Result<FourCC, MayaBinaryParseError> 
             width: 4,
             field: ReadField::Tag,
         })?;
-    Ok(FourCC::new(
-        raw.try_into().expect("slice is 4 bytes by construction"),
-    ))
+    Ok(crate::section::accept_chunk_tag(raw).expect("four-byte tag"))
 }
 
 fn read_u32be(data: &[u8], offset: usize) -> Result<u32, MayaBinaryParseError> {
@@ -1696,7 +1775,7 @@ mod tests {
                 );
                 assert_eq!(root.size, payload.len());
                 assert_eq!(root.payload_offset, header_size);
-                assert_eq!(root.payload_end, data.len());
+                assert_eq!(root.payload_end(), data.len());
                 assert_eq!(root.form_type, Some(FourCC::new(form)));
                 assert_eq!(root.child_layout, Some(layout));
                 assert_eq!(root.children_complete(), max_depth != 0);
@@ -1716,7 +1795,7 @@ mod tests {
                     );
                     assert_eq!(leaf.size, 1);
                     assert_eq!(leaf.payload_offset, header_size * 2 + 4);
-                    assert_eq!(leaf.payload_end, header_size * 2 + 5);
+                    assert_eq!(leaf.payload_end(), header_size * 2 + 5);
                     assert_eq!(leaf.form_type, None);
                     assert_eq!(leaf.child_layout, None);
                     assert!(leaf.children_complete());
@@ -1725,5 +1804,60 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod section_cache_tests {
+    use super::*;
+
+    #[test]
+    fn matching_tree_layouts_seed_section_state() {
+        let mb = parse_bytes(b"FOR4\0\0\0\x18MayaFOR4\0\0\0\x0cTESTDATA\0\0\0\0".to_vec()).unwrap();
+        assert!(matches!(
+            mb.root().source.as_ref().unwrap().section_state.get(),
+            Some(Ok(crate::MbSectionScanState::Complete))
+        ));
+    }
+
+    #[test]
+    fn root_scan_is_shared_by_clones_and_preserves_buffer_identity() {
+        let mut bytes =
+            b"FOR4\0\0\0\x2cMayaFOR4\0\0\0\x20HEADFOR8\0\0\0\x14TESTDATA\0\0\0\x01X".to_vec();
+        bytes.extend_from_slice(&[0; 7]);
+        let mb = parse_bytes(bytes).unwrap();
+        let root = mb.root();
+        assert!(root.source.as_ref().unwrap().section_state.get().is_none());
+        assert_eq!(
+            root.scan_root_sections(mb.data(), root.section_budget().unwrap())
+                .unwrap(),
+            crate::MbSectionScanState::Stopped
+        );
+        assert!(root.source.as_ref().unwrap().section_state.get().is_some());
+        let cloned = mb.clone();
+        assert!(Arc::ptr_eq(
+            root.source.as_ref().unwrap(),
+            cloned.root.source.as_ref().unwrap()
+        ));
+        assert_eq!(
+            cloned
+                .root()
+                .scan_root_sections(cloned.data(), root.section_budget().unwrap())
+                .unwrap(),
+            crate::MbSectionScanState::Stopped
+        );
+        let mut changed = mb.data().to_vec();
+        changed[24..28].copy_from_slice(b"FOR4");
+        changed[40..44].copy_from_slice(&8u32.to_be_bytes());
+        assert_eq!(
+            root.scan_root_sections(&changed, root.section_budget().unwrap())
+                .unwrap(),
+            crate::MbSectionScanState::Complete
+        );
+        assert_eq!(
+            root.scan_root_sections(mb.data(), root.section_budget().unwrap())
+                .unwrap(),
+            crate::MbSectionScanState::Stopped
+        );
     }
 }

@@ -282,7 +282,7 @@ pub(super) fn collect_mb_clean_targets(
     root: &crate::mb::Chunk,
     targets: &[ExecutionCleanTarget],
 ) -> Result<MbCleanTargets, SceneToolError> {
-    crate::mb::require_complete_mb_tree(root).map_err(mb_rewrite_error)?;
+    crate::mb::rewrite::require_complete_mb_sections(data, root).map_err(mb_rewrite_error)?;
     let script_nodes = targets
         .iter()
         .filter_map(|target| match target {
@@ -298,6 +298,7 @@ pub(super) fn collect_mb_clean_targets(
             root,
             crate::mb::MbNameSelection::Only(&script_nodes),
         )
+        .value
         .0
     };
     owner_form_targets.extend(targets.iter().filter_map(|target| match target {

@@ -32,8 +32,11 @@ fn assert_rejected(parsed: &mb::MayaBinaryFile) {
     macro_rules! assert_incomplete {
         ($result:expr) => {
             let error = $result.unwrap_err();
+            let mb::MbRewriteError::IncompleteTree(completeness) = error else {
+                panic!("expected incomplete tree");
+            };
             assert!(matches!(
-                error.completeness,
+                completeness,
                 MbCompleteness::Truncated {
                     first_reason: MbTruncationReason::ChildLimit
                         | MbTruncationReason::ChunkBudget
@@ -42,10 +45,7 @@ fn assert_rejected(parsed: &mb::MayaBinaryFile) {
                     truncated_groups: 1,
                 }
             ));
-            assert_eq!(
-                error.completeness.to_string(),
-                parsed.completeness().to_string()
-            );
+            assert_eq!(completeness.to_string(), parsed.completeness().to_string());
         };
     }
     assert_incomplete!(mb::replace_scene_paths_in_mb(data, root, &[]));
@@ -119,6 +119,7 @@ fn fixture_terminal_children_and_owner_traces() {
             })
             .collect::<Vec<_>>();
         let traces = mb::collect_rtft_owner_traces_from_mb(&parsed)
+            .value
             .into_iter()
             .map(|trace| {
                 (

@@ -5,8 +5,8 @@ use crate::{
     ma::text::escape_ma_string,
     maya_defaults::DEFAULT_MAYA_VERSION,
     mb::{
-        Chunk, ChunkLayout, FourCC, LayoutHints, MayaBinaryFile, parse_section_chunks_with_hints,
-        resolve_section_layout_hints, rewrite::encode_chunk,
+        Chunk, ChunkLayout, FourCC, LayoutHints, MayaBinaryFile, resolve_section_layout_hints,
+        rewrite::encode_chunk,
     },
     unit_semantics::{
         DEFAULT_ANGULAR_UNIT, DEFAULT_LINEAR_UNIT, DEFAULT_TIME_UNIT, normalize_angular_unit,
@@ -23,6 +23,7 @@ pub struct MbRequiresEntry {
 
 #[derive(Debug, Clone, Default)]
 pub struct HeadMetadata {
+    pub section_state: super::MbSectionScanState,
     pub vers: Option<String>,
     pub chng: Option<String>,
     pub luni: Option<String>,
@@ -52,7 +53,22 @@ impl HeadMetadata {
 }
 
 pub fn extract_head_metadata(mb: &MayaBinaryFile) -> HeadMetadata {
-    let mut metadata = HeadMetadata::default();
+    extract_head_metadata_with_budget(
+        mb,
+        mb.root()
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    )
+}
+
+pub fn extract_head_metadata_with_budget(
+    mb: &MayaBinaryFile,
+    budget: &super::MbParseBudget,
+) -> HeadMetadata {
+    let mut metadata = HeadMetadata {
+        section_state: super::scan_root_sections(mb.data(), mb.root(), budget),
+        ..Default::default()
+    };
 
     for head in mb
         .root()
@@ -70,8 +86,10 @@ pub fn extract_head_metadata(mb: &MayaBinaryFile) -> HeadMetadata {
             head.child_layout()
                 .map_or_else(LayoutHints::new, LayoutHints::from),
         );
-        let parsed = parse_section_chunks_with_hints(&payload[4..], hints);
-        for chunk in parsed.into_chunks() {
+        let parsed =
+            super::parse_section_chunks_with_hints_with_budget(&payload[4..], hints, budget);
+        metadata.section_state.merge(parsed.state());
+        for chunk in parsed.chunks() {
             let raw = chunk.payload(&payload[4..]);
             let text = String::from_utf8_lossy(raw)
                 .trim_end_matches('\0')
@@ -148,7 +166,7 @@ pub fn remove_root_forms_and_plugin_requires_from_mb(
     target_forms: &[(String, usize)],
     selection: MbNameSelection<'_>,
 ) -> Result<MbRootFormsAndRequiresRemoval, crate::mb::MbRewriteError> {
-    crate::mb::require_complete_mb_tree(root)?;
+    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
     let children = root.children();
     if children.is_empty() {
         return Ok((data.to_vec(), Vec::new(), Vec::new()));
@@ -289,7 +307,13 @@ fn rewrite_head_child_without_plugin_requires(
             .child_layout()
             .map_or_else(LayoutHints::new, LayoutHints::from),
     );
-    let parsed = parse_section_chunks_with_hints(inner, hints);
+    let parsed = super::parse_section_chunks_with_hints_with_budget(
+        inner,
+        hints,
+        child
+            .section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
     if parsed.chunks().is_empty() {
         return None;
     }
@@ -405,6 +429,7 @@ mod tests {
             let selection = MbNameSelection::Only(names);
             assert!(
                 locate_raw_script_node_forms_in_mb_by_name(mb.data(), mb.root(), selection)
+                    .value
                     .0
                     .is_empty()
             );
@@ -421,6 +446,7 @@ mod tests {
         }
         assert_eq!(
             locate_raw_script_node_forms_in_mb_by_name(mb.data(), mb.root(), MbNameSelection::All)
+                .value
                 .0
                 .len(),
             2

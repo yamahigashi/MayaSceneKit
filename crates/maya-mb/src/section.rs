@@ -104,9 +104,15 @@ impl ParsedSection {
         &self.chunks
     }
 
-    /// Consumes the section and returns its scanned chunks in original order.
-    pub fn into_chunks(self) -> Vec<SectionChunk> {
-        self.chunks
+    /// Returns whether every input byte was consumed.
+    pub fn state(&self) -> MbSectionScanState {
+        MbSectionScanState::from_tail(self.tail_span.len())
+    }
+
+    /// Consumes both the scanned prefix and its completion state.
+    pub fn into_parts(self) -> (Vec<SectionChunk>, MbSectionScanState) {
+        let state = self.state();
+        (self.chunks, state)
     }
 
     /// Returns the unscanned tail's half-open span relative to the section input.
@@ -120,119 +126,149 @@ impl ParsedSection {
     }
 }
 
-/// Scans a section using independent layout hints.
-/// With neither hint specified, returns the whole input as tail. A missing
-/// component is derived from the supplied nonzero alignment or header format.
-pub fn parse_section_chunks_with_hints(data: &[u8], hints: LayoutHints) -> ParsedSection {
-    if let Some(alignment) = hints.alignment() {
-        let header_format = hints
-            .header_format()
-            .unwrap_or_else(|| default_header_format_for_alignment(alignment));
-        return parse_section_chunks_with_layout(data, ChunkLayout::new(alignment, header_format));
-    }
-    if let Some(header_format) = hints.header_format() {
-        let alignment = default_alignment_for_header_format(header_format);
-        return parse_section_chunks_with_layout(data, ChunkLayout::new(alignment, header_format));
+/// Completion of a bounded section scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use = "inspect the section scan state before accepting a partial result"]
+pub enum MbSectionScanState {
+    #[default]
+    Complete,
+    Stopped,
+}
+
+impl MbSectionScanState {
+    pub fn merge(&mut self, other: Self) {
+        if other == Self::Stopped {
+            *self = other;
+        }
     }
 
-    ParsedSection {
-        chunks: Vec::new(),
-        layout: SectionLayout {
-            alignment: 0,
-            header_format: HeaderFormat::EightByte,
-            consumed: 0,
-        },
-        tail_span: ByteSpan::new(0, data.len()),
+    fn from_tail(len: usize) -> Self {
+        if len == 0 {
+            Self::Complete
+        } else {
+            Self::Stopped
+        }
     }
 }
 
-fn parse_section_chunks_with_layout(data: &[u8], layout: ChunkLayout) -> ParsedSection {
-    let alignment = layout.alignment_usize();
-    let header_format = layout.header_format();
+pub(crate) fn accept_chunk_tag(raw: &[u8]) -> Option<FourCC> {
+    Some(FourCC::new(raw.get(..4)?.try_into().ok()?))
+}
+
+/// Scans a section with the default parsing budget.
+pub fn parse_section_chunks_with_hints(data: &[u8], hints: LayoutHints) -> ParsedSection {
+    parse_section_chunks_with_hints_with_budget(data, hints, &crate::MbParseBudget::default())
+}
+
+/// Scans a bounded prefix, leaving unconsumed bytes in the tail.
+pub fn parse_section_chunks_with_hints_with_budget(
+    data: &[u8],
+    hints: LayoutHints,
+    budget: &crate::MbParseBudget,
+) -> ParsedSection {
+    let mut cursor = SectionCursor::new(data, hints);
     let mut chunks = Vec::new();
-    let mut cursor = 0usize;
-    let data_len = data.len();
-    let header_size = header_format.header_size();
-    let size_offset = match header_format {
-        HeaderFormat::FourByte => 4,
-        HeaderFormat::EightByte => 8,
-    };
-
-    while cursor + header_size <= data_len {
-        let tag_bytes = &data[cursor..cursor + 4];
-        if !tag_bytes.iter().all(|b| (32..=126).contains(b)) {
-            break;
-        }
-        let aux = if header_format == HeaderFormat::EightByte {
-            u32::from_be_bytes(data[cursor + 4..cursor + 8].try_into().unwrap())
-        } else {
-            0
-        };
-        let size = match header_format {
-            HeaderFormat::FourByte => u32::from_be_bytes(
-                data[cursor + size_offset..cursor + size_offset + 4]
-                    .try_into()
-                    .unwrap(),
-            ) as usize,
-            HeaderFormat::EightByte => u64::from_be_bytes(
-                data[cursor + size_offset..cursor + size_offset + 8]
-                    .try_into()
-                    .unwrap(),
-            ) as usize,
-        };
-        let payload_start = cursor + header_size;
-        let Some(payload_end) = payload_start.checked_add(size) else {
-            break;
-        };
-        if payload_end > data_len {
-            break;
-        }
-
-        let step = align(header_size + size, alignment);
-        let Some(mut next_cursor) = cursor.checked_add(step) else {
-            break;
-        };
-        if next_cursor <= cursor {
-            break;
-        }
-        if next_cursor > data_len {
-            if payload_end != data_len {
+    if data.len() <= budget.max_parse_bytes {
+        while chunks.len() < budget.max_children_per_group && chunks.len() < budget.max_total_chunks
+        {
+            let Some(chunk) = cursor.next() else {
                 break;
-            }
-            next_cursor = payload_end;
+            };
+            chunks.push(chunk);
         }
-
-        chunks.push(SectionChunk {
-            tag: FourCC::new(
-                tag_bytes
-                    .try_into()
-                    .expect("slice is 4 bytes by construction"),
-            ),
-            aux,
-            payload_span: ByteSpan::new(payload_start, payload_end),
-            chunk_start: cursor,
-            chunk_end: next_cursor,
-        });
-        cursor = next_cursor;
     }
-
     ParsedSection {
         chunks,
         layout: SectionLayout {
-            alignment,
-            header_format,
-            consumed: cursor,
+            alignment: cursor.layout.map_or(0, |l| l.alignment_usize()),
+            header_format: cursor
+                .layout
+                .map_or(HeaderFormat::EightByte, |l| l.header_format()),
+            consumed: cursor.offset,
         },
-        tail_span: ByteSpan::new(cursor, data_len),
+        tail_span: ByteSpan::new(cursor.offset, data.len()),
     }
 }
 
-fn align(v: usize, alignment: usize) -> usize {
-    if alignment <= 1 {
-        return v;
+pub(crate) struct SectionCursor<'a> {
+    data: &'a [u8],
+    layout: Option<ChunkLayout>,
+    offset: usize,
+}
+
+impl<'a> SectionCursor<'a> {
+    pub(crate) fn new(data: &'a [u8], hints: LayoutHints) -> Self {
+        let layout = if let Some(alignment) = hints.alignment() {
+            Some(ChunkLayout::new(
+                alignment,
+                hints
+                    .header_format()
+                    .unwrap_or_else(|| default_header_format_for_alignment(alignment)),
+            ))
+        } else {
+            hints
+                .header_format()
+                .map(|header| ChunkLayout::new(default_alignment_for_header_format(header), header))
+        };
+        Self {
+            data,
+            layout,
+            offset: 0,
+        }
     }
-    let rem = v % alignment;
-    if rem == 0 { v } else { v + (alignment - rem) }
+
+    pub(crate) fn state(&self) -> MbSectionScanState {
+        MbSectionScanState::from_tail(self.data.len() - self.offset)
+    }
+
+    pub(crate) fn next(&mut self) -> Option<SectionChunk> {
+        let chunk = parse_section_chunks_with_layout(self.data, self.offset, self.layout?)?;
+        self.offset = chunk.chunk_end;
+        Some(chunk)
+    }
+}
+
+fn parse_section_chunks_with_layout(
+    data: &[u8],
+    cursor: usize,
+    layout: ChunkLayout,
+) -> Option<SectionChunk> {
+    let header_format = layout.header_format();
+    let header_size = header_format.header_size();
+    let payload_start = cursor.checked_add(header_size)?;
+    let header = data.get(cursor..payload_start)?;
+    let tag = accept_chunk_tag(header)?;
+    let (aux, size) = match header_format {
+        HeaderFormat::FourByte => (
+            0,
+            u32::from_be_bytes(header[4..8].try_into().ok()?) as usize,
+        ),
+        HeaderFormat::EightByte => (
+            u32::from_be_bytes(header[4..8].try_into().ok()?),
+            u64::from_be_bytes(header[8..16].try_into().ok()?) as usize,
+        ),
+    };
+    let payload_end = payload_start.checked_add(size)?;
+    if payload_end > data.len() {
+        return None;
+    }
+    let length = header_size.checked_add(size)?;
+    let alignment = layout.alignment_usize();
+    let padding = (alignment - length % alignment) % alignment;
+    let mut chunk_end = cursor.checked_add(length.checked_add(padding)?)?;
+    if chunk_end > data.len() {
+        if payload_end != data.len() {
+            return None;
+        }
+        chunk_end = payload_end;
+    }
+    Some(SectionChunk {
+        tag,
+        aux,
+        payload_span: ByteSpan::new(payload_start, payload_end),
+        chunk_start: cursor,
+        chunk_end,
+    })
 }
 
 #[cfg(test)]
@@ -285,7 +321,8 @@ mod tests {
         assert_eq!(tail_span, ByteSpan::new(48, 51));
         assert_eq!(parsed.tail(&data), tail_span.slice(&data));
         assert_eq!(parsed.tail(&data), b"end");
-        let owned = parsed.into_chunks();
+        let (owned, state) = parsed.into_parts();
+        assert_eq!(state, MbSectionScanState::Stopped);
         assert_eq!(
             owned.iter().map(chunk_getters).collect::<Vec<_>>(),
             borrowed
@@ -335,6 +372,7 @@ mod tests {
             assert_eq!(parsed.layout.header_format, HeaderFormat::FourByte);
             assert_eq!(parsed.layout.consumed, 12);
             assert_eq!(parsed.tail_span, ByteSpan::new(12, 12));
+            assert_eq!(parsed.state(), MbSectionScanState::Complete);
         }
         for hints in [
             LayoutHints::from_numeric(Some(3), None),
@@ -350,12 +388,29 @@ mod tests {
             assert_eq!(parsed.layout.consumed, 9);
             assert_eq!(parsed.tail_span, ByteSpan::new(9, 12));
             assert_eq!(parsed.tail(data), &[0, 0, 0]);
+            assert_eq!(parsed.state(), MbSectionScanState::Stopped);
         }
-        for malformed in [
-            b"\x00ABC\0\0\0\0".as_slice(),
-            b"DATA\0\0\0",
-            b"DATA\0\0\0\x09X",
-        ] {
+        let hints = LayoutHints::new().with_header_format(HeaderFormat::FourByte);
+        let nonprintable = b"\x00ABC\0\0\0\0";
+        for prefix in [&[][..], data.as_slice()] {
+            let mut bytes = prefix.to_vec();
+            bytes.extend_from_slice(nonprintable);
+            let parsed = parse_section_chunks_with_hints(&bytes, hints);
+            assert_eq!(parsed.chunks().len(), if prefix.is_empty() { 1 } else { 2 });
+            assert_eq!(
+                parsed.chunks().last().unwrap().tag(),
+                FourCC::new([0, 65, 66, 67])
+            );
+            assert_eq!(parsed.layout.consumed, bytes.len());
+            assert_eq!(parsed.tail_span(), ByteSpan::new(bytes.len(), bytes.len()));
+            assert_eq!(parsed.state(), MbSectionScanState::Complete);
+        }
+        assert_eq!(unspecified.state(), MbSectionScanState::Stopped);
+        assert_eq!(
+            parse_section_chunks_with_hints(&[], LayoutHints::default()).state(),
+            MbSectionScanState::Complete
+        );
+        for malformed in [b"DATA\0\0\0".as_slice(), b"DATA\0\0\0\x09X"] {
             let hints = LayoutHints::new().with_header_format(HeaderFormat::FourByte);
             let parsed = parse_section_chunks_with_hints(malformed, hints);
             assert!(parsed.chunks.is_empty());
@@ -367,6 +422,7 @@ mod tests {
             assert_eq!(parsed.layout.consumed, 12);
             assert_eq!(parsed.tail_span, ByteSpan::new(12, after_chunk.len()));
             assert_eq!(parsed.tail(&after_chunk), malformed);
+            assert_eq!(parsed.state(), MbSectionScanState::Stopped);
         }
     }
 }
