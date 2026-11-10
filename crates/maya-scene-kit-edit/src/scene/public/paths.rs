@@ -24,7 +24,7 @@ pub struct PathReplaceRule {
 }
 
 /// One targeted path override keyed by collected entry order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PathReplaceOverride {
     /// Zero-based index into `collect_scene_paths(PathKind::All).entries`.
     pub entry_index: usize,

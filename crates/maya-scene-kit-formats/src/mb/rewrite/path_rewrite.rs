@@ -5,7 +5,8 @@ use maya_mb::ParsedSection;
 // MB rewrite helpers intentionally stay chunk-oriented so replacement can preserve
 // binary layout details without becoming the canonical semantic inspection path.
 use crate::mb::{
-    Chunk, ChunkLayout, FourCC, LayoutHints, parse_section_chunks_with_hints_with_budget,
+    Chunk, ChunkLayout, FourCC, LayoutHints, parse_section_chunks_with_hints,
+    parse_section_chunks_with_hints_with_budget,
     paths::{extract_raw_scene_path_records_from_mb_parts, extract_raw_scene_paths_from_mb_parts},
     resolve_section_layout_hints,
     rewrite::{encode_chunk, encode_root_chunk, rewrite_attr_payload_string_preserving_shape},
@@ -1055,6 +1056,123 @@ fn replacement_targets_for_mb(
     }
 
     out
+}
+
+#[derive(Debug, Clone)]
+pub struct MbPathCandidatePlan {
+    pub entry_index: usize,
+    pub locator: super::MbPayloadLocator,
+    pub entry: crate::mb::paths::MbScenePathEntry,
+    pub before: Vec<u8>,
+    key: TargetKey,
+}
+
+pub fn collect_mb_path_candidates(
+    data: &[u8],
+    root: &Chunk,
+    indices: &[usize],
+) -> Result<Vec<MbPathCandidatePlan>, super::MbPlanError> {
+    let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for &entry_index in indices {
+        let entry = entries
+            .get(entry_index)
+            .ok_or(super::MbPlanError::MissingEntry { entry_index })?;
+        let targets = replacement_targets_for_mb(data, root, &[(entry_index, entry.value.clone())]);
+        if targets.is_empty() {
+            return Err(super::MbPlanError::MissingEntry { entry_index });
+        }
+        for (key, _) in targets {
+            let child = root
+                .children()
+                .iter()
+                .find(|child| child.offset() == key.outer_offset)
+                .ok_or(super::MbPlanError::MissingEntry { entry_index })?;
+            let locator = super::MbPayloadLocator {
+                form: child
+                    .form_type()
+                    .map(|form| form.to_string())
+                    .unwrap_or_default(),
+                node_offset: key.outer_offset,
+                chunk_start: key.inner_chunk_start,
+            };
+            if !seen.insert(locator.clone()) {
+                return Err(super::MbPlanError::AmbiguousEntry { entry_index });
+            }
+            let inner = &data[child.payload_offset() + 4..child.payload_end()];
+            let parsed =
+                parse_section_chunks_with_hints(inner, super::composite::section_hints(child));
+            let before = parsed
+                .chunks()
+                .iter()
+                .find(|chunk| chunk.chunk_start() == locator.chunk_start)
+                .ok_or_else(|| super::MbPlanError::InvalidLocator(format!("{locator:?}")))?
+                .payload(inner)
+                .to_vec();
+            candidates.push(MbPathCandidatePlan {
+                entry_index,
+                locator,
+                entry: entry.clone(),
+                before,
+                key,
+            });
+        }
+    }
+    candidates.sort_by_key(|candidate| (candidate.entry_index, candidate.locator.clone()));
+    Ok(candidates)
+}
+
+pub fn plan_mb_path_value(
+    data: &[u8],
+    root: &Chunk,
+    candidate: &MbPathCandidatePlan,
+    after: &str,
+) -> Result<Option<super::MbPayloadEdit>, super::MbPlanError> {
+    if after == candidate.entry.value {
+        return Ok(None);
+    }
+    let invalid = || super::MbPlanError::InvalidLocator(format!("{:?}", candidate.locator));
+    let child = root
+        .children()
+        .iter()
+        .find(|child| child.offset() == candidate.locator.node_offset)
+        .ok_or_else(invalid)?;
+    let inner = data
+        .get(child.payload_offset() + 4..child.payload_end())
+        .ok_or_else(invalid)?;
+    let parsed = parse_section_chunks_with_hints(inner, super::composite::section_hints(child));
+    let (index, chunk) = parsed
+        .chunks()
+        .iter()
+        .enumerate()
+        .find(|(_, chunk)| chunk.chunk_start() == candidate.locator.chunk_start)
+        .ok_or_else(invalid)?;
+    let payload = chunk.payload(inner);
+    let rewritten = match candidate.key.origin.as_str() {
+        "rtft" => {
+            let (_, kind, _) = decode_attr_triplet(payload).ok_or_else(invalid)?;
+            rewrite_attr_payload_string_preserving_shape(payload, kind, after)
+                .ok_or_else(invalid)?
+        }
+        "frdi" => replace_path_field_in_frdi_payload_exact(payload, &candidate.key.value, after).0,
+        "fref" => {
+            replace_first_path_field_in_nul_payload_exact(payload, &candidate.key.value, after).0
+        }
+        _ => return Err(invalid()),
+    };
+    if rewritten == payload {
+        return Ok(None);
+    }
+    if !parsed.can_encode_payload(index, rewritten.len()) {
+        // Ask the checked encoder for its precise failure without accepting a fallback.
+        parsed.rewrite_payloads(inner, &[(index, &rewritten)])?;
+        return Err(invalid());
+    }
+    Ok(Some(super::MbPayloadEdit {
+        locator: candidate.locator.clone(),
+        bytes: rewritten,
+    }))
 }
 
 fn same_reference_identity(

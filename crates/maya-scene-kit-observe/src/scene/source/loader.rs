@@ -43,6 +43,7 @@ pub(crate) enum MbParseBudgetMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SceneReadIntent {
     Light,
+    Paths,
     Execution,
     #[default]
     Semantic,
@@ -318,7 +319,8 @@ impl Loader {
                     detected: scene_format,
                 });
             }
-            (_, SceneReadIntent::Light) | (SceneFormat::Ma, SceneReadIntent::Semantic) => None,
+            (_, SceneReadIntent::Light | SceneReadIntent::Paths)
+            | (SceneFormat::Ma, SceneReadIntent::Semantic) => None,
             _ => Some(self.schema_context()?),
         };
         let identity = match reader {
@@ -385,6 +387,36 @@ impl Loader {
         self.observe(SourceInput::from_path_without_retained_ma_bytes(
             path.as_ref(),
         ))
+    }
+
+    pub(crate) fn observe_paths_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ObservationBundle, SceneToolError> {
+        let mut input = SourceInput::from_path_without_retained_ma_bytes(path.as_ref());
+        input.intent = SceneReadIntent::Paths;
+        self.observe(input)
+    }
+
+    /// Acquires one source snapshot and returns its original bytes with its observation.
+    pub fn observe_path_with_bytes(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(ObservationBundle, Vec<u8>), SceneToolError> {
+        let path = path.as_ref();
+        let reader = snapshot::SourceReader::open(path)?;
+        let format = reader.format();
+        let acquired = reader.read(&self.options)?;
+        let mut input = SourceInput::from_path(path);
+        input.bytes = Some(acquired.bytes.clone());
+        let schema = if format == SceneFormat::Mb {
+            Some(self.schema_context()?)
+        } else {
+            None
+        };
+        let observation =
+            ObservationBundle::load(input, format, acquired.identity, &self.options, schema)?;
+        Ok((observation, acquired.bytes))
     }
 
     pub fn observe_bytes(
@@ -482,6 +514,7 @@ impl ExecutionObservationBundle {
 }
 
 pub struct ObservationBundle {
+    source_len: usize,
     scene_path: PathBuf,
     scene_format: SceneFormat,
     validation_state: ValidationState,
@@ -516,6 +549,11 @@ impl ObservationBundle {
         schema_context: Option<&Arc<SchemaContext>>,
     ) -> Result<Self, SceneToolError> {
         let path = input.path;
+        let source_len = input
+            .bytes
+            .as_ref()
+            .expect("source bytes acquired before parsing")
+            .len();
         match scene_format {
             SceneFormat::Ma => {
                 let bytes = Arc::new(input.bytes.expect("source bytes acquired before parsing"));
@@ -545,7 +583,10 @@ impl ObservationBundle {
                     .set(sections)
                     .expect("ma selective sections initialized once");
                 if !input.retain_ma_bytes {
-                    snapshot.release(input.intent == SceneReadIntent::Execution)?;
+                    snapshot.release(matches!(
+                        input.intent,
+                        SceneReadIntent::Execution | SceneReadIntent::Paths
+                    ))?;
                 }
                 let retained_bytes = if input.retain_ma_bytes {
                     let stored = OnceLock::new();
@@ -580,6 +621,7 @@ impl ObservationBundle {
                     }
                 });
                 Ok(Self {
+                    source_len,
                     scene_path: path.to_path_buf(),
                     scene_format,
                     validation_state,
@@ -613,9 +655,9 @@ impl ObservationBundle {
                     Some(validation_state) => validation_state,
                     None => match input.intent {
                         SceneReadIntent::Semantic => session.integrity()?.validation_state,
-                        SceneReadIntent::Light | SceneReadIntent::Execution => {
-                            ValidationState::Partial
-                        }
+                        SceneReadIntent::Light
+                        | SceneReadIntent::Paths
+                        | SceneReadIntent::Execution => ValidationState::Partial,
                     },
                 };
                 let validation_state = if validation_state == ValidationState::Validated
@@ -626,6 +668,7 @@ impl ObservationBundle {
                     validation_state
                 };
                 Ok(Self {
+                    source_len,
                     scene_path: path.to_path_buf(),
                     scene_format,
                     validation_state,
@@ -642,6 +685,29 @@ impl ObservationBundle {
                 detected: scene_format,
             }),
         }
+    }
+
+    pub fn source_fingerprint(
+        &self,
+    ) -> Result<crate::scene::paths::SceneSourceFingerprint, SceneToolError> {
+        Ok(crate::scene::paths::SceneSourceFingerprint {
+            sha256: self.source_snapshot().sha256()?.to_string(),
+            byte_len: self.source_len,
+        })
+    }
+
+    pub fn scene_paths_report(
+        &self,
+        kind: PathKind,
+    ) -> Result<crate::scene::paths::ScenePathsReport, SceneToolError> {
+        Ok(crate::scene::paths::ScenePathsReport {
+            source: Some(self.source_fingerprint()?),
+            kind: Some(kind),
+            scene_path: self.scene_path().to_path_buf(),
+            scene_format: self.scene_format(),
+            validation_state: self.validation_state(),
+            entries: self.scene_paths(kind)?,
+        })
     }
 
     pub(crate) fn source_snapshot(&self) -> &SourceSnapshot {

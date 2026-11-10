@@ -50,6 +50,7 @@ pub(crate) mod public {
         paths::{
             PathKind, ScenePathEntry, ScenePathMeta, ScenePathResolution,
             ScenePathResolutionStatus, ScenePathValueStyle, ScenePathsReport,
+            SceneSourceFingerprint,
         },
         recovery::{
             AngularAttrKind, MbRecoveryBundle, recover_mb_scene,

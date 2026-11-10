@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use maya_scene_kit_edit::scene::{
     ExecutionCleanTarget, MaterializeOptions, PathOwnerDeleteTarget, PathReplaceMode,
-    PathReplaceOverride, PathReplaceRule, clean_execution_targets, collect_raw_chunks,
-    convert_to_maya_ascii, convert_to_maya_ascii_with_options,
+    PathReplaceOverride, PathReplaceRule, SceneEditIntent, SceneEditPlan, clean_execution_targets,
+    collect_raw_chunks, convert_to_maya_ascii, convert_to_maya_ascii_with_options,
     convert_to_maya_ascii_with_report_and_options, preview_clean_execution_targets,
     preview_delete_path_owner_nodes, preview_remove_script_nodes,
     preview_remove_script_nodes_by_name, preview_replace_scene_path_candidates,
@@ -14,7 +14,7 @@ use maya_scene_kit_edit::scene::{
     stage_delete_path_owner_nodes, stage_maya_ascii, stage_remove_script_nodes,
     stage_remove_script_nodes_by_name, stage_replace_scene_paths,
     stage_replace_scene_paths_with_overrides, stage_replace_scene_paths_with_overrides_in_report,
-    stage_scene_edits, stage_scene_edits_in_report_with_bytes,
+    stage_scene_edit_plan, stage_scene_edits,
 };
 use maya_scene_kit_formats::mb::parse_file;
 use maya_scene_kit_observe::scene::{
@@ -23,7 +23,7 @@ use maya_scene_kit_observe::scene::{
     core::{OperationMode, SceneFormat, ValidationState},
     detect_scene_format,
     evidence::ExecutionSourceRange,
-    paths::{PathKind, ScenePathsReport},
+    paths::PathKind,
     scripts::ScriptNodeEntry,
 };
 use serde::Deserialize;
@@ -630,35 +630,20 @@ fn composite_stage_from_replaced_bytes_preserves_replace_overrides() {
             after_value: "textures/spec_replaced.tx".to_string(),
         },
     ];
-    let replaced =
-        stage_replace_scene_paths_with_overrides_in_report(&report, &overrides).expect("replace");
-    let observed = Loader::new(LoadOptions::default())
-        .observe_bytes(
-            &source,
-            report.scene_format,
-            report.validation_state,
-            replaced.artifact.bytes.clone(),
-        )
-        .expect("observe replaced bytes");
-    let current_report = ScenePathsReport {
-        scene_path: observed.scene_path().to_path_buf(),
-        scene_format: observed.scene_format(),
-        validation_state: observed.validation_state(),
-        entries: observed
-            .scene_paths(PathKind::All)
-            .expect("current scene paths"),
+    let plan = SceneEditPlan {
+        report,
+        clean_source: None,
+        intents: overrides
+            .into_iter()
+            .map(SceneEditIntent::Path)
+            .chain([SceneEditIntent::DeleteOwner(PathOwnerDeleteTarget {
+                node_type: "file".to_string(),
+                node_name: "file1".to_string(),
+            })])
+            .collect(),
     };
-
-    let staged = stage_scene_edits_in_report_with_bytes(
-        &current_report,
-        &replaced.artifact.bytes,
-        &[],
-        &[PathOwnerDeleteTarget {
-            node_type: "file".to_string(),
-            node_name: "file1".to_string(),
-        }],
-    )
-    .expect("composite stage");
+    let staged =
+        stage_scene_edit_plan(&plan, &std::fs::read(&source).unwrap()).expect("composite stage");
 
     assert_eq!(staged.preview.deleted_path_owner_targets.len(), 1);
     let output = String::from_utf8(staged.artifact.bytes).expect("utf8");
@@ -1116,8 +1101,14 @@ fn stage_scene_edits_composes_path_delete_before_script_clean_for_ma() {
     )
     .unwrap();
 
+    let clean_source = Loader::new(LoadOptions::default())
+        .observe_path(&source)
+        .unwrap()
+        .source_fingerprint()
+        .unwrap();
     let staged = stage_scene_edits(
         &source,
+        Some(&clean_source),
         &[ExecutionCleanTarget::ScriptNode {
             node_name: "deleteScript".to_string(),
         }],
@@ -1524,8 +1515,20 @@ fn range_clean_composite_ma_original_offsets() {
     }];
     let report = collect_scene_paths(&source, PathKind::All).unwrap();
     for staged in [
-        stage_scene_edits(&source, &targets, &owners),
-        stage_scene_edits_in_report_with_bytes(&report, input.as_bytes(), &targets, &owners),
+        stage_scene_edits(&source, report.source.as_ref(), &targets, &owners),
+        stage_scene_edit_plan(
+            &SceneEditPlan {
+                report: report.clone(),
+                clean_source: report.source.clone(),
+                intents: targets
+                    .iter()
+                    .cloned()
+                    .map(SceneEditIntent::Clean)
+                    .chain(owners.iter().cloned().map(SceneEditIntent::DeleteOwner))
+                    .collect(),
+            },
+            input.as_bytes(),
+        ),
     ] {
         let staged = staged.unwrap();
         assert_eq!(
@@ -1570,8 +1573,20 @@ fn range_clean_composite_mb_original_offsets() {
     let report = collect_scene_paths(&source, PathKind::All).unwrap();
     assert_eq!(report.entries.len(), 1);
     for staged in [
-        stage_scene_edits(&source, &targets, &owners),
-        stage_scene_edits_in_report_with_bytes(&report, &bytes, &targets, &owners),
+        stage_scene_edits(&source, report.source.as_ref(), &targets, &owners),
+        stage_scene_edit_plan(
+            &SceneEditPlan {
+                report: report.clone(),
+                clean_source: report.source.clone(),
+                intents: targets
+                    .iter()
+                    .cloned()
+                    .map(SceneEditIntent::Clean)
+                    .chain(owners.iter().cloned().map(SceneEditIntent::DeleteOwner))
+                    .collect(),
+            },
+            &bytes,
+        ),
     ] {
         let staged = staged.unwrap();
         assert_eq!(

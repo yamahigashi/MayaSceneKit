@@ -69,6 +69,22 @@ pub fn remove_raw_script_nodes_from_ma_by_name(
     (out, removed_names)
 }
 
+pub fn collect_script_node_ranges_from_ma(
+    data: &[u8],
+    target_names: &[String],
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let lines = split_lines_keepends(data);
+    let mut offsets = vec![0];
+    for line in &lines {
+        offsets.push(offsets.last().unwrap() + line.len());
+    }
+    find_script_blocks_in_ma(&lines)
+        .into_iter()
+        .filter(|(_, _, name)| target_names.is_empty() || target_names.contains(name))
+        .map(|(start, end, name)| (offsets[start]..offsets[end], name))
+        .collect()
+}
+
 fn find_script_blocks_in_ma(lines: &[&[u8]]) -> Vec<(usize, usize, String)> {
     let mut blocks = Vec::new();
     let mut i = 0usize;

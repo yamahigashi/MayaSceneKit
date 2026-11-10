@@ -21,7 +21,11 @@ pub(crate) mod public {
             ExecutionCleanPreview, ExecutionCleanResult, ExecutionCleanStageResult,
             ExecutionCleanTarget, clean_target_for_execution_origin,
         },
-        composite_edit::{CompositeSceneEditsPreview, CompositeSceneEditsStageResult},
+        composite_edit::{
+            CompositeSceneEditsPreview, CompositeSceneEditsStageResult, SceneEditChange,
+            SceneEditChanges, SceneEditError, SceneEditIntent, SceneEditLocator, SceneEditPlan,
+            SceneEditStatus, ScenePathEntryChange, ScenePathOutcome,
+        },
         conversion::{
             Confidence, DecodeAttemptResult, DecodeQuality, DecodeQualityDistributionEntry,
             IssueKind, MayaAsciiConversionReport, MayaAsciiDecodeAttempt, MayaAsciiIssue,
@@ -56,7 +60,9 @@ pub use self::{
         OperationMode, PathOwnerDeletePreview, PathOwnerDeleteStageResult, PathOwnerDeleteTarget,
         PathReplaceCandidateItem, PathReplaceCandidatePreview, PathReplaceChanges, PathReplaceMode,
         PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem, PathReplaceResult,
-        PathReplaceRule, PathReplaceStageResult, RawChunkDump, SceneFormat, ScriptNodeCleanPreview,
+        PathReplaceRule, PathReplaceStageResult, RawChunkDump, SceneEditChange, SceneEditChanges,
+        SceneEditError, SceneEditIntent, SceneEditLocator, SceneEditPlan, SceneEditStatus,
+        SceneFormat, ScenePathEntryChange, ScenePathOutcome, ScriptNodeCleanPreview,
         ScriptNodeCleanResult, ScriptNodeCleanStageResult, SemanticProvenance, StagedSceneArtifact,
         UnknownInventoryEntry, ValidationState, clean_target_for_execution_origin,
     },
@@ -323,14 +329,35 @@ pub fn stage_delete_path_owner_nodes(
     )
 }
 
+pub fn stage_scene_edit_plan_with_options(
+    plan: &SceneEditPlan,
+    bytes: &[u8],
+    options: &MaterializeOptions,
+) -> Result<CompositeSceneEditsStageResult, SceneEditError> {
+    PatchPlanner::new(options.clone()).stage_scene_edit_plan(plan, bytes)
+}
+
+pub fn stage_scene_edit_plan(
+    plan: &SceneEditPlan,
+    bytes: &[u8],
+) -> Result<CompositeSceneEditsStageResult, SceneEditError> {
+    stage_scene_edit_plan_with_options(
+        plan,
+        bytes,
+        &MaterializeOptions::default().with_operation_mode(OperationMode::Forensic),
+    )
+}
+
 pub fn stage_scene_edits_with_options(
     input_path: impl AsRef<Path>,
+    clean_source: Option<&maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     clean_targets: &[ExecutionCleanTarget],
     path_owner_delete_targets: &[PathOwnerDeleteTarget],
     options: &MaterializeOptions,
-) -> Result<CompositeSceneEditsStageResult, SceneToolError> {
+) -> Result<CompositeSceneEditsStageResult, SceneEditError> {
     PatchPlanner::new(options.clone()).stage_scene_edits(
         input_path,
+        clean_source,
         clean_targets,
         path_owner_delete_targets,
     )
@@ -338,41 +365,13 @@ pub fn stage_scene_edits_with_options(
 
 pub fn stage_scene_edits(
     input_path: impl AsRef<Path>,
+    clean_source: Option<&maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     clean_targets: &[ExecutionCleanTarget],
     path_owner_delete_targets: &[PathOwnerDeleteTarget],
-) -> Result<CompositeSceneEditsStageResult, SceneToolError> {
+) -> Result<CompositeSceneEditsStageResult, SceneEditError> {
     stage_scene_edits_with_options(
         input_path,
-        clean_targets,
-        path_owner_delete_targets,
-        &MaterializeOptions::default().with_operation_mode(OperationMode::Forensic),
-    )
-}
-
-pub fn stage_scene_edits_in_report_with_bytes_with_options(
-    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
-    bytes: &[u8],
-    clean_targets: &[ExecutionCleanTarget],
-    path_owner_delete_targets: &[PathOwnerDeleteTarget],
-    options: &MaterializeOptions,
-) -> Result<CompositeSceneEditsStageResult, SceneToolError> {
-    PatchPlanner::new(options.clone()).stage_scene_edits_in_report_with_bytes(
-        report,
-        bytes,
-        clean_targets,
-        path_owner_delete_targets,
-    )
-}
-
-pub fn stage_scene_edits_in_report_with_bytes(
-    report: &maya_scene_kit_observe::scene::paths::ScenePathsReport,
-    bytes: &[u8],
-    clean_targets: &[ExecutionCleanTarget],
-    path_owner_delete_targets: &[PathOwnerDeleteTarget],
-) -> Result<CompositeSceneEditsStageResult, SceneToolError> {
-    stage_scene_edits_in_report_with_bytes_with_options(
-        report,
-        bytes,
+        clean_source,
         clean_targets,
         path_owner_delete_targets,
         &MaterializeOptions::default().with_operation_mode(OperationMode::Forensic),

@@ -1,3 +1,8 @@
+mod composite;
+pub use composite::{
+    MbOriginalEdits, MbPayloadEdit, MbPayloadLocator, MbPlanError, apply_mb_original_edits,
+    collect_mb_plugin_require_records, locate_mb_path_owner_forms, validate_mb_original_edits,
+};
 mod attr_payload;
 mod path_rewrite;
 
@@ -5,7 +10,8 @@ pub(crate) use maya_mb::{encode_chunk, encode_root_chunk};
 
 pub(crate) use self::attr_payload::rewrite_attr_payload_string_preserving_shape;
 pub use self::path_rewrite::{
-    MbPathReplaceRule, replace_scene_paths_in_mb, replace_scene_paths_in_mb_by_index,
+    MbPathCandidatePlan, MbPathReplaceRule, collect_mb_path_candidates, plan_mb_path_value,
+    replace_scene_paths_in_mb, replace_scene_paths_in_mb_by_index,
     replace_scene_paths_in_mb_by_index_cow, replace_scene_paths_in_mb_cow,
 };
 

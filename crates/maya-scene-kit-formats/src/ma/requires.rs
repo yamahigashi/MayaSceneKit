@@ -56,6 +56,25 @@ pub fn remove_plugin_requires_from_ma(
     (rewritten, removed)
 }
 
+pub fn collect_plugin_require_ranges_from_ma(
+    data: &[u8],
+    target_rendered: &[String],
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let targets = target_rendered
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>();
+    extract_require_entries_from_ma(data)
+        .into_iter()
+        .filter(|entry| {
+            entry.kind == RawMaRequireKind::Plugin
+                && (targets.is_empty() || targets.contains(entry.rendered.as_str()))
+        })
+        .map(|entry| (entry.start..entry.end, entry.rendered))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{extract_require_entries_from_ma, remove_plugin_requires_from_ma};

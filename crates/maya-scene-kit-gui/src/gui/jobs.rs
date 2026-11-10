@@ -812,6 +812,7 @@ impl GuiShell {
                 shell.rows[index].dump_report = dump_report;
                 shell.rows[index].analyzed_audit_mode = Some(audit_mode);
                 shell.rows[index].pending_clean_targets.clear();
+                shell.rows[index].pending_clean_source = None;
                 shell.rows[index].path_overrides.clear();
                 shell.rows[index].replace_preview = None;
                 shell.rows[index].replace_changes = None;
@@ -852,6 +853,7 @@ impl GuiShell {
                 shell.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
             }
             RowJobResult::SceneEdits {
+                clean_source,
                 replace_changes,
                 audit_plan_fingerprint,
                 staged,
@@ -886,6 +888,8 @@ impl GuiShell {
                 });
                 shell.rows[index].pending_clean_targets =
                     staged.preview.cleaned_targets.iter().cloned().collect();
+                shell.rows[index].pending_clean_source = clean_source
+                    .filter(|_| !shell.rows[index].pending_clean_targets.is_empty());
                 shell.rows[index].pending_path_owner_delete_targets = staged
                     .preview
                     .deleted_path_owner_targets
@@ -942,6 +946,7 @@ impl GuiShell {
                 }
             }
             RowJobResult::Save {
+                saved_paths_report,
                 output_path,
                 audit_file_state,
                 replace_changes,
@@ -951,16 +956,7 @@ impl GuiShell {
                 if let Some(preview) = replace_preview { shell.rows[index].replace_preview = Some(preview); }
                 shell.prune_edit_history_for_row_ids(&[row_id]);
                 let dirty_kind = shell.rows[index].dirty_kind;
-                if dirty_kind == Some(DirtyKind::Replace) {
-                    let overrides = shell.rows[index].replace_preview.as_ref().map_or_else(
-                        || shell.rows[index].path_overrides.clone(),
-                        |preview| preview.items.iter().filter(|item| item.replacement_count > 0)
-                            .map(|item| (item.entry_index, item.after_value.clone())).collect(),
-                    );
-                    if let Some(report) = shell.rows[index].paths_report.as_mut() {
-                        apply_path_overrides_to_report(report, &overrides);
-                    }
-                } else if dirty_kind == Some(DirtyKind::SceneEdits) {
+                if dirty_kind == Some(DirtyKind::SceneEdits) {
                     if shell.rows[index].staged_audit_plan_fingerprint.as_deref()
                         == Some(shell.audit_plan_fingerprint.as_str())
                     {
@@ -982,10 +978,14 @@ impl GuiShell {
                         shell.rows[index].dump_report = Some(report);
                     }
                 }
+                if let Some(report) = saved_paths_report {
+                    shell.rows[index].paths_report = Some(report);
+                }
                 shell.rows[index].dirty_artifact = None;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].dirty_kind = None;
                 shell.rows[index].pending_clean_targets.clear();
+                shell.rows[index].pending_clean_source = None;
                 shell.rows[index].pending_path_owner_delete_targets.clear();
                 shell.rows[index].path_overrides.clear();
                 shell.rows[index].replace_preview = None;
@@ -1553,9 +1553,20 @@ impl GuiShell {
                             .ok_or_else(|| "missing staged artifact for save".to_string())?,
                         None => return Err("missing dirty kind for save".to_string()),
                     };
+                    let saved_paths_report = if dirty_kind == Some(DirtyKind::ToAscii) {
+                        None
+                    } else {
+                        Some(Loader::new(options.load_options().clone())
+                            .observe_bytes(&path, artifact.scene_format,
+                                maya_scene_kit_observe::scene::ValidationState::CopiedUnvalidated,
+                                artifact.bytes.clone())
+                            .and_then(|observation| observation.scene_paths_report(PathKind::All))
+                            .map_err(|error| error.to_string())?)
+                    };
                     save_staged_artifact_with_backup(&artifact, &path, backup_location)
                         .map_err(|err| err.to_string())?;
                     Ok(RowJobResult::Save {
+                        saved_paths_report,
                         replace_changes,
                         replace_preview,
                         audit_file_state: GuiFileState::read(&path).ok(),

@@ -1136,6 +1136,7 @@ impl GuiShell {
                     row.staged_dump_report = None;
                     row.staged_source_bytes = None;
                     row.pending_clean_targets.clear();
+                    row.pending_clean_source = None;
                     row.pending_path_owner_delete_targets.clear();
                     row.clean_preview = None;
                     row.path_owner_delete_preview = None;
@@ -1355,6 +1356,7 @@ impl GuiShell {
                 row.ascii_report = None;
                 row.path_owner_delete_preview = None;
                 row.pending_clean_targets.clear();
+                row.pending_clean_source = None;
                 row.pending_path_owner_delete_targets.clear();
                 row.staged_audit_mode = None;
                 row.staged_audit_report = None;
@@ -1383,6 +1385,7 @@ impl GuiShell {
                 row.ascii_report = None;
                 row.path_owner_delete_preview = None;
                 row.pending_clean_targets.clear();
+                row.pending_clean_source = None;
                 row.pending_path_owner_delete_targets.clear();
                 row.staged_audit_mode = None;
                 row.staged_audit_report = None;
@@ -1457,6 +1460,7 @@ impl GuiShell {
         row.clean_preview = None;
         row.path_owner_delete_preview = None;
         row.pending_clean_targets.clear();
+        row.pending_clean_source = None;
         row.pending_path_owner_delete_targets.clear();
         row.staged_audit_mode = None;
         row.staged_audit_report = None;
@@ -1499,7 +1503,10 @@ impl GuiShell {
             return;
         }
 
-        if clean_targets.is_empty() && path_owner_delete_targets.is_empty() {
+        if clean_targets.is_empty()
+            && path_owner_delete_targets.is_empty()
+            && self.rows[row_index].path_overrides.is_empty()
+        {
             self.clear_staged_scene_edits_for_row(row_index, cx);
             if let Some(edit_sequence) = edit_sequence {
                 let row_id = self.rows[row_index].id;
@@ -1520,15 +1527,9 @@ impl GuiShell {
         let audit_mode = self.rows[row_index]
             .analyzed_audit_mode
             .unwrap_or(self.state.audit_mode);
-        let base_report = self.rows[row_index].display_paths_report().cloned();
+        let base_report = self.rows[row_index].paths_report.clone();
         let path_overrides = self.rows[row_index].path_overrides.clone();
-        let replace_artifact = self.rows[row_index].dirty_artifact.clone();
-        let replace_changes = if path_overrides.is_empty() {
-            None
-        } else {
-            self.rows[row_index].replace_changes.clone()
-        };
-        let replace_artifact_current = self.rows[row_index].replace_artifact_is_current();
+        let clean_source = self.rows[row_index].clean_source_for_targets(&clean_targets);
         let clean_targets = clean_targets.into_iter().collect::<Vec<_>>();
         let path_owner_delete_targets = path_owner_delete_targets.into_iter().collect::<Vec<_>>();
         let materialize_options = self.scene_materialize_options(OperationMode::Forensic);
@@ -1545,64 +1546,60 @@ impl GuiShell {
             window,
             cx,
             move |path| {
-                let mut replace_changes = replace_changes;
-                let staged = if path_overrides.is_empty() {
-                    stage_scene_edits_with_options(
-                        &path,
-                        &clean_targets,
-                        &path_owner_delete_targets,
-                        &materialize_options,
-                    )
-                    .map_err(|err| err.to_string())?
-                } else {
-                    let base_report = base_report
-                        .clone()
-                        .ok_or_else(|| "missing path report for scene edits".to_string())?;
-                    let replace_overrides =
-                        replace_overrides_for_row_from_map(&base_report, &path_overrides)?;
-                    let replace_bytes = if replace_artifact_current {
-                        replace_artifact
-                            .clone()
-                            .ok_or_else(|| {
-                                "missing staged replace artifact for scene edits".to_string()
-                            })?
-                            .bytes
-                    } else {
-                        let replaced =
-                            stage_replace_scene_paths_with_overrides_in_report_with_options(
-                                &base_report,
-                                &replace_overrides,
-                                &materialize_options,
-                            )
-                            .map_err(|err| err.to_string())?;
-                        replace_changes = Some(replaced.changes);
-                        replaced.artifact.bytes
-                    };
-                    let observation = Loader::new(load_options.clone())
-                        .observe_bytes(
-                            &path,
-                            base_report.scene_format,
-                            base_report.validation_state,
-                            replace_bytes.clone(),
-                        )
-                        .map_err(|err| err.to_string())?;
-                    let current_report = ScenePathsReport {
-                        scene_path: observation.scene_path().to_path_buf(),
-                        scene_format: observation.scene_format(),
-                        validation_state: observation.validation_state(),
-                        entries: observation
-                            .scene_paths(PathKind::All)
-                            .map_err(|err| err.to_string())?,
-                    };
-                    stage_scene_edits_in_report_with_bytes_with_options(
-                        &current_report,
-                        &replace_bytes,
-                        &clean_targets,
-                        &path_owner_delete_targets,
-                        &materialize_options,
-                    )
-                    .map_err(|err| err.to_string())?
+                let clean_source = clean_source?;
+                let (observation, original_bytes) = Loader::new(load_options.clone())
+                    .observe_path_with_bytes(&path)
+                    .map_err(|err| err.to_string())?;
+                let base_report = match &base_report {
+                    Some(report) => report.clone(),
+                    None if path_overrides.is_empty() => observation
+                        .scene_paths_report(PathKind::All)
+                        .map_err(|err| err.to_string())?,
+                    None => return Err("missing original path report for scene edits".into()),
                 };
+                let acquired_source = observation
+                    .source_fingerprint()
+                    .map_err(|err| err.to_string())?;
+                let report_source = base_report
+                    .source
+                    .as_ref()
+                    .ok_or_else(|| "missing original path observation fingerprint".to_string())?;
+                if report_source != &acquired_source {
+                    return Err("path observation does not match the original scene bytes".into());
+                }
+                if !clean_targets.is_empty() && clean_source.is_none() {
+                    return Err("missing original clean observation fingerprint".into());
+                }
+                if clean_source
+                    .as_ref()
+                    .is_some_and(|source| source != &acquired_source)
+                {
+                    return Err("clean observation does not match the original scene bytes".into());
+                }
+                let replace_overrides =
+                    replace_overrides_for_row_from_map(&base_report, &path_overrides)?;
+                let edit_plan = SceneEditPlan {
+                    report: base_report,
+                    clean_source: clean_source.clone(),
+                    intents: replace_overrides
+                        .into_iter()
+                        .map(SceneEditIntent::Path)
+                        .chain(clean_targets.into_iter().map(SceneEditIntent::Clean))
+                        .chain(
+                            path_owner_delete_targets
+                                .into_iter()
+                                .map(SceneEditIntent::DeleteOwner),
+                        )
+                        .collect(),
+                };
+                let staged = stage_scene_edit_plan_with_options(
+                    &edit_plan,
+                    &original_bytes,
+                    &materialize_options,
+                )
+                .map_err(|err| err.to_string())?;
+                let replace_changes =
+                    (!path_overrides.is_empty()).then(|| staged.changes.path_replacements.clone());
                 let staged_source_bytes = staged.artifact.bytes.clone();
                 let analyzed = analyze_row_bytes_with_options(
                     &path,
@@ -1620,6 +1617,7 @@ impl GuiShell {
                     "parse budget exceeded while rebuilding dump preview".to_string()
                 })?;
                 Ok(RowJobResult::SceneEdits {
+                    clean_source,
                     replace_changes,
                     audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
                     staged,

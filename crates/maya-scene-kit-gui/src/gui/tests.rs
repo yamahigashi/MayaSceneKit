@@ -45,6 +45,67 @@ use maya_scene_kit_observe::scene::{
 };
 use tempfile::tempdir;
 
+#[gpui::test]
+fn composed_length_changing_replace_cleans_original_command_only(cx: &mut TestAppContext) {
+    let dir = tempdir().expect("temporary directory");
+    let scene = dir.path().join("TestScene.ma");
+    let before = "asset/example/a.fbx";
+    let after = "asset/example/longer_name.fbx";
+    let command = "python(\"print('Example')\");";
+    let source = format!(
+        "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode file -n \"ExampleFile\";\nsetAttr \".ftn\" -type \"string\" \"{before}\";\n{command}\ncreateNode transform -n \"ExampleTransform\";\n"
+    );
+    fs::write(&scene, &source).unwrap();
+    let mut row = observed_test_row(1, &scene);
+    let target = row
+        .audit_report
+        .as_ref()
+        .unwrap()
+        .surfaces
+        .iter()
+        .find_map(|surface| {
+            (surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelCommand)
+                .then(|| clean_target_for_execution_origin(&surface.origin))
+                .flatten()
+        })
+        .unwrap();
+    let entry_index = row
+        .paths_report
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|entry| entry.value == before)
+        .unwrap();
+    row.path_overrides.insert(entry_index, after.into());
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.replace_rows(vec![row]);
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([target]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        shell.spawn_save_jobs(vec![0], window, cx);
+    });
+    visual_cx.run_until_parked();
+    assert_eq!(
+        fs::read_to_string(scene).unwrap(),
+        source.replace(before, after).replace(command, "")
+    );
+}
+
 use super::{
     AuditDetailCodeState, AuditDetailDialogState, AuditDetailField, AuditDetailFieldKind,
     AuditDetailTab, AuditResultItemKind, AuditResultRow, AuditResultRowKey, AuditRowCleanState,
@@ -57,8 +118,7 @@ use super::{
     PathTableSort, PathTypeFilter, ReplaceDialogPreviewSignature, ReplaceDialogPreviewState,
     ReplaceDialogSort, ReplaceDialogSortKey, ReplaceDialogState, RowJobResult, RowOperation,
     SceneRow, TableSelectAll, analyze_row, analyze_row_bytes_with_options,
-    analyze_row_with_options, apply_path_overrides_to_report, apply_persisted_column_widths,
-    audit_context_menu_state,
+    analyze_row_with_options, apply_persisted_column_widths, audit_context_menu_state,
     audit_detail_dialog::OfferInput,
     audit_table_columns, backup_file_name, build_app_menus, build_audit_clipboard_payload,
     build_audit_result_rows, build_audit_table_model, build_file_copy_payload,
@@ -198,6 +258,298 @@ fn sample_audited_snapshot(path_name: &str) -> AuditedSceneSnapshot {
     let report = audit_script_nodes_with_options(&scene_path, &plan, &load_options, options)
         .expect("audit sample scene");
     AuditedSceneSnapshot::new(report, options, plan_fingerprint).expect("sample audit snapshot")
+}
+
+fn observed_test_row(id: u64, path: &Path) -> SceneRow {
+    let mut row = test_row(id, path);
+    let RowJobResult::Analyze(result) =
+        analyze_row(path, AuditModePreference::StrictDefault).expect("observe test source")
+    else {
+        panic!("expected analysis");
+    };
+    row.set_audit_report(Some(result.audit_report), result.audit_file_state);
+    row.paths_report = result.paths_report;
+    row.dump_report = result.dump_report;
+    row
+}
+
+fn pending_clean_reanalysis_case(cx: &mut TestAppContext, binary: bool) {
+    fn chunk(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = tag.to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes.resize(bytes.len().next_multiple_of(4), 0);
+        bytes
+    }
+    fn form(kind: &[u8; 4], parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = kind.to_vec();
+        for part in parts {
+            payload.extend_from_slice(part);
+        }
+        chunk(b"FOR4", &payload)
+    }
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(if binary {
+        "TestScene.mb"
+    } else {
+        "TestScene.ma"
+    });
+    let source = if binary {
+        form(
+            b"Maya",
+            &[
+                form(
+                    b"SCRP",
+                    &[
+                        chunk(b"CREA", b"Example\0"),
+                        chunk(b"STR ", b"b\0\0python(\"print('Example')\");\0"),
+                    ],
+                ),
+                form(
+                    b"RTFT",
+                    &[
+                        chunk(b"CREA", b"FileNode\0"),
+                        chunk(b"STR ", b"ftn\0\0asset/example/file.tx\0"),
+                    ],
+                ),
+            ],
+        )
+    } else {
+        b"//Maya ASCII 2026 scene\npython(\"print('Example')\");\ncreateNode file -n \"FileNode\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\n".to_vec()
+    };
+    fs::write(&path, &source).unwrap();
+    let row = observed_test_row(1, &path);
+    let target = row
+        .audit_report
+        .as_ref()
+        .unwrap()
+        .surfaces
+        .iter()
+        .find_map(|surface| {
+            let target = clean_target_for_execution_origin(&surface.origin)?;
+            match &target {
+                ExecutionCleanTarget::MbOwnerForm { form, .. } if binary && form == "SCRP" => {
+                    Some(target)
+                }
+                ExecutionCleanTarget::TopLevelCommand { .. } if !binary => Some(target),
+                _ => None,
+            }
+        })
+        .expect("audit-derived clean target");
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.replace_rows(vec![row]);
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([target.clone()]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    let original_artifact = shell.read_with(visual_cx, |shell, _| {
+        assert_eq!(
+            shell.rows[0].pending_clean_targets,
+            BTreeSet::from([target.clone()])
+        );
+        shell.rows[0]
+            .dirty_artifact
+            .clone()
+            .expect("staged original clean")
+    });
+    let mut changed = source.clone();
+    for start in (0..source.len().saturating_sub(6))
+        .filter(|start| &source[*start..*start + 7] == b"Example")
+    {
+        changed[start..start + 7].copy_from_slice(b"SampleX");
+    }
+    assert_eq!(source.len(), changed.len());
+    assert_ne!(source, changed);
+    fs::write(&path, &changed).unwrap();
+    let RowJobResult::Analyze(analysis) =
+        analyze_row(&path, AuditModePreference::StrictDefault).unwrap()
+    else {
+        panic!("analysis result");
+    };
+    shell.update_in(visual_cx, |shell, window, cx| {
+        let row = &mut shell.rows[0];
+        row.set_audit_report(Some(analysis.audit_report), analysis.audit_file_state);
+        row.paths_report = analysis.paths_report;
+        row.dump_report = analysis.dump_report;
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([target]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(reason) if reason.contains("clean observation")));
+        assert!(matches!(&shell.status_message, Some(BannerMessage::Raw(reason)) if reason.contains("clean observation")));
+        assert_eq!(shell.rows[0].dirty_artifact.as_ref(), Some(&original_artifact));
+    });
+    assert_eq!(fs::read(path).unwrap(), changed);
+}
+
+#[gpui::test]
+fn pending_ascii_clean_keeps_its_source_after_reanalysis(cx: &mut TestAppContext) {
+    pending_clean_reanalysis_case(cx, false);
+}
+
+#[gpui::test]
+fn pending_binary_clean_keeps_its_source_after_reanalysis(cx: &mut TestAppContext) {
+    pending_clean_reanalysis_case(cx, true);
+}
+
+#[gpui::test]
+fn replace_save_refreshes_path_source_without_auto_analysis(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    fs::write(&path, b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\ncreateNode file -n \"Sample\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/other.tx\";\n").unwrap();
+    let mut row = observed_test_row(1, &path);
+    let report = row.paths_report.as_ref().unwrap();
+    let value = PathReplaceOverride {
+        entry_index: 0,
+        before_value: report.entries[0].value.clone(),
+        after_value: "asset/example/longer_file.tx".into(),
+    };
+    let staged = maya_scene_kit_edit::scene::stage_replace_scene_paths_with_overrides_in_report(
+        report,
+        std::slice::from_ref(&value),
+    )
+    .unwrap();
+    row.path_overrides.insert(0, value.after_value);
+    row.dirty_kind = Some(DirtyKind::Replace);
+    row.dirty_artifact = Some(staged.artifact);
+    row.replace_preview = Some(staged.preview);
+    row.replace_changes = Some(staged.changes);
+    row.replace_generation = 1;
+    row.replace_artifact_generation = Some(1);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.replace_rows(vec![row]);
+        shell.spawn_save_jobs(vec![0], window, cx);
+    });
+    visual_cx.run_until_parked();
+    let saved_report = collect_scene_paths(&path, PathKind::All).unwrap();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert_eq!(
+            shell.rows[0].paths_report.as_ref().unwrap().source,
+            saved_report.source
+        );
+        assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::new(),
+            BTreeSet::from([PathOwnerDeleteTarget {
+                node_type: "file".into(),
+                node_name: "Example".into(),
+            }]),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        assert!(
+            shell.rows[0]
+                .staged_paths_report
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.node_name != "Example")
+        );
+    });
+}
+
+#[gpui::test]
+fn scene_edit_save_after_audit_plan_change_allows_path_only_composition(cx: &mut TestAppContext) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("TestScene.ma");
+    let source = "//Maya ASCII 2026 scene\npython(\"print('Example')\");\ncreateNode file -n \"Sample\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\n";
+    fs::write(&path, source).unwrap();
+    let row = observed_test_row(1, &path);
+    let target = row
+        .audit_report
+        .as_ref()
+        .unwrap()
+        .surfaces
+        .iter()
+        .find_map(|surface| {
+            (surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelCommand)
+                .then(|| clean_target_for_execution_origin(&surface.origin))
+                .flatten()
+        })
+        .unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state.workspace_auto_analyze = false;
+        shell.state.analysis_cache_enabled = false;
+        shell.replace_rows(vec![row]);
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::from([target]),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+        shell.audit_plan_fingerprint = "ExampleChangedPlan".into();
+        shell.spawn_save_jobs(vec![0], window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+        shell.rows[0]
+            .path_overrides
+            .insert(0, "asset/example/longer_file.tx".into());
+        shell.stage_scene_edits_for_row(
+            0,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            ResultTab::Paths,
+            None,
+            false,
+            window,
+            cx,
+        );
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        let row = &shell.rows[0];
+        assert_eq!(row.dirty_kind, Some(DirtyKind::SceneEdits));
+        assert_eq!(
+            row.dirty_artifact.as_ref().unwrap().bytes,
+            source
+                .replace("python(\"print('Example')\");", "")
+                .replace("asset/example/file.tx", "asset/example/longer_file.tx")
+                .as_bytes()
+        );
+    });
 }
 
 fn display_audit_rows(rows: Vec<AuditResultRow>) -> Vec<super::AuditTableRow> {
@@ -605,12 +957,16 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
 
     let staged = match maya_scene_kit_edit::scene::stage_scene_edits_with_options(
         scene,
+        row.paths_report
+            .as_ref()
+            .and_then(|report| report.source.as_ref()),
         &clean_targets.into_iter().collect::<Vec<_>>(),
         &[],
         &options,
     ) {
         Ok(staged) => staged,
         Err(_) => CompositeSceneEditsStageResult {
+            changes: Default::default(),
             preview: maya_scene_kit_edit::scene::CompositeSceneEditsPreview {
                 input_path: scene.to_path_buf(),
                 scene_format: SceneFormat::Ma,
@@ -650,6 +1006,10 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
     let staged_dump_report = analyzed.dump_report.expect("staged dump");
 
     RowJobResult::SceneEdits {
+        clean_source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         replace_changes: None,
         audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
         staged,
@@ -1031,6 +1391,7 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    saved_paths_report: None,
                     replace_changes: None,
                     replace_preview: None,
                     audit_file_state: None,
@@ -1130,6 +1491,7 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    saved_paths_report: None,
                     replace_changes: None,
                     replace_preview: None,
                     audit_file_state: None,
@@ -1426,6 +1788,7 @@ fn scene_edit_clean_undo_restores_findings_count_and_findings_filter(cx: &mut Te
 
             row.set_audit_report(Some(result.audit_report), result.audit_file_state);
             row.dump_report = result.dump_report;
+            row.paths_report = result.paths_report;
             row.findings = original_findings;
             shell.rows = vec![row];
             shell.refresh_file_table(cx);
@@ -1648,6 +2011,7 @@ fn save_prunes_only_affected_row_history(cx: &mut TestAppContext) {
                 1,
                 RowOperation::Save,
                 RowJobResult::Save {
+                    saved_paths_report: None,
                     replace_changes: None,
                     replace_preview: None,
                     audit_file_state: None,
@@ -1766,28 +2130,6 @@ fn scene_row_dirty_when_path_overrides_exist_without_artifact() {
 
     assert!(row.dirty());
     assert!(!row.replace_artifact_is_current());
-}
-
-#[test]
-fn apply_path_overrides_to_report_updates_entry_values() {
-    let dir = tempdir().expect("tmpdir");
-    let scene = dir.path().join("scene.ma");
-    fs::write(
-        &scene,
-        concat!(
-            "//Maya ASCII 2026 scene\n",
-            "createNode file -n \"file1\";\n",
-            "    setAttr \".ftn\" -type \"string\" \"textures/diffuse.tx\";\n",
-        ),
-    )
-    .expect("write scene");
-
-    let mut report = collect_scene_paths(&scene, PathKind::All).expect("paths");
-    let overrides = BTreeMap::from([(0usize, "textures/edited.tx".to_string())]);
-
-    apply_path_overrides_to_report(&mut report, &overrides);
-
-    assert_eq!(report.entries[0].value, "textures/edited.tx");
 }
 
 #[test]
@@ -6400,9 +6742,9 @@ fn path_context_undo_delete_owner_targets_clear_all_selected_rows_in_same_file(
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
+            let mut row = observed_test_row(1, &scene);
             row.selected = true;
-            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             shell.rows = vec![row];
             shell.selected_path_rows = BTreeSet::from([vec![(1, 0)], vec![(1, 1)]]);
 
@@ -6447,9 +6789,9 @@ fn path_context_delete_owner_targets_stage_all_selected_entries_in_same_file(
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
+            let mut row = observed_test_row(1, &scene);
             row.selected = true;
-            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             shell.rows = vec![row];
             shell.selected_path_rows = BTreeSet::from([vec![(1, 0)], vec![(1, 1)]]);
 
@@ -6494,9 +6836,9 @@ fn path_context_delete_owner_targets_stage_only_clicked_entry_outside_selection(
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
+            let mut row = observed_test_row(1, &scene);
             row.selected = true;
-            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             shell.rows = vec![row];
             shell.selected_path_rows = BTreeSet::from([vec![(1, 1)]]);
 
@@ -6533,9 +6875,9 @@ fn path_context_undo_delete_owner_preserves_other_scene_edits(cx: &mut TestAppCo
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
+            let mut row = observed_test_row(1, &scene);
             row.selected = true;
-            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             shell.rows = vec![row];
 
             shell.stage_scene_edits_for_row(
@@ -6917,11 +7259,11 @@ fn file_context_delete_ui_configuration_script_node_skips_non_matching_selected_
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut eligible_row = test_row(1, &eligible_scene);
+            let mut eligible_row = observed_test_row(1, &eligible_scene);
             eligible_row.selected = true;
             eligible_row.dump_report = result.dump_report.clone();
 
-            let mut blocked_row = test_row(2, &blocked_scene);
+            let mut blocked_row = observed_test_row(2, &blocked_scene);
             blocked_row.selected = true;
 
             shell.rows = vec![eligible_row, blocked_row];
@@ -7014,7 +7356,7 @@ fn menu_delete_ui_configuration_script_node_stages_scene_edits(cx: &mut TestAppC
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
+            let mut row = observed_test_row(1, &scene);
             row.selected = true;
             shell.rows = vec![row];
             shell.rebuild_row_id_index();
@@ -7064,10 +7406,10 @@ fn file_context_delete_ui_configuration_script_node_from_unselected_row_targets_
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row_a = test_row(1, &scene_a);
+            let mut row_a = observed_test_row(1, &scene_a);
             row_a.selected = true;
             row_a.dump_report = result_a.dump_report.clone();
-            let mut row_b = test_row(2, &scene_b);
+            let mut row_b = observed_test_row(2, &scene_b);
             row_b.dump_report = result_b.dump_report.clone();
             shell.rows = vec![row_a, row_b];
             shell.rebuild_row_id_index();
@@ -7112,10 +7454,10 @@ fn file_context_delete_ui_configuration_script_node_from_selected_row_targets_se
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row_a = test_row(1, &scene_a);
+            let mut row_a = observed_test_row(1, &scene_a);
             row_a.selected = true;
             row_a.dump_report = result_a.dump_report.clone();
-            let mut row_b = test_row(2, &scene_b);
+            let mut row_b = observed_test_row(2, &scene_b);
             row_b.selected = true;
             row_b.dump_report = result_b.dump_report.clone();
             shell.rows = vec![row_a, row_b];
@@ -7161,10 +7503,10 @@ fn file_context_delete_ui_configuration_script_node_skips_processing_rows(cx: &m
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row_a = test_row(1, &scene_a);
+            let mut row_a = observed_test_row(1, &scene_a);
             row_a.selected = true;
             row_a.dump_report = result_a.dump_report.clone();
-            let mut row_b = test_row(2, &scene_b);
+            let mut row_b = observed_test_row(2, &scene_b);
             row_b.selected = true;
             row_b.dump_report = result_b.dump_report.clone();
             row_b.busy = Some((RowOperation::Analyze, 0));
@@ -7217,10 +7559,10 @@ fn menu_delete_ui_configuration_script_node_skips_rows_without_the_node(cx: &mut
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row_with = test_row(1, &scene_with);
+            let mut row_with = observed_test_row(1, &scene_with);
             row_with.selected = true;
             row_with.dump_report = result_with.dump_report.clone();
-            let mut row_without = test_row(2, &scene_without);
+            let mut row_without = observed_test_row(2, &scene_without);
             row_without.selected = true;
             row_without.dump_report = result_without.dump_report.clone();
             shell.rows = vec![row_with, row_without];
@@ -7601,9 +7943,9 @@ fn convert_workspace_relative_preserves_owner_delete_staging_on_other_rows(
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
-            let mut row = test_row(1, &scene);
+            let mut row = observed_test_row(1, &scene);
             row.selected = true;
-            row.paths_report = Some(collect_scene_paths(&scene, PathKind::File).expect("paths"));
+            row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             row.pending_path_owner_delete_targets = BTreeSet::from([PathOwnerDeleteTarget {
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
@@ -7748,6 +8090,8 @@ fn build_path_table_model_marks_mb_rows_without_trace_as_not_owner_deletable() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(ScenePathsReport {
+        source: None,
+        kind: Some(PathKind::All),
         scene_path: scene.clone(),
         scene_format: SceneFormat::Mb,
         validation_state: ValidationState::Validated,
@@ -10906,6 +11250,7 @@ fn audit_detail_fix_save_promotion_records_file_state(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                saved_paths_report: None,
                 replace_changes: None,
                 replace_preview: None,
                 output_path: path.clone(),
@@ -11781,7 +12126,7 @@ mod allowlist_tests {
             assert!(shell.rows[1].apply_edit_state(&edit_state).is_ok());
             assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             let audit_generation = shell.rows[1].audit_generation;
-            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { replace_changes: None, replace_preview: None,
+            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { saved_paths_report: None, replace_changes: None, replace_preview: None,
                 output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
             }, None, window, cx);
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
@@ -11960,6 +12305,8 @@ fn check_path_override_failure(cx: &mut TestAppContext, pending: bool) {
         shell.update(app, |shell, cx| {
             let mut first = SceneRow::new_unloaded_row(1);
             first.paths_report = Some(super::ScenePathsReport {
+                source: None,
+                kind: Some(PathKind::All),
                 entries: Vec::new(),
                 scene_path: "asset/example/TestScene.ma".into(),
                 scene_format: maya_scene_kit_observe::scene::SceneFormat::Ma,
@@ -12634,6 +12981,7 @@ fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
             1,
             RowOperation::Save,
             RowJobResult::Save {
+                saved_paths_report: None,
                 replace_changes: None,
                 replace_preview: None,
                 output_path: path.clone(),
@@ -13378,7 +13726,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.deliver_job_result_for_test(
             1,
             RowOperation::Save,
-            RowJobResult::Save { replace_changes: None, replace_preview: None,
+            RowJobResult::Save { saved_paths_report: None, replace_changes: None, replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: None,
             },
@@ -13391,7 +13739,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.apply_job_result(
             (1, save_job_id),
             RowOperation::Save,
-            RowJobResult::Save { replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
+            RowJobResult::Save { saved_paths_report: None, replace_changes: None, replace_preview: None, output_path: path.clone(), audit_file_state: None },
             None, window, cx,
         );
         assert!(shell.rows[0].busy == Some((RowOperation::ToAscii, ascii_job_id)));
@@ -13796,6 +14144,7 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
         assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
         let preview = shell.rows[0].replace_preview.clone();
         shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save {
+                    saved_paths_report: None,
             replace_changes: Some(expected.clone()),
             replace_preview: preview,
             output_path: directory.path().join("Sample.ma"),
@@ -13830,7 +14179,7 @@ fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext
             shell.state = test_state(directory.path(), "");
             shell.state.workspace_auto_analyze = false;
             shell.state.analysis_cache_enabled = false;
-            let mut row = test_row(1, &input);
+            let mut row = observed_test_row(1, &input);
             row.paths_report = Some(report.clone());
             row.path_overrides.insert(0, "asset/Example.ma".into());
             row.dirty_kind = Some(DirtyKind::Replace);

@@ -80,13 +80,9 @@ pub fn collect_scene_paths_with_options(
     kind: PathKind,
     options: &LoadOptions,
 ) -> Result<ScenePathsReport, SceneToolError> {
-    let observation = Loader::new(options.clone()).observe_path_without_retained_ma_bytes(path)?;
-    Ok(ScenePathsReport {
-        scene_path: observation.scene_path().to_path_buf(),
-        scene_format: observation.scene_format(),
-        validation_state: observation.validation_state(),
-        entries: observation.scene_paths(kind)?,
-    })
+    Loader::new(options.clone())
+        .observe_paths_path(path)?
+        .scene_paths_report(kind)
 }
 
 #[cfg(test)]

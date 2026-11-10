@@ -249,7 +249,7 @@ fn decode_finf(payload: &[u8]) -> Option<(String, String)> {
     None
 }
 
-fn decode_plug_to_requires_entry(payload: &[u8]) -> Option<MbRequiresEntry> {
+pub(crate) fn decode_plug_to_requires_entry(payload: &[u8]) -> Option<MbRequiresEntry> {
     fn sanitize_token(raw: &[u8]) -> String {
         String::from_utf8_lossy(raw)
             .trim_matches(|c: char| c.is_control())

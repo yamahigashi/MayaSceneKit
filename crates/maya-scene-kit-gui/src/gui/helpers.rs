@@ -988,17 +988,6 @@ pub(super) fn replace_overrides_for_row(row: &SceneRow) -> Option<Vec<PathReplac
     )
 }
 
-pub(super) fn apply_path_overrides_to_report(
-    report: &mut ScenePathsReport,
-    overrides: &BTreeMap<usize, String>,
-) {
-    for (entry_index, value) in overrides {
-        if let Some(entry) = report.entries.get_mut(*entry_index) {
-            entry.value = value.clone();
-        }
-    }
-}
-
 pub(super) fn default_audit_severity_filter() -> BTreeSet<AuditSeverityFilter> {
     BTreeSet::from([AuditSeverityFilter::Low, AuditSeverityFilter::MediumPlus])
 }
@@ -2060,14 +2049,9 @@ fn analyze_observation_result(
     let dump_report = observation
         .scene_dump_report()
         .map_err(|err| err.to_string())?;
-    let paths_report = ScenePathsReport {
-        scene_path: observation.scene_path().to_path_buf(),
-        scene_format: observation.scene_format(),
-        validation_state: observation.validation_state(),
-        entries: observation
-            .scene_paths(PathKind::All)
-            .map_err(|err| err.to_string())?,
-    };
+    let paths_report = observation
+        .scene_paths_report(PathKind::All)
+        .map_err(|err| err.to_string())?;
     let options = audit_options_from_preference(audit_mode);
     let audit_report =
         audit_observation(observation, plan, options).map_err(|err| err.to_string())?;

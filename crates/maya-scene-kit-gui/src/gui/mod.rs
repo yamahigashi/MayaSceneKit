@@ -39,11 +39,12 @@ use maya_scene_kit_edit::scene::{
     CompositeSceneEditsStageResult, ExecutionCleanPreview, ExecutionCleanTarget,
     MayaAsciiConversionReport, PathOwnerDeletePreview, PathOwnerDeleteTarget, PathReplaceChanges,
     PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplaceRule,
-    PathReplaceStageResult, StagedSceneArtifact, clean_target_for_execution_origin,
-    collect_raw_chunks, preview_replace_scene_path_candidates_in_report_with_options,
+    PathReplaceStageResult, SceneEditIntent, SceneEditPlan, StagedSceneArtifact,
+    clean_target_for_execution_origin, collect_raw_chunks,
+    preview_replace_scene_path_candidates_in_report_with_options,
     preview_replace_scene_paths_with_overrides_in_report_with_options, save_staged_artifact,
     stage_maya_ascii_with_options, stage_replace_scene_paths_with_overrides_in_report_with_options,
-    stage_scene_edits_in_report_with_bytes_with_options, stage_scene_edits_with_options,
+    stage_scene_edit_plan_with_options,
 };
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, ObserveCacheAccess, ObserveCacheStore, ObservedSceneSnapshot,
@@ -545,6 +546,7 @@ struct SceneRowEditState {
     dirty_artifact: Option<StagedSceneArtifact>,
     dirty_kind: Option<DirtyKind>,
     pending_clean_targets: BTreeSet<ExecutionCleanTarget>,
+    pending_clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     pending_path_owner_delete_targets: BTreeSet<PathOwnerDeleteTarget>,
     audit_plan_fingerprint: Option<String>,
     staged_audit_mode: Option<AuditModePreference>,
@@ -840,6 +842,7 @@ struct SceneRow {
     dirty_artifact: Option<StagedSceneArtifact>,
     dirty_kind: Option<DirtyKind>,
     pending_clean_targets: BTreeSet<ExecutionCleanTarget>,
+    pending_clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     pending_path_owner_delete_targets: BTreeSet<PathOwnerDeleteTarget>,
     audit_plan_fingerprint: Option<String>,
     staged_audit_mode: Option<AuditModePreference>,
@@ -1344,6 +1347,7 @@ impl SceneRow {
             dirty_artifact: None,
             dirty_kind: None,
             pending_clean_targets: BTreeSet::new(),
+            pending_clean_source: None,
             pending_path_owner_delete_targets: BTreeSet::new(),
             staged_audit_mode: None,
             staged_audit_report: None,
@@ -1579,6 +1583,54 @@ impl SceneRow {
             && self.replace_artifact_generation == Some(self.replace_generation)
     }
 
+    fn clean_source_for_targets(
+        &self,
+        targets: &BTreeSet<ExecutionCleanTarget>,
+    ) -> Result<Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>, String> {
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let retained = targets
+            .intersection(&self.pending_clean_targets)
+            .next()
+            .is_some();
+        let pending_source = if retained {
+            Some(
+                self.pending_clean_source
+                    .as_ref()
+                    .ok_or_else(|| "missing recorded clean observation fingerprint".to_string())?,
+            )
+        } else {
+            None
+        };
+        let has_new_targets = targets
+            .difference(&self.pending_clean_targets)
+            .next()
+            .is_some();
+        let source = if has_new_targets {
+            let audit_digest = self
+                .audit_report
+                .as_ref()
+                .map(|report| report.digests.scene_sha256.as_str());
+            let audit_source = self
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.as_ref())
+                .filter(|source| {
+                    !source.sha256.is_empty() && Some(source.sha256.as_str()) == audit_digest
+                })
+                .ok_or_else(|| "missing original clean observation fingerprint".to_string())?;
+            if pending_source.is_some_and(|source| source != audit_source) {
+                return Err("clean observation does not match the pending clean targets".into());
+            }
+            audit_source
+        } else {
+            pending_source
+                .ok_or_else(|| "missing recorded clean observation fingerprint".to_string())?
+        };
+        Ok(Some(source.clone()))
+    }
+
     fn edit_state(&self) -> SceneRowEditState {
         SceneRowEditState {
             audit_report: self.audit_report.clone(),
@@ -1593,6 +1645,7 @@ impl SceneRow {
             dirty_artifact: self.dirty_artifact.clone(),
             dirty_kind: self.dirty_kind,
             pending_clean_targets: self.pending_clean_targets.clone(),
+            pending_clean_source: self.pending_clean_source.clone(),
             pending_path_owner_delete_targets: self.pending_path_owner_delete_targets.clone(),
             staged_audit_mode: self.staged_audit_mode,
             staged_audit_report: self.staged_audit_report.clone(),
@@ -1620,6 +1673,7 @@ impl SceneRow {
         self.dirty_artifact = state.dirty_artifact.clone();
         self.dirty_kind = state.dirty_kind;
         self.pending_clean_targets = state.pending_clean_targets.clone();
+        self.pending_clean_source = state.pending_clean_source.clone();
         self.pending_path_owner_delete_targets = state.pending_path_owner_delete_targets.clone();
         self.staged_audit_mode = state.staged_audit_mode;
         self.staged_audit_report = state.staged_audit_report.clone();
@@ -1648,6 +1702,7 @@ impl SceneRowEditState {
             && self.dirty_artifact == other.dirty_artifact
             && self.dirty_kind == other.dirty_kind
             && self.pending_clean_targets == other.pending_clean_targets
+            && self.pending_clean_source == other.pending_clean_source
             && self.pending_path_owner_delete_targets == other.pending_path_owner_delete_targets
             && self.staged_audit_mode == other.staged_audit_mode
             && self.path_overrides == other.path_overrides
@@ -1684,6 +1739,7 @@ fn ascii_report_same(
 enum RowJobResult {
     Analyze(AnalyzeRowResult),
     SceneEdits {
+        clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
         replace_changes: Option<PathReplaceChanges>,
         staged: CompositeSceneEditsStageResult,
         audit_mode: AuditModePreference,
@@ -1698,6 +1754,7 @@ enum RowJobResult {
         artifact: StagedSceneArtifact,
     },
     Save {
+        saved_paths_report: Option<ScenePathsReport>,
         replace_changes: Option<PathReplaceChanges>,
         replace_preview: Option<PathReplacePreview>,
         output_path: PathBuf,

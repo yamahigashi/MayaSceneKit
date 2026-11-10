@@ -421,7 +421,9 @@ fn token_value(data: &[u8], token: &PathToken, encoding: SourceEncoding) -> Stri
     }
 }
 
+#[derive(Clone)]
 struct PathCandidate {
+    excluded_ranges: Vec<Range<usize>>,
     ranges: Vec<Range<usize>>,
     entry: Option<ScenePathEntry>,
 }
@@ -529,6 +531,7 @@ fn path_candidates(
                 && (looks_like_scene_path(&values[i]) || looks_like_scene_file_path(&values[i]))
             {
                 candidates.push(PathCandidate {
+                    excluded_ranges: Vec::new(),
                     ranges: vec![tokens[i].range.clone()],
                     entry: Some(ScenePathEntry {
                         node_type: "reference".into(),
@@ -603,17 +606,22 @@ fn path_candidates(
         let entry = active
             .as_ref()
             .and_then(|block| scene_path_entry_from_setattr(block, attr, &value));
-        candidates.push(PathCandidate { ranges, entry });
+        candidates.push(PathCandidate {
+            ranges,
+            entry,
+            excluded_ranges: Vec::new(),
+        });
     }
     candidates
 }
 
-struct ValueRangeEdit {
-    range: Range<usize>,
-    bytes: Vec<u8>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaByteEdit {
+    pub range: Range<usize>,
+    pub bytes: Vec<u8>,
 }
 
-fn apply_path_value_edits(data: &[u8], mut edits: Vec<ValueRangeEdit>) -> Vec<u8> {
+fn apply_path_value_edits(data: &[u8], mut edits: Vec<MaByteEdit>) -> Vec<u8> {
     edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
     for edit in &edits {
         assert!(edit.range.start <= edit.range.end && edit.range.end <= data.len());
@@ -673,6 +681,16 @@ fn escaped_path_bytes(value: &str, encoding: SourceEncoding) -> Option<Vec<u8>> 
     encode_path(&escape_ma_string(value), encoding)
 }
 
+pub struct MaPathRangeSkip {
+    pub range: Range<usize>,
+    pub skipped: MaPathReplaceSkips,
+}
+
+struct MaPathCandidateApplication {
+    change: MaPathReplaceChange,
+    skipped_ranges: Vec<MaPathRangeSkip>,
+}
+
 fn apply_path_candidate(
     data: &[u8],
     encoding: SourceEncoding,
@@ -680,8 +698,8 @@ fn apply_path_candidate(
     rules: &[PathMatchRule],
     override_value: Option<&str>,
     skipped: &mut MaPathReplaceSkips,
-    edits: &mut Vec<ValueRangeEdit>,
-) -> MaPathReplaceChange {
+    edits: &mut Vec<MaByteEdit>,
+) -> MaPathCandidateApplication {
     let decoded: Vec<_> = candidate
         .ranges
         .iter()
@@ -700,6 +718,9 @@ fn apply_path_candidate(
             == Some(&data[candidate.ranges[i].clone()])
     };
     let mut accept = |i: usize, next: String, values: &mut Vec<String>| {
+        if candidate.excluded_ranges.contains(&candidate.ranges[i]) {
+            return;
+        }
         local_match[i] = true;
         let reason = if !decoded[i].1 {
             1
@@ -772,41 +793,58 @@ fn apply_path_candidate(
             }
         }
     }
-    skipped.crosses_concat_boundary += crossed.iter().filter(|&&crossed| crossed).count();
     let mut count = 0;
+    let mut skipped_ranges = Vec::new();
     for i in 0..values.len() {
+        if candidate.excluded_ranges.contains(&candidate.ranges[i]) {
+            continue;
+        }
         if !decoded[i].1 && (!crossed[i] || local_match[i]) {
             reasons[i] = 1;
         }
-        match reasons[i] {
-            1 => skipped.non_utf8 += 1,
-            2 => skipped.non_canonical_escape += 1,
-            _ => {}
-        }
+        let mut range_skipped = MaPathReplaceSkips {
+            non_utf8: usize::from(reasons[i] == 1),
+            non_canonical_escape: usize::from(reasons[i] == 2),
+            crosses_concat_boundary: usize::from(crossed[i]),
+            ..Default::default()
+        };
         if values[i] != original[i] {
-            let Some(bytes) = escaped_path_bytes(&values[i], encoding) else {
+            if let Some(bytes) = escaped_path_bytes(&values[i], encoding) {
+                let (raw, _) = decode_path(&bytes, encoding);
+                values[i] = unescape_ma_string_literal(&raw);
+                if bytes != data[candidate.ranges[i].clone()] {
+                    count += 1;
+                    edits.push(MaByteEdit {
+                        range: candidate.ranges[i].clone(),
+                        bytes,
+                    });
+                }
+            } else {
                 if reasons[i] == 0 {
-                    skipped.unrepresentable += 1;
+                    range_skipped.unrepresentable = 1;
                 }
                 values[i].clone_from(&original[i]);
-                continue;
-            };
-            let (raw, _) = decode_path(&bytes, encoding);
-            values[i] = unescape_ma_string_literal(&raw);
-            if bytes != data[candidate.ranges[i].clone()] {
-                count += 1;
-                edits.push(ValueRangeEdit {
-                    range: candidate.ranges[i].clone(),
-                    bytes,
-                });
             }
         }
+        skipped.non_utf8 += range_skipped.non_utf8;
+        skipped.non_canonical_escape += range_skipped.non_canonical_escape;
+        skipped.unrepresentable += range_skipped.unrepresentable;
+        skipped.crosses_concat_boundary += range_skipped.crosses_concat_boundary;
+        if range_skipped.total() > 0 {
+            skipped_ranges.push(MaPathRangeSkip {
+                range: candidate.ranges[i].clone(),
+                skipped: range_skipped,
+            });
+        }
     }
-    MaPathReplaceChange {
-        entry: candidate.entry,
-        before_value: original.concat(),
-        after_value: values.concat(),
-        replacement_count: count,
+    MaPathCandidateApplication {
+        change: MaPathReplaceChange {
+            entry: candidate.entry,
+            before_value: original.concat(),
+            after_value: values.concat(),
+            replacement_count: count,
+        },
+        skipped_ranges,
     }
 }
 
@@ -828,6 +866,27 @@ pub fn replace_raw_scene_paths_in_ma(
         return Ok(empty_path_result(data));
     }
     replace_raw_scene_paths_in_ma_with_rules(data, &rules, None)
+}
+
+fn matching_path_candidate(
+    candidates: &[PathCandidate],
+    entry: &ScenePathEntry,
+    entry_index: usize,
+) -> Result<usize, MaPathReplaceError> {
+    let fingerprint = scene_path_entry_fingerprint(entry);
+    let mut matching = candidates.iter().enumerate().filter(|(_, candidate)| {
+        candidate
+            .entry
+            .as_ref()
+            .is_some_and(|entry| scene_path_entry_fingerprint(entry) == fingerprint)
+    });
+    let (index, _) = matching
+        .next()
+        .ok_or(MaPathReplaceError::MissingEntry { entry_index })?;
+    if matching.next().is_some() {
+        return Err(MaPathReplaceError::AmbiguousEntry { entry_index });
+    }
+    Ok(index)
 }
 
 fn replace_raw_scene_paths_in_ma_with_rules(
@@ -852,29 +911,8 @@ fn replace_raw_scene_paths_in_ma_with_rules(
                     entry_index: *index,
                 });
             };
-            let fingerprint = scene_path_entry_fingerprint(entry);
-            let matching: Vec<_> = candidates
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| {
-                    candidate
-                        .entry
-                        .as_ref()
-                        .is_some_and(|entry| scene_path_entry_fingerprint(entry) == fingerprint)
-                })
-                .collect();
-            if matching.len() > 1 {
-                return Err(MaPathReplaceError::AmbiguousEntry {
-                    entry_index: *index,
-                });
-            }
-            if let Some((i, _)) = matching.first() {
-                selected.insert(*i, value.as_str());
-            } else {
-                return Err(MaPathReplaceError::MissingEntry {
-                    entry_index: *index,
-                });
-            }
+            let candidate_index = matching_path_candidate(&candidates, entry, *index)?;
+            selected.insert(candidate_index, value.as_str());
         }
     }
     let mut result = MaPathReplaceResult {
@@ -890,7 +928,7 @@ fn replace_raw_scene_paths_in_ma_with_rules(
         if replacements.is_some() && !selected.contains_key(&i) {
             continue;
         }
-        let change = apply_path_candidate(
+        let applied = apply_path_candidate(
             data,
             encoding,
             candidate,
@@ -899,8 +937,8 @@ fn replace_raw_scene_paths_in_ma_with_rules(
             &mut result.skipped,
             &mut edits,
         );
-        result.replacement_count += change.replacement_count;
-        result.paths.push(change);
+        result.replacement_count += applied.change.replacement_count;
+        result.paths.push(applied.change);
     }
     result.bytes = apply_path_value_edits(data, edits);
     Ok(result)
@@ -914,6 +952,249 @@ pub fn replace_raw_scene_paths_in_ma_by_index(
         return Ok(empty_path_result(data));
     }
     replace_raw_scene_paths_in_ma_with_rules(data, &[], Some(replacements))
+}
+
+#[derive(Clone)]
+pub struct MaPathCandidatePlan {
+    pub entry_index: usize,
+    encoding: SourceEncoding,
+    candidate: PathCandidate,
+}
+
+impl MaPathCandidatePlan {
+    pub fn ranges(&self) -> &[Range<usize>] {
+        &self.candidate.ranges
+    }
+    pub fn entry(&self) -> &ScenePathEntry {
+        self.candidate.entry.as_ref().expect("resolved path entry")
+    }
+}
+
+pub struct MaPathCandidatesPlan {
+    pub candidates: Vec<MaPathCandidatePlan>,
+    pub skipped: MaPathReplaceSkips,
+}
+
+pub struct MaPathValuePlan {
+    pub edits: Vec<MaByteEdit>,
+    pub skipped: MaPathReplaceSkips,
+    pub skipped_ranges: Vec<MaPathRangeSkip>,
+}
+
+pub fn collect_ma_path_candidates(
+    data: &[u8],
+    indices: &[usize],
+) -> Result<MaPathCandidatesPlan, MaPathReplaceError> {
+    if indices.is_empty() {
+        return Ok(MaPathCandidatesPlan {
+            candidates: Vec::new(),
+            skipped: MaPathReplaceSkips::default(),
+        });
+    }
+    let (encoding, commands) = path_source(data)?;
+    let candidates = path_candidates(data, &commands.commands, encoding);
+    let entries = extract_raw_scene_paths_from_ma(data);
+    let mut seen = HashSet::new();
+    let mut selected = HashSet::new();
+    let mut plans = Vec::new();
+    for &entry_index in indices {
+        if !seen.insert(entry_index) {
+            return Err(MaPathReplaceError::DuplicateEntry { entry_index });
+        }
+        let entry = entries
+            .get(entry_index)
+            .ok_or(MaPathReplaceError::MissingEntry { entry_index })?;
+        let index = matching_path_candidate(&candidates, entry, entry_index)?;
+        let candidate = &candidates[index];
+        if !selected.insert(index) {
+            return Err(MaPathReplaceError::AmbiguousEntry { entry_index });
+        }
+        plans.push(MaPathCandidatePlan {
+            entry_index,
+            encoding,
+            candidate: candidate.clone(),
+        });
+    }
+    Ok(MaPathCandidatesPlan {
+        candidates: plans,
+        skipped: MaPathReplaceSkips {
+            unterminated_tail: usize::from(commands.unterminated_tail_from.is_some()),
+            unterminated_tail_from: commands.unterminated_tail_from,
+            ..MaPathReplaceSkips::default()
+        },
+    })
+}
+
+pub fn plan_ma_path_value(
+    data: &[u8],
+    candidate: &MaPathCandidatePlan,
+    after: &str,
+    excluded_ranges: &[Range<usize>],
+) -> MaPathValuePlan {
+    if after == candidate.entry().value {
+        return MaPathValuePlan {
+            edits: Vec::new(),
+            skipped: MaPathReplaceSkips::default(),
+            skipped_ranges: Vec::new(),
+        };
+    }
+    let mut skipped = MaPathReplaceSkips::default();
+    let mut edits = Vec::new();
+    let mut selected = candidate.candidate.clone();
+    selected.excluded_ranges = excluded_ranges.to_vec();
+    let applied = apply_path_candidate(
+        data,
+        candidate.encoding,
+        selected,
+        &[],
+        Some(after),
+        &mut skipped,
+        &mut edits,
+    );
+    MaPathValuePlan {
+        edits,
+        skipped,
+        skipped_ranges: applied.skipped_ranges,
+    }
+}
+
+/// Applies already validated, disjoint edits in descending original-byte order.
+pub fn apply_ma_byte_edits(data: &[u8], edits: &mut [MaByteEdit]) -> Vec<u8> {
+    edits.sort_by_key(|edit| std::cmp::Reverse((edit.range.start, edit.range.end)));
+    let mut out = data.to_vec();
+    for edit in edits {
+        out.splice(edit.range.clone(), edit.bytes.iter().copied());
+    }
+    out
+}
+
+pub struct MaCommandRanges {
+    ranges: Vec<Range<usize>>,
+    encoding: SourceEncoding,
+}
+
+pub fn collect_ma_command_ranges(data: &[u8]) -> MaCommandRanges {
+    use maya_mel::parser::{
+        LightItem, LightSourceView, scan_light_bytes_with_encoding_and_options_and_sink,
+    };
+    let mut ranges = Vec::new();
+    let mut sink = |_: LightSourceView<'_>, item: LightItem| {
+        let span = match item {
+            LightItem::Command(command) => command.span,
+            LightItem::Proc(proc_def) => proc_def.span,
+            LightItem::Other { span } => span,
+        };
+        ranges.push(usize::from(span.start())..usize::from(span.end()));
+    };
+    let options = LightParseOptions {
+        budgets: ParseBudgets {
+            max_bytes: data.len(),
+            ..ParseBudgets::default()
+        },
+        ..LightParseOptions::default()
+    };
+    let scan = if let Some(encoding) = header_path_encoding(data) {
+        scan_light_bytes_with_encoding_and_options_and_sink(data, encoding, options, &mut sink)
+    } else {
+        scan_light_bytes_with_options_and_sink(data, options, &mut sink)
+    };
+    MaCommandRanges {
+        ranges,
+        encoding: scan.source_encoding,
+    }
+}
+
+impl MaCommandRanges {
+    pub fn contains(&self, data: &[u8], mut range: Range<usize>) -> bool {
+        let Some(bytes) = data.get(range.clone()) else {
+            return false;
+        };
+        range.start += bytes
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+        range.end -= bytes
+            .iter()
+            .rev()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+        range.start < range.end && self.ranges.contains(&range)
+    }
+
+    pub fn file_command_without_callback(&self, command: &[u8]) -> Option<(Vec<u8>, bool)> {
+        let trailing = command
+            .iter()
+            .rev()
+            .take_while(|byte| matches!(byte, b'\n' | b'\r'))
+            .count();
+        let trimmed = command
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())?
+            + 1;
+        let terminated = command[trimmed - 1] == b';';
+        let tokens = PathTokens {
+            data: command,
+            cursor: 0,
+            end: trimmed - usize::from(terminated),
+            encoding: self.encoding,
+        }
+        .collect::<Vec<_>>();
+        let head = tokens.first()?;
+        if head.quoted || &command[head.range.clone()] != b"file" {
+            return None;
+        }
+        let mut kept = Vec::new();
+        let mut removed = false;
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if !token.quoted && &command[token.range.clone()] == b"-command" {
+                removed = true;
+                index += 1;
+                for _ in 0..2 {
+                    let Some(argument) = tokens.get(index) else {
+                        break;
+                    };
+                    if !argument.quoted && command[argument.range.clone()].starts_with(b"-") {
+                        break;
+                    }
+                    index += 1;
+                }
+            } else {
+                kept.push(token);
+                index += 1;
+            }
+        }
+        if !removed {
+            return Some((command.to_vec(), false));
+        }
+        let mut bytes = Vec::new();
+        for (index, token) in kept.iter().enumerate() {
+            let symbol = |token: &PathToken, value: u8| {
+                !token.quoted && command[token.range.clone()] == [value]
+            };
+            if index > 0
+                && !symbol(token, b')')
+                && !symbol(token, b'+')
+                && !symbol(kept[index - 1], b'(')
+                && !symbol(kept[index - 1], b'+')
+            {
+                bytes.push(b' ');
+            }
+            if token.quoted {
+                bytes.push(b'"');
+            }
+            bytes.extend_from_slice(&command[token.range.clone()]);
+            if token.quoted {
+                bytes.push(b'"');
+            }
+        }
+        if terminated {
+            bytes.push(b';');
+        }
+        bytes.extend_from_slice(&command[command.len() - trailing..]);
+        Some((bytes, true))
+    }
 }
 
 pub fn ma_range_has_bytes(data: &[u8], start: usize, end: usize) -> bool {
@@ -1060,6 +1341,25 @@ pub fn remove_path_owner_nodes_from_ma(
     data: &[u8],
     targets: &[(String, String)],
 ) -> (Vec<u8>, Vec<(String, String)>) {
+    let ranges = collect_path_owner_ranges_from_ma(data, targets);
+    if ranges.is_empty() {
+        return (data.to_vec(), Vec::new());
+    }
+    let mut out = String::new();
+    let mut cursor = 0;
+    let mut removed = HashSet::new();
+    for (range, target) in ranges {
+        out.push_str(&String::from_utf8_lossy(&data[cursor..range.start]));
+        cursor = range.end;
+        removed.insert(target);
+    }
+    out.push_str(&String::from_utf8_lossy(&data[cursor..]));
+    (out.into_bytes(), removed.into_iter().collect())
+}
+pub fn collect_path_owner_ranges_from_ma(
+    data: &[u8],
+    targets: &[(String, String)],
+) -> Vec<(Range<usize>, (String, String))> {
     let targets = targets
         .iter()
         .filter_map(|(node_type, node_name)| {
@@ -1070,12 +1370,15 @@ pub fn remove_path_owner_nodes_from_ma(
         })
         .collect::<HashSet<_>>();
     if targets.is_empty() {
-        return (data.to_vec(), Vec::new());
+        return Vec::new();
     }
 
     let lines = split_lines_keepends(data);
-    let mut out = String::new();
-    let mut removed = HashSet::<(String, String)>::new();
+    let mut ranges = Vec::new();
+    let mut offsets = vec![0];
+    for line in &lines {
+        offsets.push(offsets.last().unwrap() + line.len());
+    }
     let mut i = 0usize;
     let mut line_number = 0usize;
 
@@ -1088,13 +1391,12 @@ pub fn remove_path_owner_nodes_from_ma(
             if let Some(entry) = extract_reference_entry_from_raw_file_command(&command) {
                 let target = (entry.node_type, entry.node_name);
                 if targets.contains(&target) {
-                    removed.insert(target);
+                    ranges.push((offsets[i]..offsets[next], target));
                     i = next;
                     line_number += command.lines().count().max(1);
                     continue;
                 }
             }
-            out.push_str(&command);
             i = next;
             line_number += command.lines().count().max(1);
             continue;
@@ -1105,32 +1407,22 @@ pub fn remove_path_owner_nodes_from_ma(
             if let Some(block) = start_raw_create_node_block(trimmed.as_bytes(), line_number) {
                 let target = (block.node_type, block.node_name);
                 if targets.contains(&target) {
-                    removed.insert(target);
+                    ranges.push((offsets[i]..offsets[next], target));
                     i = next;
                     line_number += command.lines().count().max(1);
                     continue;
                 }
             }
-            out.push_str(&command);
             i = next;
             line_number += command.lines().count().max(1);
             continue;
         }
 
-        out.push_str(&line_text);
         i += 1;
         line_number += 1;
     }
 
-    if removed.is_empty() {
-        return (data.to_vec(), Vec::new());
-    }
-
-    let removed = targets
-        .into_iter()
-        .filter(|target| removed.contains(target))
-        .collect::<Vec<_>>();
-    (out.into_bytes(), removed)
+    ranges
 }
 
 fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, usize) {
@@ -1148,7 +1440,7 @@ fn collect_top_level_command_block(lines: &[&[u8]], start: usize) -> (String, us
     (command, next)
 }
 
-fn file_command_without_callback(
+pub fn file_command_without_callback(
     command: &str,
 ) -> Result<Option<(String, bool)>, crate::ma::error::MaParseError> {
     let tokens = tokenize_command(command)?;
@@ -1360,6 +1652,44 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn candidate_skip_stays_on_its_original_literal_range() {
+        let input = br#"createNode file -n "Example";
+setAttr ".ftn" -type "string" ("asset\d/" + "example/file.tx");
+"#;
+        let (encoding, commands) = super::path_source(input).unwrap();
+        let candidate = super::path_candidates(input, &commands.commands, encoding).remove(0);
+        let expected_range = candidate.ranges[0].clone();
+        let unchanged_range = candidate.ranges[1].clone();
+        let rules = [super::PathMatchRule {
+            pattern: regex::Regex::new("asset").unwrap(),
+            replacement: "Sample".into(),
+            literal: true,
+        }];
+        let mut skipped = super::MaPathReplaceSkips::default();
+        let mut edits = Vec::new();
+        let applied = super::apply_path_candidate(
+            input,
+            encoding,
+            candidate,
+            &rules,
+            None,
+            &mut skipped,
+            &mut edits,
+        );
+        assert!(edits.is_empty());
+        assert_eq!(skipped.non_canonical_escape, 1);
+        assert_eq!(applied.skipped_ranges.len(), 1);
+        assert_eq!(applied.skipped_ranges[0].range, expected_range);
+        assert_eq!(applied.skipped_ranges[0].skipped.non_canonical_escape, 1);
+        assert!(
+            !applied
+                .skipped_ranges
+                .iter()
+                .any(|skip| skip.range == unchanged_range)
+        );
+    }
+
     use super::{
         MaRangeEdit, MaRangeEditError, MaRangeEditKind, apply_ma_range_edits,
         command_has_terminating_semicolon, ma_file_command_callback_present,

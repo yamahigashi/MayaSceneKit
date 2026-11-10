@@ -91,9 +91,20 @@ pub struct ScenePathMeta {
     pub trace_child_header_size: Option<usize>,
 }
 
+/// Identity of the bytes used to construct an observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneSourceFingerprint {
+    pub sha256: String,
+    pub byte_len: usize,
+}
+
 /// Aggregate result returned by path collection APIs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenePathsReport {
+    #[serde(default)]
+    pub source: Option<SceneSourceFingerprint>,
+    #[serde(default)]
+    pub kind: Option<PathKind>,
     /// Source scene path.
     pub scene_path: PathBuf,
     /// Detected source scene format.

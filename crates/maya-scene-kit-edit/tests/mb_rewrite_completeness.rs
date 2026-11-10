@@ -141,6 +141,8 @@ fn incomplete_mb_preview_composite_and_indexed_callers_refuse() {
             .unwrap_err(),
     );
     let report = ScenePathsReport {
+        source: None,
+        kind: Some(maya_scene_kit_observe::scene::paths::PathKind::All),
         scene_path: input.clone(),
         scene_format: SceneFormat::Mb,
         validation_state: ValidationState::CopiedUnvalidated,
@@ -170,17 +172,22 @@ fn incomplete_mb_preview_composite_and_indexed_callers_refuse() {
         maya_scene_kit_observe::scene::paths::PathKind::All,
     )
     .unwrap();
-    check(
-        planner
-            .stage_scene_edits_in_report_with_bytes(
-                &report,
-                &bytes,
-                &[],
-                &[PathOwnerDeleteTarget {
-                    node_type: "file".into(),
-                    node_name: "Example".into(),
-                }],
-            )
-            .unwrap_err(),
-    );
+    let error = planner
+        .stage_scene_edit_plan(
+            &maya_scene_kit_edit::scene::SceneEditPlan {
+                report,
+                clean_source: None,
+                intents: vec![maya_scene_kit_edit::scene::SceneEditIntent::DeleteOwner(
+                    PathOwnerDeleteTarget {
+                        node_type: "file".into(),
+                        node_name: "Example".into(),
+                    },
+                )],
+            },
+            &bytes,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("cannot rewrite incomplete"));
+    assert!(!output.exists());
+    assert_eq!(std::fs::read(&input).unwrap(), bytes);
 }
