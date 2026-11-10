@@ -945,14 +945,20 @@ fn collect_mb_coverage(
     registry: Arc<SchemaRegistry>,
     execution_semantics: &NodeExecutionSemantics,
 ) -> Result<ExecutionCoverageCollection, SceneToolError> {
-    let (surfaces, mut section_state) = collect_mb_native_script_surfaces(
+    let (mut surfaces, mut section_state) = collect_mb_native_script_surfaces(
         mb,
         execution_semantics,
         budget.unwrap_or(&MbParseBudget::default()),
     );
     section_state.merge(extraction_state);
     let mut coverage_issues = Vec::new();
-    let dispatcher = DecoderDispatcher::new(registry);
+    let dispatcher = DecoderDispatcher::new(Arc::clone(&registry));
+    let candidate_attrs: HashSet<_> = execution_semantics
+        .ma_capture_attr_selectors()
+        .iter()
+        .map(|selector| selector.attr.trim_start_matches('.'))
+        .collect();
+    let mut connections = Vec::new();
 
     for child in mb.root().children() {
         if !child.is_group() {
@@ -976,6 +982,31 @@ fn collect_mb_coverage(
         };
 
         let visit = |chunk: crate::mb::SectionChunk| {
+            if form == "CONS" && chunk.tag() == "CWFL" {
+                let span = chunk.payload_span().offset(child.payload_offset() + 4);
+                let payload = &mb.data()[span.start..span.end];
+                if mb_connection_endpoint_bytes(payload).is_some_and(|(_, dst)| {
+                    dst.rsplit(|byte| *byte == b'.').next().is_some_and(|attr| {
+                        let attr = attr.split(|byte| *byte == b'[').next().unwrap_or_default();
+                        std::str::from_utf8(attr).is_ok_and(|attr| candidate_attrs.contains(attr))
+                    })
+                }) {
+                    connections.push(RawChunkRecord {
+                        chunk_ref: ChunkRef {
+                            form: form.clone(),
+                            tag: chunk.tag().to_string(),
+                            node_offset: child.offset(),
+                            parent_tag: Some(child.tag().to_string()),
+                            chunk_aux: Some(chunk.aux()),
+                            child_alignment,
+                            child_header_size,
+                            payload_size: span.len(),
+                        },
+                        payload_span: span,
+                    });
+                    return;
+                }
+            }
             if raw_chunk_form_is_known_benign_container(form.as_str()) {
                 return;
             }
@@ -1074,6 +1105,18 @@ fn collect_mb_coverage(
         });
     }
 
+    if !connections.is_empty() {
+        coverage_issues.extend(collect_mb_connections(
+            mb,
+            &connections,
+            &registry,
+            execution_semantics,
+            budget.unwrap_or(&MbParseBudget::default()),
+            section_state,
+            &mut surfaces,
+        )?);
+    }
+
     if let MbCompleteness::Truncated { .. } = completeness {
         let mut reasons = Vec::new();
         let mut reason_kinds = HashSet::new();
@@ -1114,6 +1157,519 @@ fn collect_mb_coverage(
         surfaces,
         coverage_issues,
     })
+}
+
+fn mb_connection_endpoint_bytes(payload: &[u8]) -> Option<(&[u8], &[u8])> {
+    let fields = payload.get(1..)?;
+    let split = fields.iter().position(|byte| *byte == 0)?;
+    let destination = &fields[split + 1..];
+    let end = destination
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(destination.len());
+    Some((&fields[..split], &destination[..end]))
+}
+
+fn mb_connection_endpoints(payload: &[u8]) -> Option<(&str, &str)> {
+    let (source, destination) = mb_connection_endpoint_bytes(payload)?;
+    Some((
+        std::str::from_utf8(source).ok()?,
+        std::str::from_utf8(destination).ok()?,
+    ))
+}
+
+fn mb_connection_plug(plug: &str) -> Option<(&str, &str)> {
+    let (owner, attr) = plug.split_once('.')?;
+    Some((owner.trim_start_matches(':'), attr))
+}
+
+fn mb_connection_attr_tail(attr: &str) -> &str {
+    attr.rsplit('.')
+        .next()
+        .unwrap_or(attr)
+        .split('[')
+        .next()
+        .unwrap_or("")
+}
+
+struct MbConnectionValue<'a> {
+    tag: FourCC,
+    value: Option<&'a [u8]>,
+    range: ExecutionSourceRange,
+}
+
+struct MbConnectionOwner<'a> {
+    node_type: String,
+    offset: usize,
+    attrs: std::collections::HashMap<String, Vec<MbConnectionValue<'a>>>,
+}
+
+fn mb_connection_issue(
+    origin: ExecutionOrigin,
+    reason: &str,
+    source: &str,
+    destination: &str,
+) -> ExecutionCoverageIssueRecord {
+    let endpoints = format!("source={source:?}, destination={destination:?}");
+    let reason = format!("MB unresolved connection ({endpoints}): {reason}");
+    ExecutionCoverageIssueRecord {
+        kind: ExecutionCoverageIssueKind::UnexplainedRawMbPayload,
+        detail: ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason },
+        origin: Some(origin),
+        preview: PreviewWindowSpec::prefix(Arc::from(endpoints)),
+    }
+}
+
+fn collect_mb_connections(
+    mb: &crate::mb::MayaBinaryFile,
+    records: &[RawChunkRecord],
+    registry: &Arc<SchemaRegistry>,
+    semantics: &NodeExecutionSemantics,
+    budget: &MbParseBudget,
+    mut state: crate::mb::MbSectionScanState,
+    surfaces: &mut Vec<ExecutionSurfaceRecord>,
+) -> Result<Vec<ExecutionCoverageIssueRecord>, SceneToolError> {
+    use std::collections::HashMap;
+    let dispatcher = DecoderDispatcher::new(Arc::clone(registry));
+    let type_names =
+        crate::scene::schema::node_semantics::load_typeid_typename_map_with_registry(registry)
+            .map_err(SceneToolError::Config)?;
+    let mut needed = HashSet::new();
+    for record in records {
+        if let Some((src, dst)) = mb_connection_endpoints(record.payload(mb.data())) {
+            for plug in [src, dst] {
+                if let Some((owner, _)) = mb_connection_plug(plug) {
+                    needed.insert(owner);
+                }
+            }
+        }
+    }
+    let mut owners: HashMap<String, Option<MbConnectionOwner<'_>>> = HashMap::new();
+    let mut incoming: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for child in mb.root().children().iter().filter(|child| child.is_group()) {
+        let form = child
+            .form_type()
+            .map(|form| form.to_string())
+            .unwrap_or_default();
+        let hints = resolve_section_layout_hints(
+            child.tag(),
+            child.form_type(),
+            child
+                .child_layout()
+                .map_or_else(LayoutHints::new, LayoutHints::from),
+        );
+        let payload = &mb.data()[child.payload_offset()..child.payload_end()];
+        let Some(inner) = payload.get(4..) else {
+            continue;
+        };
+        if form == "CONS" {
+            state.merge(visit_group_chunks_with_layout_with_budget(
+                inner,
+                hints,
+                2,
+                budget,
+                |chunk| {
+                    if chunk.tag() == "CWFL" {
+                        if let Some(dst) = mb_connection_endpoint_bytes(chunk.payload(inner))
+                            .and_then(|(_, dst)| std::str::from_utf8(dst).ok())
+                        {
+                            if let Some((name, attr)) = mb_connection_plug(dst) {
+                                if needed.contains(name) {
+                                    incoming.entry(name).or_default().insert(attr);
+                                }
+                            }
+                        }
+                    }
+                },
+            )?);
+            continue;
+        }
+        let named = crate::mb::paths::extract_mb_form_node_name_with_layout(
+            payload,
+            hints.alignment().map(|a| a.get()),
+            hints.header_format().map(|f| f.header_size()),
+            budget,
+        );
+        state.merge(named.state);
+        let parsed = if named.value.is_none() && form == "SLCT" {
+            Some(crate::mb::parse_section_chunks_with_hints_with_budget(
+                inner, hints, budget,
+            ))
+        } else {
+            None
+        };
+        let name = named.value.or_else(|| {
+            parsed.as_ref().and_then(|parsed| {
+                parsed.chunks().iter().find_map(|chunk| {
+                    (chunk.tag() == "SLCT")
+                        .then(|| {
+                            std::str::from_utf8(chunk.payload(inner)).ok().map(|s| {
+                                s.trim_matches(char::from(0))
+                                    .trim_start_matches(':')
+                                    .to_string()
+                            })
+                        })
+                        .flatten()
+                })
+            })
+        });
+        if let Some(parsed) = &parsed {
+            state.merge(parsed.state());
+        }
+        let Some(name) = name else { continue };
+        let name = name.trim_start_matches(':').to_string();
+        if !needed.contains(name.as_str()) {
+            continue;
+        }
+        let vacant = match owners.entry(name.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+                continue;
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => entry,
+        };
+        let parsed = parsed.unwrap_or_else(|| {
+            crate::mb::parse_section_chunks_with_hints_with_budget(inner, hints, budget)
+        });
+        state.merge(parsed.state());
+        let node_type = form_typeid(&form)
+            .and_then(|id| type_names.get(&id))
+            .cloned()
+            .or_else(|| mb_default_selected_node_type(&name).map(str::to_string))
+            .unwrap_or_default();
+        let mut attrs: HashMap<String, Vec<MbConnectionValue<'_>>> = HashMap::new();
+        for chunk in parsed.chunks() {
+            if matches!(
+                chunk.tag().to_string().as_str(),
+                "CREA" | "FLGS" | "ATTR" | "SLCT"
+            ) {
+                continue;
+            }
+            let bytes = chunk.payload(inner);
+            let Some(nul) = bytes.iter().position(|b| *b == 0) else {
+                continue;
+            };
+            let Ok(attr) = std::str::from_utf8(&bytes[..nul]) else {
+                continue;
+            };
+            if attr.is_empty() {
+                continue;
+            }
+            let attr = semantics
+                .canonical_attr(&node_type, attr)
+                .unwrap_or(attr)
+                .to_string();
+            attrs.entry(attr).or_default().push(MbConnectionValue {
+                tag: chunk.tag(),
+                value: bytes.get(nul + 2..),
+                range: ExecutionSourceRange {
+                    start: child.payload_offset() + 4 + chunk.chunk_start(),
+                    end: child.payload_offset() + 4 + chunk.payload_span().end,
+                },
+            });
+        }
+        vacant.insert(Some(MbConnectionOwner {
+            node_type,
+            offset: child.offset(),
+            attrs,
+        }));
+    }
+    let mut issues = Vec::new();
+    let mut connected = HashSet::new();
+    let mut controls = HashSet::new();
+    let mut propagated = Vec::new();
+    let mut seen_payloads = HashSet::new();
+    for record in records {
+        let payload = record.payload(mb.data());
+        if !seen_payloads.insert(payload) {
+            continue;
+        }
+        let (source_bytes, destination_bytes) =
+            mb_connection_endpoint_bytes(payload).unwrap_or_default();
+        let source_spelling = String::from_utf8_lossy(source_bytes);
+        let destination_spelling = String::from_utf8_lossy(destination_bytes);
+        let issue = |origin, reason| {
+            mb_connection_issue(origin, reason, &source_spelling, &destination_spelling)
+        };
+        let raw = &record.chunk_ref;
+        let range = ExecutionSourceRange {
+            start: record
+                .payload_span
+                .start
+                .saturating_sub(raw.child_header_size.unwrap_or(16)),
+            end: record.payload_span.end,
+        };
+        let mut origin = ExecutionOrigin {
+            chunk_form: Some(raw.form.clone()),
+            chunk_tag: Some(raw.tag.clone()),
+            chunk_node_offset: Some(raw.node_offset),
+            chunk_aux: raw.chunk_aux,
+            chunk_payload_offset: Some(record.payload_span.start),
+            chunk_payload_size: Some(record.payload_span.len()),
+            chunk_child_alignment: raw.child_alignment,
+            chunk_child_header_size: raw.child_header_size,
+            connection_range: Some(range),
+            source_range: Some(range),
+            ..ExecutionOrigin::without_chunk_address()
+        };
+        let decoded = dispatcher.decode_with_quality(
+            &raw.form,
+            &raw.tag,
+            record.payload(mb.data()),
+            raw.node_offset,
+            raw.chunk_aux,
+            raw.child_alignment,
+            raw.child_header_size,
+            Some(&raw.form),
+            raw.parent_tag.as_deref(),
+        );
+        let Some((src, dst)) = decoded.events.iter().find_map(|event| match event {
+            DecodedEvent::Connect { src, dst, .. } => Some((src.as_str(), dst.as_str())),
+            _ => None,
+        }) else {
+            issues.push(issue(origin, "cannot decode endpoints"));
+            continue;
+        };
+        let Some((dst_name, dst_attr)) = mb_connection_plug(dst) else {
+            issues.push(issue(origin, "cannot identify destination"));
+            continue;
+        };
+        let src_plug = mb_connection_plug(src);
+        let dst_owner = owners.get(dst_name).and_then(Option::as_ref);
+        let node_type = dst_owner
+            .map(|owner| owner.node_type.as_str())
+            .unwrap_or("");
+        let tail = mb_connection_attr_tail(dst_attr);
+        let canonical = semantics
+            .ma_capture_attr_selectors()
+            .iter()
+            .filter(|selector| {
+                selector.attr.strip_prefix('.') == Some(tail)
+                    && (selector.node_type.is_empty()
+                        || selector.node_type.eq_ignore_ascii_case(node_type))
+                    && selector
+                        .node_name
+                        .as_deref()
+                        .is_none_or(|name| name == dst_name)
+            })
+            .max_by_key(|selector| (!selector.node_type.is_empty(), selector.node_name.is_some()))
+            .map(|s| s.canonical_attr.clone());
+        let source_owner = src_plug.and_then(|(name, _)| owners.get(name).and_then(Option::as_ref));
+        let source_has_incoming =
+            src_plug
+                .zip(source_owner)
+                .is_some_and(|((name, attr), source)| {
+                    incoming.get(name).is_some_and(|attrs| {
+                        attrs.iter().any(|incoming| {
+                            match (
+                                semantics.canonical_attr(&source.node_type, incoming),
+                                semantics.canonical_attr(&source.node_type, attr),
+                            ) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => true,
+                            }
+                        })
+                    })
+                });
+        let source_is_numeric = state == crate::mb::MbSectionScanState::Complete
+            && matches!(mb.completeness(), MbCompleteness::Complete)
+            && !source_has_incoming
+            && src_plug
+                .zip(source_owner)
+                .is_some_and(|((name, attr), source)| {
+                    if name.contains('|') || attr.contains(['.', '[']) {
+                        return false;
+                    }
+                    let canonical = semantics
+                        .canonical_attr(&source.node_type, attr)
+                        .unwrap_or(attr);
+                    source.attrs.get(canonical).is_some_and(|values| {
+                        if let [value] = values.as_slice() {
+                            let size = match value.tag.as_ascii() {
+                                Some("DBLE") => 8,
+                                Some("FLT " | "LONG") => 4,
+                                Some("SHRT") => 2,
+                                Some("BOOL") => 1,
+                                _ => return false,
+                            };
+                            value.value.is_some_and(|bytes| bytes.len() == size)
+                        } else {
+                            false
+                        }
+                    })
+                });
+        let default_type = mb_default_selected_node_type(dst_name).unwrap_or("");
+        if !owners.contains_key(dst_name)
+            && !default_type.is_empty()
+            && semantics.profiles_for_node(default_type).is_empty()
+        {
+            continue;
+        }
+        if canonical.is_none()
+            && (!node_type.is_empty()
+                || (semantics.ma_execution_attr_is_ambiguous(tail)
+                    && source_is_numeric
+                    && !owners.get(dst_name).is_some_and(Option::is_none)))
+        {
+            continue;
+        }
+        let attr = canonical.unwrap_or_else(|| format!(".{tail}"));
+        origin.node_name = Some(dst_name.to_string());
+        origin.attr_name = Some(attr.clone());
+        origin.connection_source_plug = src_plug.map(|(name, attr)| format!("{name}.{attr}"));
+        if state == crate::mb::MbSectionScanState::Stopped
+            || !matches!(mb.completeness(), MbCompleteness::Complete)
+        {
+            issues.push(issue(
+                origin,
+                "section scan stopped or chunk tree incomplete",
+            ));
+            continue;
+        }
+        let Some(owner) =
+            dst_owner.filter(|_| !dst_attr.contains(['.', '[', '|']) && !dst_name.contains('|'))
+        else {
+            issues.push(issue(
+                origin,
+                "destination owner is missing, duplicated, or ambiguous",
+            ));
+            continue;
+        };
+        if node_type.is_empty() && !is_generic_execution_attr_name(tail) {
+            issues.push(issue(origin, "destination node type is unknown"));
+            continue;
+        }
+        if node_type.eq_ignore_ascii_case("script") && matches!(attr.as_str(), ".st" | ".stp") {
+            controls.insert(owner.offset);
+            issues.push(issue(origin, "connected trigger / language is unknown"));
+            continue;
+        }
+        if node_type.eq_ignore_ascii_case("script") {
+            origin.surface_kind = ExecutionSurfaceKind::ScriptNodeBody;
+            let number = |attr: &str| {
+                owner
+                    .attrs
+                    .get(attr)
+                    .and_then(|values| values.last())
+                    .map(|v| {
+                        v.value
+                            .and_then(|bytes| mb_script_number(&v.tag.to_string(), bytes))
+                    })
+            };
+            let script_type = number("st");
+            let source_type = number("stp");
+            origin.trigger = script_type
+                .map(|n| {
+                    n.map(script_type_to_trigger)
+                        .unwrap_or(ExecutionTrigger::Unknown)
+                })
+                .unwrap_or(ExecutionTrigger::Manual);
+            origin.lang = source_type
+                .map(|n| {
+                    n.map(script_source_type_to_language)
+                        .unwrap_or(ExecutionLanguage::Unknown)
+                })
+                .unwrap_or(ExecutionLanguage::Mel);
+            origin.source_kind =
+                script_node_source_kind(script_type.flatten(), source_type.flatten());
+        } else if let Some(template) = ma_callback_origin(node_type, dst_name, &attr, semantics) {
+            origin.surface_kind = template.surface_kind;
+            origin.trigger = template.trigger;
+            origin.lang = template.lang;
+            origin.source_kind = template.source_kind;
+        } else {
+            continue;
+        }
+        connected.insert((owner.offset, attr));
+        let Some((src_name, src_attr)) =
+            src_plug.filter(|(name, attr)| !name.contains('|') && !attr.contains(['.', '[']))
+        else {
+            issues.push(issue(origin, "source plug is ambiguous"));
+            continue;
+        };
+        let Some(source) = owners.get(src_name).and_then(Option::as_ref) else {
+            issues.push(issue(origin, "source owner is missing or duplicated"));
+            continue;
+        };
+        if source_has_incoming {
+            issues.push(issue(
+                origin,
+                "source has an incoming connection; multiple hops are unresolved",
+            ));
+            continue;
+        }
+        let source_attr = semantics
+            .canonical_attr(&source.node_type, src_attr)
+            .unwrap_or(src_attr);
+        let values = source
+            .attrs
+            .get(source_attr)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if values.len() != 1 {
+            issues.push(issue(
+                origin,
+                "source attribute does not identify one value chunk",
+            ));
+            continue;
+        }
+        let value = &values[0];
+        origin.connection_source_range = Some(value.range);
+        origin.assignment_index = Some(0);
+        let text = value
+            .value
+            .filter(|_| value.tag == "STR " || value.tag == "TEXT")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let Some(text) =
+            text.filter(|text| !text.trim_end_matches(char::from(0)).contains(char::from(0)))
+        else {
+            issues.push(issue(origin, "source value chunk is not a readable string"));
+            continue;
+        };
+        let text = text.trim_end_matches(char::from(0));
+        if !text.is_empty() {
+            propagated.push((
+                owner.offset,
+                ExecutionSurfaceRecord {
+                    text: Arc::from(text),
+                    origin,
+                    requires_mel_modeling: true,
+                },
+            ));
+        }
+    }
+    let owner_types: HashMap<_, _> = owners
+        .values()
+        .filter_map(Option::as_ref)
+        .map(|owner| (owner.offset, owner.node_type.as_str()))
+        .collect();
+    for surface in surfaces.iter_mut() {
+        if let Some(offset) = surface.origin.chunk_node_offset {
+            if let Some(attr) = surface.origin.attr_name.as_deref() {
+                let node_type = owner_types.get(&offset).copied().unwrap_or("");
+                let canonical = format!(
+                    ".{}",
+                    semantics
+                        .canonical_attr(node_type, attr)
+                        .unwrap_or(attr.trim_start_matches('.'))
+                );
+                surface.origin.overwritten_by_connection = connected.contains(&(offset, canonical));
+            }
+            if controls.contains(&offset) {
+                surface.origin.lang = ExecutionLanguage::Unknown;
+                surface.origin.trigger = ExecutionTrigger::Unknown;
+            }
+        }
+    }
+    propagated.sort_by_key(|(_, surface)| surface.origin.connection_range.map(|r| r.start));
+    surfaces.extend(propagated.into_iter().map(|(offset, mut surface)| {
+        if controls.contains(&offset) {
+            surface.origin.lang = ExecutionLanguage::Unknown;
+            surface.origin.trigger = ExecutionTrigger::Unknown;
+        }
+        surface
+    }));
+    Ok(issues)
 }
 
 fn collect_mb_script_body_assignments<'a>(
@@ -1400,6 +1956,8 @@ fn form_typeid(form_type: &str) -> Option<u32> {
 fn mb_default_selected_node_type(node_name: &str) -> Option<&'static str> {
     match node_name {
         "defaultRenderGlobals" => Some("renderGlobals"),
+        "perspShape" | "frontShape" | "sideShape" | "topShape" => Some("camera"),
+        "creasePartition" | "renderPartition" => Some("partition"),
         _ => None,
     }
 }
@@ -2734,5 +3292,45 @@ mod section_state_tests {
         let error =
             crate::mb::rewrite::require_complete_mb_sections(mb.data(), mb.root()).unwrap_err();
         assert!(error.to_string().contains("depth budget"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod mb_connection_scan_tests {
+    use super::*;
+    mod fixture {
+        include!("../../../tests/support/mb_connections.rs");
+    }
+
+    #[test]
+    fn stopped_extraction_keeps_a_positioned_unresolved_connection() {
+        let mb = crate::mb::parse_bytes(fixture::example(
+            &[b"print('Example')"],
+            "ExampleSource.note",
+            "ExampleScript.b",
+            &[],
+        ))
+        .unwrap();
+        let registry = Arc::new(SchemaRegistry::new(SchemaPaths::from_defaults()));
+        let semantics =
+            crate::scene::schema::node_semantics::node_execution_semantics_with_registry(
+                registry.as_ref(),
+            )
+            .unwrap();
+        let result = collect_mb_coverage(
+            &mb,
+            &mb.completeness(),
+            crate::mb::MbSectionScanState::Stopped,
+            None,
+            registry,
+            &semantics,
+        )
+        .unwrap();
+        assert!(result.surfaces.is_empty());
+        assert!(result.coverage_issues.iter().any(|issue| {
+            issue.origin.as_ref().is_some_and(|origin| {
+                origin.chunk_tag.as_deref() == Some("CWFL") && origin.connection_range.is_some()
+            }) && format!("{:?}", issue.detail).contains("stopped")
+        }));
     }
 }
