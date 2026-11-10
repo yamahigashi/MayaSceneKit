@@ -214,3 +214,124 @@ fn audit_selective_unknown_statements_require_review() {
         AuditDisposition::Allow
     );
 }
+
+#[test]
+fn audit_context_layouts_preserve_python_script_surfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    let plan = audit_plan();
+    let payload = "exec('print(1)')";
+    for separator in [
+        "\n",
+        " ",
+        "/**/",
+        "\ncurrentUnit -t film;\n",
+        "\nfileInfo \"Example\" \"Sample\";\n",
+        "\nselect -ne Example;\n",
+        "\nselect -r Example;\n",
+        "\nselect -add Example;\n",
+        "\nselect Example;\n",
+        "\nselect :Example;\n",
+    ] {
+        write_scene(
+            &source,
+            &format!(
+                "//Maya ASCII 2026 scene\ncreateNode script -n \"Example\";{separator}setAttr \".stp\" 1; setAttr \".b\" -type \"string\" \"{payload}\";"
+            ),
+        );
+        let report = audit_script_nodes(&source, &plan).unwrap();
+        assert_eq!(
+            report.disposition,
+            AuditDisposition::DenyMalicious,
+            "{separator}"
+        );
+        assert!(
+            report
+                .surfaces
+                .iter()
+                .any(
+                    |surface| surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                        && surface.origin.node_name.as_deref() == Some("Example")
+                        && surface.preview == payload
+                ),
+            "{separator}"
+        );
+    }
+}
+
+#[test]
+fn audit_context_unbound_and_unresolved_attributes_use_coverage_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    let plan = audit_plan();
+    for statement in [
+        "setAttr \".tx\" 1; setAttr \".ty\" 2;",
+        "setAttr \".b\" -type \"string\" \"Example\";",
+        "createNode;",
+        "setAttr;",
+        "select Example; setAttr \".before\" -type \"string\" \"Example\";",
+    ] {
+        write_scene(&source, &format!("//Maya ASCII 2026 scene\n{statement}"));
+        let report = audit_script_nodes(&source, &plan).unwrap();
+        assert_eq!(report.disposition, AuditDisposition::Review, "{statement}");
+        assert!(
+            report
+                .coverage_issues
+                .iter()
+                .any(|issue| issue.kind == ExecutionCoverageIssueKind::TopLevelDiagnostics),
+            "{statement}"
+        );
+    }
+    let hardened = audit_script_nodes_with_options(
+        &source,
+        &plan,
+        &LoadOptions::default(),
+        AuditOptions::hardened_untrusted(),
+    )
+    .unwrap();
+    assert_eq!(hardened.disposition, AuditDisposition::DenyUncertain);
+    write_scene(
+        &source,
+        "//Maya ASCII 2026 scene\ncreateNode transform -n \"Example\"; setAttr \".tx\" 1;",
+    );
+    assert_eq!(
+        audit_script_nodes(&source, &plan).unwrap().disposition,
+        AuditDisposition::Allow
+    );
+}
+
+#[test]
+fn single_script_body_with_flag_alias_is_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    for flag in [
+        "-cb on",
+        "-channelBox on",
+        "-keyable on",
+        "-lock off",
+        "-size 1",
+        "-capacityHint 1",
+    ] {
+        write_scene(
+            &source,
+            &format!(
+                "//Maya ASCII 2026 scene\ncreateNode script -n Example; setAttr {flag} \".b\" -type \"string\" \"python(\\\"exec('print(1)')\\\");\";"
+            ),
+        );
+        let report = audit_script_nodes(&source, &audit_plan()).unwrap();
+        assert_eq!(
+            report.disposition,
+            AuditDisposition::DenyMalicious,
+            "{flag}"
+        );
+        assert!(
+            report
+                .surfaces
+                .iter()
+                .any(
+                    |surface| surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                        && surface.origin.node_name.as_deref() == Some("Example")
+                )
+        );
+    }
+}

@@ -1,23 +1,11 @@
+use std::{collections::HashMap, sync::LazyLock};
+
+use maya_mel::{
+    maya::MayaCommandRegistry,
+    sema::command_schema::{CommandRegistry, FlagArity},
+};
+
 use crate::ma::error::MaParseError;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScalarTokenPolicy {
-    Plain,
-    Bool,
-    Usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FlagDescriptor {
-    pub(crate) name: &'static str,
-    pub(crate) arity: usize,
-    pub(crate) scalar_policy: ScalarTokenPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FlagCommandKind {
-    SetAttr,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
@@ -126,58 +114,30 @@ pub fn bare_token(token: &Token) -> Option<&str> {
     }
 }
 
-const BOOL_FLAG: ScalarTokenPolicy = ScalarTokenPolicy::Bool;
-const USIZE_FLAG: ScalarTokenPolicy = ScalarTokenPolicy::Usize;
-const PLAIN_FLAG: ScalarTokenPolicy = ScalarTokenPolicy::Plain;
-const SET_ATTR_FLAGS: &[FlagDescriptor] = &[
-    FlagDescriptor {
-        name: "-s",
-        arity: 1,
-        scalar_policy: USIZE_FLAG,
-    },
-    FlagDescriptor {
-        name: "-ch",
-        arity: 1,
-        scalar_policy: USIZE_FLAG,
-    },
-    FlagDescriptor {
-        name: "-l",
-        arity: 1,
-        scalar_policy: BOOL_FLAG,
-    },
-    FlagDescriptor {
-        name: "-k",
-        arity: 1,
-        scalar_policy: BOOL_FLAG,
-    },
-    FlagDescriptor {
-        name: "-type",
-        arity: 1,
-        scalar_policy: PLAIN_FLAG,
-    },
-];
-// Runtime parser paths only need setAttr flag metadata. Other legacy command fallback
-// lives in command-family owners such as `parse_references.rs`.
-const fn command_flags(kind: FlagCommandKind) -> &'static [FlagDescriptor] {
-    match kind {
-        FlagCommandKind::SetAttr => SET_ATTR_FLAGS,
-    }
-}
-
-pub(crate) fn command_flag_descriptor(
-    kind: FlagCommandKind,
-    flag_name: &str,
-) -> Option<&'static FlagDescriptor> {
-    command_flags(kind)
-        .iter()
-        .find(|flag| flag.name == flag_name)
+pub(crate) fn setattr_flag_arity(flag: &str) -> Option<usize> {
+    static FLAGS: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
+        let registry = MayaCommandRegistry::new();
+        let schema = registry.lookup("setAttr").expect("built-in setAttr schema");
+        let mut flags = HashMap::new();
+        for flag in schema.flags.iter() {
+            let arity = match flag.arity_by_mode.create {
+                FlagArity::None => 0,
+                FlagArity::Exact(count) => usize::from(count),
+                FlagArity::Range { max, .. } => usize::from(max),
+            };
+            flags.insert(flag.long_name.to_string(), arity);
+            if let Some(short) = &flag.short_name {
+                flags.insert(short.to_string(), arity);
+            }
+        }
+        flags
+    });
+    FLAGS.get(flag.trim_start_matches('-')).copied()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FlagCommandKind, ScalarTokenPolicy, Token, command_flag_descriptor, tokenize_command,
-    };
+    use super::{Token, setattr_flag_arity, tokenize_command};
 
     #[test]
     fn tokenizer_preserves_positive_exponent_numeric_tokens() {
@@ -199,17 +159,22 @@ mod tests {
 
     #[test]
     fn setattr_flag_metadata_is_inspectable() {
-        assert_eq!(
-            command_flag_descriptor(FlagCommandKind::SetAttr, "-type")
-                .expect("setAttr -type flag")
-                .scalar_policy,
-            ScalarTokenPolicy::Plain
-        );
-        assert_eq!(
-            command_flag_descriptor(FlagCommandKind::SetAttr, "-s")
-                .expect("setAttr -s flag")
-                .arity,
-            1
-        );
+        for flag in [
+            "-type",
+            "-typ",
+            "-s",
+            "-size",
+            "-cb",
+            "-channelBox",
+            "-keyable",
+            "-lock",
+            "-capacityHint",
+            "-caching",
+        ] {
+            assert_eq!(setattr_flag_arity(flag), Some(1), "{flag}");
+        }
+        for flag in ["-av", "-alteredValue", "-clamp"] {
+            assert_eq!(setattr_flag_arity(flag), Some(0), "{flag}");
+        }
     }
 }

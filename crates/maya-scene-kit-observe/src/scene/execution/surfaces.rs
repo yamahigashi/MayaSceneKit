@@ -1511,6 +1511,32 @@ mod tests {
     }
 
     #[test]
+    fn selected_expression_reaches_node_attribute_surface() {
+        let input = b"createNode -name Example expression; select :Example; setAttr \".ixp\" -type \"string\" \"print 1;\";";
+        let semantics =
+            node_execution_semantics_with_registry(default_schema_registry()).expect("semantics");
+        let sections = ma::selective::extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(input, &maya_scene_kit_formats::mel::MelParseBudget::default(), semantics.ma_capture_attr_selectors());
+        let coverage = collect_execution_coverage_from_ma_parts(
+            &sections.dump_sections.script_entries,
+            &sections.node_attr_values,
+            &sections.audit_top_level,
+            &semantics,
+        )
+        .expect("coverage");
+        assert!(
+            coverage
+                .surfaces
+                .iter()
+                .any(
+                    |surface| surface.origin.node_name.as_deref() == Some("Example")
+                        && surface.origin.attr_name.as_deref() == Some(".ixp")
+                        && surface.text.as_ref() == "print 1;"
+                )
+        );
+        assert!(sections.audit_top_level.diagnostics.is_empty());
+    }
+
+    #[test]
     fn ma_surfaces_include_schema_selected_node_attr_callbacks() {
         let input = concat!(
             "createNode script -n \"ExampleScript\";\n",

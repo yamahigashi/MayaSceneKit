@@ -9,9 +9,9 @@ use maya_mel::{
     maya::{
         MayaCommandRegistry,
         model::{
-            DefaultMayaSelectiveSetAttrSelector, MayaSelectiveCreateNode, MayaSelectiveFile,
-            MayaSelectiveItem, MayaSelectiveRequires, MayaSelectiveSetAttr,
-            MayaSelectiveSetAttrSelector, MayaTrackedSetAttrAttr,
+            DefaultMayaSelectiveSetAttrSelector, MayaSelectiveFile, MayaSelectiveItem,
+            MayaSelectiveRequires, MayaSelectiveSetAttr, MayaSelectiveSetAttrSelector,
+            MayaTrackedSetAttrAttr,
         },
     },
     parser::{
@@ -26,10 +26,8 @@ use maya_mel::{
 use crate::{
     ScenePathEntry, ScenePathMeta,
     ma::{
-        commands::{
-            FlagCommandKind, Token, bare_token, command_flag_descriptor, token_text,
-            tokenize_command,
-        },
+        block_context::{BlockCommand, BlockContext, BlockTracker, SelectedTarget},
+        commands::{Token, bare_token, setattr_flag_arity, token_text, tokenize_command},
         lexer::{
             extract_script_node_name_from_create, is_reference_attr, parse_ma_quoted_literal,
             parse_setattr_string_command, parse_setattr_string_value,
@@ -89,6 +87,7 @@ pub fn extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selector
     node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) -> RawMaSelectiveSections {
     let mut sink = SelectiveScanSink {
+        tracker: BlockTracker::for_source(data),
         selected_node_attr_selectors: node_attr_selectors.clone(),
         ..SelectiveScanSink::default()
     };
@@ -205,37 +204,38 @@ fn build_audit_source_store(
     }))
 }
 
-fn start_create_node_block(
-    source: LightSourceView<'_>,
-    command_text: &str,
-    create_node: &MayaSelectiveCreateNode,
-    line_number: usize,
-) -> Option<ActiveCreateBlock> {
-    let node_type = create_node
-        .node_type_range
-        .map(|range| decode_range_value(source, range))
-        .filter(|value: &String| !value.is_empty())
-        .unwrap_or_else(|| parse_create_node_type(command_text).to_string());
-    let node_name = create_node
-        .name_range
-        .map(|range| decode_range_value(source, range))
-        .filter(|value: &String| !value.is_empty())
-        .unwrap_or_else(|| {
-            extract_script_node_name_from_create(command_text.as_bytes(), line_number)
-        });
+fn context_binding<'a>(
+    context: &'a BlockContext,
+    selectors: &HashSet<RawMaNodeAttrSelector>,
+) -> Option<(&'a str, &'a str)> {
+    context.binding(|node_type| {
+        matches!(node_type, "script" | "expression")
+            || selectors
+                .iter()
+                .any(|selector| selector.node_type == node_type)
+    })
+}
 
-    match node_type.as_str() {
-        "script" => Some(ActiveCreateBlock::Script(ActiveScriptBlock {
-            name: node_name,
+fn start_create_node_block(
+    context: &BlockContext,
+    selectors: &HashSet<RawMaNodeAttrSelector>,
+) -> Option<ActiveCreateBlock> {
+    let (node_type, name) = context_binding(context, selectors)?;
+    Some(match node_type {
+        "" => ActiveCreateBlock::Selected(ActiveSelectedNodeBlock {
+            node_name: name.to_string(),
+        }),
+        "script" => ActiveCreateBlock::Script(ActiveScriptBlock {
+            name: name.to_string(),
             body: None,
             script_type: None,
             source_type: None,
-        })),
-        _ => Some(ActiveCreateBlock::ScenePath(ActiveScenePathBlock {
-            node_type,
-            node_name,
-        })),
-    }
+        }),
+        _ => ActiveCreateBlock::ScenePath(ActiveScenePathBlock {
+            node_type: node_type.to_string(),
+            node_name: name.to_string(),
+        }),
+    })
 }
 
 fn apply_setattr_to_active_block(
@@ -489,11 +489,27 @@ fn scene_path_entry_fingerprint(entry: &ScenePathEntry) -> u64 {
 }
 
 fn decode_range_value(source: LightSourceView<'_>, range: TextRange) -> String {
-    let text = source_decoded_string(source, range);
-    if let Some(contents) = string_literal_contents(&text) {
-        return unescape_ma_string_literal(contents);
+    decoded_range_value(source, range).into_owned()
+}
+
+fn decoded_range_value(source: LightSourceView<'_>, range: TextRange) -> Cow<'_, str> {
+    unquoted_range_value(source_decoded_cow(source, range))
+}
+
+fn unquoted_range_value(text: Cow<'_, str>) -> Cow<'_, str> {
+    match text {
+        Cow::Borrowed(text) => match string_literal_contents(text) {
+            Some(contents) if contents.contains('\\') => {
+                Cow::Owned(unescape_ma_string_literal(contents))
+            }
+            Some(contents) => Cow::Borrowed(contents),
+            None => Cow::Borrowed(text),
+        },
+        Cow::Owned(text) => match string_literal_contents(&text) {
+            Some(contents) => Cow::Owned(unescape_ma_string_literal(contents)),
+            None => Cow::Owned(text),
+        },
     }
-    text
 }
 
 fn string_literal_contents(text: &str) -> Option<&str> {
@@ -566,14 +582,6 @@ fn parse_file_command_flag_value(command: &str, flag: &str) -> Option<String> {
     literal.map(|s| unescape_ma_string_literal(&s))
 }
 
-fn parse_create_node_type(command: &str) -> &str {
-    let trimmed = command.trim_start();
-    let Some(rest) = trimmed.strip_prefix("createNode ") else {
-        return "";
-    };
-    rest.split_whitespace().next().unwrap_or_default()
-}
-
 fn parse_setattr_scalar_u32_command(command: &str) -> Option<(String, u32)> {
     let tokens = tokenize_command(command).ok()?;
     if !matches!(tokens.first().and_then(bare_token), Some("setAttr")) {
@@ -595,8 +603,7 @@ fn parse_setattr_scalar_u32_command(command: &str) -> Option<(String, u32)> {
         if !flag.starts_with('-') {
             break;
         }
-        let descriptor = command_flag_descriptor(FlagCommandKind::SetAttr, flag)?;
-        idx += 1 + descriptor.arity;
+        idx += 1 + setattr_flag_arity(flag)?;
     }
 
     let value = parse_u32_token(tokens.get(idx)?)?;
@@ -866,6 +873,7 @@ struct SelectiveScanSink {
     audit_head_cache: HashMap<String, bool>,
     selective_diagnostics: Vec<MelParseDiagnostic>,
     active_block: Option<ActiveCreateBlock>,
+    tracker: BlockTracker,
     line_tracker: LineTracker,
 }
 
@@ -880,9 +888,6 @@ impl LightItemSink for SelectiveScanSink {
         self.line_tracker
             .advance_to(source_raw_bytes(source), span_start);
         let is_indented = self.line_tracker.is_indented();
-        if !is_indented {
-            flush_active_block(&mut self.active_block, &mut self.script_entries);
-        }
 
         match item {
             LightItem::Proc(proc_def) if is_indented => {
@@ -911,16 +916,13 @@ impl LightItemSink for SelectiveScanSink {
                         span: mel_span(command.span),
                     });
                 }
-                if !is_indented
-                    && !self.selected_node_attr_selectors.is_empty()
+                let context_error = self.update_context(source, &command);
+                let diagnostic_start = self.selective_diagnostics.len();
+                let indented_top_level = is_indented
                     && !expression
-                    && let Some(node_name) = selected_node_name_from_command(source, &command)
-                {
-                    self.active_block =
-                        Some(ActiveCreateBlock::Selected(ActiveSelectedNodeBlock {
-                            node_name,
-                        }));
-                    return;
+                    && matches!(head, Some("requires" | "file" | "createNode"));
+                if indented_top_level {
+                    self.push_indented_top_level_diagnostic(command.span);
                 }
                 if let Some(item) = selective_item_from_command(
                     source,
@@ -930,14 +932,22 @@ impl LightItemSink for SelectiveScanSink {
                 ) {
                     if is_indented
                         && !expression
-                        && selective_item_requires_top_level_context(
-                            &item,
-                            self.active_block.is_some(),
-                        )
+                        && !indented_top_level
+                        && selective_item_requires_top_level_context(&item)
                     {
                         self.push_indented_top_level_diagnostic(command.span);
                     }
-                    self.on_selective_item(source, item, is_indented);
+                    self.on_selective_item(source, item);
+                }
+                if !expression
+                    && !unterminated
+                    && self.selective_diagnostics.len() == diagnostic_start
+                {
+                    if let Some(message) = context_error {
+                        self.push_context_diagnostic(command.span, message);
+                    } else if head == Some("setAttr") {
+                        self.check_attribute_context(source, &command);
+                    }
                 }
                 if expression
                     && matches!(head, Some("requires" | "file" | "createNode" | "setAttr"))
@@ -951,9 +961,7 @@ impl LightItemSink for SelectiveScanSink {
                 if is_indented {
                     self.push_indented_top_level_diagnostic(span);
                 }
-                if !is_indented || self.active_block.is_none() {
-                    self.push_top_level_statement(span, head);
-                }
+                self.push_top_level_statement(span, head);
             }
             _ => {}
         }
@@ -961,6 +969,244 @@ impl LightItemSink for SelectiveScanSink {
 }
 
 impl SelectiveScanSink {
+    fn update_context(
+        &mut self,
+        source: LightSourceView<'_>,
+        command: &LightCommandSurface,
+    ) -> Option<&'static str> {
+        let head = source_ascii_slice(source, command.head_range).unwrap_or("");
+        let mut error = None;
+        let transition = match head {
+            "createNode" => {
+                let mut index = 0;
+                let mut type_word = None;
+                let mut skip_select = false;
+                while let Some(word) = command.words.get(index) {
+                    if let LightWord::Flag { text, .. } = word {
+                        match source_ascii_slice(source, *text) {
+                            Some("-n" | "-name" | "-p" | "-parent") => index += 1,
+                            Some("-ss" | "-skipSelect") => skip_select = true,
+                            Some("-s" | "-shared") => {}
+                            _ => {}
+                        }
+                    } else if type_word.is_none() {
+                        type_word = Some(word);
+                    }
+                    index += 1;
+                }
+                let name_range = first_flag_arg_range(source, &command.words, &["name", "n"]);
+                let name_word = name_range
+                    .and_then(|range| command.words.iter().find(|word| word.range() == range));
+                let node_type =
+                    type_word.and_then(|word| static_context_word(source, command, word));
+                let explicit_name =
+                    name_word.and_then(|word| static_context_word(source, command, word));
+                let named = explicit_name.is_some();
+                let has_name_flag = command.words.iter().any(|word| matches!(word,
+                    LightWord::Flag { text, .. } if matches!(source_ascii_slice(source, *text), Some("-n" | "-name"))));
+                let context = match node_type {
+                    Some(node_type) if !has_name_flag || named => {
+                        let name = explicit_name.map(Cow::into_owned).unwrap_or_else(|| {
+                            extract_script_node_name_from_create(
+                                source_decoded_cow(source, command.span).as_bytes(),
+                                self.line_tracker.line_number(),
+                            )
+                        });
+                        BlockContext::Node {
+                            node_type: node_type.into_owned(),
+                            name,
+                        }
+                    }
+                    _ => {
+                        error = Some("createNode has no static node type or name");
+                        BlockContext::None
+                    }
+                };
+                if skip_select && error.is_none() {
+                    error = Some("createNode skipSelect requires conservative audit coverage");
+                }
+                BlockCommand::Create {
+                    context,
+                    named,
+                    skip_select,
+                }
+            }
+            "select" => match selected_targets_from_command(source, command) {
+                Ok(transition) => transition,
+                Err(message) => {
+                    error = Some(message);
+                    BlockCommand::Select {
+                        targets: Vec::new(),
+                        accumulate: false,
+                    }
+                }
+            },
+            "rename"
+                if !command
+                    .words
+                    .iter()
+                    .any(|word| matches!(word, LightWord::Flag { .. })) =>
+            {
+                match command.words.as_slice() {
+                    [old, new] => match (
+                        static_context_word(source, command, old),
+                        static_context_word(source, command, new),
+                    ) {
+                        (Some(old), Some(new)) => BlockCommand::Rename {
+                            old: old.into_owned(),
+                            new: new.into_owned(),
+                        },
+                        _ => BlockCommand::Preserve,
+                    },
+                    _ => BlockCommand::Preserve,
+                }
+            }
+            _ => BlockCommand::Preserve,
+        };
+        if self.tracker.on_command(transition) {
+            if head == "rename" {
+                if let (Some((_, name)), Some(block)) = (
+                    context_binding(&self.tracker.context, &self.selected_node_attr_selectors),
+                    &mut self.active_block,
+                ) {
+                    match block {
+                        ActiveCreateBlock::Script(block) => block.name = name.to_string(),
+                        ActiveCreateBlock::ScenePath(block) => block.node_name = name.to_string(),
+                        ActiveCreateBlock::Selected(block) => block.node_name = name.to_string(),
+                    }
+                }
+            } else {
+                flush_active_block(&mut self.active_block, &mut self.script_entries);
+                self.active_block = start_create_node_block(
+                    &self.tracker.context,
+                    &self.selected_node_attr_selectors,
+                );
+            }
+        }
+        debug_assert_eq!(
+            context_binding(&self.tracker.context, &self.selected_node_attr_selectors),
+            self.active_block.as_ref().map(active_block_node)
+        );
+        error
+    }
+
+    fn push_context_diagnostic(&mut self, span: TextRange, message: &'static str) {
+        self.selective_diagnostics.push(MelParseDiagnostic {
+            stage: MelDiagnosticStage::Parse,
+            message: Cow::Borrowed(message),
+            span: mel_span(span),
+        });
+    }
+
+    fn check_attribute_context(
+        &mut self,
+        source: LightSourceView<'_>,
+        command: &LightCommandSurface,
+    ) {
+        let Some(range) = first_setattr_attr_path_range(source, &command.words) else {
+            self.push_context_diagnostic(command.span, "setAttr has no attribute path");
+            return;
+        };
+        let attr = decoded_range_value(source, range);
+        if attr.is_empty() {
+            self.push_context_diagnostic(command.span, "setAttr has no attribute path");
+            return;
+        }
+        let execution_attr = |name: &str| {
+            matches!(
+                name,
+                "b" | "a"
+                    | "st"
+                    | "stp"
+                    | "ixp"
+                    | "before"
+                    | "after"
+                    | "scriptType"
+                    | "sourceType"
+                    | "internalExpression"
+            )
+        };
+        if !attr.starts_with('.') {
+            match attr.rsplit_once('.') {
+                Some((node, name)) if !node.is_empty() && !name.is_empty() => {
+                    if execution_attr(name) {
+                        self.push_context_diagnostic(
+                            command.span,
+                            "absolute execution attribute requires conservative audit coverage",
+                        );
+                    }
+                }
+                _ => {
+                    self.push_context_diagnostic(command.span, "setAttr has invalid attribute path")
+                }
+            }
+            return;
+        }
+        match &self.tracker.context {
+            BlockContext::None if !self.tracker.reported_unbound => {
+                self.tracker.reported_unbound = true;
+                self.push_context_diagnostic(command.span, "relative setAttr has no node context");
+            }
+            BlockContext::Node { .. }
+                if matches!(
+                    attr.as_ref(),
+                    ".before" | ".after" | ".scriptType" | ".sourceType" | ".internalExpression"
+                ) =>
+            {
+                self.push_context_diagnostic(
+                    command.span,
+                    "long execution attribute requires conservative audit coverage",
+                );
+            }
+            BlockContext::Selected { targets }
+                if !self.tracker.reported_selected
+                    && !targets.iter().all(|target| target.is_default)
+                    && (execution_attr(&attr[1..])
+                        || self
+                            .selected_node_attr_selectors
+                            .iter()
+                            .any(|selector| selector.attr == attr)) =>
+            {
+                let resolved =
+                    context_binding(&self.tracker.context, &self.selected_node_attr_selectors)
+                        .is_some_and(|(node_type, name)| {
+                            if node_type.is_empty()
+                                || matches!(
+                                    attr.as_ref(),
+                                    ".before"
+                                        | ".after"
+                                        | ".scriptType"
+                                        | ".sourceType"
+                                        | ".internalExpression"
+                                )
+                            {
+                                return false;
+                            }
+
+                            matches!(
+                                (node_type, attr.as_ref()),
+                                ("script", ".b" | ".a" | ".st" | ".stp") | ("expression", ".ixp")
+                            ) || self.selected_node_attr_selectors.iter().any(|selector| {
+                                selector.node_type == node_type
+                                    && selector.attr == attr
+                                    && selector
+                                        .node_name
+                                        .as_deref()
+                                        .is_none_or(|expected| expected == name)
+                            })
+                        });
+                if !resolved {
+                    self.tracker.reported_selected = true;
+                    self.push_context_diagnostic(
+                        command.span,
+                        "selected execution attribute has unresolved node type",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn finish(
         mut self,
         source: LightSourceView<'_>,
@@ -1034,14 +1280,9 @@ impl SelectiveScanSink {
         }
     }
 
-    fn on_selective_item(
-        &mut self,
-        source: LightSourceView<'_>,
-        item: MayaSelectiveItem,
-        is_indented: bool,
-    ) {
+    fn on_selective_item(&mut self, source: LightSourceView<'_>, item: MayaSelectiveItem) {
         match item {
-            MayaSelectiveItem::Requires(requires) if !is_indented => {
+            MayaSelectiveItem::Requires(requires) => {
                 let command_text = source_decoded_cow(source, requires.span);
                 let normalized = normalize_requires_command(command_text.as_ref());
                 if self.seen_requires.insert(normalized.clone()) {
@@ -1055,7 +1296,7 @@ impl SelectiveScanSink {
                     });
                 }
             }
-            MayaSelectiveItem::File(file) if !is_indented => {
+            MayaSelectiveItem::File(file) => {
                 let command_text = source_decoded_string(source, file.span);
                 if file_command_has_flag(&command_text, "-rfn") {
                     self.selective_diagnostics
@@ -1085,16 +1326,8 @@ impl SelectiveScanSink {
                         )));
                 }
             }
-            MayaSelectiveItem::CreateNode(create_node) if !is_indented => {
-                let command_text = source_decoded_cow(source, create_node.span);
-                self.active_block = start_create_node_block(
-                    source,
-                    command_text.as_ref(),
-                    &create_node,
-                    self.line_tracker.line_number(),
-                );
-            }
-            MayaSelectiveItem::SetAttr(set_attr) if is_indented => {
+            MayaSelectiveItem::CreateNode(_) => {}
+            MayaSelectiveItem::SetAttr(set_attr) => {
                 if let Some(attr) =
                     tracked_opaque_tail_attr_name(self.active_block.as_ref(), &set_attr)
                 {
@@ -1118,14 +1351,8 @@ impl SelectiveScanSink {
             }
             MayaSelectiveItem::OtherCommand { head_range, span } => {
                 let head = source_ascii_slice(source, head_range);
-                if !is_indented
-                    || self.active_block.is_none()
-                    || head.is_some_and(is_structural_command_head)
-                {
-                    self.push_top_level_statement(span, head);
-                }
+                self.push_top_level_statement(span, head);
             }
-            _ => {}
         }
     }
 }
@@ -1138,10 +1365,7 @@ fn classify_raw_require_kind(rendered: &str) -> RawMaRequireKind {
     }
 }
 
-fn selective_item_requires_top_level_context(
-    item: &MayaSelectiveItem,
-    _has_active_block: bool,
-) -> bool {
+fn selective_item_requires_top_level_context(item: &MayaSelectiveItem) -> bool {
     match item {
         MayaSelectiveItem::Requires(_)
         | MayaSelectiveItem::File(_)
@@ -1179,41 +1403,12 @@ fn selective_item_from_command(
             path_range: last_non_flag_range(&command.words),
             span: command.span,
         })),
-        "createNode" => {
-            let node_type_range = first_non_flag_range(&command.words);
-            let node_type_text =
-                node_type_range.map(|range| source_decoded_string(source, range))?;
-            let node_type = strip_outer_quotes(&node_type_text);
-            if node_type == "script" {
-                return Some(MayaSelectiveItem::CreateNode(MayaSelectiveCreateNode {
-                    head_range: command.head_range,
-                    node_type_range,
-                    name_range: first_flag_arg_range(source, &command.words, &["name", "n"]),
-                    parent_range: first_flag_arg_range(source, &command.words, &["parent", "p"]),
-                    span: command.span,
-                }));
-            }
-            if node_type.is_empty() {
-                return None;
-            }
-            Some(MayaSelectiveItem::CreateNode(MayaSelectiveCreateNode {
-                head_range: command.head_range,
-                node_type_range,
-                name_range: first_flag_arg_range(source, &command.words, &["name", "n"]),
-                parent_range: first_flag_arg_range(source, &command.words, &["parent", "p"]),
-                span: command.span,
-            }))
-        }
         "setAttr" => {
             let attr_path_range = first_setattr_attr_path_range(source, &command.words);
             let type_name_range = first_flag_arg_range(source, &command.words, &["type", "typ"]);
-            let tracked_attr = attr_path_range.and_then(|range| {
-                let attr_path = source_decoded_string(source, range);
-                DefaultMayaSelectiveSetAttrSelector.classify(strip_outer_quotes(&attr_path))
-            });
-            let attr_path_text =
-                attr_path_range.map(|range| source_decoded_string(source, range))?;
+            let attr_path_text = attr_path_range.map(|range| source_decoded_cow(source, range))?;
             let attr_path = strip_outer_quotes(&attr_path_text);
+            let tracked_attr = DefaultMayaSelectiveSetAttrSelector.classify(attr_path);
             if !matches!(attr_path, ".b" | ".st" | ".stp")
                 && tracked_attr.is_none()
                 && (selected_node_attr_selectors.is_empty()
@@ -1241,36 +1436,72 @@ fn selective_item_from_command(
     }
 }
 
-fn selected_node_name_from_command(
-    source: LightSourceView<'_>,
+fn static_context_word<'a>(
+    source: LightSourceView<'a>,
     command: &LightCommandSurface,
-) -> Option<String> {
-    let head = source_ascii_slice(source, command.head_range)?;
-    if head != "select" {
+    word: &LightWord,
+) -> Option<Cow<'a, str>> {
+    if matches!(
+        word,
+        LightWord::Capture { .. }
+            | LightWord::GroupedExpr { .. }
+            | LightWord::BraceList { .. }
+            | LightWord::VectorLiteral { .. }
+            | LightWord::Flag { .. }
+    ) {
         return None;
     }
-    let mut saw_no_expand = false;
-    let mut selected = None;
+    if command.words.iter().any(|next| {
+        matches!(next, LightWord::GroupedExpr { range }
+        if range.start() == word.range().end())
+    }) {
+        return None;
+    }
+    let raw = source_decoded_cow(source, word.range());
+    if raw.starts_with('$') {
+        return None;
+    }
+    let value = unquoted_range_value(raw);
+    (!value.is_empty()).then_some(value)
+}
+
+fn selected_targets_from_command(
+    source: LightSourceView<'_>,
+    command: &LightCommandSurface,
+) -> Result<BlockCommand, &'static str> {
+    let mut accumulate = false;
     for word in &command.words {
-        match word {
-            LightWord::Flag { text, .. } => {
-                let flag = source_ascii_slice(source, *text)?;
-                if matches!(flag, "-ne" | "-noExpand") {
-                    saw_no_expand = true;
+        if let LightWord::Flag { text, .. } = word {
+            match source_ascii_slice(source, *text) {
+                Some("-cl" | "-clear" | "-d" | "-deselect") => {
+                    return Ok(BlockCommand::Select {
+                        targets: Vec::new(),
+                        accumulate: false,
+                    });
                 }
-            }
-            _ => {
-                let range = non_flag_range(word)?;
-                let text = source_decoded_string(source, range);
-                selected = Some(
-                    strip_outer_quotes(&text)
-                        .trim_start_matches(':')
-                        .to_string(),
-                );
+                Some("-add" | "-tgl" | "-toggle") => accumulate = true,
+                _ => {}
             }
         }
     }
-    saw_no_expand.then_some(selected).flatten()
+    let mut targets = Vec::new();
+    for word in &command.words {
+        if !matches!(word, LightWord::Flag { .. }) {
+            let text = static_context_word(source, command, word)
+                .ok_or("dynamic select target requires conservative audit coverage")?;
+            let target = SelectedTarget::new(&text);
+            if !targets
+                .iter()
+                .any(|previous: &SelectedTarget| previous.name == target.name)
+            {
+                targets.push(target);
+            }
+        }
+    }
+    Ok(BlockCommand::Select {
+        targets,
+        accumulate,
+    })
 }
 
 fn audit_item_source_span(item: &MelAuditTopLevelItemFact) -> MelSpan {
@@ -1285,10 +1516,6 @@ fn collect_non_flag_ranges(words: &[LightWord]) -> Vec<TextRange> {
     words.iter().filter_map(non_flag_range).collect()
 }
 
-fn first_non_flag_range(words: &[LightWord]) -> Option<TextRange> {
-    words.iter().find_map(non_flag_range)
-}
-
 fn first_setattr_attr_path_range(
     source: LightSourceView<'_>,
     words: &[LightWord],
@@ -1298,8 +1525,7 @@ fn first_setattr_attr_path_range(
         match words.get(index)? {
             LightWord::Flag { text, .. } => {
                 let flag = source_ascii_slice(source, *text)?;
-                let descriptor = command_flag_descriptor(FlagCommandKind::SetAttr, flag);
-                index += 1 + descriptor.map_or(0, |descriptor| descriptor.arity);
+                index += 1 + setattr_flag_arity(flag).unwrap_or(0);
             }
             word => return non_flag_range(word),
         }
@@ -1567,11 +1793,11 @@ mod tests {
                 1,
                 false,
             ),
-            ("setAttr \".b\" -type \"string\" (\"a\" + \"b\");", 0, false),
+            ("setAttr \".b\" -type \"string\" (\"a\" + \"b\");", 0, true),
             (
                 "setAttr \".b\" -type \"string\" ( \"a\" + \"b\" );",
                 0,
-                false,
+                true,
             ),
             ("system \"echo Example\";", 1, false),
             ("evalEcho \"print 1\";", 1, false),
@@ -1609,7 +1835,7 @@ mod tests {
             ),
             (
                 "createNode script -n \"ExampleScript\";\n    system \"echo Example\";",
-                0,
+                1,
                 true,
             ),
             ("    system \"echo Example\";", 1, true),
@@ -1620,7 +1846,7 @@ mod tests {
             ("    system(\"Example\");", 1, true),
             (
                 "createNode script -n \"ExampleScript\";\n    system(\"Example\");",
-                0,
+                1,
                 true,
             ),
             ("    string $s = \"Example\";", 1, true),
@@ -1866,17 +2092,16 @@ mod tests {
     #[test]
     fn selective_sections_keep_block_boundaries_on_unindented_commands() {
         let input = concat!(
-            "createNode script -n \"scriptNode1\";\n",
-            "    setAttr \".b\" -type \"string\" \"print \\\"ok\\\";\";\n",
-            "rename \"a\" \"b\";\n",
-            "    setAttr \".b\" -type \"string\" \"print \\\"ignored\\\";\";\n",
+            "createNode script -n \"ExampleScript\";\n",
+            "rename -uid \"Example\";\n",
+            "    setAttr \".b\" -type \"string\" \"print('Example');\";\n",
         );
 
         let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
         assert_eq!(sections.dump_sections.script_entries.len(), 1);
         assert_eq!(
             sections.dump_sections.script_entries[0].body,
-            "print \"ok\";"
+            "print('Example');"
         );
     }
 
@@ -2422,5 +2647,533 @@ mod tests {
                     .message
                     .contains("non-utf8 MEL source decoded via cp932 selective path requires conservative audit coverage")
         }));
+    }
+}
+
+#[cfg(test)]
+mod context_regressions {
+    use super::*;
+
+    #[test]
+    fn script_body_binding_ignores_layout_and_preserving_commands() {
+        for separator in [
+            "\n",
+            " ",
+            "/**/",
+            "\n// Example comment\n",
+            "\nfile -r \"asset/example/file.ma\";\n",
+            "\ncurrentUnit -t film;\n",
+            "\nfileInfo \"Example\" \"Sample\";\n",
+        ] {
+            let input = format!(
+                "createNode script -n \"Example\";{separator}setAttr \".b\" -type \"string\" \"print('Example')\";"
+            );
+            let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+            assert_eq!(sections.dump_sections.script_entries[0].name, "Example");
+            assert_eq!(
+                sections.dump_sections.script_entries[0].body, "print('Example')",
+                "{separator}"
+            );
+        }
+
+        let sections = extract_raw_selective_sections_from_ma(
+            b"createNode script -n \"Example\"; createNode transform -n \"Sample\"; setAttr \".b\" -type \"string\" \"Example\";");
+        assert_eq!(sections.dump_sections.script_entries[0].name, "Example");
+        assert_eq!(sections.dump_sections.script_entries[0].body, "");
+        assert!(sections.audit_top_level.diagnostics.is_empty());
+        let sections = extract_raw_selective_sections_from_ma(
+            b"    requires \"Example\" \"1\";\n    file -r -command \"Example\" \"print 1\" \"asset/example/file.ma\";\n    createNode script -n \"Example\";\n    setAttr \".b\" -type \"string\" \"Example\";");
+        assert_eq!(sections.dump_sections.require_entries.len(), 1);
+        assert_eq!(sections.scene_paths[0].value, "asset/example/file.ma");
+        assert_eq!(sections.dump_sections.script_entries[0].body, "Example");
+        assert!(sections.audit_top_level.items.iter().any(|item| matches!(item, MelAuditTopLevelItemFact::Command(command) if command.file_command_callback.is_some())));
+        assert_eq!(
+            sections
+                .audit_top_level
+                .diagnostics
+                .iter()
+                .filter(|d| d.message.contains("indented top-level"))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn relative_attribute_diagnostics_follow_selection_intervals() {
+        for input in [
+            "setAttr \".tx\" 1; setAttr \".b\" -type \"string\" \"Example\";",
+            "createNode;",
+            "setAttr;",
+            "select -ne Example; setAttr \".b\" -type \"string\" \"Example\";",
+            "select -r Example; setAttr \".before\" -type \"string\" \"Example\";",
+            "select -add Example; setAttr \".ixp\" -type \"string\" \"Example\";",
+            "select Example; setAttr \".stp\" 1;",
+        ] {
+            let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+            assert_eq!(sections.audit_top_level.diagnostics.len(), 1, "{input}");
+            let diagnostic = &sections.audit_top_level.diagnostics[0];
+            assert_eq!(diagnostic.stage, MelDiagnosticStage::Parse);
+            let (statement, message) = if input.starts_with("select") {
+                (
+                    input.split_once("; ").unwrap().1,
+                    "selected execution attribute has unresolved node type",
+                )
+            } else if input == "createNode;" {
+                (input, "createNode has no static node type or name")
+            } else if input == "setAttr;" {
+                (input, "setAttr has no attribute path")
+            } else {
+                ("setAttr \".tx\" 1;", "relative setAttr has no node context")
+            };
+            assert_eq!(diagnostic.message, message);
+            assert_eq!(
+                sections.audit_top_level.source_text(diagnostic.span),
+                statement
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolved_context_regressions {
+    use super::*;
+
+    #[test]
+    fn selected_created_nodes_resume_typed_collection() {
+        for selection in [
+            "-ne Example",
+            "-r Example",
+            "-add Example",
+            "Example",
+            ":Example",
+        ] {
+            let input = format!(
+                "createNode script -n \"Example\"; select {selection}; setAttr \".b\" -type \"string\" \"print('Example')\";"
+            );
+            let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+            assert!(
+                sections
+                    .dump_sections
+                    .script_entries
+                    .iter()
+                    .any(|entry| entry.name == "Example" && entry.body == "print('Example')"),
+                "{selection}"
+            );
+            assert!(
+                sections.audit_top_level.diagnostics.is_empty(),
+                "{selection}"
+            );
+        }
+        let selectors = HashSet::from([RawMaNodeAttrSelector {
+            node_type: "expression".into(),
+            node_name: None,
+            attr: ".ixp".into(),
+        }]);
+        let sections = extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+            b"createNode expression -n \"Example\"; select Example; setAttr \".ixp\" -type \"string\" \"print 1;\";",
+            &MelParseBudget::default(), &selectors);
+        assert_eq!(sections.node_attr_values[0].node_type, "expression");
+        assert_eq!(sections.node_attr_values[0].node_name, "Example");
+        assert_eq!(
+            sections.node_attr_values[0].string_value.as_deref(),
+            Some("print 1;")
+        );
+    }
+
+    #[test]
+    fn default_selection_and_static_create_arguments_preserve_coverage() {
+        for input in [
+            "select -ne :time1; setAttr \".st\" 1;",
+            "select -r :defaultRenderGlobals; setAttr \".before\" -type \"string\" \"Example\";",
+        ] {
+            assert!(
+                extract_raw_selective_sections_from_ma(input.as_bytes())
+                    .audit_top_level
+                    .diagnostics
+                    .is_empty(),
+                "{input}"
+            );
+        }
+        let sections = extract_raw_selective_sections_from_ma(b"createNode script -n \"Example\" (system(\"Example\")); setAttr \".b\" -type \"string\" \"Example\";");
+        assert_eq!(sections.dump_sections.script_entries[0].body, "Example");
+        assert_eq!(sections.audit_top_level.items.len(), 1);
+        assert!(matches!(
+            sections.audit_top_level.items[0],
+            MelAuditTopLevelItemFact::Other(_)
+        ));
+    }
+
+    #[test]
+    fn malformed_context_and_unbound_intervals_keep_diagnostic_priority() {
+        let cases = [
+            (
+                "setAttr \".tx\" 1; select -cl; setAttr \".ty\" 2; createNode transform -n \"Example\"; select -d Example; setAttr \".tx\" 3; setAttr \".ty\" 4;",
+                2,
+            ),
+            (
+                "createNode script -n \"Example\"; createNode $Example; setAttr \".b\" -type \"string\" \"Example\";",
+                2,
+            ),
+            (
+                "createNode script -n \"Example\"; createNode script -n $Example; setAttr \".b\" -type \"string\" \"Example\";",
+                2,
+            ),
+            ("    createNode;", 1),
+            (
+                "createNode; setAttr; setAttr \".tx\" 1; setAttr \".ty\" 2;",
+                3,
+            ),
+            ("select $Example; setAttr \".tx\" 1;", 2),
+            ("select \x60system \"Example\"\x60; setAttr \".tx\" 1;", 1),
+        ];
+        for (input, count) in cases {
+            let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+            assert_eq!(sections.audit_top_level.diagnostics.len(), count, "{input}");
+            for diagnostic in &sections.audit_top_level.diagnostics {
+                assert_eq!(diagnostic.stage, MelDiagnosticStage::Parse);
+                assert_eq!(
+                    sections.audit_top_level.source_text(diagnostic.span),
+                    &input[diagnostic.span.start..diagnostic.span.end]
+                );
+            }
+            assert!(
+                sections
+                    .dump_sections
+                    .script_entries
+                    .iter()
+                    .all(|entry| entry.body.is_empty()),
+                "{input}"
+            );
+        }
+        for select in [
+            "select;",
+            "select -cl;",
+            "select -cl Example;",
+            "select -d Example;",
+        ] {
+            assert!(
+                extract_raw_selective_sections_from_ma(select.as_bytes())
+                    .audit_top_level
+                    .diagnostics
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod selection_fix_regressions {
+    use super::*;
+
+    fn body(input: &str, owner: &str) {
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+        assert!(
+            sections
+                .dump_sections
+                .script_entries
+                .iter()
+                .any(|entry| entry.name == owner && entry.body == "Example"),
+            "{input}"
+        );
+        assert!(
+            sections.audit_top_level.diagnostics.is_empty(),
+            "{input}: {:?}",
+            sections.audit_top_level.diagnostics
+        );
+    }
+
+    fn diagnostic(input: &str, statement: &str, message: &str) {
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+        let diagnostic = sections
+            .audit_top_level
+            .diagnostics
+            .iter()
+            .find(|d| d.message == message)
+            .unwrap_or_else(|| panic!("{input}: {:?}", sections.audit_top_level.diagnostics));
+        assert_eq!(diagnostic.stage, MelDiagnosticStage::Parse);
+        assert_eq!(
+            sections.audit_top_level.source_text(diagnostic.span),
+            statement
+        );
+    }
+
+    #[test]
+    fn setattr_flag_aliases_preserve_body() {
+        for flags in [
+            "-cb on",
+            "-channelBox on",
+            "-keyable on",
+            "-lock off",
+            "-size 1",
+            "-capacityHint 1",
+            "-caching off",
+            "-alteredValue",
+            "-clamp",
+        ] {
+            body(
+                &format!(
+                    "createNode script -n Example; setAttr {flags} \".b\" -type \"string\" \"Example\";"
+                ),
+                "Example",
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_and_deferred_attribute_paths_are_diagnosed() {
+        diagnostic(
+            "createNode script -n Example; setAttr on 1;",
+            "setAttr on 1;",
+            "setAttr has invalid attribute path",
+        );
+        for attr in [
+            "b",
+            "a",
+            "st",
+            "stp",
+            "ixp",
+            "before",
+            "after",
+            "scriptType",
+            "sourceType",
+            "internalExpression",
+        ] {
+            let statement = format!("setAttr \"Example.{attr}\" 1;");
+            diagnostic(
+                &statement,
+                &statement,
+                "absolute execution attribute requires conservative audit coverage",
+            );
+        }
+        for attr in [
+            "before",
+            "after",
+            "scriptType",
+            "sourceType",
+            "internalExpression",
+        ] {
+            let statement = format!("setAttr \".{attr}\" 1;");
+            diagnostic(
+                &format!("createNode script -n Example; {statement}"),
+                &statement,
+                "long execution attribute requires conservative audit coverage",
+            );
+        }
+    }
+
+    #[test]
+    fn colon_selection_requires_known_default_or_created_node() {
+        body(
+            "createNode script -n time1; select :time1; setAttr \".b\" -type \"string\" \"Example\";",
+            "time1",
+        );
+        diagnostic(
+            "createNode script; select :Example; setAttr \".b\" 1;",
+            "setAttr \".b\" 1;",
+            "selected execution attribute has unresolved node type",
+        );
+
+        diagnostic(
+            "select :Example; setAttr \".b\" 1;",
+            "setAttr \".b\" 1;",
+            "selected execution attribute has unresolved node type",
+        );
+        body(
+            "createNode script -n Example; select :Example; setAttr \".b\" -type \"string\" \"Example\";",
+            "Example",
+        );
+    }
+
+    #[test]
+    fn multi_selection_and_accumulation_preserve_execution_owner() {
+        for select in [
+            "select Example Sample;",
+            "select Example :time1;",
+            "select Sample; select -add Example;",
+            "select Example; select -tgl Sample;",
+        ] {
+            body(
+                &format!(
+                    "createNode script -n Example; createNode transform -n Sample; {select} setAttr \".b\" -type \"string\" \"Example\";"
+                ),
+                "Example",
+            );
+        }
+        for select in [
+            "select Example Unknown;",
+            "select Example Sample;",
+            "select Example; select -add Unknown;",
+            "select Example; select -tgl Sample;",
+        ] {
+            diagnostic(
+                &format!(
+                    "createNode script -n Example; createNode expression -n Sample; {select} setAttr \".b\" 1;"
+                ),
+                "setAttr \".b\" 1;",
+                "selected execution attribute has unresolved node type",
+            );
+        }
+    }
+
+    #[test]
+    fn rename_and_duplicate_names_use_latest_type() {
+        body(
+            "createNode script -n Example; createNode transform -n Sample; rename Sample TestAsset; rename Example Sample; select Sample; setAttr \".b\" -type \"string\" \"Example\";",
+            "Sample",
+        );
+        body(
+            "createNode script -n Example; rename Example Sample; setAttr \".b\" -type \"string\" \"Example\";",
+            "Sample",
+        );
+        body(
+            "createNode transform -n Example; createNode script -n Example; select Example; setAttr \".b\" -type \"string\" \"Example\";",
+            "Example",
+        );
+    }
+
+    #[test]
+    fn create_flags_resolve_type_and_skip_selection_fails_closed() {
+        for create in [
+            "createNode -n \"Example\" script;",
+            "createNode -p \"Sample\" script -n \"Example\";",
+            "createNode \"script\" -name \"Example\";",
+        ] {
+            body(
+                &format!("{create} select Example; setAttr \".b\" -type \"string\" \"Example\";"),
+                "Example",
+            );
+        }
+        for flag in ["-ss", "-skipSelect"] {
+            let statement = format!("createNode transform -n Sample {flag};");
+            let input = format!(
+                "createNode script -n Example; {statement} setAttr \".b\" -type \"string\" \"Example\";"
+            );
+            let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+            assert!(
+                sections
+                    .dump_sections
+                    .script_entries
+                    .iter()
+                    .all(|entry| entry.body.is_empty())
+            );
+            diagnostic(
+                &input,
+                "setAttr \".b\" -type \"string\" \"Example\";",
+                "relative setAttr has no node context",
+            );
+
+            diagnostic(
+                &format!("createNode script -n Example; {statement}"),
+                &statement,
+                "createNode skipSelect requires conservative audit coverage",
+            );
+        }
+    }
+
+    #[test]
+    fn selected_diagnostics_are_once_per_interval() {
+        let input = b"setAttr \".tx\" 1; select -cl Example; setAttr \".ty\" 1; createNode transform -n Example; select -d Example; setAttr \".tz\" 1; select Sample; select; setAttr \".tx\" 2;";
+        let sections = extract_raw_selective_sections_from_ma(input);
+        assert_eq!(sections.audit_top_level.diagnostics.len(), 3);
+        for (d, statement) in sections.audit_top_level.diagnostics.iter().zip([
+            "setAttr \".tx\" 1;",
+            "setAttr \".tz\" 1;",
+            "setAttr \".tx\" 2;",
+        ]) {
+            assert_eq!(d.stage, MelDiagnosticStage::Parse);
+            assert_eq!(d.message, "relative setAttr has no node context");
+            assert_eq!(sections.audit_top_level.source_text(d.span), statement);
+        }
+        let selectors = HashSet::from([RawMaNodeAttrSelector {
+            node_type: "ExampleType".into(),
+            node_name: None,
+            attr: ".exampleCallback".into(),
+        }]);
+        let sections = extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+            b"select Example; setAttr \".exampleCallback\" -type \"string\" \"Example\";",
+            &MelParseBudget::default(),
+            &selectors,
+        );
+        let d = &sections.audit_top_level.diagnostics[0];
+        assert_eq!(d.stage, MelDiagnosticStage::Parse);
+        assert_eq!(
+            d.message,
+            "selected execution attribute has unresolved node type"
+        );
+        assert_eq!(
+            sections.audit_top_level.source_text(d.span),
+            "setAttr \".exampleCallback\" -type \"string\" \"Example\";"
+        );
+        let input = "select Example; setAttr \".b\" 1; setAttr \".st\" 1; select Sample; setAttr \".ixp\" 1; setAttr \".stp\" 1;";
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+        let diagnostics = &sections.audit_top_level.diagnostics;
+        assert_eq!(diagnostics.len(), 2);
+        for (d, statement) in diagnostics
+            .iter()
+            .zip(["setAttr \".b\" 1;", "setAttr \".ixp\" 1;"])
+        {
+            assert_eq!(d.stage, MelDiagnosticStage::Parse);
+            assert_eq!(
+                d.message,
+                "selected execution attribute has unresolved node type"
+            );
+            assert_eq!(sections.audit_top_level.source_text(d.span), statement);
+        }
+    }
+}
+
+#[cfg(test)]
+mod standalone_ui_regression {
+    use super::*;
+
+    #[test]
+    fn standalone_ui_statements_survive_retained_node_context() {
+        let statements = [
+            "string $example = \"Example\";",
+            "string $sample = \"Sample\";",
+            "string $testAsset = \"TestAsset\";",
+            "formLayout -e Example;",
+            "showWindow Example;",
+            "string $testScene = \"TestScene\";",
+            "nodeOutliner -e Example;",
+            "nodeOutliner -e Sample;",
+        ];
+        for selection in ["select Sample;", "select :time1;", ""] {
+            let input = format!(
+                "createNode transform -n Example;\nrename Example Sample;\n{selection}\n{}\n    {}\n    {}\n    {}\n{}\n{}\n{}\n{}\nsetAttr \".tx\" 1;",
+                statements[0],
+                statements[1],
+                statements[2],
+                statements[3],
+                statements[4],
+                statements[5],
+                statements[6],
+                statements[7]
+            );
+            let facts = extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+            let captured: Vec<_> = facts
+                .items
+                .iter()
+                .map(|item| facts.source_text(audit_item_source_span(item)))
+                .collect();
+            assert_eq!(captured, statements, "{selection}");
+            assert_eq!(
+                facts
+                    .items
+                    .iter()
+                    .filter(|item| matches!(item, MelAuditTopLevelItemFact::Other(_)))
+                    .count(),
+                5
+            );
+            assert_eq!(facts.diagnostics.len(), 3);
+            for (diagnostic, statement) in facts.diagnostics.iter().zip(&statements[1..4]) {
+                assert_eq!(diagnostic.stage, MelDiagnosticStage::Parse);
+                assert_eq!(
+                    diagnostic.message,
+                    "indented top-level MEL statement requires conservative audit coverage"
+                );
+                assert_eq!(facts.source_text(diagnostic.span), *statement);
+            }
+        }
     }
 }

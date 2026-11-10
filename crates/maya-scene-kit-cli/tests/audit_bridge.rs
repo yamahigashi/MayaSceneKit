@@ -272,3 +272,30 @@ fn audit_cli_selective_unknown_statements_require_review() {
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["files"][0]["disposition"], "allow");
 }
+
+#[test]
+fn audit_cli_context_binding_sets_deny_and_review_exit_codes() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    for (statement, code) in [
+        (
+            "createNode script -n \"Example\"; setAttr \".stp\" 1; setAttr \".b\" -type \"string\" \"exec('print(1)')\";",
+            10,
+        ),
+        ("setAttr \".tx\" 1;", 20),
+        (
+            "select Example; setAttr \".before\" -type \"string\" \"Example\";",
+            20,
+        ),
+        ("createNode transform -n \"Example\"; setAttr \".tx\" 1;", 0),
+    ] {
+        std::fs::write(&source, format!("//Maya ASCII 2026 scene\n{statement}")).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_maya-scene-kit"))
+            .arg("audit")
+            .arg(&source)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code), "{statement}");
+    }
+}

@@ -1,4 +1,5 @@
 pub mod ast;
+pub(crate) mod block_context;
 pub mod commands;
 pub mod error;
 pub(crate) mod lexer;
