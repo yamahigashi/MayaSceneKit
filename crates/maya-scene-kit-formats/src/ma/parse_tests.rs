@@ -472,3 +472,19 @@ fn data_reference_edits_empty_fixture_is_preserved() {
     assert_eq!(value.groups[0].expected_count, 0);
     assert!(value.groups[0].records.is_empty());
 }
+
+#[test]
+fn string_concat_accepts_comment_trivia() {
+    for expression in [
+        "(\"Example\" /* Sample */ + \"Sample\")",
+        "(\"Example\" // Sample\n + \"Sample\")",
+    ] {
+        let input = format!(
+            "createNode script -n \"ExampleScript\";\nsetAttr \".b\" -type \"string\" {expression};"
+        );
+        assert_eq!(
+            first_refedit_value(&input),
+            ParsedSetAttrValue::String("ExampleSample".to_string())
+        );
+    }
+}

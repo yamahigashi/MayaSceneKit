@@ -35,6 +35,7 @@ use crate::{
             parse_setattr_string_command, parse_setattr_string_value,
             parse_setattr_string_value_tail, unescape_ma_string_literal,
         },
+        parse::validate_string_concat_expression_prefix,
         raw_dump::{
             RawMaDumpSections, RawMaNodeAttrSelector, RawMaNodeAttrValue, RawMaRequireEntry,
             RawMaRequireKind, RawMaScriptEntry,
@@ -191,7 +192,7 @@ fn build_audit_source_store(
     let mut merged = Vec::<MelSpan>::new();
     for span in spans {
         match merged.last_mut() {
-            Some(active) if span.start <= active.end => {
+            Some(active) if span.start < active.end => {
                 active.end = active.end.max(span.end);
             }
             _ => merged.push(span),
@@ -687,6 +688,106 @@ fn tracked_setattr_opaque_tail_diagnostic(attr: &str) -> MelParseDiagnostic {
     }
 }
 
+fn is_structural_command_head(head: &str) -> bool {
+    matches!(
+        head,
+        "requires"
+            | "fileInfo"
+            | "currentUnit"
+            | "file"
+            | "createNode"
+            | "setAttr"
+            | "addAttr"
+            | "deleteAttr"
+            | "rename"
+            | "select"
+            | "connectAttr"
+            | "disconnectAttr"
+            | "relationship"
+            | "lockNode"
+            | "parent"
+            | "dataStructure"
+            | "applyMetadata"
+    )
+}
+
+fn command_has_execution_expression(
+    source: LightSourceView<'_>,
+    command: &LightCommandSurface,
+) -> (bool, bool) {
+    let scan_range = |range: TextRange| {
+        let previous = command
+            .words
+            .iter()
+            .map(LightWord::range)
+            .chain(std::iter::once(command.head_range))
+            .find(|previous| previous.end() == range.start())
+            .and_then(|previous| source_decoded_cow(source, previous).chars().next_back());
+        text_has_execution_expression(&source_decoded_cow(source, range), previous)
+    };
+    let words_executable = command.words.iter().any(|word| match word {
+        LightWord::Capture { .. } => true,
+        LightWord::GroupedExpr { range }
+        | LightWord::BraceList { range }
+        | LightWord::VectorLiteral { range } => scan_range(*range).0,
+        _ => false,
+    });
+    let (tail_executable, unterminated) = command.opaque_tail.map_or((false, false), scan_range);
+    (words_executable || tail_executable, unterminated)
+}
+
+fn text_has_execution_expression(text: &str, previous: Option<char>) -> (bool, bool) {
+    let mut chars = text.chars();
+    let mut quoted = false;
+    let mut executable = false;
+    while let Some(ch) = chars.next() {
+        if quoted {
+            match ch {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => quoted = true,
+            '/' if chars.as_str().starts_with('/') => {
+                for ch in chars.by_ref() {
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.as_str().starts_with('*') => {
+                chars.next();
+                while let Some(ch) = chars.next() {
+                    if ch == '*' && chars.as_str().starts_with('/') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            '\u{60}' => executable = true,
+            '(' => {
+                let start = text.len() - chars.as_str().len() - 1;
+                let preceding = text[..start].chars().next_back().or(previous);
+                if !preceding
+                    .is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ']' | ')' | '}'))
+                    && let Ok(consumed) = validate_string_concat_expression_prefix(&text[start..])
+                {
+                    chars = text[start + consumed..].chars();
+                } else {
+                    executable = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    (executable, quoted)
+}
+
 fn is_audit_top_level_command_head(head: &str) -> bool {
     matches!(
         head,
@@ -796,22 +897,39 @@ impl LightItemSink for SelectiveScanSink {
                     }));
             }
             LightItem::Command(command) => {
-                if !is_indented && !self.selected_node_attr_selectors.is_empty() {
-                    if let Some(node_name) = selected_node_name_from_command(source, &command) {
-                        self.active_block =
-                            Some(ActiveCreateBlock::Selected(ActiveSelectedNodeBlock {
-                                node_name,
-                            }));
-                        return;
-                    }
+                let head = source_ascii_slice(source, command.head_range);
+                let structural = head.is_some_and(is_structural_command_head);
+                let (expression, unterminated) = if structural {
+                    command_has_execution_expression(source, &command)
+                } else {
+                    (false, false)
+                };
+                if unterminated {
+                    self.selective_diagnostics.push(MelParseDiagnostic {
+                        stage: MelDiagnosticStage::Parse,
+                        message: Cow::Borrowed("statement reached EOF inside an unterminated string without a semicolon"),
+                        span: mel_span(command.span),
+                    });
+                }
+                if !is_indented
+                    && !self.selected_node_attr_selectors.is_empty()
+                    && !expression
+                    && let Some(node_name) = selected_node_name_from_command(source, &command)
+                {
+                    self.active_block =
+                        Some(ActiveCreateBlock::Selected(ActiveSelectedNodeBlock {
+                            node_name,
+                        }));
+                    return;
                 }
                 if let Some(item) = selective_item_from_command(
                     source,
                     &command,
-                    &mut self.audit_head_cache,
+                    expression,
                     &self.selected_node_attr_selectors,
                 ) {
                     if is_indented
+                        && !expression
                         && selective_item_requires_top_level_context(
                             &item,
                             self.active_block.is_some(),
@@ -821,45 +939,20 @@ impl LightItemSink for SelectiveScanSink {
                     }
                     self.on_selective_item(source, item, is_indented);
                 }
-            }
-            LightItem::Other { span } if is_indented => {
-                let span_text = source_decoded_cow(source, span);
-                if let Some(head) = classify_top_level_other(span_text.as_ref()) {
-                    self.push_indented_top_level_diagnostic(span);
-                    if self.active_block.is_none() {
-                        self.audit_items
-                            .push(MelAuditTopLevelItemFact::Command(Box::new(
-                                MelAuditTopLevelCommandFact {
-                                    head: Arc::from(head),
-                                    source_span: mel_span(span),
-                                    span: mel_span(span),
-                                    schema_has_script_flag: command_schema_has_script_flag(head),
-                                    file_command_callback: None,
-                                },
-                            )));
-                    }
+                if expression
+                    && matches!(head, Some("requires" | "file" | "createNode" | "setAttr"))
+                {
+                    self.push_top_level_statement(command.span, None);
                 }
             }
-            LightItem::Other { span } if !is_indented => {
+            LightItem::Other { span } => {
                 let span_text = source_decoded_cow(source, span);
-                if let Some(head) = classify_top_level_other(span_text.as_ref()) {
-                    self.audit_items
-                        .push(MelAuditTopLevelItemFact::Command(Box::new(
-                            MelAuditTopLevelCommandFact {
-                                head: Arc::from(head),
-                                source_span: mel_span(span),
-                                span: mel_span(span),
-                                schema_has_script_flag: command_schema_has_script_flag(head),
-                                file_command_callback: None,
-                            },
-                        )));
-                } else {
-                    self.audit_items.push(MelAuditTopLevelItemFact::Other(
-                        MelAuditTopLevelOtherFact {
-                            source_span: mel_span(span),
-                            span: mel_span(span),
-                        },
-                    ));
+                let head = classify_top_level_other(span_text.as_ref());
+                if is_indented {
+                    self.push_indented_top_level_diagnostic(span);
+                }
+                if !is_indented || self.active_block.is_none() {
+                    self.push_top_level_statement(span, head);
                 }
             }
             _ => {}
@@ -915,6 +1008,30 @@ impl SelectiveScanSink {
             ),
             span: mel_span(span),
         });
+    }
+
+    fn push_top_level_statement(&mut self, span: TextRange, head: Option<&str>) {
+        if let Some(head) = head.filter(|head| {
+            (!is_structural_command_head(head) || *head == "file")
+                && is_audit_top_level_command_head_cached(head, &mut self.audit_head_cache)
+        }) {
+            self.audit_items
+                .push(MelAuditTopLevelItemFact::Command(Box::new(
+                    MelAuditTopLevelCommandFact {
+                        head: Arc::from(head),
+                        source_span: mel_span(span),
+                        span: mel_span(span),
+                        schema_has_script_flag: command_schema_has_script_flag(head),
+                        file_command_callback: None,
+                    },
+                )));
+        } else {
+            self.audit_items
+                .push(MelAuditTopLevelItemFact::Other(MelAuditTopLevelOtherFact {
+                    source_span: mel_span(span),
+                    span: mel_span(span),
+                }));
+        }
     }
 
     fn on_selective_item(
@@ -999,23 +1116,13 @@ impl SelectiveScanSink {
                     );
                 }
             }
-            MayaSelectiveItem::OtherCommand { head_range, span }
-                if !is_indented || self.active_block.is_none() =>
-            {
-                let Some(head) = source_ascii_slice(source, head_range) else {
-                    return;
-                };
-                if is_audit_top_level_command_head_cached(head, &mut self.audit_head_cache) {
-                    self.audit_items
-                        .push(MelAuditTopLevelItemFact::Command(Box::new(
-                            MelAuditTopLevelCommandFact {
-                                head: Arc::from(head),
-                                source_span: mel_span(span),
-                                span: mel_span(span),
-                                schema_has_script_flag: command_schema_has_script_flag(head),
-                                file_command_callback: None,
-                            },
-                        )));
+            MayaSelectiveItem::OtherCommand { head_range, span } => {
+                let head = source_ascii_slice(source, head_range);
+                if !is_indented
+                    || self.active_block.is_none()
+                    || head.is_some_and(is_structural_command_head)
+                {
+                    self.push_top_level_statement(span, head);
                 }
             }
             _ => {}
@@ -1047,10 +1154,20 @@ fn selective_item_requires_top_level_context(
 fn selective_item_from_command(
     source: LightSourceView<'_>,
     command: &LightCommandSurface,
-    audit_head_cache: &mut HashMap<String, bool>,
+    has_execution_expression: bool,
     selected_node_attr_selectors: &HashSet<RawMaNodeAttrSelector>,
 ) -> Option<MayaSelectiveItem> {
-    let head = source_ascii_slice(source, command.head_range)?;
+    let other = MayaSelectiveItem::OtherCommand {
+        head_range: command.head_range,
+        span: command.span,
+    };
+    let Some(head) = source_ascii_slice(source, command.head_range).filter(|head| !head.is_empty())
+    else {
+        return Some(other);
+    };
+    if !matches!(head, "requires" | "file" | "createNode" | "setAttr") && has_execution_expression {
+        return Some(other);
+    }
     match head {
         "requires" => Some(MayaSelectiveItem::Requires(MayaSelectiveRequires {
             head_range: command.head_range,
@@ -1119,13 +1236,8 @@ fn selective_item_from_command(
                 span: command.span,
             }))
         }
-        _ if is_audit_top_level_command_head_cached(head, audit_head_cache) => {
-            Some(MayaSelectiveItem::OtherCommand {
-                head_range: command.head_range,
-                span: command.span,
-            })
-        }
-        _ => None,
+        _ if is_structural_command_head(head) => None,
+        _ => Some(other),
     }
 }
 
@@ -1314,6 +1426,315 @@ mod tests {
         ma::raw_dump::RawMaNodeAttrSelector,
         mel::{MelDiagnosticStage, MelParseBudget, MelSourceEncoding},
     };
+
+    #[test]
+    fn selective_nested_and_opaque_expression_regressions() {
+        use crate::mel::MelAuditTopLevelItemFact;
+        for padding in [String::new(), "Example ".repeat(70), "Example ".repeat(600)] {
+            for (tail, executable, diagnostic) in [
+                ("{\x60system \"Example\"\x60}", true, false),
+                ("{system(\"Example\")}", true, false),
+                ("system(\"echo Example\")", true, false),
+                ("Example[0](\"Sample\")", true, false),
+                ("<<1, \x60getAttr \"Example.tx\"\x60, 3>>", true, false),
+                ("\"Example(1)\x60\"", false, false),
+                ("(\"Example\" /* Sample */ + \"Sample\")", false, false),
+                ("// \"\n\x60system \"Example\"\x60", true, false),
+                ("/* \" */ \x60system \"Example\"\x60", true, false),
+                ("// (\nExample", false, false),
+                ("/* ( */ Example", false, false),
+                ("\\\x60system \"Example\"\x60", true, false),
+                ("\"Example", false, true),
+            ] {
+                let input = format!(
+                    "connectAttr Example {padding}{tail}{}",
+                    if diagnostic { "" } else { ";" }
+                );
+                let facts =
+                    extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+                assert_eq!(
+                    facts
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, MelAuditTopLevelItemFact::Other(_))),
+                    executable,
+                    "{input}"
+                );
+                if !executable {
+                    assert_eq!(!facts.diagnostics.is_empty(), diagnostic, "{input}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selective_structural_expressions_preserve_dedicated_processing() {
+        use crate::mel::MelAuditTopLevelItemFact;
+        for head in [
+            "requires",
+            "fileInfo",
+            "currentUnit",
+            "file",
+            "createNode",
+            "setAttr",
+            "addAttr",
+            "deleteAttr",
+            "rename",
+            "select",
+            "connectAttr",
+            "disconnectAttr",
+            "relationship",
+            "lockNode",
+            "parent",
+            "dataStructure",
+            "applyMetadata",
+        ] {
+            let input = format!("{head} Example (system(\"Example\"));");
+            let facts = extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+            assert!(
+                facts
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, MelAuditTopLevelItemFact::Other(_))),
+                "{input}"
+            );
+        }
+        let input = "requires maya \"2026\" (system(\"Example\"));\nfile -r -command \"Example\" \"print 1\" (system(\"Example\")) \"asset/example/file.ma\";\ncreateNode script -n \"ExampleScript\" (system(\"Example\"));\n    setAttr \".b\" -type \"string\" \"print 1;\";";
+        let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+        assert_eq!(sections.dump_sections.require_entries.len(), 1);
+        assert_eq!(sections.scene_paths.len(), 1);
+        assert_eq!(sections.dump_sections.script_entries[0].body, "print 1;");
+        assert!(sections.audit_top_level.items.iter().any(|item| matches!(item, MelAuditTopLevelItemFact::Command(command) if command.file_command_callback.is_some())));
+        assert_eq!(
+            sections
+                .audit_top_level
+                .items
+                .iter()
+                .filter(|item| matches!(item, MelAuditTopLevelItemFact::Other(_)))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn selective_literal_arguments_and_second_statement() {
+        for input in [
+            "select -ne \"Example(1)\";",
+            "fileInfo \"Example\" \"Sample\x60\";",
+            "setAttr \".t\" <<1, 2, 3>>;",
+            "setAttr \".t\" -1 -2 -3;",
+            "setAttr \".m\" -type \"matrix\" 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1;",
+            "select -ne \"Example\\\"(Sample\";",
+        ] {
+            let facts = extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+            assert!(facts.items.is_empty(), "{input}");
+        }
+        for head in ["rename", "connectAttr"] {
+            for (expression, count) in [
+                ("(\"Example\" + \"Sample\")", 0),
+                ("(\"Example\" + \x60system \"Sample\"\x60)", 1),
+                ("(\"Example\" + system(\"Sample\"))", 1),
+            ] {
+                let input = format!("{head} Example {expression};");
+                let facts =
+                    extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+                assert_eq!(facts.items.len(), count, "{input}");
+            }
+        }
+        let input = "select -ne \"Example\";select -ne {system(\"Example\")};";
+        let facts = extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+        assert_eq!(facts.items.len(), 1);
+        let span = super::audit_item_source_span(&facts.items[0]);
+        assert_eq!(span.start, input.find(';').unwrap() + 1);
+        assert_eq!(facts.source_text(span), &input[span.start..]);
+    }
+
+    #[test]
+    fn selective_unknown_statement_table_preserves_coverage_and_spans() {
+        use crate::mel::MelAuditTopLevelItemFact;
+        let cases = [
+            ("select system(\"echo Example\");", 1, false),
+            ("connectAttr python(\"x\") \"Sample.tx\";", 1, false),
+            ("rename \"Example\" mm.eval(\"print 1\");", 1, false),
+            ("setAttr \".tx\" \x60system \"echo Example\"\x60;", 1, false),
+            (
+                "createNode transform -n \"Example\";\n    connectAttr \x60system \"echo Example\"\x60 \"Example.tx\" \"Sample.tx\";",
+                1,
+                false,
+            ),
+            (
+                "file -r -ns \"Example\" \x60system \"echo Example\"\x60 \"asset/example/file.ma\";",
+                1,
+                false,
+            ),
+            ("setAttr \".b\" -type \"string\" (\"a\" + \"b\");", 0, false),
+            (
+                "setAttr \".b\" -type \"string\" ( \"a\" + \"b\" );",
+                0,
+                false,
+            ),
+            ("system \"echo Example\";", 1, false),
+            ("evalEcho \"print 1\";", 1, false),
+            ("expression -s \"print 1\";", 1, false),
+            ("scriptNode -bs \"print 1\" -st 1;", 1, false),
+            ("sysFile -delete \"asset/example/file.ma\";", 1, false),
+            ("system(\"echo Example\");", 1, false),
+            ("system\n\"echo Example\";", 1, false),
+            ("// Example\nsystem \"echo Example\";", 1, false),
+            (";", 1, false),
+            ("global string $g;", 1, false),
+            ("string $s = \"x\";", 1, false),
+            ("int $i = 1;", 1, false),
+            ("if (1) system \"echo Example\";", 1, false),
+            ("for ($i=0;$i<1;$i++) system \"echo Example\";", 1, false),
+            ("while (0) system \"echo Example\";", 1, false),
+            ("return;", 1, false),
+            (
+                "system \"echo Example\"; system \"echo Example\";",
+                2,
+                false,
+            ),
+            ("例 \"Example\";", 1, false),
+            ("select -ne \x60system \"echo Example\"\x60;", 1, false),
+            ("rename \"Example\" (python(\"print 1\"));", 1, false),
+            (
+                "connectAttr (\"Example\" + system(\"echo Example\") + \".tx\") \"Sample.tx\";",
+                1,
+                false,
+            ),
+            (
+                "createNode script -n \"ExampleScript\";\n    setAttr \".st\" \x60system \"echo Example\"\x60;",
+                1,
+                false,
+            ),
+            (
+                "createNode script -n \"ExampleScript\";\n    system \"echo Example\";",
+                0,
+                true,
+            ),
+            ("    system \"echo Example\";", 1, true),
+            ("setAttr \".example\" -type \"string\" \"Example", 0, true),
+            ("", 0, false),
+            ("  \n// Example\n", 0, false),
+            ("system \"Example\"", 1, false),
+            ("    system(\"Example\");", 1, true),
+            (
+                "createNode script -n \"ExampleScript\";\n    system(\"Example\");",
+                0,
+                true,
+            ),
+            ("    string $s = \"Example\";", 1, true),
+        ];
+        for (input, other_count, diagnostic) in cases {
+            let facts = extract_raw_selective_sections_from_ma(input.as_bytes()).audit_top_level;
+            let others = facts
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MelAuditTopLevelItemFact::Other(other) => Some(other),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(others.len(), other_count, "{input}");
+            if other_count == 2 {
+                assert_eq!(
+                    others
+                        .iter()
+                        .map(|other| facts.source_text(other.source_span))
+                        .collect::<Vec<_>>(),
+                    ["system \"echo Example\";", "system \"echo Example\";"]
+                );
+            }
+            assert_eq!(!facts.diagnostics.is_empty(), diagnostic, "{input}");
+            for other in others {
+                assert_eq!(other.span, other.source_span, "{input}");
+                let original = &input[other.source_span.start..other.source_span.end];
+                assert_eq!(facts.source_text(other.source_span), original, "{input}");
+                assert!(!original.is_empty());
+                let line = input.as_bytes()[..other.source_span.start]
+                    .iter()
+                    .filter(|b| **b == b'\n')
+                    .count()
+                    + 1;
+                let expected_line = if input.starts_with("//") || input.starts_with("createNode") {
+                    2
+                } else {
+                    1
+                };
+                assert_eq!(line, expected_line, "{input}");
+                assert_eq!(original.ends_with(';'), input.ends_with(';'), "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn selective_string_concat_excludes_only_literal_expressions() {
+        use crate::mel::MelAuditTopLevelItemFact;
+        for (expression, executable) in [
+            ("( \"print 1;\" + \"print 2;\" )", false),
+            ("( \"print 1;\" + \x60system \"echo Example\"\x60 )", true),
+            ("( \"print 1;\" + system(\"echo Example\") )", true),
+            (
+                "( \"print 1;\" /* Example */ + // Example\n \"print 2;\" )",
+                false,
+            ),
+        ] {
+            for padding in [String::new(), "-keyable 1 ".repeat(16)] {
+                let input = format!(
+                    "createNode script -n \"ExampleScript\";\n    setAttr \".b\" -type \"string\" {padding}{expression};"
+                );
+                let sections = extract_raw_selective_sections_from_ma(input.as_bytes());
+                assert_eq!(
+                    sections
+                        .audit_top_level
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, MelAuditTopLevelItemFact::Other(_))),
+                    executable,
+                    "{input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selective_adjacent_cp932_statements_preserve_full_text() {
+        let input =
+            "//Maya ASCII 2026 scene\n//Codeset: 932\nsystem \"日本語\";system \"Example\";";
+        let (bytes, _, errors) = SHIFT_JIS.encode(input);
+        assert!(!errors);
+        let facts = extract_raw_selective_sections_from_ma(&bytes).audit_top_level;
+        let texts = facts
+            .items
+            .iter()
+            .map(|item| facts.source_text(super::audit_item_source_span(item)))
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["system \"日本語\";", "system \"Example\";"]);
+    }
+
+    #[test]
+    fn selective_structural_heads_have_no_script_flags_except_file() {
+        for head in [
+            "requires",
+            "fileInfo",
+            "currentUnit",
+            "createNode",
+            "setAttr",
+            "addAttr",
+            "deleteAttr",
+            "rename",
+            "select",
+            "connectAttr",
+            "disconnectAttr",
+            "relationship",
+            "lockNode",
+            "parent",
+            "dataStructure",
+            "applyMetadata",
+        ] {
+            assert!(!super::command_schema_has_script_flag(head), "{head}");
+        }
+    }
 
     fn non_utf8_repro_source(label: &str) -> String {
         let body = format!(

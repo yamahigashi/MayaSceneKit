@@ -158,3 +158,59 @@ fn audit_non_standard_plugin_requires_needs_review() {
         fact.target == "requires \"SamplePlugin\" \"1.0\";" && fact.risk.as_str() == "review"
     }));
 }
+
+#[test]
+fn audit_selective_unknown_statements_require_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    for statement in [
+        "file -r -ns \"Example\" \x60system \"echo Example\"\x60 \"asset/example/file.ma\";",
+        "system \"echo Example\";",
+        "evalEcho \"print 1\";",
+        "expression -s \"print 1\";",
+        "scriptNode -bs \"print 1\" -st 1;",
+        "sysFile -delete \"asset/example/file.ma\";",
+        "    system \"echo Example\";",
+        "createNode script -n \"ExampleScript\";\n    system \"echo Example\";",
+        "if (1) system \"echo Example\";",
+        "for ($i=0;$i<1;$i++) system \"echo Example\";",
+        "while (0) system \"echo Example\";",
+    ] {
+        write_scene(&source, &format!("//Maya ASCII 2026 scene\n{statement}\n"));
+        let report = audit_script_nodes(&source, &audit_plan()).unwrap();
+        assert!(
+            !matches!(
+                report.disposition,
+                AuditDisposition::Allow | AuditDisposition::AllowWithNotice
+            ),
+            "{statement}"
+        );
+    }
+    write_scene(
+        &source,
+        "//Maya ASCII 2026 scene\nsystem \"echo Example\";\n",
+    );
+    let hardened = audit_script_nodes_with_options(
+        &source,
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::hardened_untrusted(),
+    )
+    .unwrap();
+    assert_eq!(hardened.disposition, AuditDisposition::DenyUncertain);
+    write_scene(
+        &source,
+        concat!(
+            "//Maya ASCII 2026 scene\nrequires maya \"2026\";\n",
+            "fileInfo \"application\" \"Example\";\ncurrentUnit -l centimeter -a degree -t film;\n",
+            "createNode transform -n \"Example\";\n    setAttr \".tx\" 1;\n",
+            "connectAttr \"Example.tx\" \"Sample.tx\";\nrelationship \"link\" \"Example\" \"Sample\";\nselect -ne \"Example\";\nlockNode -l 1 \"Example\";\n",
+        ),
+    );
+    assert_eq!(
+        audit_script_nodes(&source, &audit_plan())
+            .unwrap()
+            .disposition,
+        AuditDisposition::Allow
+    );
+}

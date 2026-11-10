@@ -1226,6 +1226,107 @@ mod tests {
     }
 
     #[test]
+    fn ma_selective_unknown_statements_and_known_surfaces() {
+        let semantics = node_execution_semantics_with_registry(default_schema_registry()).unwrap();
+        for input in [
+            "system \"echo Example\";",
+            "evalEcho \"print 1\";",
+            "expression -s \"print 1\";",
+            "scriptNode -bs \"print 1\" -st 1;",
+            "sysFile -delete \"asset/example/file.ma\";",
+            "printX \"a\";",
+            "sourceFoo \"a\";",
+        ] {
+            let sections = ma::selective::extract_raw_selective_sections_from_ma(input.as_bytes());
+            let coverage = collect_execution_coverage_from_ma_parts(
+                &sections.dump_sections.script_entries,
+                &[],
+                &sections.audit_top_level,
+                &semantics,
+            )
+            .unwrap();
+            assert!(
+                coverage
+                    .surfaces
+                    .iter()
+                    .any(|surface| surface.origin.surface_kind
+                        == ExecutionSurfaceKind::TopLevelOtherStatement
+                        && surface.text.as_ref() == input),
+                "{input}"
+            );
+            assert!(coverage.coverage_issues.iter().any(|issue| matches!(issue.detail, crate::scene::evidence::ExecutionCoverageIssueDetail::UnsupportedTopLevelStatement)), "{input}");
+        }
+        for head in ["python", "eval", "commandPort", "evalDeferred"] {
+            for input in [
+                format!("{head} \"Example\";"),
+                format!("{head}(\"Example\");"),
+            ] {
+                let sections =
+                    ma::selective::extract_raw_selective_sections_from_ma(input.as_bytes());
+                let coverage = collect_execution_coverage_from_ma_parts(
+                    &[],
+                    &[],
+                    &sections.audit_top_level,
+                    &semantics,
+                )
+                .unwrap();
+                assert!(
+                    coverage
+                        .surfaces
+                        .iter()
+                        .any(|surface| surface.origin.surface_kind
+                            == ExecutionSurfaceKind::TopLevelCommand
+                            && surface.origin.source_kind.as_deref() == Some(head)
+                            && surface.text.as_ref() == input),
+                    "{input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ma_selective_adjacent_surfaces_match_input_source() {
+        let semantics = node_execution_semantics_with_registry(default_schema_registry()).unwrap();
+        let sphere = std::fs::read(repo_root().join("tests/02/sphere.ma")).unwrap();
+        let synthetic = b"python \"Example\";eval \"Sample\";evalDeferred \"Example\";nodeOutliner -selectCommand \"print 1\";file -r -command \"Example\" \"print 1\" \"asset/example/file.ma\";";
+        for input in [sphere.as_slice(), synthetic.as_slice()] {
+            let sections = ma::selective::extract_raw_selective_sections_from_ma(input);
+            let actual = collect_execution_coverage_from_ma_parts(
+                &sections.dump_sections.script_entries,
+                &[],
+                &sections.audit_top_level,
+                &semantics,
+            )
+            .unwrap();
+            let direct_facts = mel::collect_top_level_audit_candidates_from_bytes(input);
+            let direct_scripts = ma::scripts::extract_raw_script_entries_from_ma(input);
+            let expected = collect_execution_coverage_from_ma_parts(
+                &direct_scripts,
+                &[],
+                &direct_facts,
+                &semantics,
+            )
+            .unwrap();
+            assert!(!actual.surfaces.is_empty());
+            assert_eq!(actual.surfaces.len(), expected.surfaces.len());
+            for (actual, expected) in actual.surfaces.iter().zip(&expected.surfaces) {
+                assert_eq!(actual.text, expected.text);
+                assert_eq!(actual.origin.source_range, expected.origin.source_range);
+                if let Some(range) = &actual.origin.source_range
+                    && matches!(
+                        actual.origin.surface_kind,
+                        ExecutionSurfaceKind::TopLevelCommand
+                            | ExecutionSurfaceKind::TopLevelOtherStatement
+                            | ExecutionSurfaceKind::TopLevelProcDefinition
+                    )
+                {
+                    assert_eq!(actual.text.as_bytes(), &input[range.start..range.end]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ma_surfaces_include_file_command_callback_but_not_proc_definition() {
         let input = concat!(
             "//Maya ASCII 2026 scene\n",

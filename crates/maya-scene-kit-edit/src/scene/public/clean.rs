@@ -100,6 +100,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clean_selective_unknown_statement_maps_to_removal_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("Example.ma");
+        let header = "//Maya ASCII 2026 scene\n";
+        let statement = "system \"echo Example\";";
+        std::fs::write(&source, format!("{header}{statement}")).unwrap();
+        let observation = maya_scene_kit_observe::scene::Loader::new(Default::default())
+            .observe_path(&source)
+            .unwrap();
+        let surfaces = observation.observed_execution_surfaces(64).unwrap();
+        let surface = surfaces
+            .iter()
+            .find(|surface| {
+                surface.surface.origin.surface_kind == ExecutionSurfaceKind::TopLevelOtherStatement
+            })
+            .expect("unknown statement surface");
+        assert_eq!(
+            clean_target_for_execution_origin(&surface.surface.origin),
+            Some(ExecutionCleanTarget::TopLevelCommand {
+                source_range: ExecutionSourceRange {
+                    start: header.len(),
+                    end: header.len() + statement.len()
+                }
+            })
+        );
+    }
+
+    #[test]
     fn clean_target_for_execution_origin_maps_script_node_ma() {
         let origin = ExecutionOrigin {
             lang: ExecutionLanguage::Python,

@@ -155,82 +155,104 @@ fn parse_specialized_string_value(
 fn parse_parenthesized_string_concat_expression(
     expression: &str,
 ) -> Result<String, SceneToolError> {
-    let mut chars = expression.trim().chars().peekable();
-    match chars.next() {
-        Some('(') => {}
-        _ => {
-            return Err(SceneToolError::UnsupportedAsciiFeature(
-                "unsupported setAttr string expression in Maya ASCII scenes".to_string(),
-            ));
-        }
+    let (value, consumed) = parse_string_concat_expression_prefix(expression)?;
+    let mut trailing = expression[consumed..].chars();
+    skip_string_expression_trivia(&mut trailing)?;
+    if trailing.next().is_some() {
+        return Err(unsupported_string_expression());
     }
-
-    let mut value = String::new();
-    let mut expect_term = true;
-    loop {
-        while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
-            chars.next();
-        }
-
-        let Some(ch) = chars.next() else {
-            break;
-        };
-
-        if expect_term {
-            match ch {
-                '"' => value.push_str(&parse_double_quoted_string_literal(&mut chars)?),
-                ')' => break,
-                _ => {
-                    return Err(SceneToolError::UnsupportedAsciiFeature(
-                        "unsupported setAttr string expression in Maya ASCII scenes".to_string(),
-                    ));
-                }
-            }
-            expect_term = false;
-            continue;
-        }
-
-        match ch {
-            '+' => expect_term = true,
-            ')' => break,
-            _ if ch.is_whitespace() => {}
-            _ => {
-                return Err(SceneToolError::UnsupportedAsciiFeature(
-                    "unsupported setAttr string expression in Maya ASCII scenes".to_string(),
-                ));
-            }
-        }
-    }
-
-    while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
-        chars.next();
-    }
-    if chars.next().is_some() || expect_term {
-        return Err(SceneToolError::UnsupportedAsciiFeature(
-            "unsupported setAttr string expression in Maya ASCII scenes".to_string(),
-        ));
-    }
-
     Ok(value)
 }
 
-fn parse_double_quoted_string_literal(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) -> Result<String, SceneToolError> {
+pub(in crate::ma) fn parse_string_concat_expression_prefix(
+    expression: &str,
+) -> Result<(String, usize), SceneToolError> {
     let mut value = String::new();
+    let consumed = scan_string_concat_expression_prefix(expression, |ch| value.push(ch))?;
+    Ok((value, consumed))
+}
+
+pub(in crate::ma) fn validate_string_concat_expression_prefix(
+    expression: &str,
+) -> Result<usize, SceneToolError> {
+    scan_string_concat_expression_prefix(expression, |_| {})
+}
+
+fn scan_string_concat_expression_prefix(
+    expression: &str,
+    mut emit: impl FnMut(char),
+) -> Result<usize, SceneToolError> {
+    let mut chars = expression.chars();
+    skip_string_expression_trivia(&mut chars)?;
+    if chars.next() != Some('(') {
+        return Err(unsupported_string_expression());
+    }
+    loop {
+        skip_string_expression_trivia(&mut chars)?;
+        if chars.next() != Some('"') {
+            return Err(unsupported_string_expression());
+        }
+        parse_double_quoted_string_literal(&mut chars, &mut emit)?;
+        skip_string_expression_trivia(&mut chars)?;
+        match chars.next() {
+            Some('+') => {}
+            Some(')') => return Ok(expression.len() - chars.as_str().len()),
+            _ => return Err(unsupported_string_expression()),
+        }
+    }
+}
+
+fn skip_string_expression_trivia(chars: &mut std::str::Chars<'_>) -> Result<(), SceneToolError> {
+    loop {
+        while chars.clone().next().is_some_and(char::is_whitespace) {
+            chars.next();
+        }
+        if chars.as_str().starts_with("//") {
+            for ch in chars.by_ref() {
+                if ch == '\n' {
+                    break;
+                }
+            }
+        } else if chars.as_str().starts_with("/*") {
+            chars.next();
+            chars.next();
+            let mut previous = None;
+            loop {
+                let ch = chars.next().ok_or_else(unsupported_string_expression)?;
+                if previous == Some('*') && ch == '/' {
+                    break;
+                }
+                previous = Some(ch);
+            }
+        } else {
+            return Ok(());
+        }
+    }
+}
+
+fn unsupported_string_expression() -> SceneToolError {
+    SceneToolError::UnsupportedAsciiFeature(
+        "unsupported setAttr string expression in Maya ASCII scenes".to_string(),
+    )
+}
+
+fn parse_double_quoted_string_literal(
+    chars: &mut std::str::Chars<'_>,
+    emit: &mut impl FnMut(char),
+) -> Result<(), SceneToolError> {
     let mut escape = false;
 
     for ch in chars.by_ref() {
         if escape {
             match ch {
-                'n' => value.push('\n'),
-                'r' => value.push('\r'),
-                't' => value.push('\t'),
-                '"' => value.push('"'),
-                '\\' => value.push('\\'),
+                'n' => emit('\n'),
+                'r' => emit('\r'),
+                't' => emit('\t'),
+                '"' => emit('"'),
+                '\\' => emit('\\'),
                 other => {
-                    value.push('\\');
-                    value.push(other);
+                    emit('\\');
+                    emit(other);
                 }
             }
             escape = false;
@@ -239,8 +261,8 @@ fn parse_double_quoted_string_literal(
 
         match ch {
             '\\' => escape = true,
-            '"' => return Ok(value),
-            _ => value.push(ch),
+            '"' => return Ok(()),
+            _ => emit(ch),
         }
     }
 

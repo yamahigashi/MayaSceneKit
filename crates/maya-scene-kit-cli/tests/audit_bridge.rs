@@ -244,3 +244,31 @@ fn audit_cli_rejects_unreadable_or_invalid_allowlist() {
         assert!(stderr.contains("allowlist"), "{stderr}");
     }
 }
+
+#[test]
+fn audit_cli_selective_unknown_statements_require_review() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    for statement in ["system \"echo Example\";", "system(\"echo Example\");"] {
+        std::fs::write(&source, format!("//Maya ASCII 2026 scene\n{statement}\n")).unwrap();
+        let output = run_audit_cli(&[source.as_os_str(), "--json".as_ref()]);
+        assert_eq!(output.status.code(), Some(20), "{statement}");
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["files"][0]["disposition"], "review");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("unsupported_coverage")
+        );
+    }
+    std::fs::write(&source, concat!(
+        "//Maya ASCII 2026 scene\nrequires maya \"2026\";\n",
+        "fileInfo \"application\" \"Example\";\ncurrentUnit -l centimeter -a degree -t film;\n",
+        "createNode transform -n \"Example\";\n    setAttr \".tx\" 1;\n",
+        "connectAttr \"Example.tx\" \"Sample.tx\";\nrelationship \"link\" \"Example\" \"Sample\";\nselect -ne \"Example\";\nlockNode -l 1 \"Example\";\n",
+    )).unwrap();
+    let output = run_audit_cli(&[source.as_os_str(), "--json".as_ref()]);
+    assert_eq!(output.status.code(), Some(0));
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["files"][0]["disposition"], "allow");
+}

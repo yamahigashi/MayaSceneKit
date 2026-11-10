@@ -18,6 +18,7 @@ mod parse_support;
 mod parse_units;
 
 use self::parse_driver::parse_ascii_scene_document_from_top_level;
+pub(super) use self::parse_set_attr::validate_string_concat_expression_prefix;
 #[cfg(test)]
 #[path = "parse_tests.rs"]
 mod tests;
