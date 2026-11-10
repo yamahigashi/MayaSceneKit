@@ -2200,6 +2200,7 @@ pub(super) fn render_banner_message(i18n: &I18n, message: &BannerMessage) -> Str
         BannerMessage::SelectFilesFirst => i18n.text("banner.select_files_first"),
         BannerMessage::SelectedFilesNeedReaudit => i18n.text("banner.selected_files_need_reaudit"),
         BannerMessage::Raw(message) => message.clone(),
+        BannerMessage::SaveInProgress => i18n.text("banner.save_in_progress"),
         BannerMessage::NothingDirtyToSave => i18n.text("banner.nothing_dirty_to_save"),
         BannerMessage::NothingSelectedDirtyToSave => {
             i18n.text("banner.nothing_selected_dirty_to_save")

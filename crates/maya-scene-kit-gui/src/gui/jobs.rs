@@ -250,6 +250,9 @@ impl GuiShell {
     }
 
     pub(super) fn run_menu_undo(&mut self, cx: &mut Context<Self>) {
+        if self.block_workspace_change_while_saving(cx) {
+            return;
+        }
         let Some(entry) = self.undo_stack.pop() else {
             self.status_message = Some(BannerMessage::NothingToUndo);
             cx.notify();
@@ -260,6 +263,9 @@ impl GuiShell {
     }
 
     pub(super) fn run_menu_redo(&mut self, cx: &mut Context<Self>) {
+        if self.block_workspace_change_while_saving(cx) {
+            return;
+        }
         let Some(entry) = self.redo_stack.pop() else {
             self.status_message = Some(BannerMessage::NothingToRedo);
             cx.notify();
@@ -303,17 +309,10 @@ impl GuiShell {
             .detach();
     }
 
-    fn begin_save_ui_block(&mut self, count: usize, cx: &mut Context<Self>) {
-        if count == 0 {
-            return;
-        }
-        self.save_jobs_in_flight = self.save_jobs_in_flight.saturating_add(count);
-        cx.notify();
-    }
-
-    fn complete_save_ui_block(&mut self, cx: &mut Context<Self>) {
-        self.save_jobs_in_flight = self.save_jobs_in_flight.saturating_sub(1);
-        cx.notify();
+    pub(super) fn is_saving(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|row| matches!(row.status, FileStatus::Processing(RowOperation::Save)))
     }
 
     pub(super) fn refresh_row_path_resolution_state(&mut self, row_index: usize) {
@@ -387,6 +386,7 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let target_ids: Vec<u64> = targets.iter().map(|&index| self.rows[index].id).collect();
         let i18n = self.i18n();
         let message = i18n.text("dialog.confirm_save_all_title");
         let detail = i18n.format(
@@ -423,6 +423,13 @@ impl GuiShell {
                         move |shell: &mut GuiShell,
                               window: &mut Window,
                               cx: &mut Context<GuiShell>| {
+                            let targets = target_ids
+                                .into_iter()
+                                .filter_map(|id| shell.index_of_row_id(id))
+                                .filter(|&index| {
+                                    !matches!(shell.rows[index].status, FileStatus::Processing(_))
+                                })
+                                .collect();
                             shell.spawn_save_jobs(targets, window, cx);
                         },
                     );
@@ -660,9 +667,6 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         let message = error.to_string();
-        if matches!(operation, RowOperation::Save) {
-            self.complete_save_ui_block(cx);
-        }
         let row_id = self.rows[index].id;
         self.rows[index].status = FileStatus::Error(message.clone());
         if matches!(operation, RowOperation::Analyze) {
@@ -708,6 +712,17 @@ impl GuiShell {
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.index_of_row_id(row_id) else {
+            if matches!(operation, RowOperation::Save)
+                && let RowJobResult::Save { output_path, .. } = result
+            {
+                self.record_job(
+                    operation_key(operation),
+                    output_path.clone(),
+                    Some(output_path),
+                    "saved".to_string(),
+                    false,
+                );
+            }
             return;
         };
 
@@ -880,7 +895,6 @@ impl GuiShell {
                 audit_file_state,
             } => {
                 self.prune_edit_history_for_row_ids(&[row_id]);
-                self.complete_save_ui_block(cx);
                 let dirty_kind = self.rows[index].dirty_kind;
                 if dirty_kind == Some(DirtyKind::Replace) {
                     let overrides = self.rows[index].path_overrides.clone();
@@ -969,6 +983,11 @@ impl GuiShell {
             return;
         };
 
+        let save_output_path = if matches!(operation, RowOperation::Save) {
+            self.save_target_path_for_row(index)
+        } else {
+            None
+        };
         self.rows[index].status = FileStatus::Processing(operation);
         let path = self.rows[index].path.clone();
         let view = cx.entity();
@@ -991,6 +1010,19 @@ impl GuiShell {
                                     window,
                                     cx,
                                 ),
+                                Err(err)
+                                    if shell.index_of_row_id(row_id).is_none()
+                                        && save_output_path.is_some() =>
+                                {
+                                    let output_path = save_output_path.expect("save output path");
+                                    shell.record_job(
+                                        operation_key(operation),
+                                        output_path.clone(),
+                                        Some(output_path),
+                                        err,
+                                        true,
+                                    );
+                                }
                                 Err(err) => shell.mark_error_by_id(
                                     row_id,
                                     operation,
@@ -1380,7 +1412,7 @@ impl GuiShell {
                     })
                 },
             );
-            self.begin_save_ui_block(1, cx);
+            cx.notify();
         }
     }
 }

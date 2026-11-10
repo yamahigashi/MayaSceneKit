@@ -270,7 +270,7 @@ impl Render for GuiShell {
                         .bg(rgba(0xfffcf780)),
                 )
             })
-            .when(self.save_jobs_in_flight > 0, |this| {
+            .when(self.is_saving(), |this| {
                 this.child(
                     div()
                         .id("save-ui-block")

@@ -12567,3 +12567,228 @@ fn replace_preview_table_keeps_resized_column_widths_across_sync(cx: &mut TestAp
         assert_eq!(table.delegate().column(1, cx).width, px(600.0));
     });
 }
+
+#[gpui::test]
+fn save_overlay_clears_after_rows_are_replaced(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("TestScene.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        let mut row = test_row(1, &path);
+        row.dirty_kind = Some(DirtyKind::SceneEdits);
+        row.dirty_artifact = Some(StagedSceneArtifact {
+            input_path: path.clone(),
+            suggested_output_path: path.clone(),
+            scene_format: SceneFormat::Ma,
+            operation_mode: OperationMode::Forensic,
+            validation_state: ValidationState::Validated,
+            bytes: b"//Maya ASCII 2026 scene\n".to_vec(),
+        });
+        shell.replace_rows(vec![row]);
+        shell.spawn_save_jobs(vec![0], window, cx);
+        assert!(shell.is_saving());
+        fs::write(dir.path().join("Example.ma"), "//Maya ASCII 2026 scene\n").expect("write scene");
+        shell.replace_rows(vec![test_row(2, &dir.path().join("Example.ma"))]);
+        let history_len = shell.state.job_history.len();
+        shell.apply_job_result(
+            1,
+            RowOperation::Save,
+            RowJobResult::Save {
+                output_path: path.clone(),
+                audit_file_state: None,
+            },
+            None,
+            window,
+            cx,
+        );
+        assert!(!shell.is_saving());
+        assert!(matches!(shell.rows[0].status, FileStatus::Idle));
+        assert_eq!(shell.rows[0].id, 2);
+        assert_eq!(shell.state.job_history.len(), history_len + 1);
+        assert_eq!(shell.state.job_history[0].output.as_ref(), Some(&path));
+    });
+}
+
+#[gpui::test]
+fn save_overlay_blocks_workspace_handlers(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    fs::write(dir.path().join("TestScene.ma"), "//Maya ASCII 2026 scene\n").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell
+            .state
+            .set_workspace_root(Some(dir.path().to_path_buf()));
+        let mut row = test_row(1, &dir.path().join("TestScene.ma"));
+        row.status = FileStatus::Processing(RowOperation::Save);
+        shell.replace_rows(vec![row]);
+        shell.on_menu_select_folder(&super::MenuSelectFolder, window, cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::SaveInProgress)
+        ));
+        assert_eq!(shell.rows.len(), 1);
+        assert_eq!(shell.rows[0].id, 1);
+        assert_eq!(
+            shell.state.workspace_root_path(),
+            Some(dir.path().to_path_buf())
+        );
+        shell.status_message = None;
+        shell.on_menu_reload_folder(&super::MenuReloadFolder, window, cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::SaveInProgress)
+        ));
+        assert!(!shell.workspace_scan_active());
+        assert_eq!(shell.rows.len(), 1);
+        assert_eq!(shell.rows[0].id, 1);
+        assert!(shell.is_saving());
+        assert_eq!(
+            shell.state.workspace_root_path(),
+            Some(dir.path().to_path_buf())
+        );
+    });
+}
+
+fn save_guard_row(path: &Path) -> SceneRow {
+    let mut row = test_row(1, path);
+    row.selected = true;
+    row.dirty_kind = Some(DirtyKind::SceneEdits);
+    row.dirty_artifact = Some(StagedSceneArtifact {
+        input_path: path.to_path_buf(),
+        suggested_output_path: path.to_path_buf(),
+        scene_format: SceneFormat::Ma,
+        operation_mode: OperationMode::Forensic,
+        validation_state: ValidationState::Validated,
+        bytes: b"//Maya ASCII 2026 scene\n".to_vec(),
+    });
+    row
+}
+
+#[gpui::test]
+fn save_guard_blocks_scan_and_clear(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("TestScene.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell
+            .state
+            .set_workspace_root(Some(dir.path().to_path_buf()));
+        shell.replace_rows(vec![save_guard_row(&path)]);
+        shell.run_save_selected(window, cx);
+        assert!(shell.is_saving());
+        for operation in 0..4 {
+            shell.status_message = None;
+            match operation {
+                0 => shell.set_workspace_folder(dir.path().join("Example"), window, cx),
+                1 => shell.set_ignore_folder_names_enabled_preference(
+                    !shell.state.ignore_folder_names_enabled,
+                    window,
+                    cx,
+                ),
+                2 => {
+                    shell.state.ignore_folder_names_enabled = true;
+                    shell.apply_ignored_folder_names(vec!["Example".to_string()], window, cx);
+                }
+                _ => shell.clear_workspace(window, cx),
+            }
+            assert!(matches!(
+                shell.status_message,
+                Some(BannerMessage::SaveInProgress)
+            ));
+            assert!(!shell.workspace_scan_active());
+            assert_eq!(shell.rows.len(), 1);
+            assert_eq!(shell.rows[0].id, 1);
+            assert_eq!(
+                shell.state.workspace_root_path(),
+                Some(dir.path().to_path_buf())
+            );
+            assert!(shell.is_saving());
+        }
+    });
+}
+
+#[gpui::test]
+fn save_guard_blocks_undo_and_redo(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("TestScene.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![test_row(1, &path)]);
+        let sequence = shell.begin_edit_transaction(&[0]).expect("transaction");
+        shell.apply_job_result(
+            1,
+            RowOperation::Clean,
+            staged_clean_result(&path, "ExampleScript"),
+            Some(sequence),
+            window,
+            cx,
+        );
+        shell.run_menu_undo(cx);
+        shell.run_menu_redo(cx);
+        shell
+            .redo_stack
+            .push(shell.undo_stack.last().expect("undo entry").clone());
+        shell.rows[0].selected = true;
+        shell.run_save_selected(window, cx);
+        assert!(shell.is_saving());
+        let undo_count = shell.undo_stack.len();
+        shell.run_menu_undo(cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::SaveInProgress)
+        ));
+        assert!(matches!(
+            shell.rows[0].status,
+            FileStatus::Processing(RowOperation::Save)
+        ));
+        assert!(shell.is_saving());
+        assert_eq!(shell.undo_stack.len(), undo_count);
+        shell.status_message = None;
+        shell.run_menu_redo(cx);
+        assert!(matches!(
+            shell.status_message,
+            Some(BannerMessage::SaveInProgress)
+        ));
+        assert!(matches!(
+            shell.rows[0].status,
+            FileStatus::Processing(RowOperation::Save)
+        ));
+        assert!(shell.is_saving());
+    });
+}
+
+#[gpui::test]
+fn save_guard_confirmation_resolves_row_ids(cx: &mut TestAppContext) {
+    let (shell, visual_cx) = open_test_shell(cx);
+    let dir = tempdir().expect("tmpdir");
+    let path = dir.path().join("TestScene.ma");
+    let other = dir.path().join("Example.ma");
+    fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
+    fs::write(&other, "// Example\n").expect("write scene");
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(dir.path(), "");
+        shell.replace_rows(vec![save_guard_row(&path)]);
+        shell.run_save_all(window, cx);
+        let mut replacement = save_guard_row(&other);
+        replacement.id = 2;
+        shell.replace_rows(vec![replacement]);
+    });
+    visual_cx.simulate_prompt_answer("Save All");
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, _| {
+        assert!(!shell.is_saving());
+        assert!(shell.state.job_history.is_empty());
+        assert_eq!(shell.rows[0].dirty_kind, Some(DirtyKind::SceneEdits));
+    });
+    assert_eq!(
+        fs::read_to_string(other).expect("read scene"),
+        "// Example\n"
+    );
+}

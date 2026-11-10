@@ -328,7 +328,6 @@ impl GuiShell {
             file_dialog_block_generation: 0,
             auto_analyze_queue: AutoAnalyzeQueueState::default(),
             file_dialog_ui_blocked: false,
-            save_jobs_in_flight: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             next_edit_history_sequence: 0,

@@ -201,6 +201,15 @@ impl GuiShell {
         self.state.last_opened_input = Some(input);
     }
 
+    pub(super) fn block_workspace_change_while_saving(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.is_saving() {
+            return false;
+        }
+        self.status_message = Some(BannerMessage::SaveInProgress);
+        cx.notify();
+        true
+    }
+
     pub(super) fn open_recent_folder(
         &mut self,
         index: usize,
@@ -250,6 +259,9 @@ impl GuiShell {
     }
 
     pub(super) fn add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_workspace_change_while_saving(cx) {
+            return;
+        }
         let response = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -317,6 +329,9 @@ impl GuiShell {
     }
 
     pub(super) fn clear_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_workspace_change_while_saving(cx) {
+            return;
+        }
         self.invalidate_file_list_membership_refresh();
         self.cancel_workspace_scan();
         self.cancel_progressive_cache_restore();
@@ -364,6 +379,9 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.block_workspace_change_while_saving(cx) {
+            return;
+        }
         self.invalidate_file_list_membership_refresh();
         self.cancel_workspace_scan();
         self.cancel_progressive_cache_restore();
@@ -598,7 +616,8 @@ impl GuiShell {
             return;
         }
         self.state.ignore_folder_names_enabled = ignore_folder_names_enabled;
-        self.cancel_all_auto_analysis();
+        self.refresh_app_menus(window, cx);
+        self.persist();
         self.rescan_workspace_with_current_settings(window, cx);
     }
 
@@ -634,7 +653,8 @@ impl GuiShell {
         }
         self.state.set_ignored_folder_names(ignored_folder_names);
         if self.state.ignore_folder_names_enabled {
-            self.cancel_all_auto_analysis();
+            self.refresh_app_menus(window, cx);
+            self.persist();
             self.rescan_workspace_with_current_settings(window, cx);
             return;
         }
