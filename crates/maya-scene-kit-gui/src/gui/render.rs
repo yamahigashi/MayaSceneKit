@@ -231,6 +231,24 @@ impl Render for GuiShell {
                     },
                 )
             }))
+            .children(self.startup_banner_message().map(|message| {
+                div()
+                    .px_4()
+                    .pb_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .child(div().flex_1().child(render_banner_message(&i18n, message)))
+                    .child(
+                        Button::new("dismiss-startup-banner")
+                            .label(i18n.text("action.close"))
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.dismiss_startup_banner();
+                                cx.notify();
+                            })),
+                    )
+            }))
             .child(
                 div().px_4().pb_3().text_sm().text_color(rgb(MUTED)).child(
                     self.workspace_scan_message(&i18n)

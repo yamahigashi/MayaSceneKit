@@ -640,7 +640,7 @@ impl GuiShell {
         self.persist();
     }
 
-    fn push_job_history_entry(
+    pub(super) fn push_job_history_entry(
         &mut self,
         operation: &str,
         input: PathBuf,

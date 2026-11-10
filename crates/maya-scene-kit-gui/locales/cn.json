@@ -1,4 +1,5 @@
 {
+  "log.settings_save_skipped": "设置恢复失败，本次会话已禁用保存，已跳过设置保存。",
   "label.audit_detail.overwritten_assignment": "已覆盖的脚本正文（赋值位置 {index}）",
   "banner.settings_lenient": "部分设置无法解码，已恢复默认值或跳过。原始文件已保存在 {path}。",
   "banner.workspace_unavailable": "工作区文件夹不可用：{path}。已保留此设置。",

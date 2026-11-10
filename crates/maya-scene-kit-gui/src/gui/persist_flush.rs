@@ -15,6 +15,23 @@ impl PersistFlushState {
 }
 
 impl GuiShell {
+    fn skip_disabled_settings_save(&mut self) -> bool {
+        let Some(path) = self.settings_save_disabled_path.clone() else {
+            return false;
+        };
+        if !self.settings_save_skip_logged {
+            self.settings_save_skip_logged = true;
+            self.push_job_history_entry(
+                "settings_save",
+                path,
+                None,
+                self.i18n().text("log.settings_save_skipped"),
+                true,
+            );
+        }
+        true
+    }
+
     pub(super) fn cancel_persist_flush(&mut self) {
         self.persist_flush_state.cancel();
     }
@@ -25,6 +42,9 @@ impl GuiShell {
         cx: &mut Context<Self>,
         workspace_paths_dirty: bool,
     ) {
+        if self.skip_disabled_settings_save() {
+            return;
+        }
         self.persist_flush_state.dirty = true;
         self.persist_flush_state.workspace_paths_dirty |= workspace_paths_dirty;
         if self.persist_flush_state.in_flight {
@@ -111,6 +131,9 @@ impl GuiShell {
 
     pub(super) fn flush_persist_now(&mut self, workspace_paths_dirty: bool) {
         self.cancel_persist_flush();
+        if self.skip_disabled_settings_save() {
+            return;
+        }
         let state = self.prepared_persisted_state(workspace_paths_dirty);
         let sequence = next_persist_save_sequence();
         if let Err(err) = save_persisted_state(&state, sequence) {

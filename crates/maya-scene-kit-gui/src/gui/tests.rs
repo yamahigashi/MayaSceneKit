@@ -11704,7 +11704,6 @@ mod allowlist_tests {
         let old_staged = staged_clean_result(&path, "ExampleScriptNode");
         let mut dirty = current_row(2, &path, &empty_plan);
         let RowJobResult::SceneEdits {
-            replace_changes: None,
             staged,
             staged_source_bytes,
             ..
@@ -11782,9 +11781,7 @@ mod allowlist_tests {
             assert!(shell.rows[1].apply_edit_state(&edit_state).is_ok());
             assert_eq!(shell.rows[1].staged_audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
             let audit_generation = shell.rows[1].audit_generation;
-            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save {
-                replace_changes: None,
-                replace_preview: None,
+            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { replace_changes: None, replace_preview: None,
                 output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
             }, None, window, cx);
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
@@ -13381,9 +13378,7 @@ fn row_mutation_duplicate_worker_result_does_not_apply_twice(cx: &mut TestAppCon
         shell.deliver_job_result_for_test(
             1,
             RowOperation::Save,
-            RowJobResult::Save {
-                replace_changes: None,
-                replace_preview: None,
+            RowJobResult::Save { replace_changes: None, replace_preview: None,
                 output_path: path.clone(),
                 audit_file_state: None,
             },
@@ -13761,109 +13756,6 @@ fn missing_workspace_root_survives_save_preparation(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn startup_settings_recovery_and_unavailable_root_are_reported(cx: &mut TestAppContext) {
-    cx.update(init_gui_app);
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("Example.json");
-    let missing_root = dir.path().join("ExampleMissing");
-    for payload in [
-        "{".to_string(),
-        serde_json::json!({"workspace_root": missing_root, "locale": "english"}).to_string(),
-    ] {
-        fs::write(&path, payload).unwrap();
-        let loaded = crate::persistence::load_persisted_state_at(&path);
-        let recovery_path = loaded
-            .recovery
-            .as_ref()
-            .map(|recovery| recovery.path.clone());
-        let expected_root = loaded.state.workspace_root.clone();
-        let expected_state = loaded.state.clone();
-        cx.add_window_view(|window, cx| {
-            let menu_bar = TopMenuBar::new(window, cx);
-            let shell =
-                cx.new(|cx| GuiShell::new_with_loaded_settings(menu_bar, window, cx, loaded));
-            shell.update(cx, |shell, _cx| {
-                assert_eq!(shell.state.workspace_root, expected_root);
-                let Some(BannerMessage::Raw(message)) = &shell.status_message else {
-                    panic!("startup must show a settings banner");
-                };
-                if let Some(backup) = recovery_path.as_ref() {
-                    assert!(message.contains(&backup.display().to_string()));
-                } else {
-                    assert!(message.contains(&missing_root.display().to_string()));
-                    assert!(message.contains("unavailable"));
-                    assert!(shell.rows.is_empty());
-                    assert_eq!(
-                        shell.prepared_persisted_state(false).workspace_root,
-                        expected_state.workspace_root
-                    );
-                }
-            });
-            Root::new(shell, window, cx)
-        });
-    }
-}
-
-#[test]
-fn audit_detail_derived_script_history_matching_preserves_assignment_identity() {
-    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
-
-    use super::audit_detail_dialog::{AuditSurfaceMatch, match_audit_surface_text};
-
-    let origin = ExecutionOrigin {
-        lang: ExecutionLanguage::Mel,
-        surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
-        node_name: Some("ExampleScript".to_string()),
-        overwritten: true,
-        assignment_index: Some(0),
-        ..ExecutionOrigin::without_chunk_address()
-    };
-    let surfaces: Vec<_> = [Some(0), Some(1), None]
-        .into_iter()
-        .map(|index| ExecutionSurface {
-            origin: ExecutionOrigin {
-                overwritten: index.is_some(),
-                assignment_index: index,
-                ..origin.clone()
-            },
-            text: "print('Example')".into(),
-            preview: String::new(),
-        })
-        .collect();
-    let target = ExecutionOrigin {
-        lang: ExecutionLanguage::Python,
-        ..origin
-    };
-    let AuditSurfaceMatch::Found(found) = match_audit_surface_text(&target, true, &surfaces) else {
-        panic!("expected unique assignment");
-    };
-    assert_eq!(found.catalog_index, 0);
-    assert_eq!(found.origin.assignment_index, Some(0));
-}
-
-#[test]
-fn audit_detail_script_history_marker_is_localized() {
-    use super::audit_detail_dialog::audit_detail_assignment_note;
-    let mut origin = ExecutionOrigin::without_chunk_address();
-    for (locale, expected) in [
-        (SupportedLocale::English, "Overwritten body (assignment 2)"),
-        (SupportedLocale::Japanese, "上書きされた本文（代入位置 2）"),
-        (SupportedLocale::Chinese, "已覆盖的脚本正文（赋值位置 2）"),
-    ] {
-        let i18n = I18n::new(locale);
-        assert_eq!(audit_detail_assignment_note(&origin, &i18n), None);
-        origin.overwritten = true;
-        origin.assignment_index = Some(2);
-        assert_eq!(
-            audit_detail_assignment_note(&origin, &i18n).as_deref(),
-            Some(expected)
-        );
-        origin.overwritten = false;
-        origin.assignment_index = None;
-    }
-}
-
-#[gpui::test]
 fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext) {
     use maya_scene_kit_edit::scene::stage_replace_scene_paths_with_overrides;
     let directory = tempdir().unwrap();
@@ -13980,4 +13872,179 @@ fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext
             );
         });
     }
+}
+
+#[test]
+fn audit_detail_derived_script_history_matching_preserves_assignment_identity() {
+    use maya_scene_kit_observe::scene::execution::ExecutionSurface;
+
+    use super::audit_detail_dialog::{AuditSurfaceMatch, match_audit_surface_text};
+
+    let origin = ExecutionOrigin {
+        lang: ExecutionLanguage::Mel,
+        surface_kind: ExecutionSurfaceKind::ScriptNodeBody,
+        node_name: Some("ExampleScript".to_string()),
+        overwritten: true,
+        assignment_index: Some(0),
+        ..ExecutionOrigin::without_chunk_address()
+    };
+    let surfaces: Vec<_> = [Some(0), Some(1), None]
+        .into_iter()
+        .map(|index| ExecutionSurface {
+            origin: ExecutionOrigin {
+                overwritten: index.is_some(),
+                assignment_index: index,
+                ..origin.clone()
+            },
+            text: "print('Example')".into(),
+            preview: String::new(),
+        })
+        .collect();
+    let target = ExecutionOrigin {
+        lang: ExecutionLanguage::Python,
+        ..origin
+    };
+    let AuditSurfaceMatch::Found(found) = match_audit_surface_text(&target, true, &surfaces) else {
+        panic!("expected unique assignment");
+    };
+    assert_eq!(found.catalog_index, 0);
+    assert_eq!(found.origin.assignment_index, Some(0));
+}
+
+#[gpui::test]
+fn startup_settings_recovery_and_unavailable_root_are_reported(cx: &mut TestAppContext) {
+    cx.update(init_gui_app);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.json");
+    let missing_root = dir.path().join("ExampleMissing");
+    for payload in [
+        "{".to_string(),
+        serde_json::json!({"workspace_root": missing_root, "locale": "english"}).to_string(),
+    ] {
+        fs::write(&path, payload).unwrap();
+        let loaded = crate::persistence::load_persisted_state_at(&path);
+        let recovery_path = loaded
+            .recovery
+            .as_ref()
+            .map(|recovery| recovery.path.clone());
+        let expected_root = loaded.state.workspace_root.clone();
+        let expected_state = loaded.state.clone();
+        cx.add_window_view(|window, cx| {
+            let menu_bar = TopMenuBar::new(window, cx);
+            let shell =
+                cx.new(|cx| GuiShell::new_with_loaded_settings(menu_bar, window, cx, loaded));
+            shell.update(cx, |shell, _cx| {
+                assert_eq!(shell.state.workspace_root, expected_root);
+                let Some(BannerMessage::Raw(message)) = shell.startup_banner_message() else {
+                    panic!("startup must show a settings banner");
+                };
+                if let Some(backup) = recovery_path.as_ref() {
+                    assert!(message.contains(&backup.display().to_string()));
+                } else {
+                    assert!(message.contains(&missing_root.display().to_string()));
+                    assert!(message.contains("unavailable"));
+                    assert!(shell.rows.is_empty());
+                    assert_eq!(
+                        shell.prepared_persisted_state(false).workspace_root,
+                        expected_state.workspace_root
+                    );
+                }
+            });
+            Root::new(shell, window, cx)
+        });
+    }
+}
+
+#[test]
+fn audit_detail_script_history_marker_is_localized() {
+    use super::audit_detail_dialog::audit_detail_assignment_note;
+    let mut origin = ExecutionOrigin::without_chunk_address();
+    for (locale, expected) in [
+        (SupportedLocale::English, "Overwritten body (assignment 2)"),
+        (SupportedLocale::Japanese, "上書きされた本文（代入位置 2）"),
+        (SupportedLocale::Chinese, "已覆盖的脚本正文（赋值位置 2）"),
+    ] {
+        let i18n = I18n::new(locale);
+        assert_eq!(audit_detail_assignment_note(&origin, &i18n), None);
+        origin.overwritten = true;
+        origin.assignment_index = Some(2);
+        assert_eq!(
+            audit_detail_assignment_note(&origin, &i18n).as_deref(),
+            Some(expected)
+        );
+        origin.overwritten = false;
+        origin.assignment_index = None;
+    }
+}
+
+fn example_settings_recovery(saving_disabled: bool) -> crate::persistence::SettingsRecovery {
+    crate::persistence::SettingsRecovery {
+        path: PathBuf::from("Example.json"),
+        saving_disabled,
+        lenient: false,
+    }
+}
+
+#[gpui::test]
+fn settings_notice_survives_transient_status(cx: &mut TestAppContext) {
+    let (shell, cx) = open_test_shell(cx);
+    shell.update(cx, |shell, _| {
+        shell.apply_settings_recovery(Some(&example_settings_recovery(false)));
+        shell.status_message = Some(BannerMessage::Raw("Example status".into()));
+        let message = render_banner_message(&shell.i18n(), shell.startup_banner_message().unwrap());
+        assert!(message.contains("Example.json"));
+    });
+}
+
+#[gpui::test]
+fn settings_notice_dismissal_clears_sticky_slot(cx: &mut TestAppContext) {
+    let (shell, cx) = open_test_shell(cx);
+    shell.update(cx, |shell, _| {
+        shell.apply_settings_recovery(Some(&example_settings_recovery(false)));
+        assert!(shell.startup_banner_message().is_some());
+        shell.dismiss_startup_banner();
+        assert!(shell.startup_banner_message().is_none());
+    });
+}
+
+#[gpui::test]
+fn settings_notice_higher_importance_replaces_and_resists_lower(cx: &mut TestAppContext) {
+    let (shell, cx) = open_test_shell(cx);
+    shell.update(cx, |shell, _| {
+        shell.apply_settings_recovery(Some(&example_settings_recovery(false)));
+        shell.apply_settings_recovery(Some(&example_settings_recovery(true)));
+        let expected = example_settings_recovery(true).banner(&shell.i18n());
+        assert_eq!(
+            render_banner_message(&shell.i18n(), shell.startup_banner_message().unwrap()),
+            expected
+        );
+        shell.apply_settings_recovery(Some(&example_settings_recovery(false)));
+        assert_eq!(
+            render_banner_message(&shell.i18n(), shell.startup_banner_message().unwrap()),
+            expected
+        );
+    });
+}
+
+#[gpui::test]
+fn settings_notice_disabled_saves_are_logged_once(cx: &mut TestAppContext) {
+    let (shell, cx) = open_test_shell(cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.apply_settings_recovery(Some(&example_settings_recovery(true)));
+        for _ in 0..5 {
+            shell.schedule_persist_flush(window, cx, true);
+            shell.flush_persist_now(false);
+        }
+        assert_eq!(
+            shell
+                .state
+                .job_history
+                .iter()
+                .filter(|entry| entry.operation == "settings_save")
+                .count(),
+            1
+        );
+        assert!(!shell.persist_flush_state.in_flight);
+        assert!(!shell.persist_flush_state.dirty);
+    });
 }

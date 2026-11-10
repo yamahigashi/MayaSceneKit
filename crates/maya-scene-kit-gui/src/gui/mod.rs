@@ -193,6 +193,12 @@ struct PendingAllowlistRemoval {
     expected: UserAllowlistEntry,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StartupBannerImportance {
+    Warning,
+    Error,
+}
+
 struct GuiShell {
     audit_allowlist: AuditAllowlist,
     audit_plan: Arc<ScriptAuditPlan>,
@@ -283,6 +289,9 @@ struct GuiShell {
     audit_allow_in_flight: bool,
     plugin_registry: PluginRegistry,
     status_message: Option<BannerMessage>,
+    startup_banner: Option<(StartupBannerImportance, BannerMessage)>,
+    settings_save_disabled_path: Option<PathBuf>,
+    settings_save_skip_logged: bool,
     max_bytes_dialog: Option<MaxBytesDialogState>,
     ignore_folder_names_dialog: Option<IgnoreFolderNamesDialogState>,
     replace_dialog: Option<ReplaceDialogState>,

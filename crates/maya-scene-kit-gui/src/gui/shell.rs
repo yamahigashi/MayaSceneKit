@@ -3,6 +3,24 @@ use maya_scene_kit_edit::scene::{MaterializeOptions, OperationMode};
 use super::*;
 
 impl GuiShell {
+    pub(super) fn startup_banner_message(&self) -> Option<&BannerMessage> {
+        self.startup_banner.as_ref().map(|(_, message)| message)
+    }
+
+    pub(super) fn dismiss_startup_banner(&mut self) {
+        self.startup_banner = None;
+    }
+
+    fn show_startup_banner(&mut self, importance: StartupBannerImportance, message: BannerMessage) {
+        if self
+            .startup_banner
+            .as_ref()
+            .is_none_or(|(current, _)| importance >= *current)
+        {
+            self.startup_banner = Some((importance, message));
+        }
+    }
+
     pub(super) fn new(menu_bar: TopMenuBar, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_loaded_settings(menu_bar, window, cx, load_persisted_state())
     }
@@ -45,7 +63,14 @@ impl GuiShell {
                     &[("path", root.display().to_string())],
                 ));
             }
-            self.status_message = Some(BannerMessage::Raw(message));
+            let importance = if recovery.saving_disabled {
+                self.settings_save_disabled_path = Some(recovery.path.clone());
+                self.cancel_persist_flush();
+                StartupBannerImportance::Error
+            } else {
+                StartupBannerImportance::Warning
+            };
+            self.show_startup_banner(importance, BannerMessage::Raw(message));
         }
     }
 
@@ -408,6 +433,9 @@ impl GuiShell {
             audit_allow_in_flight: false,
             plugin_registry,
             status_message: None,
+            startup_banner: None,
+            settings_save_disabled_path: None,
+            settings_save_skip_logged: false,
             max_bytes_dialog: None,
             ignore_folder_names_dialog: None,
             replace_dialog: None,
@@ -422,10 +450,13 @@ impl GuiShell {
             if root.is_dir() {
                 shell.rescan_workspace_with_current_settings(window, cx);
             } else {
-                shell.status_message = Some(BannerMessage::Raw(shell.i18n().format(
-                    "banner.workspace_unavailable",
-                    &[("path", root.display().to_string())],
-                )));
+                shell.show_startup_banner(
+                    StartupBannerImportance::Warning,
+                    BannerMessage::Raw(shell.i18n().format(
+                        "banner.workspace_unavailable",
+                        &[("path", root.display().to_string())],
+                    )),
+                );
             }
         } else {
             shell.start_progressive_cache_restore(window, cx);

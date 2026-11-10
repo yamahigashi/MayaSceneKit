@@ -1,4 +1,5 @@
 {
+  "log.settings_save_skipped": "Settings save skipped: saving is disabled for this session because settings recovery failed.",
   "label.audit_detail.overwritten_assignment": "Overwritten body (assignment {index})",
   "banner.settings_lenient": "Some settings could not be decoded and were reset or skipped. The original was kept at {path}.",
   "banner.workspace_unavailable": "The workspace folder is unavailable: {path}. The setting has been kept.",
