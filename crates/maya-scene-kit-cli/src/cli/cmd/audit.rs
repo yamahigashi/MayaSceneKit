@@ -71,8 +71,8 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
         let report_allowed = !allowlist_paths.is_empty();
         let load_options = load_options(node_info_paths, max_bytes);
 
-        let files = match collect_scene_files(input) {
-            Ok(v) if !v.is_empty() => v,
+        let collection = match collect_scene_files(input) {
+            Ok(v) if !v.files.is_empty() || !v.issues.is_empty() => v,
             Ok(_) => {
                 eprintln!("error: no .ma/.mb files found: {}", input.display());
                 return 2;
@@ -84,14 +84,38 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
         };
 
         let audit_options = AuditOptions::strict_default();
-        let graph_report = audit_reference_graph_roots_with_options_and_digests(
-            files.iter().map(PathBuf::as_path),
+        let mut graph_report = audit_reference_graph_roots_with_options_and_digests(
+            collection.files.iter().map(PathBuf::as_path),
             &plan,
             &load_options,
             audit_options,
             false,
         );
-        if graph_report.reports.is_empty()
+        if !collection.issues.is_empty() {
+            if matches!(
+                graph_report.disposition,
+                crate::scene::AuditDisposition::Allow
+                    | crate::scene::AuditDisposition::AllowWithNotice
+            ) {
+                graph_report.disposition = crate::scene::AuditDisposition::Review;
+            }
+            graph_report
+                .traversal_issues
+                .extend(
+                    collection
+                        .issues
+                        .iter()
+                        .map(|issue| crate::scene::AuditTraversalIssue {
+                            kind: crate::scene::AuditTraversalIssueKind::LoadFailed,
+                            scene_path: Some(issue.path.clone()),
+                            source_path: None,
+                            raw_target: None,
+                            message: issue.message.clone(),
+                        }),
+                );
+        }
+        if !collection.files.is_empty()
+            && graph_report.reports.is_empty()
             && graph_report
                 .traversal_issues
                 .iter()
@@ -157,6 +181,8 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 },
                 "files": file_summaries.iter().map(|(path, format, hit_count, review_count, notice_count, surface_count, validation_state, coverage_state, coverage_issue_count, blocked_on_uncertainty, disposition)| json!({
                     "path": path,
+                    "aliases": collection.details.get(std::path::Path::new(path)).map(|d| d.aliases.as_slice()).unwrap_or_default(),
+                    "outside_input_tree": collection.details.get(std::path::Path::new(path)).is_some_and(|d| d.outside_input_tree),
                     "scene_format": format.as_str(),
                     "finding_count": hit_count,
                     "review_signal_count": review_count,
@@ -385,6 +411,20 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                     file_notice_count,
                     report.surface_count,
                 );
+                if let Some(details) = collection.details.get(&report.scene_path) {
+                    let _ = write!(
+                        stdout_output,
+                        " outside_input_tree={}",
+                        details.outside_input_tree
+                    );
+                    if !details.aliases.is_empty() {
+                        let _ = write!(
+                            stdout_output,
+                            " aliases={}",
+                            serde_json::to_string(&details.aliases).unwrap()
+                        );
+                    }
+                }
                 if report_allowed {
                     let _ = write!(stdout_output, " allowed={}", report.allowed_finding_count());
                 }

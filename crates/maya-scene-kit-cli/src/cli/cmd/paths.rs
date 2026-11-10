@@ -32,17 +32,18 @@ pub(crate) fn run_paths(
             return 2;
         }
 
-        let files = match collect_scene_files(input) {
-            Ok(v) if !v.is_empty() => v,
-            Ok(_) => {
-                eprintln!("error: no .ma/.mb files found: {}", input.display());
-                return 2;
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                return 2;
-            }
-        };
+        let files =
+            match collect_scene_files(input).map(|collection| collection.warn_and_take_files()) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    eprintln!("error: no .ma/.mb files found: {}", input.display());
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            };
         let load_options = load_options(node_info_paths, max_bytes);
 
         if input.is_file() {

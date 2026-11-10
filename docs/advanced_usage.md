@@ -41,6 +41,21 @@ Command-specific options worth knowing:
 
 Run `maya-scene-kit <command> --help` for the authoritative flag list.
 
+Directory walks follow file links when either the link name or the resolved target
+name has a .ma or .mb extension. Canonical paths are processed once, using the first
+path in sorted order; audit lists the other paths as aliases in text and JSON, and
+dump, paths, and replace print alias notes to stderr. Followed links outside the
+input tree are marked with outside_input_tree in audit text and JSON and a stderr
+note for the other commands. Directory links discovered during the walk (including
+Windows junctions and directory reparse points) are skipped without traversal.
+A directory link supplied explicitly as the input is followed. Broken links are
+reported only when their link names have a scene extension. Audit reports skipped
+links as traversal issues and raises otherwise successful runs to review (exit 20);
+denials retain precedence, and a run where every scene fails to load still exits 1.
+Dump, paths, and replace print one warning per skipped link and exit 2 if no scenes
+remain, including inputs containing only directory links. Replace with --out-dir
+writes regular files at the selected relative paths; it does not recreate links.
+
 ## Execution Modes
 
 Commands that mutate or gate scenes run in one of three modes:

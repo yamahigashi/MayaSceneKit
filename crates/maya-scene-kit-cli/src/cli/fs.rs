@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -221,16 +221,57 @@ pub(super) fn render_scene_dump_text(
     Ok(render_scene_dump_with_options(input, load_options)?)
 }
 
-pub(super) fn collect_scene_files(input: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub(super) struct SceneFileCollection {
+    pub(super) files: Vec<PathBuf>,
+    pub(super) issues: Vec<SceneFileIssue>,
+    pub(super) details: BTreeMap<PathBuf, SceneFileDetails>,
+}
+
+#[derive(Default)]
+pub(super) struct SceneFileDetails {
+    pub(super) aliases: Vec<PathBuf>,
+    pub(super) outside_input_tree: bool,
+}
+
+pub(super) struct SceneFileIssue {
+    pub(super) path: PathBuf,
+    pub(super) message: String,
+}
+
+impl SceneFileCollection {
+    pub(super) fn warn_and_take_files(self) -> Vec<PathBuf> {
+        for issue in self.issues {
+            eprintln!("warning: {}: {}", issue.path.display(), issue.message);
+        }
+        for (path, details) in self.details {
+            for alias in details.aliases {
+                eprintln!("note: {}: alias of {}", alias.display(), path.display());
+            }
+            if details.outside_input_tree {
+                eprintln!("note: {}: outside_input_tree=true", path.display());
+            }
+        }
+        self.files
+    }
+}
+
+pub(super) fn collect_scene_files(input: &Path) -> std::io::Result<SceneFileCollection> {
     if input.is_file() {
-        return Ok(if is_scene_file(input) {
-            vec![input.to_path_buf()]
-        } else {
-            Vec::new()
+        return Ok(SceneFileCollection {
+            files: if is_scene_file(input)
+                || fs::canonicalize(input).is_ok_and(|p| is_scene_file(&p))
+            {
+                vec![input.to_path_buf()]
+            } else {
+                Vec::new()
+            },
+            issues: Vec::new(),
+            details: BTreeMap::new(),
         });
     }
 
     let mut out = Vec::new();
+    let mut issues = Vec::new();
     let mut stack = vec![input.to_path_buf()];
     let mut visited_dirs = HashSet::new();
 
@@ -243,7 +284,36 @@ pub(super) fn collect_scene_files(input: &Path) -> std::io::Result<Vec<PathBuf>>
             let entry = entry?;
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)?;
+            if is_directory_reparse_point(&metadata) {
+                issues.push(SceneFileIssue {
+                    path,
+                    message: "directory symlink skipped without traversal".to_string(),
+                });
+                continue;
+            }
             if metadata.file_type().is_symlink() {
+                match fs::metadata(&path) {
+                    Ok(target) if target.is_file() => {
+                        if is_scene_file(&path)
+                            || fs::canonicalize(&path).is_ok_and(|p| is_scene_file(&p))
+                        {
+                            out.push(path);
+                        }
+                    }
+                    Ok(target) if target.is_dir() => issues.push(SceneFileIssue {
+                        path,
+                        message: "directory symlink skipped without traversal".to_string(),
+                    }),
+                    Ok(_) => issues.push(SceneFileIssue {
+                        path,
+                        message: "symlink target is not a regular file".to_string(),
+                    }),
+                    Err(error) if is_scene_file(&path) => issues.push(SceneFileIssue {
+                        path,
+                        message: format!("cannot read symlink target: {error}"),
+                    }),
+                    Err(_) => {}
+                }
                 continue;
             }
             if metadata.is_dir() {
@@ -255,7 +325,32 @@ pub(super) fn collect_scene_files(input: &Path) -> std::io::Result<Vec<PathBuf>>
     }
 
     out.sort();
-    Ok(out)
+    issues.sort_by(|a, b| a.path.cmp(&b.path));
+    let root = fs::canonicalize(input)?;
+    let mut canonical_files = BTreeMap::<PathBuf, PathBuf>::new();
+    let mut details = BTreeMap::<PathBuf, SceneFileDetails>::new();
+    let mut files = Vec::new();
+    for path in out {
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if let Some(first) = canonical_files.get(&canonical) {
+            details.get_mut(first).unwrap().aliases.push(path);
+        } else {
+            details.insert(
+                path.clone(),
+                SceneFileDetails {
+                    aliases: Vec::new(),
+                    outside_input_tree: !canonical.starts_with(&root),
+                },
+            );
+            canonical_files.insert(canonical, path.clone());
+            files.push(path);
+        }
+    }
+    Ok(SceneFileCollection {
+        files,
+        issues,
+        details,
+    })
 }
 
 fn is_scene_file(path: &Path) -> bool {
@@ -265,4 +360,18 @@ fn is_scene_file(path: &Path) -> bool {
             .as_deref(),
         Some("ma") | Some("mb")
     )
+}
+
+#[cfg(windows)]
+fn is_directory_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let attributes = metadata.file_attributes();
+    attributes & FILE_ATTRIBUTE_DIRECTORY != 0 && attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_directory_reparse_point(_: &fs::Metadata) -> bool {
+    false
 }
