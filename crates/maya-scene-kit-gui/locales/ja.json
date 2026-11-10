@@ -1,4 +1,8 @@
 {
+  "banner.settings_lenient": "一部の設定を読み取れず、既定値に戻すかスキップしました。元のファイルは {path} に保存しました。",
+  "banner.workspace_unavailable": "ワークスペースフォルダーを利用できません: {path}。設定は保持しています。",
+  "banner.settings_recovered": "設定を読み込めませんでした。既定値を使用しています。元のファイルは {path} に退避しました。",
+  "banner.settings_recovery_failed": "設定を安全に復旧できませんでした。既定値を使用しています。{path} を保護するため、このセッションでは設定を保存しません。",
   "banner.row_mutation_busy": "{name} は {operation} の実行中のため変更できません。",
   "banner.row_mutation_missing": "対象の行は既に削除されています。",
   "banner.replace_busy_skipped": "処理中の {count} 行をスキップしました。",

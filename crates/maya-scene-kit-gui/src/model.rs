@@ -105,11 +105,13 @@ pub enum StatusFilter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedWorkspaceFile {
+    #[serde(with = "crate::persistence::path_serde")]
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentInput {
+    #[serde(with = "crate::persistence::path_serde")]
     pub path: PathBuf,
     #[serde(default)]
     pub was_directory: bool,
@@ -118,7 +120,9 @@ pub struct RecentInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobHistoryEntry {
     pub operation: String,
+    #[serde(with = "crate::persistence::path_serde")]
     pub input: PathBuf,
+    #[serde(default, with = "crate::persistence::optional_path_serde")]
     pub output: Option<PathBuf>,
     pub summary: String,
     #[serde(default)]
@@ -135,19 +139,21 @@ pub struct PersistedTableColumnWidth {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
-    #[serde(default)]
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default, with = "crate::persistence::optional_path_serde")]
     pub workspace_root: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub locale: LocalePreference,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub audit_mode: AuditModePreference,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub backup_location: BackupLocationPreference,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub workspace_layout: WorkspaceLayoutPreference,
     #[serde(default)]
     pub workspace_auto_analyze: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub auto_analyze_parallelism: AutoAnalyzeParallelismPreference,
     #[serde(default = "default_analysis_cache_enabled")]
     pub analysis_cache_enabled: bool,
@@ -157,9 +163,9 @@ pub struct PersistedState {
     pub ignore_folder_names_enabled: bool,
     #[serde(default = "default_ignored_folder_names")]
     pub ignored_folder_names: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub active_tab: ResultTab,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub status_filter: StatusFilter,
     #[serde(default)]
     pub file_list_findings_only: bool,
@@ -171,13 +177,13 @@ pub struct PersistedState {
     pub file_list_dirty_only: bool,
     #[serde(default)]
     pub search_query: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::valid_entries")]
     pub workspace_files: Vec<PersistedWorkspaceFile>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::valid_entries")]
     pub recent_inputs: Vec<RecentInput>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::valid_entries")]
     pub job_history: Vec<JobHistoryEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::persistence::lenient_value")]
     pub last_opened_input: Option<RecentInput>,
     #[serde(default)]
     pub file_table_column_widths: Vec<PersistedTableColumnWidth>,
@@ -231,6 +237,7 @@ pub fn normalize_ignored_folder_names(names: impl IntoIterator<Item = String>) -
 impl Default for PersistedState {
     fn default() -> Self {
         Self {
+            extra: Default::default(),
             workspace_root: None,
             locale: LocalePreference::default(),
             audit_mode: AuditModePreference::default(),
@@ -441,6 +448,7 @@ mod tests {
     #[test]
     fn workspace_paths_falls_back_to_legacy_state() {
         let state = PersistedState {
+            extra: Default::default(),
             workspace_root: Some(PathBuf::from("tests/02")),
             locale: LocalePreference::Japanese,
             audit_mode: AuditModePreference::HardenedUntrusted,

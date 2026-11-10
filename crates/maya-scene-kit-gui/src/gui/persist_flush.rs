@@ -121,7 +121,6 @@ impl GuiShell {
     pub(super) fn prepared_persisted_state(&self, workspace_paths_dirty: bool) -> PersistedState {
         let mut state = self.state.clone();
         state.normalize_ignore_folder_settings();
-        state.set_workspace_root(state.workspace_root_path().filter(|path| path.exists()));
         if workspace_paths_dirty {
             state.replace_workspace_paths(self.rows.iter().map(|row| row.path.clone()));
         }

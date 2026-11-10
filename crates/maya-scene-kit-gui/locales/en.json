@@ -1,4 +1,8 @@
 {
+  "banner.settings_lenient": "Some settings could not be decoded and were reset or skipped. The original was kept at {path}.",
+  "banner.workspace_unavailable": "The workspace folder is unavailable: {path}. The setting has been kept.",
+  "banner.settings_recovered": "Settings could not be read. Defaults are in use; the original was kept at {path}.",
+  "banner.settings_recovery_failed": "Settings could not be safely recovered. Defaults are in use; saving is disabled for this session to preserve {path}.",
   "banner.row_mutation_busy": "Cannot modify {name} while {operation} is running.",
   "banner.row_mutation_missing": "The target row no longer exists.",
   "banner.replace_busy_skipped": "Skipped {count} busy rows.",

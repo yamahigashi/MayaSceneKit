@@ -310,11 +310,359 @@ pub fn default_analysis_cache_root() -> PathBuf {
     PathBuf::from(ANALYSIS_CACHE_DIR)
 }
 
-pub fn load_persisted_state() -> io::Result<PersistedState> {
-    match load_persisted_state_from(&default_state_path()) {
-        Ok(state) => Ok(state),
-        Err(err) if err.kind() == io::ErrorKind::InvalidData => Ok(PersistedState::default()),
-        Err(err) => Err(err),
+thread_local! {
+    static DECODE_LOSS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn mark_decode_loss() {
+    DECODE_LOSS.set(true);
+}
+
+pub(crate) fn lenient_value<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|_| {
+        mark_decode_loss();
+        T::default()
+    }))
+}
+
+pub(crate) fn valid_entries<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let values = <Vec<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value(value) {
+            Ok(entry) => Some(entry),
+            Err(_) => {
+                mark_decode_loss();
+                None
+            }
+        })
+        .collect())
+}
+
+pub(crate) mod path_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::*;
+
+    const UNIX_PREFIX: &str = "\0unix:";
+    const WINDOWS_PREFIX: &str = "\0windows:";
+
+    pub(super) fn encode(path: &Path) -> String {
+        if let Some(text) = path.to_str() {
+            return text.to_owned();
+        }
+        #[cfg(unix)]
+        {
+            use std::{fmt::Write, os::unix::ffi::OsStrExt};
+            let mut encoded = String::from(UNIX_PREFIX);
+            for byte in path.as_os_str().as_bytes() {
+                write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+            encoded
+        }
+        #[cfg(windows)]
+        {
+            use std::{fmt::Write, os::windows::ffi::OsStrExt};
+            let mut encoded = String::from(WINDOWS_PREFIX);
+            for unit in path.as_os_str().encode_wide() {
+                write!(encoded, "{unit:04x}").expect("writing to a String cannot fail");
+            }
+            encoded
+        }
+        #[cfg(not(any(unix, windows)))]
+        unreachable!("unsupported platform")
+    }
+
+    pub(super) fn decode(text: String) -> Option<PathBuf> {
+        if let Some(hex) = text.strip_prefix(UNIX_PREFIX) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                if !canonical_hex(hex, 2) {
+                    return None;
+                }
+                let bytes: Vec<u8> = (0..hex.len())
+                    .step_by(2)
+                    .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).ok())
+                    .collect::<Option<_>>()?;
+                if bytes.contains(&0) {
+                    return None;
+                }
+                let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+                return (encode(&path) == text).then_some(path);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = hex;
+                return None;
+            }
+        }
+        if let Some(hex) = text.strip_prefix(WINDOWS_PREFIX) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStringExt;
+                if !canonical_hex(hex, 4) {
+                    return None;
+                }
+                let units: Vec<u16> = (0..hex.len())
+                    .step_by(4)
+                    .map(|index| u16::from_str_radix(&hex[index..index + 4], 16).ok())
+                    .collect::<Option<_>>()?;
+                if units.contains(&0) {
+                    return None;
+                }
+                let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+                return (encode(&path) == text).then_some(path);
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = hex;
+                return None;
+            }
+        }
+        (!text.contains('\0')).then(|| PathBuf::from(text))
+    }
+
+    fn canonical_hex(hex: &str, width: usize) -> bool {
+        !hex.is_empty()
+            && hex.len() % width == 0
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    pub(crate) fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&encode(path))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        decode(String::deserialize(deserializer)?)
+            .ok_or_else(|| serde::de::Error::custom("invalid persisted path"))
+    }
+}
+
+pub(crate) mod optional_path_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::*;
+
+    pub(crate) fn serialize<S: Serializer>(
+        path: &Option<PathBuf>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        path.as_deref()
+            .map(path_serde::encode)
+            .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<PathBuf>, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let path = value
+            .as_str()
+            .and_then(|text| path_serde::decode(text.to_owned()));
+        if !value.is_null() && path.is_none() {
+            mark_decode_loss();
+        }
+        Ok(path)
+    }
+}
+
+pub struct LoadedSettings {
+    pub state: PersistedState,
+    pub recovery: Option<SettingsRecovery>,
+}
+
+pub struct SettingsRecovery {
+    pub path: PathBuf,
+    pub saving_disabled: bool,
+    pub lenient: bool,
+}
+
+impl SettingsRecovery {
+    pub(crate) fn banner(&self, i18n: &crate::i18n::I18n) -> String {
+        i18n.format(
+            if self.saving_disabled {
+                "banner.settings_recovery_failed"
+            } else if self.lenient {
+                "banner.settings_lenient"
+            } else {
+                "banner.settings_recovered"
+            },
+            &[("path", self.path.display().to_string())],
+        )
+    }
+}
+
+#[derive(Default)]
+struct SaveProtection {
+    disabled: std::sync::atomic::AtomicBool,
+    logged: std::sync::atomic::AtomicBool,
+}
+
+impl SaveProtection {
+    fn permits_save(&self) -> bool {
+        if !self.disabled.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.logged.swap(true, Ordering::AcqRel) {
+            eprintln!(
+                "Settings saving is disabled: the unreadable settings file could not be preserved."
+            );
+        }
+        false
+    }
+}
+
+static SAVE_PROTECTION: SaveProtection = SaveProtection {
+    disabled: std::sync::atomic::AtomicBool::new(false),
+    logged: std::sync::atomic::AtomicBool::new(false),
+};
+
+pub fn load_persisted_state() -> LoadedSettings {
+    load_persisted_state_at(&default_state_path())
+}
+
+pub(crate) fn load_persisted_state_at(path: &Path) -> LoadedSettings {
+    recover_settings(path, &SAVE_PROTECTION, || {})
+}
+
+fn parse_settings(bytes: &[u8]) -> io::Result<(PersistedState, bool)> {
+    if bytes.is_empty() {
+        return Ok((PersistedState::default(), false));
+    }
+    let previous_loss = DECODE_LOSS.replace(false);
+    let parsed = serde_json::from_slice::<PersistedState>(bytes);
+    let loss = DECODE_LOSS.replace(previous_loss);
+    let mut state = parsed.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    state.normalize_ignore_folder_settings();
+    Ok((state, loss))
+}
+
+fn read_settings(path: &Path) -> io::Result<Vec<u8>> {
+    match fs::read(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        result => result,
+    }
+}
+
+fn preserve_settings(
+    path: &Path,
+    bytes: &[u8],
+    kind: &str,
+    timestamp: &str,
+) -> io::Result<PathBuf> {
+    use std::io::Write;
+    for suffix in 0u64.. {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".{kind}-{timestamp}"));
+        if suffix != 0 {
+            name.push(format!("-{suffix}"));
+        }
+        let backup = path.with_file_name(name);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup);
+        match file {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                return Ok(backup);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("backup suffix exhausted")
+}
+
+fn recover_settings(
+    path: &Path,
+    protection: &SaveProtection,
+    before_recheck: impl FnOnce(),
+) -> LoadedSettings {
+    let disabled = || {
+        protection.disabled.store(true, Ordering::Release);
+        LoadedSettings {
+            state: PersistedState::default(),
+            recovery: Some(SettingsRecovery {
+                path: path.to_path_buf(),
+                saving_disabled: true,
+                lenient: false,
+            }),
+        }
+    };
+    let Ok(mut bytes) = read_settings(path) else {
+        return disabled();
+    };
+    let mut parsed = parse_settings(&bytes);
+    if parsed.is_err() {
+        before_recheck();
+        bytes = match read_settings(path) {
+            Ok(bytes) => bytes,
+            Err(_) => return disabled(),
+        };
+        parsed = parse_settings(&bytes);
+    }
+    if let Ok((state, false)) = parsed {
+        return LoadedSettings {
+            state,
+            recovery: None,
+        };
+    }
+    let (state, lenient) = match parsed {
+        Ok((state, true)) => (state, true),
+        Err(_) => (PersistedState::default(), false),
+        _ => unreachable!(),
+    };
+    let kind = if lenient { "lenient" } else { "corrupt" };
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let backup = preserve_settings(path, &bytes, kind, &timestamp);
+    match backup {
+        Ok(backup) => {
+            // Recheck after copying too: never remove a newer replacement observed here.
+            if !lenient {
+                match read_settings(path) {
+                    Ok(current) if current == bytes => {
+                        if fs::remove_file(path).is_err() {
+                            return disabled();
+                        }
+                    }
+                    Ok(current) => {
+                        if let Ok((state, false)) = parse_settings(&current) {
+                            return LoadedSettings {
+                                state,
+                                recovery: None,
+                            };
+                        }
+                        return disabled();
+                    }
+                    Err(_) => return disabled(),
+                }
+            }
+            LoadedSettings {
+                state,
+                recovery: Some(SettingsRecovery {
+                    path: backup,
+                    saving_disabled: false,
+                    lenient,
+                }),
+            }
+        }
+        Err(_) => disabled(),
     }
 }
 
@@ -326,23 +674,18 @@ pub fn next_persist_save_sequence() -> u64 {
 }
 
 pub fn save_persisted_state(state: &PersistedState, sequence: u64) -> io::Result<()> {
+    if !SAVE_PROTECTION.permits_save() {
+        return Ok(());
+    }
     save_persisted_state_to(&default_state_path(), state, sequence, &LAST_SAVED_SEQUENCE)
 }
 
+#[cfg(test)]
 fn load_persisted_state_from(path: &Path) -> io::Result<PersistedState> {
-    match fs::read(path) {
-        Ok(bytes) => {
-            let mut state: PersistedState = serde_json::from_slice(&bytes)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-            state.normalize_ignore_folder_settings();
-            Ok(state)
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(PersistedState::default()),
-        Err(err) => Err(err),
-    }
+    parse_settings(&read_settings(path)?).map(|(state, _)| state)
 }
 
-fn save_persisted_state_to(
+pub(crate) fn save_persisted_state_to(
     path: &Path,
     state: &PersistedState,
     sequence: u64,
@@ -382,6 +725,373 @@ mod tests {
         JobHistoryEntry, LocalePreference, PersistedState, PersistedTableColumnWidth,
         PersistedWorkspaceFile, RecentInput, ResultTab, StatusFilter, WorkspaceLayoutPreference,
     };
+
+    #[test]
+    fn utf8_settings_pretty_json_is_byte_identical() {
+        let expected = r#"{
+  "workspace_root": "asset/Example",
+  "locale": "english",
+  "audit_mode": "strict_default",
+  "backup_location": "backup_folder",
+  "workspace_layout": "top_bottom",
+  "workspace_auto_analyze": false,
+  "auto_analyze_parallelism": "four",
+  "analysis_cache_enabled": true,
+  "max_bytes": 123,
+  "ignore_folder_names_enabled": true,
+  "ignored_folder_names": [
+    "Example",
+    "Sample"
+  ],
+  "active_tab": "overview",
+  "status_filter": "all",
+  "file_list_findings_only": false,
+  "file_list_missing_only": false,
+  "file_list_no_workspace_only": false,
+  "file_list_dirty_only": false,
+  "search_query": "Example",
+  "workspace_files": [
+    {
+      "path": "asset/Example/例.ma"
+    }
+  ],
+  "recent_inputs": [
+    {
+      "path": "asset/Example",
+      "was_directory": true
+    }
+  ],
+  "job_history": [
+    {
+      "operation": "Example",
+      "input": "asset/Example/例.ma",
+      "output": null,
+      "summary": "Sample",
+      "failed": false,
+      "timestamp": null
+    },
+    {
+      "operation": "Example",
+      "input": "asset/Example/例.ma",
+      "output": "asset/Sample.ma",
+      "summary": "Sample",
+      "failed": false,
+      "timestamp": "2026-11-10T12:00:00Z"
+    }
+  ],
+  "last_opened_input": {
+    "path": "asset/Example/例.ma",
+    "was_directory": false
+  },
+  "file_table_column_widths": [
+    {
+      "key": "name",
+      "width_px": 640
+    }
+  ],
+  "path_table_column_widths": [
+    {
+      "key": "path",
+      "width_px": 720
+    }
+  ],
+  "audit_table_column_widths": [
+    {
+      "key": "summary",
+      "width_px": 360
+    }
+  ]
+}"#;
+        let state: PersistedState = serde_json::from_str(expected).unwrap();
+        assert_eq!(
+            serde_json::to_vec_pretty(&state).unwrap(),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn backup_collision_preserves_existing_copy() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        let timestamp = "20261110T120000";
+        let existing = dir.path().join(format!("Example.json.corrupt-{timestamp}"));
+        fs::write(&existing, b"Example original backup").unwrap();
+        let second = super::preserve_settings(&path, b"{", "corrupt", timestamp).unwrap();
+        let third = super::preserve_settings(&path, b"[", "corrupt", timestamp).unwrap();
+        assert_eq!(
+            second.file_name().unwrap(),
+            "Example.json.corrupt-20261110T120000-1"
+        );
+        assert_eq!(
+            third.file_name().unwrap(),
+            "Example.json.corrupt-20261110T120000-2"
+        );
+        assert_eq!(fs::read(existing).unwrap(), b"Example original backup");
+        assert_eq!(fs::read(second).unwrap(), b"{");
+        assert_eq!(fs::read(third).unwrap(), b"[");
+    }
+
+    #[test]
+    fn reparsed_settings_are_not_moved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        fs::write(&path, b"{").unwrap();
+        let replacement = br#"{"max_bytes":123}"#;
+        let loaded = super::recover_settings(&path, &super::SaveProtection::default(), || {
+            fs::write(&path, replacement).unwrap();
+        });
+        assert_eq!(loaded.state.max_bytes, Some(123));
+        assert!(loaded.recovery.is_none());
+        assert_eq!(fs::read(&path).unwrap(), replacement);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn lenient_settings_keep_original_and_extra_fields() {
+        for payload in [
+            r#"{"locale":"Example","max_bytes":123,"Example":{"Sample":true}}"#,
+            r#"{"workspace_root":123,"max_bytes":123}"#,
+            r#"{"recent_inputs":[{"path":"Example","was_directory":"Sample"}],"max_bytes":123}"#,
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("Example.json");
+            fs::write(&path, payload).unwrap();
+            let loaded = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+            let recovery = loaded.recovery.unwrap();
+            assert!(
+                recovery
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains(".lenient-")
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), payload);
+            assert_eq!(fs::read_to_string(&recovery.path).unwrap(), payload);
+            assert_eq!(loaded.state.max_bytes, Some(123));
+            assert!(
+                recovery
+                    .banner(&crate::i18n::I18n::new(
+                        crate::model::SupportedLocale::English
+                    ))
+                    .contains(&recovery.path.display().to_string())
+            );
+            let original: serde_json::Value = serde_json::from_str(payload).unwrap();
+            let saved = serde_json::to_value(&loaded.state).unwrap();
+            assert_eq!(saved.get("Example"), original.get("Example"));
+        }
+    }
+
+    #[test]
+    fn empty_settings_have_no_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        fs::write(&path, []).unwrap();
+        let loaded = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        assert!(loaded.recovery.is_none());
+        assert_eq!(loaded.state, PersistedState::default());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn escaped_paths_accept_only_encoder_output() {
+        for text in [
+            "\0unix:+f",
+            "\0unix:FF",
+            "\0unix:41",
+            "\0unix:",
+            "\0windows:D800",
+            "\0windows:0041",
+        ] {
+            assert!(super::path_serde::decode(text.into()).is_none(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn settings_banner_keys_exist_in_every_locale() {
+        for text in [
+            include_str!("../locales/en.json"),
+            include_str!("../locales/ja.json"),
+            include_str!("../locales/cn.json"),
+        ] {
+            let messages: serde_json::Value = serde_json::from_str(text).unwrap();
+            for key in [
+                "banner.settings_recovered",
+                "banner.settings_recovery_failed",
+                "banner.settings_lenient",
+                "banner.workspace_unavailable",
+            ] {
+                assert!(messages[key].as_str().unwrap().contains("{path}"));
+            }
+        }
+    }
+
+    #[test]
+    fn extra_settings_round_trip() {
+        let state: PersistedState = serde_json::from_str(r#"{"Example":{"Sample":123}}"#).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        save_persisted_state_to(&path, &state, 1, &Mutex::new(0)).unwrap();
+        let restored = load_persisted_state_from(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap()["Example"]["Sample"],
+            123
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unreadable_settings_are_never_moved() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&path).is_ok() {
+            eprintln!("permission regression skipped: process can read mode 000 (root)");
+            return;
+        }
+        let loaded = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        assert!(path.exists());
+        assert!(loaded.recovery.unwrap().saving_disabled);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn truncated_settings_are_kept_and_reported() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        fs::write(&path, b"{\"locale\":").unwrap();
+        let protection = super::SaveProtection::default();
+        let loaded = super::recover_settings(&path, &protection, || {});
+        assert_eq!(loaded.state, PersistedState::default());
+        let recovery = loaded.recovery.unwrap();
+        assert!(!recovery.saving_disabled);
+        assert!(!path.exists());
+        assert_eq!(fs::read(&recovery.path).unwrap(), b"{\"locale\":");
+        let name = recovery.path.file_name().unwrap().to_str().unwrap();
+        let stamp = name.strip_prefix("Example.json.corrupt-").unwrap();
+        chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S").unwrap();
+        assert_eq!(recovery.path.parent(), path.parent());
+        let banner = recovery.banner(&crate::i18n::I18n::new(
+            crate::model::SupportedLocale::English,
+        ));
+        assert!(banner.contains(&recovery.path.display().to_string()));
+        assert!(banner.contains("original was kept"));
+        assert!(protection.permits_save());
+        save_persisted_state_to(&path, &loaded.state, 1, &Mutex::new(0)).unwrap();
+        assert_eq!(fs::read(&recovery.path).unwrap(), b"{\"locale\":");
+    }
+
+    #[test]
+    fn failed_settings_recovery_disables_saves_for_session() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        fs::write(&path, b"{").unwrap();
+        let protection = super::SaveProtection::default();
+        let loaded = super::recover_settings(&path, &protection, || {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        });
+        assert_eq!(loaded.state, PersistedState::default());
+        let recovery = loaded.recovery.unwrap();
+        assert!(recovery.saving_disabled);
+        assert_eq!(recovery.path, path);
+        let banner = recovery.banner(&crate::i18n::I18n::new(
+            crate::model::SupportedLocale::English,
+        ));
+        assert!(banner.contains(&path.display().to_string()));
+        assert!(banner.contains("saving is disabled"));
+        assert!(!protection.permits_save());
+        assert!(!protection.permits_save());
+        assert!(protection.logged.load(std::sync::atomic::Ordering::Acquire));
+        assert!(path.is_dir());
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, b"{}").unwrap();
+        let _ = super::recover_settings(&path, &protection, || {});
+        assert!(!protection.permits_save());
+    }
+
+    #[test]
+    fn unknown_settings_enums_preserve_other_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        fs::write(&path, r#"{"locale":"future","active_tab":"future","audit_mode":"future","backup_location":"future","workspace_layout":"future","auto_analyze_parallelism":"future","status_filter":"future","max_bytes":123,"recent_inputs":[{"path":"Example"}],"ignored_folder_names":["Sample"],"file_table_column_widths":[{"key":"name","width_px":640}]}"#).unwrap();
+        let state = load_persisted_state_from(&path).unwrap();
+        assert_eq!(state.locale, LocalePreference::default());
+        assert_eq!(state.active_tab, ResultTab::default());
+        assert_eq!(state.audit_mode, AuditModePreference::default());
+        assert_eq!(state.backup_location, BackupLocationPreference::default());
+        assert_eq!(state.workspace_layout, WorkspaceLayoutPreference::default());
+        assert_eq!(
+            state.auto_analyze_parallelism,
+            AutoAnalyzeParallelismPreference::default()
+        );
+        assert_eq!(state.status_filter, StatusFilter::default());
+        assert_eq!(state.max_bytes, Some(123));
+        assert_eq!(state.recent_inputs[0].path, PathBuf::from("Example"));
+        assert_eq!(state.ignored_folder_names, ["Sample"]);
+        assert_eq!(state.file_table_column_widths[0].width_px, 640);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_utf8_settings_paths_round_trip_and_invalid_entries_are_skipped() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        let raw = PathBuf::from(std::ffi::OsString::from_vec(b"Example/\xff.ma".to_vec()));
+        let state = PersistedState {
+            workspace_root: Some(raw.clone()),
+            workspace_files: vec![PersistedWorkspaceFile { path: raw.clone() }],
+            recent_inputs: vec![RecentInput {
+                path: raw.clone(),
+                was_directory: false,
+            }],
+            last_opened_input: Some(RecentInput {
+                path: raw.clone(),
+                was_directory: false,
+            }),
+            job_history: vec![JobHistoryEntry {
+                operation: "Example".into(),
+                input: raw.clone(),
+                output: Some(raw),
+                summary: "Sample".into(),
+                failed: false,
+                timestamp: None,
+            }],
+            ..PersistedState::default()
+        };
+        save_persisted_state_to(&path, &state, 1, &Mutex::new(0)).unwrap();
+        assert_eq!(load_persisted_state_from(&path).unwrap(), state);
+        let mut json = serde_json::to_value(&state).unwrap();
+        json["workspace_files"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"path":"\u{0}unix:invalid"}));
+        json["recent_inputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"path":123}));
+        json["job_history"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"input":false}));
+        json["last_opened_input"] = serde_json::json!({"path":false});
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let restored = load_persisted_state_from(&path).unwrap();
+        assert_eq!(restored.workspace_files, state.workspace_files);
+        assert_eq!(restored.recent_inputs, state.recent_inputs);
+        assert_eq!(restored.job_history, state.job_history);
+        assert_eq!(restored.last_opened_input, None);
+        let utf8 = PersistedWorkspaceFile {
+            path: "Example/例.ma".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&utf8).unwrap(),
+            r#"{"path":"Example/例.ma"}"#
+        );
+    }
 
     const A0: &str = r#"{"hash":"sha256:79a04cad1f2f3e49d4efcda479915fdc244cd65b27a931f7bed1cfff42ff7e20","codes":["mel_exec"],"label":"ExampleApp"}"#;
     const A1: &str = r#"{"hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","codes":["mel_python"],"label":"Sample"}"#;
@@ -835,6 +1545,7 @@ mod tests {
         let dir = tempdir().expect("tmpdir");
         let path = dir.path().join("gui-state.json");
         let state = PersistedState {
+            extra: Default::default(),
             workspace_root: Some(PathBuf::from("tests/02")),
             locale: LocalePreference::Japanese,
             audit_mode: AuditModePreference::HardenedUntrusted,

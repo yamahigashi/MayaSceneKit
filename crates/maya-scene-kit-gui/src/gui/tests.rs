@@ -110,6 +110,7 @@ use crate::{
 
 fn test_state(root: &Path, search_query: &str) -> PersistedState {
     PersistedState {
+        extra: Default::default(),
         workspace_root: Some(root.to_path_buf()),
         locale: LocalePreference::English,
         audit_mode: AuditModePreference::StrictDefault,
@@ -13724,4 +13725,65 @@ fn row_mutation_bulk_jobs_refresh_audit_once(cx: &mut TestAppContext) {
                 .all(|row| row.clean_state != AuditRowCleanState::Busy)
         );
     });
+}
+
+#[gpui::test]
+fn missing_workspace_root_survives_save_preparation(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("ExampleMissing");
+    let (shell, cx) = open_test_shell(cx);
+    shell.update(cx, |shell, _cx| {
+        shell.state.set_workspace_root(Some(root.clone()));
+        let prepared = shell.prepared_persisted_state(false);
+        let path = dir.path().join("Example.json");
+        crate::persistence::save_persisted_state_to(&path, &prepared, 1, &std::sync::Mutex::new(0))
+            .unwrap();
+        let restored: PersistedState =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(restored.workspace_root, Some(root));
+    });
+}
+
+#[gpui::test]
+fn startup_settings_recovery_and_unavailable_root_are_reported(cx: &mut TestAppContext) {
+    cx.update(init_gui_app);
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("Example.json");
+    let missing_root = dir.path().join("ExampleMissing");
+    for payload in [
+        "{".to_string(),
+        serde_json::json!({"workspace_root": missing_root, "locale": "english"}).to_string(),
+    ] {
+        fs::write(&path, payload).unwrap();
+        let loaded = crate::persistence::load_persisted_state_at(&path);
+        let recovery_path = loaded
+            .recovery
+            .as_ref()
+            .map(|recovery| recovery.path.clone());
+        let expected_root = loaded.state.workspace_root.clone();
+        let expected_state = loaded.state.clone();
+        cx.add_window_view(|window, cx| {
+            let menu_bar = TopMenuBar::new(window, cx);
+            let shell =
+                cx.new(|cx| GuiShell::new_with_loaded_settings(menu_bar, window, cx, loaded));
+            shell.update(cx, |shell, _cx| {
+                assert_eq!(shell.state.workspace_root, expected_root);
+                let Some(BannerMessage::Raw(message)) = &shell.status_message else {
+                    panic!("startup must show a settings banner");
+                };
+                if let Some(backup) = recovery_path.as_ref() {
+                    assert!(message.contains(&backup.display().to_string()));
+                } else {
+                    assert!(message.contains(&missing_root.display().to_string()));
+                    assert!(message.contains("unavailable"));
+                    assert!(shell.rows.is_empty());
+                    assert_eq!(
+                        shell.prepared_persisted_state(false).workspace_root,
+                        expected_state.workspace_root
+                    );
+                }
+            });
+            Root::new(shell, window, cx)
+        });
+    }
 }

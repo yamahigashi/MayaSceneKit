@@ -4,17 +4,49 @@ use super::*;
 
 impl GuiShell {
     pub(super) fn new(menu_bar: TopMenuBar, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let state = load_persisted_state().unwrap_or_default();
-        Self::new_with_state_and_cache_root(
+        Self::new_with_loaded_settings(menu_bar, window, cx, load_persisted_state())
+    }
+
+    pub(super) fn new_with_loaded_settings(
+        menu_bar: TopMenuBar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        loaded: crate::persistence::LoadedSettings,
+    ) -> Self {
+        let mut shell = Self::new_with_state_and_cache_root(
             menu_bar,
             window,
             cx,
-            state,
+            loaded.state,
             default_analysis_cache_root(),
             Some(default_plugin_dir_from_state_path(&default_state_path())),
             app_allowlist_path(std::env::current_exe().ok().as_deref()),
             user_allowlist_path(&default_state_path()),
-        )
+        );
+        shell.apply_settings_recovery(loaded.recovery.as_ref());
+        shell
+    }
+
+    pub(super) fn apply_settings_recovery(
+        &mut self,
+        recovery: Option<&crate::persistence::SettingsRecovery>,
+    ) {
+        if let Some(recovery) = recovery {
+            let mut message = recovery.banner(&self.i18n());
+            if let Some(root) = self
+                .state
+                .workspace_root
+                .as_ref()
+                .filter(|root| !root.is_dir())
+            {
+                message.push('\n');
+                message.push_str(&self.i18n().format(
+                    "banner.workspace_unavailable",
+                    &[("path", root.display().to_string())],
+                ));
+            }
+            self.status_message = Some(BannerMessage::Raw(message));
+        }
     }
 
     #[cfg(test)]
@@ -386,8 +418,15 @@ impl GuiShell {
             bypass_next_exit_warning: false,
             _subscriptions: subscriptions,
         };
-        if shell.state.workspace_root_path().is_some() {
-            shell.rescan_workspace_with_current_settings(window, cx);
+        if let Some(root) = shell.state.workspace_root_path() {
+            if root.is_dir() {
+                shell.rescan_workspace_with_current_settings(window, cx);
+            } else {
+                shell.status_message = Some(BannerMessage::Raw(shell.i18n().format(
+                    "banner.workspace_unavailable",
+                    &[("path", root.display().to_string())],
+                )));
+            }
         } else {
             shell.start_progressive_cache_restore(window, cx);
         }
