@@ -1,8 +1,8 @@
 use maya_scene_kit_observe::scene::model::{AddAttrOp, AddAttrValueSpec, FlagState};
 
-use crate::scene::emit::ma::format::{escape_ma_string, format_numeric_value};
+use crate::scene::emit::ma::format::{EmitContext, escape_ma_string, format_numeric_value};
 
-pub(crate) fn render_add_attr_op(op: &AddAttrOp) -> Option<String> {
+pub(crate) fn render_add_attr_op(op: &AddAttrOp, context: &mut EmitContext) -> Option<String> {
     if !op.is_emittable() {
         return None;
     }
@@ -46,10 +46,19 @@ pub(crate) fn render_add_attr_op(op: &AddAttrOp) -> Option<String> {
     if op.index_matters == FlagState::False {
         parts.push("-im false".to_string());
     }
-    parts.push(format!("-sn \"{}\"", escape_ma_string(&op.short_name)));
-    parts.push(format!("-ln \"{}\"", escape_ma_string(&op.long_name)));
+    parts.push(format!(
+        "-sn \"{}\"",
+        escape_ma_string(&op.short_name, context, "addAttr.short_name")
+    ));
+    parts.push(format!(
+        "-ln \"{}\"",
+        escape_ma_string(&op.long_name, context, "addAttr.long_name")
+    ));
     if let Some(nice_name) = &op.nice_name {
-        parts.push(format!("-nn \"{}\"", escape_ma_string(nice_name)));
+        parts.push(format!(
+            "-nn \"{}\"",
+            escape_ma_string(nice_name, context, "addAttr.nice_name")
+        ));
     }
     if let Some(default_value) = &op.default_value {
         parts.push(format!("-dv {}", format_numeric_value(default_value.value)));
@@ -68,15 +77,24 @@ pub(crate) fn render_add_attr_op(op: &AddAttrOp) -> Option<String> {
     }
     match &op.value_spec {
         AddAttrValueSpec::AttrType(attr_type) => {
-            parts.push(format!("-at \"{}\"", escape_ma_string(attr_type)));
+            parts.push(format!(
+                "-at \"{}\"",
+                escape_ma_string(attr_type, context, "addAttr.attr_type")
+            ));
             if attr_type == "enum" {
                 if let Some(enum_names) = &op.enum_names {
-                    parts.push(format!("-en \"{}\"", escape_ma_string(enum_names)));
+                    parts.push(format!(
+                        "-en \"{}\"",
+                        escape_ma_string(enum_names, context, "addAttr.enum_names")
+                    ));
                 }
             }
         }
         AddAttrValueSpec::DataType(data_type) => {
-            parts.push(format!("-dt \"{}\"", escape_ma_string(data_type)));
+            parts.push(format!(
+                "-dt \"{}\"",
+                escape_ma_string(data_type, context, "addAttr.data_type")
+            ));
         }
         AddAttrValueSpec::UnknownToken { .. } => return None,
     }
@@ -84,7 +102,10 @@ pub(crate) fn render_add_attr_op(op: &AddAttrOp) -> Option<String> {
         parts.push(format!("-nc {number_of_children}"));
     }
     if let Some(parent) = &op.parent {
-        parts.push(format!("-p \"{}\"", escape_ma_string(parent)));
+        parts.push(format!(
+            "-p \"{}\"",
+            escape_ma_string(parent, context, "addAttr.parent")
+        ));
     }
     Some(format!("{};", parts.join(" ")))
 }

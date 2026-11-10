@@ -6,19 +6,22 @@ use crate::{
     reference_semantics::{
         derive_parent_reference_node, reference_depth, render_reference_options_clause,
     },
-    scene::emit::ma::format::escape_ma_string,
+    scene::emit::ma::format::{EmitContext, escape_ma_string},
 };
 
-pub(crate) fn render_reference_file_ops(reference_files: &[ReferenceFileOp]) -> Vec<String> {
+pub(crate) fn render_reference_file_ops(
+    reference_files: &[ReferenceFileOp],
+    context: &mut EmitContext,
+) -> Vec<String> {
     let order = order_reference_file_ops_for_ma(reference_files);
     let mut lines = Vec::new();
 
     for idx in &order {
-        lines.push(render_reference_file_rdi(&reference_files[*idx]));
+        lines.push(render_reference_file_rdi(&reference_files[*idx], context));
     }
     for idx in order {
         if reference_depth(&reference_files[idx].reference_node) == 1 {
-            lines.push(render_reference_file_load(&reference_files[idx]));
+            lines.push(render_reference_file_load(&reference_files[idx], context));
         }
     }
 
@@ -92,36 +95,51 @@ pub(crate) fn order_reference_file_ops_for_ma(reference_files: &[ReferenceFileOp
     ordered
 }
 
-fn reference_option_part(reference: &ReferenceFileOp) -> String {
+fn reference_option_part(reference: &ReferenceFileOp, context: &mut EmitContext) -> String {
     reference
         .options
         .as_ref()
         .and_then(|s| render_reference_options_clause(s).map(|_| s.trim().to_string()))
-        .map(|s| format!(" -op \"{}\"", escape_ma_string(&s)))
+        .map(|s| {
+            format!(
+                " -op \"{}\"",
+                escape_ma_string(&s, context, "reference.options")
+            )
+        })
         .unwrap_or_default()
 }
 
-fn render_reference_file_rdi(reference: &ReferenceFileOp) -> String {
+fn render_reference_file_rdi(reference: &ReferenceFileOp, context: &mut EmitContext) -> String {
     let depth = reference_depth(&reference.reference_node);
-    let op_part = reference_option_part(reference);
+    context.set_target("reference", &reference.reference_node);
+    let op_part = reference_option_part(reference, context);
     format!(
         "file -rdi {depth} -ns \"{}\" -rfn \"{}\"{} -typ \"{}\" \"{}\";",
-        escape_ma_string(&reference.namespace),
-        escape_ma_string(&reference.reference_node),
+        escape_ma_string(&reference.namespace, context, "reference.namespace"),
+        escape_ma_string(
+            &reference.reference_node,
+            context,
+            "reference.reference_node"
+        ),
         op_part,
-        reference.file_type,
-        escape_ma_string(&reference.path)
+        escape_ma_string(&reference.file_type, context, "reference.file_type"),
+        escape_ma_string(&reference.path, context, "reference.path")
     )
 }
 
-fn render_reference_file_load(reference: &ReferenceFileOp) -> String {
-    let op_part = reference_option_part(reference);
+fn render_reference_file_load(reference: &ReferenceFileOp, context: &mut EmitContext) -> String {
+    context.set_target("reference", &reference.reference_node);
+    let op_part = reference_option_part(reference, context);
     format!(
         "file -r -ns \"{}\" -dr 1 -rfn \"{}\"{} -typ \"{}\" \"{}\";",
-        escape_ma_string(&reference.namespace),
-        escape_ma_string(&reference.reference_node),
+        escape_ma_string(&reference.namespace, context, "reference.namespace"),
+        escape_ma_string(
+            &reference.reference_node,
+            context,
+            "reference.reference_node"
+        ),
         op_part,
-        reference.file_type,
-        escape_ma_string(&reference.path)
+        escape_ma_string(&reference.file_type, context, "reference.file_type"),
+        escape_ma_string(&reference.path, context, "reference.path")
     )
 }

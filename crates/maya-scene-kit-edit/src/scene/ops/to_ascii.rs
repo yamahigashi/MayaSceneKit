@@ -4,7 +4,9 @@ use std::{
 };
 
 use maya_scene_kit_observe::scene::{
-    forensics::{NodeRecoveryIssue, RecoveryForensics},
+    forensics::{
+        Confidence, NodeRecoveryIssue, RecoveryForensics, RecoveryIssue, RecoveryIssueKind,
+    },
     model::{RecoveredHeader, RecoveredScene},
     recovery::AngularAttrKind,
 };
@@ -49,7 +51,7 @@ pub(in crate::scene) fn render_best_effort_ma(
         metadata,
         scene_model,
         forensics,
-        issues,
+        mut issues,
         source_path,
         output_name,
         angular_attrs_by_node,
@@ -76,15 +78,38 @@ pub(in crate::scene) fn render_best_effort_ma(
         .collect();
     let decode_quality_distribution = build_decode_quality_distribution(&forensics);
 
+    let rendered = document::render_best_effort_maya_ascii(
+        &metadata,
+        &scene_model,
+        source_path,
+        output_name,
+        &angular_attrs_by_node,
+        embed_metadata,
+    );
+    issues.extend(rendered.issues.into_iter().map(|issue| NodeRecoveryIssue {
+        node_type: issue.node_type,
+        node_name: issue.target,
+        issue: RecoveryIssue {
+            kind: RecoveryIssueKind::Unsupported,
+            confidence: Confidence::Exact,
+            attr_name: issue.position,
+            reason: Some(issue.reason),
+            semantic_provenance: None,
+            value_kind_hex: None,
+            payload_size: None,
+            payload_digest_hex: None,
+            payload_preview_hex: None,
+            payload_inline_hex: None,
+            refedit_unknown_tail_offset: None,
+            refedit_unknown_tail_opcode_hex: None,
+            refedit_unknown_tail_payload_size: None,
+            refedit_unknown_tail_payload_preview_hex: None,
+            decoder_attempts: vec![],
+            trace: None,
+        },
+    }));
     BestEffortBuildResult {
-        maya_ascii: document::render_best_effort_maya_ascii(
-            &metadata,
-            &scene_model,
-            source_path,
-            output_name,
-            &angular_attrs_by_node,
-            embed_metadata,
-        ),
+        maya_ascii: rendered.text,
         issues,
         raw_chunks,
         raw_chunk_count,

@@ -1,33 +1,44 @@
 use maya_scene_kit_observe::scene::model::{RefEditData, RefEditRecord};
 
-use crate::scene::emit::ma::format::escape_ma_string;
+use crate::scene::emit::ma::format::{EmitContext, escape_ma_string};
 
 pub(crate) fn format_reference_edits_setattr_from_data(
     attr_path: &str,
     data: &RefEditData,
+    context: &mut EmitContext,
 ) -> String {
+    let attr_path = escape_ma_string(attr_path, context, "refedit.attr_path");
     let mut lines = vec![format!(
         "setAttr \"{attr_path}\" -type \"dataReferenceEdits\" "
     )];
-    lines.push(format!("\t\t\"{}\"", escape_ma_string(&data.root_node)));
+    lines.push(format!(
+        "\t\t\"{}\"",
+        escape_ma_string(&data.root_node, context, "refedit.root_node")
+    ));
     for (idx, group) in data.groups.iter().enumerate() {
         lines.push(format!(
             "\t\t\"{}\" {}",
-            escape_ma_string(&group.name),
+            escape_ma_string(&group.name, context, "refedit.group"),
             group.expected_count
         ));
         for rec in data.grouped_records.get(idx).into_iter().flatten() {
             match rec {
                 RefEditRecord::Context(node, index) => {
-                    lines.push(format!("\t\t\"{}\" {index}", escape_ma_string(node)));
+                    lines.push(format!(
+                        "\t\t\"{}\" {index}",
+                        escape_ma_string(node, context, "refedit.context")
+                    ));
                 }
                 RefEditRecord::Op0(a, b, c) => {
                     lines.push(format!(
                         "\t\t0 \"{}\" \"{}\" ",
-                        escape_ma_string(a),
-                        escape_ma_string(b)
+                        escape_ma_string(a, context, "refedit.argument_a"),
+                        escape_ma_string(b, context, "refedit.argument_b")
                     ));
-                    lines.push(format!("\t\t\"{}\"", escape_ma_string(c)));
+                    lines.push(format!(
+                        "\t\t\"{}\"",
+                        escape_ma_string(c, context, "refedit.argument_c")
+                    ));
                 }
                 RefEditRecord::Op1(args) => {
                     if args.is_empty() {
@@ -35,7 +46,12 @@ pub(crate) fn format_reference_edits_setattr_from_data(
                     } else {
                         let rendered = args
                             .iter()
-                            .map(|arg| format!("\"{}\"", escape_ma_string(arg)))
+                            .map(|arg| {
+                                format!(
+                                    "\"{}\"",
+                                    escape_ma_string(arg, context, "refedit.argument")
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(" ");
                         lines.push(format!("\t\t1 {rendered}"));
@@ -44,20 +60,28 @@ pub(crate) fn format_reference_edits_setattr_from_data(
                 RefEditRecord::Op2(a, b, c) => {
                     lines.push(format!(
                         "\t\t2 \"{}\" \"{}\" \"{}\"",
-                        escape_ma_string(a),
-                        escape_ma_string(b),
-                        escape_ma_string(c)
+                        escape_ma_string(a, context, "refedit.argument_a"),
+                        escape_ma_string(b, context, "refedit.argument_b"),
+                        escape_ma_string(c, context, "refedit.argument_c")
                     ));
                 }
                 RefEditRecord::Op3(a, b, c) => {
                     lines.push(format!(
                         "\t\t3 \"{}\" \"{}\" \"{}\"",
-                        escape_ma_string(a),
-                        escape_ma_string(b),
-                        escape_ma_string(c)
+                        escape_ma_string(a, context, "refedit.argument_a"),
+                        escape_ma_string(b, context, "refedit.argument_b"),
+                        escape_ma_string(c, context, "refedit.argument_c")
                     ));
                 }
                 RefEditRecord::Op5 { sub, args } => {
+                    if *sub > 4096 {
+                        context.record(
+                            "refedit.sub",
+                            &sub.to_string(),
+                            "omitted reference edit with argument count above 4096",
+                        );
+                        continue;
+                    }
                     let mut render_args = args.clone();
                     while render_args.len() < *sub as usize {
                         render_args.push(String::new());
@@ -67,7 +91,12 @@ pub(crate) fn format_reference_edits_setattr_from_data(
                     } else {
                         let rendered = render_args
                             .iter()
-                            .map(|arg| format!("\"{}\"", escape_ma_string(arg)))
+                            .map(|arg| {
+                                format!(
+                                    "\"{}\"",
+                                    escape_ma_string(arg, context, "refedit.argument")
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(" ");
                         lines.push(format!("\t\t5 {sub} {rendered}"));

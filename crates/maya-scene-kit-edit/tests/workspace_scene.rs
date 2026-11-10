@@ -67,47 +67,9 @@ fn sorted_script_entries(entries: Vec<ScriptNodeEntry>) -> Vec<(String, String)>
     values
 }
 
-fn build_mb_chunk_with_alignment(tag: &str, payload: &[u8], sibling_alignment: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(tag.as_bytes());
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-    out.extend_from_slice(payload);
-    while (out.len() - 16) % sibling_alignment != 0 {
-        out.push(0);
-    }
-    out
-}
-
-fn build_mb_chunk(tag: &str, payload: &[u8]) -> Vec<u8> {
-    build_mb_chunk_with_alignment(tag, payload, 8)
-}
-
-fn build_mb_form_with_alignment(
-    form: &str,
-    children: &[Vec<u8>],
-    sibling_alignment: usize,
-) -> Vec<u8> {
-    let mut payload = form.as_bytes().to_vec();
-    for child in children {
-        payload.extend_from_slice(child);
-    }
-    build_mb_chunk_with_alignment("FOR8", &payload, sibling_alignment)
-}
-
-fn build_mb_root(children: &[Vec<u8>]) -> Vec<u8> {
-    let mut payload = b"Maya".to_vec();
-    for child in children {
-        payload.extend_from_slice(child);
-    }
-
-    let mut out = Vec::new();
-    out.extend_from_slice(b"FOR8");
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-    out.extend_from_slice(&payload);
-    out
-}
+#[path = "support/mb_chunks.rs"]
+mod mb_chunks;
+use mb_chunks::{build_mb_chunk, build_mb_form_with_alignment, build_mb_root};
 
 #[test]
 fn semantic_manifest_pairs_match_for_paths_and_script_nodes() {
@@ -1648,4 +1610,172 @@ fn range_clean_overlap_errors_match() {
     assert!(preview.contains("0..10"));
     assert!(preview.contains("5..15"));
     assert_eq!(preview, materialize);
+}
+
+#[path = "support/mb_header.rs"]
+mod mb_header;
+
+#[test]
+fn converted_header_cannot_inject_top_level_commands() {
+    use maya_scene_kit_formats::mel::{MelTopLevelItemFact, collect_top_level_facts};
+    let original = std::fs::read(repo_root().join("tests/02/sphere.mb")).unwrap();
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("Example.mb");
+    let output = dir.path().join("Example.ma");
+    let hostile = "Example\npython(\"print(1)\");";
+    let baseline: String = "Example".chars().cycle().take(hostile.len()).collect();
+    let mut signatures = Vec::new();
+    for value in [&baseline, hostile] {
+        std::fs::write(
+            &input,
+            mb_header::replace_header_string(&original, b"CHNG", value),
+        )
+        .unwrap();
+        convert_to_maya_ascii(&input, &output).unwrap();
+        let text = std::fs::read_to_string(&output).unwrap();
+        signatures.push(
+            collect_top_level_facts(&text)
+                .items
+                .into_iter()
+                .map(|item| match item {
+                    MelTopLevelItemFact::Command(command) => command.head.to_string(),
+                    MelTopLevelItemFact::Proc(_) => "<proc>".into(),
+                    MelTopLevelItemFact::Other(_) => "<other>".into(),
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(signatures[0], signatures[1]);
+}
+
+#[test]
+fn unsafe_ascii_emission_is_rejected_before_output_is_created() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("Example.mb");
+    let output = dir.path().join("Example.ma");
+    let strict = MaterializeOptions::default().with_operation_mode(OperationMode::Strict);
+    std::fs::write(
+        &input,
+        build_mb_root(&[build_mb_form_with_alignment(
+            "HEAD",
+            &[build_mb_chunk("VERS", b"2026")],
+            4,
+        )]),
+    )
+    .unwrap();
+    convert_to_maya_ascii_with_options(&input, &output, &strict).unwrap();
+    std::fs::remove_file(&output).unwrap();
+    let mut cases = vec![];
+    for value in [
+        "Example\0Sample",
+        "Example\u{001a}Sample",
+        "Example\u{0085}Sample",
+        "Example\u{2028}Sample",
+        "Example\u{2029}Sample",
+    ] {
+        cases.push((
+            build_mb_root(&[build_mb_form_with_alignment(
+                "HEAD",
+                &[build_mb_chunk("VERS", value.as_bytes())],
+                4,
+            )]),
+            "requires.version",
+        ));
+    }
+    for (tag, position) in [
+        ("LUNI", "currentUnit.linear"),
+        ("AUNI", "currentUnit.angular"),
+        ("TUNI", "currentUnit.time"),
+    ] {
+        cases.push((
+            build_mb_root(&[build_mb_form_with_alignment(
+                "HEAD",
+                &[build_mb_chunk(tag, b"Example;Sample")],
+                4,
+            )]),
+            position,
+        ));
+    }
+    cases.push((
+        build_mb_root(&[build_mb_form_with_alignment(
+            "HEAD",
+            &[build_mb_chunk("PLUG", b"ExamplePlugin\x001.0\0-nodeType\0")],
+            4,
+        )]),
+        "requires.options",
+    ));
+    cases.push((
+        build_mb_root(&[build_mb_form_with_alignment(
+            "SLCT",
+            &[build_mb_chunk("SLCT", b"Example;Sample\0")],
+            4,
+        )]),
+        "select.target",
+    ));
+    for (bytes, position) in cases {
+        std::fs::write(&input, bytes).unwrap();
+        let options = MaterializeOptions::default().with_operation_mode(OperationMode::Strict);
+        let result = convert_to_maya_ascii_with_options(&input, &output, &options);
+        assert!(
+            matches!(result, Err(SceneToolError::RejectedByMode { .. })),
+            "{result:?}"
+        );
+        assert!(!output.exists());
+        let report = convert_to_maya_ascii_with_report_and_options(
+            &input,
+            &output,
+            &MaterializeOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.attr_name == position),
+            "{position}: {:?}",
+            report.issues
+        );
+        std::fs::remove_file(&output).unwrap();
+    }
+}
+
+#[test]
+fn invalid_node_type_is_rejected_before_output_is_created() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("Example.mb");
+    let output = dir.path().join("Example.ma");
+    let schema = dir.path().join("Example.yaml");
+    std::fs::write(
+        &schema,
+        "version: 1\nnodes:\n  Example Sample:\n    typeid: 0x45584D50\n    attrs: {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &input,
+        build_mb_root(&[build_mb_form_with_alignment(
+            "EXMP",
+            &[build_mb_chunk("CREA", b"Example\0")],
+            4,
+        )]),
+    )
+    .unwrap();
+    let options = MaterializeOptions::default().with_additional_node_info_paths(vec![schema]);
+    let strict = options.clone().with_operation_mode(OperationMode::Strict);
+    assert!(matches!(
+        convert_to_maya_ascii_with_options(&input, &output, &strict),
+        Err(SceneToolError::RejectedByMode { .. })
+    ));
+    assert!(!output.exists());
+    let report = convert_to_maya_ascii_with_report_and_options(&input, &output, &options).unwrap();
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.attr_name == "createNode.node_type")
+    );
+    assert!(
+        std::fs::read_to_string(output)
+            .unwrap()
+            .contains("createNode \"Example Sample\"")
+    );
 }

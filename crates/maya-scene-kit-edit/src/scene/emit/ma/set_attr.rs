@@ -7,7 +7,7 @@ use maya_scene_kit_observe::scene::{
 
 use crate::{
     scene::emit::ma::{
-        format::{escape_ma_string, format_number, format_numeric_value},
+        format::{EmitContext, escape_ma_string, format_number, format_numeric_value},
         units::{AngularRenderUnit, TimeRenderContext},
     },
     typed_value_semantics::{TypedValueAngularRenderClass, TypedValueKind, TypedValueRenderClass},
@@ -23,6 +23,7 @@ pub(crate) struct SetAttrRenderContext<'a> {
 pub(crate) fn render_set_attr_op_with_render_context(
     op: &SetAttrOp,
     render_context: SetAttrRenderContext<'_>,
+    context: &mut EmitContext,
 ) -> String {
     let mut prefix = String::from("setAttr");
     if let Some(size) = op.array_size {
@@ -37,7 +38,10 @@ pub(crate) fn render_set_attr_op_with_render_context(
     if let Some(keyable) = op.keyable {
         prefix.push_str(if keyable { " -k on" } else { " -k off" });
     }
-    prefix.push_str(&format!(" \"{}\"", escape_ma_string(&op.attr_name_or_path)));
+    prefix.push_str(&format!(
+        " \"{}\"",
+        escape_ma_string(&op.attr_name_or_path, context, "setAttr.attr_path")
+    ));
     let angular_kind = resolve_angular_attr_kind(&op.attr_name_or_path, render_context);
 
     match &op.value {
@@ -89,12 +93,12 @@ pub(crate) fn render_set_attr_op_with_render_context(
             if matches!(render_class, TypedValueRenderClass::TupleInline) {
                 format!(
                     "{prefix} -type \"{}\" {tail} ;",
-                    escape_ma_string(value_type)
+                    escape_ma_string(value_type, context, "setAttr.value_type")
                 )
             } else {
                 format!(
                     "{prefix} -type \"{}\" {tail};",
-                    escape_ma_string(value_type)
+                    escape_ma_string(value_type, context, "setAttr.value_type")
                 )
             }
         }
@@ -118,7 +122,14 @@ pub(crate) fn render_set_attr_op_with_render_context(
             out
         }
         SetAttrValue::String(value) => {
-            format!("{prefix} -type \"string\" \"{}\";", escape_ma_string(value))
+            format!(
+                "{prefix} -type \"string\" \"{}\";",
+                escape_ma_string(
+                    value,
+                    context,
+                    format_args!("setAttr {} value", op.attr_name_or_path)
+                )
+            )
         }
         SetAttrValue::StringArray {
             declared_count,
@@ -130,7 +141,16 @@ pub(crate) fn render_set_attr_op_with_render_context(
                 let emitted_count = values.len();
                 let quoted = values
                     .iter()
-                    .map(|value| format!("\"{}\"", escape_ma_string(value)))
+                    .map(|value| {
+                        format!(
+                            "\"{}\"",
+                            escape_ma_string(
+                                value,
+                                context,
+                                format_args!("setAttr {} value", op.attr_name_or_path)
+                            )
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" ");
                 let count = if *declared_count == emitted_count {
@@ -152,7 +172,16 @@ pub(crate) fn render_set_attr_op_with_render_context(
         SetAttrValue::ComponentList(values) => {
             let quoted = values
                 .iter()
-                .map(|value| format!("\"{}\"", escape_ma_string(value)))
+                .map(|value| {
+                    format!(
+                        "\"{}\"",
+                        escape_ma_string(
+                            value,
+                            context,
+                            format_args!("setAttr {} value", op.attr_name_or_path)
+                        )
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             format!(

@@ -6,3 +6,6 @@ pub(crate) mod refedit;
 pub(crate) mod references;
 pub(crate) mod set_attr;
 pub(crate) mod units;
+
+#[cfg(test)]
+mod tests;
