@@ -117,19 +117,15 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                         }),
                 );
         }
-        if !collection.files.is_empty()
-            && graph_report.reports.is_empty()
-            && graph_report
-                .traversal_issues
-                .iter()
-                .any(|issue| issue.kind == crate::scene::AuditTraversalIssueKind::LoadFailed)
-        {
+        let exit_code = audit_exit_code(&graph_report);
+        if exit_code == 1 {
             for issue in &graph_report.traversal_issues {
-                eprintln!("scene error: {}", issue.message);
+                if issue.kind == crate::scene::AuditTraversalIssueKind::ConfigurationFailed {
+                    eprintln!("scene error: {}", issue.message);
+                }
             }
-            return 1;
+            return exit_code;
         }
-
         if json_output {
             let mut file_summaries = Vec::new();
             let mut file_allowed_counts = Vec::new();
@@ -326,13 +322,7 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
                 }
             }
 
-            match graph_report.disposition {
-                crate::scene::AuditDisposition::Allow
-                | crate::scene::AuditDisposition::AllowWithNotice => 0,
-                crate::scene::AuditDisposition::Review => 20,
-                crate::scene::AuditDisposition::DenyMalicious => 10,
-                crate::scene::AuditDisposition::DenyUncertain => 11,
-            }
+            audit_exit_code(&graph_report)
         } else {
             let mut total_findings = 0usize;
 
@@ -478,15 +468,37 @@ pub(crate) fn run_script_audit(args: ScriptAuditArgs<'_>) -> i32 {
             }
             let _ = writeln!(stdout_output);
 
-            match graph_report.disposition {
-                crate::scene::AuditDisposition::Allow
-                | crate::scene::AuditDisposition::AllowWithNotice => 0,
-                crate::scene::AuditDisposition::Review => 20,
-                crate::scene::AuditDisposition::DenyMalicious => 10,
-                crate::scene::AuditDisposition::DenyUncertain => 11,
-            }
+            audit_exit_code(&graph_report)
         }
     })
+}
+
+fn audit_exit_code(report: &crate::scene::AuditGraphReport) -> i32 {
+    use crate::scene::{AuditDisposition, AuditTraversalIssueKind};
+
+    if report
+        .traversal_issues
+        .iter()
+        .any(|issue| issue.kind == AuditTraversalIssueKind::ConfigurationFailed)
+    {
+        return 1;
+    }
+    match report.disposition {
+        AuditDisposition::DenyMalicious => 10,
+        AuditDisposition::DenyUncertain => 11,
+        AuditDisposition::Review => 20,
+        AuditDisposition::Allow | AuditDisposition::AllowWithNotice => {
+            if report
+                .traversal_issues
+                .iter()
+                .any(|issue| issue.kind == AuditTraversalIssueKind::LoadFailed)
+            {
+                20
+            } else {
+                0
+            }
+        }
+    }
 }
 
 struct GroupedCoverageIssue<'a> {

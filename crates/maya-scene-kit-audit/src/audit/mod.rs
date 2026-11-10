@@ -592,7 +592,10 @@ impl<'a> ReferenceAuditRun<'a> {
             Ok((report, reference_targets)) => self.record_report(entry, report, reference_targets),
             Err(err) => {
                 let issue_index = self.push_issue(AuditTraversalIssue {
-                    kind: AuditTraversalIssueKind::LoadFailed,
+                    kind: match &err {
+                        SceneToolError::Config(_) => AuditTraversalIssueKind::ConfigurationFailed,
+                        _ => AuditTraversalIssueKind::LoadFailed,
+                    },
                     scene_path: Some(entry.path),
                     source_path: None,
                     raw_target: None,

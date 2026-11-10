@@ -170,11 +170,11 @@ fn extensionless_external_link_and_non_scene_broken_link() {
 }
 
 #[test]
-fn all_failed_with_collection_issue_still_exits_one() {
+fn all_failed_with_collection_issue_returns_review() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("Example.mb"), b"invalid").unwrap();
     symlink(".", dir.path().join("ExampleDirectory")).unwrap();
-    assert_eq!(run("audit", dir.path(), true).status.code(), Some(1));
+    assert_eq!(run("audit", dir.path(), true).status.code(), Some(20));
 }
 
 #[test]

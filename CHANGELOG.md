@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Breaking: audit now returns exit code 20 for an unreadable scene passed alone
+  or in a directory, including runs where every scene fails to load. JSON mode
+  emits the graph traversal issues and summary; text mode uses the same exit
+  classification. Previously, runs where every scene failed returned 1.
+  Configuration errors, including invalid node-info overlays or schema
+  configuration, retain exit code 1 and an error message on stderr.
+
 - MbChildren, MbTruncationReason, and MbCompleteness are now non-exhaustive.
   MbInspectReport adds a public completeness field (excluded from serialization).
   Inspect text starts with a completeness= line, including --at-offset output.

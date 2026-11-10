@@ -646,6 +646,7 @@ pub enum AuditTraversalIssueKind {
     DepthLimit,
     SceneLimit,
     LoadFailed,
+    ConfigurationFailed,
 }
 
 impl AuditReport {

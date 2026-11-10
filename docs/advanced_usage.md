@@ -51,7 +51,7 @@ Windows junctions and directory reparse points) are skipped without traversal.
 A directory link supplied explicitly as the input is followed. Broken links are
 reported only when their link names have a scene extension. Audit reports skipped
 links as traversal issues and raises otherwise successful runs to review (exit 20);
-denials retain precedence, and a run where every scene fails to load still exits 1.
+denials retain precedence, and a run where every scene fails to load exits 20.
 Dump, paths, and replace print one warning per skipped link and exit 2 if no scenes
 remain, including inputs containing only directory links. Replace with --out-dir
 writes regular files at the selected relative paths; it does not recreate links.
@@ -221,15 +221,24 @@ For small payloads, inline hex is kept and no blob file is written.
 - Per-file `hits`: total matches in all script node bodies in that file
 - Top-level `hit_count` in `--json`: total matches across all files
 
-Exit codes:
+Exit codes for audit:
 
-- `0`: allow or allow-with-notice
-- `10`: malicious findings triggered deny (`deny_malicious`)
-- `11`: uncertainty triggered deny (`deny_uncertain`; only under the hardened
+- 0: allow or allow-with-notice
+- 10: malicious findings triggered deny (deny_malicious)
+- 11: uncertainty triggered deny (deny_uncertain; only under the hardened
   profile, so the default CLI never emits it)
-- `20`: review
-- `1`: scene decode or processing error
-- `2`: CLI usage or I/O error
+- 20: review, including scene read or decode failures
+- 1: schema or node-info configuration error, audit-plan processing error,
+  JSON rendering failure, or stdout write failure
+- 2: CLI usage, allowlist, or input enumeration error
+
+An unreadable scene now returns 20 instead of 1, whether you pass the file alone
+or its directory. This also applies when every scene fails to load. JSON mode
+includes the failure under graph.traversal_issues and retains the summary shape;
+text mode uses the same classification. A denial takes precedence over a read
+failure when auditing multiple scenes. Configuration errors, including invalid
+node-info overlays or schema configuration, remain tool errors: exit 1 with the
+config error on stderr. Non-scene output failures still return 1.
 
 ## Audit Allowlists
 
