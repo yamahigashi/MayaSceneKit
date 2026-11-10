@@ -369,3 +369,27 @@ fn manual_scene_and_source_findings_match_without_provenance() {
         assert_eq!(scene.scene_format, SceneFormat::Ma);
     }
 }
+
+#[test]
+fn mel_script_node_with_hiragana_eval_returns_findings() {
+    let dir = tempfile::tempdir().expect("temporary scene directory");
+    let scene_path = dir.path().join("TestScene.ma");
+    let source = format!("eval(\"print \\\"x{}\\\"\");", "あ".repeat(60));
+    let escaped = source.replace('\\', "\\\\").replace('"', "\\\"");
+    std::fs::write(
+        &scene_path,
+        format!(
+            "//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExampleScript\";\n    setAttr \".st\" 1;\n    setAttr \".stp\" 0;\n    setAttr \".b\" -type \"string\" \"{escaped}\";\n"
+        ),
+    )
+    .expect("write synthetic scene");
+    let plan = build_script_audit_plan(Vec::new(), 96).expect("audit plan");
+    let report = audit_script_nodes_with_options(
+        &scene_path,
+        &plan,
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+    )
+    .expect("audit scene");
+    assert!(!report.findings.is_empty());
+}

@@ -19,7 +19,7 @@ pub(crate) fn severity_for_trigger(
 pub(crate) fn snippet(text: &str) -> String {
     let mut value = text.trim().replace('\n', "\\n");
     if value.len() > 120 {
-        value.truncate(120);
+        value.truncate(clamp_char_boundary(&value, 120));
     }
     value
 }
@@ -65,7 +65,42 @@ fn clamp_char_boundary(text: &str, mut index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::preview_window;
+    use super::{preview_window, snippet};
+
+    #[test]
+    fn snippet_truncates_at_utf8_boundary() {
+        let text = format!("x{}", "あ".repeat(41));
+        assert_eq!(snippet(&text), format!("x{}", "あ".repeat(39)));
+    }
+
+    #[test]
+    fn snippet_exact_limit_is_unchanged() {
+        let text = "x".repeat(120);
+        assert_eq!(snippet(&text), text);
+    }
+
+    #[test]
+    fn snippet_ascii_over_limit_is_truncated() {
+        assert_eq!(snippet(&"x".repeat(121)), "x".repeat(120));
+    }
+
+    #[test]
+    fn snippet_empty_is_unchanged() {
+        assert_eq!(snippet(""), "");
+    }
+
+    #[test]
+    fn snippet_four_byte_character_crossing_limit() {
+        assert_eq!(snippet(&format!("{}😀", "x".repeat(118))), "x".repeat(118));
+    }
+
+    #[test]
+    fn snippet_counts_escaped_newline_bytes() {
+        assert_eq!(
+            snippet(&format!("{}\ny", "x".repeat(118))),
+            format!("{}\\n", "x".repeat(118))
+        );
+    }
 
     #[test]
     fn preview_window_can_be_disabled() {
