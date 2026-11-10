@@ -5,7 +5,6 @@ use std::{
 
 use maya_scene_kit_formats::mel::{MelParseBudget, mel_parse_budget_limit_from_message};
 use rustpython_parser::ast;
-use sha2::{Digest, Sha256};
 
 use super::{
     MelResolvedStringKind, MelSinkArgFact, MelSinkArgKind, MelSurfaceFacts,
@@ -34,6 +33,8 @@ use crate::scene::{
     SceneToolError, StaticExecutionReason, UnknownSemanticDetail, UnknownSemanticFact,
     source::{ObservationBundle, ObservationData},
 };
+
+const CHANGED_DURING_READ: &str = "scene file changed while it was being read";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedExecutionCore {
@@ -72,7 +73,7 @@ pub(crate) struct UnknownSemanticFactCore {
 pub(crate) fn build_observed_execution_core(
     observation: &ObservationBundle,
 ) -> Result<ObservedExecutionCore, SceneToolError> {
-    let coverage = match &observation.data {
+    let mut coverage = match &observation.data {
         ObservationData::Ma { data } => {
             let semantics = data.node_execution_semantics()?;
             surfaces::collect_execution_coverage_from_ma_parts(
@@ -95,6 +96,26 @@ pub(crate) fn build_observed_execution_core(
             )
         }
     }?;
+
+    if observation.source_snapshot().identity.stability()
+        == crate::scene::source::snapshot::ReadStability::Unstable
+    {
+        let diagnostic = CHANGED_DURING_READ;
+        coverage
+            .coverage_issues
+            .push(surfaces::ExecutionCoverageIssueRecord {
+                kind: ExecutionCoverageIssueKind::TopLevelDiagnostics,
+                detail: ExecutionCoverageIssueDetail::TopLevelDiagnostics {
+                    diagnostic: diagnostic.into(),
+                },
+                origin: None,
+                preview: surfaces::PreviewWindowSpec::new(
+                    Arc::from(diagnostic),
+                    0,
+                    diagnostic.len(),
+                ),
+            });
+    }
 
     let mut core = build_execution_core(coverage, observation.mel_parse_budget())?;
     let mut dependency_facts = dependency::collect_scene_dependency_facts(observation)?;
@@ -310,12 +331,8 @@ pub(crate) fn derive_coverage_state(
 pub(crate) fn build_scene_digests(
     observation: &ObservationBundle,
 ) -> Result<SceneDigestSet, SceneToolError> {
-    let bytes = match &observation.data {
-        ObservationData::Ma { data } => data.bytes()?,
-        ObservationData::Mb { session } => session.mb.data(),
-    };
     Ok(SceneDigestSet {
-        scene_sha256: sha256_hex(bytes),
+        scene_sha256: observation.source_snapshot().sha256()?.to_owned(),
         schema_bundle_sha256: None,
         policy_bundle_sha256: None,
     })
@@ -615,7 +632,14 @@ fn materialize_coverage_issue(
         kind: issue.kind,
         detail: issue.detail.clone(),
         origin: issue.origin.clone(),
-        preview: render_preview(&issue.preview, max_preview),
+        preview: match &issue.detail {
+            ExecutionCoverageIssueDetail::TopLevelDiagnostics { diagnostic }
+                if diagnostic == CHANGED_DURING_READ && issue.origin.is_none() =>
+            {
+                diagnostic.clone()
+            }
+            _ => render_preview(&issue.preview, max_preview),
+        },
     }
 }
 
@@ -1049,12 +1073,6 @@ fn semantic_rank(class: ExecutionSemanticClass) -> u8 {
         ExecutionSemanticClass::ScriptBearingWrite => 4,
         ExecutionSemanticClass::UnknownWrite => 5,
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]

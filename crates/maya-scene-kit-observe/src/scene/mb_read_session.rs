@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    mb::{MayaBinaryParseError, MbParseBudget, parse_bytes_with_budget, parse_file_with_budget},
+    mb::{MayaBinaryParseError, MbParseBudget, parse_bytes_with_budget},
     scene::{
         SceneToolError,
         dump::SceneDumpRequireEntry,
@@ -17,7 +17,11 @@ use crate::{
             collect_raw_chunk_records_with_budget, recover_nodes, recover_reference_files,
         },
         schema::SchemaContext,
-        source::mb::{self, RawMbSelectiveSections},
+        source::{
+            LoadOptions,
+            mb::{self, RawMbSelectiveSections},
+            snapshot::{self, SourceIdentity, SourceSnapshot},
+        },
     },
 };
 
@@ -34,6 +38,7 @@ pub(crate) struct MbSceneFacts {
 
 pub(crate) struct MbReadSession {
     pub(crate) mb: crate::mb::MayaBinaryFile,
+    pub(crate) snapshot: SourceSnapshot,
     pub(crate) completeness: crate::mb::MbCompleteness,
     schema_context: Option<Arc<SchemaContext>>,
     budget: MbParseBudget,
@@ -53,8 +58,15 @@ impl MbReadSession {
         schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
-        let mb = parse_file_with_budget(path, budget)?;
-        Self::from_mb(mb, schema_context, budget)
+        let acquired =
+            snapshot::acquire(path, &LoadOptions::default().with_mb_parse_budget(*budget))?;
+        Self::load_snapshot_bytes(
+            path,
+            acquired.bytes,
+            acquired.identity,
+            schema_context,
+            budget,
+        )
     }
 
     pub(crate) fn load_raw_bytes(
@@ -63,17 +75,35 @@ impl MbReadSession {
         schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
+        Self::load_snapshot_bytes(
+            path,
+            bytes,
+            SourceIdentity::absent(),
+            schema_context,
+            budget,
+        )
+    }
+
+    pub(crate) fn load_snapshot_bytes(
+        path: &std::path::Path,
+        bytes: Vec<u8>,
+        identity: SourceIdentity,
+        schema_context: Option<Arc<SchemaContext>>,
+        budget: &MbParseBudget,
+    ) -> Result<Self, SceneToolError> {
         let mb = parse_bytes_with_budget(bytes, budget)?.with_path(path);
-        Self::from_mb(mb, schema_context, budget)
+        Self::from_mb(mb, identity, schema_context, budget)
     }
 
     fn from_mb(
         mb: crate::mb::MayaBinaryFile,
+        identity: SourceIdentity,
         schema_context: Option<Arc<SchemaContext>>,
         budget: &MbParseBudget,
     ) -> Result<Self, SceneToolError> {
         let completeness = mb.completeness();
         Ok(Self {
+            snapshot: SourceSnapshot::mb(Arc::clone(mb.data_arc()), identity),
             mb,
             completeness,
             schema_context,

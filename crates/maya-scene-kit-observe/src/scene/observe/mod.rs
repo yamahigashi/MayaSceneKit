@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn ma_observe_path_without_retained_bytes_reloads_only_on_digest_demand() {
+    fn ma_light_observation_rejects_digest_without_reloading_bytes() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let source = dir.path().join("transient_bytes.ma");
         std::fs::write(
@@ -630,9 +630,8 @@ mod tests {
         assert_eq!(paths.len(), 1);
         assert!(transient.cached_ma_bytes_ptr().is_none());
 
-        let digests = transient.scene_digests(0).expect("scene digests");
-        assert!(!digests.scene_sha256.is_empty());
-        assert!(transient.cached_ma_bytes_ptr().is_some());
+        assert!(transient.scene_digests(0).is_err());
+        assert!(transient.cached_ma_bytes_ptr().is_none());
     }
 
     #[test]

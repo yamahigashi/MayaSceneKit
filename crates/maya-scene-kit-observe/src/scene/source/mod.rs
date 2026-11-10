@@ -1,6 +1,7 @@
 pub(crate) mod loader;
 pub(crate) mod ma;
 pub(crate) mod mb;
+pub(crate) mod snapshot;
 
 use std::path::Path;
 
@@ -87,3 +88,6 @@ pub fn collect_scene_paths_with_options(
         entries: observation.scene_paths(kind)?,
     })
 }
+
+#[cfg(test)]
+mod read_tests;

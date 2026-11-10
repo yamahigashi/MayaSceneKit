@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc};
+use std::sync::Arc;
 
 use maya_scene_kit_formats::{
     ma::{
@@ -101,17 +101,10 @@ impl MaObservationData {
     }
 
     pub(crate) fn bytes(&self) -> Result<&[u8], crate::scene::SceneToolError> {
-        if let Some(bytes) = self.bytes.get() {
-            return Ok(bytes.as_slice());
-        }
-
-        let bytes = fs::read(&self.source_path)?;
-        let _ = self.bytes.set(bytes);
-        Ok(self
-            .bytes
+        self.bytes
             .get()
-            .expect("ma bytes available after lazy reload")
-            .as_slice())
+            .map(|bytes| bytes.as_slice())
+            .ok_or_else(|| SceneToolError::Message("source bytes have been released".into()))
     }
 }
 

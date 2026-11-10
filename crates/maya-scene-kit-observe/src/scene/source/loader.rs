@@ -9,6 +9,7 @@ use maya_scene_kit_formats::{
     mel::{MelParseBudget, first_mel_parse_budget_limit},
 };
 
+use super::snapshot::{self, SourceIdentity, SourceSnapshot};
 use crate::{
     mb::MbParseBudget,
     scene::{
@@ -19,7 +20,6 @@ use crate::{
             ExecutionSurface, ObservedExecutionCatalog, ObservedExecutionSurface, catalog,
         },
         mb_read_session::MbReadSession,
-        ops,
         paths::{PathKind, ScenePathEntry},
         query,
         schema::{SchemaContext, SchemaInputs},
@@ -303,25 +303,43 @@ impl Loader {
     }
 
     fn observe(&self, input: SourceInput<'_>) -> Result<ObservationBundle, SceneToolError> {
-        let scene_format = match input.scene_format {
-            Some(scene_format) => scene_format,
-            None => ops::detect_scene_format(input.path)?,
-        };
-        let schema_context = match scene_format {
-            SceneFormat::Ma if input.intent == SceneReadIntent::Execution => {
-                Some(self.schema_context()?)
+        let mut input = input;
+        let (scene_format, reader) = match input.scene_format {
+            Some(format) => (format, None),
+            None => {
+                let reader = snapshot::SourceReader::open(input.path)?;
+                (reader.format(), Some(reader))
             }
-            SceneFormat::Ma => None,
-            SceneFormat::Mb if input.intent != SceneReadIntent::Light => {
-                Some(self.schema_context()?)
-            }
-            SceneFormat::Mb => None,
-            SceneFormat::Unknown => None,
         };
-        ObservationBundle::load(input, scene_format, &self.options, schema_context)
+        let schema_context = match (scene_format, input.intent) {
+            (SceneFormat::Unknown, _) => {
+                return Err(SceneToolError::UnsupportedSceneFormat {
+                    path: input.path.to_path_buf(),
+                    detected: scene_format,
+                });
+            }
+            (_, SceneReadIntent::Light) | (SceneFormat::Ma, SceneReadIntent::Semantic) => None,
+            _ => Some(self.schema_context()?),
+        };
+        let identity = match reader {
+            Some(reader) => {
+                let acquired = reader.read(&self.options)?;
+                input.bytes = Some(acquired.bytes);
+                acquired.identity
+            }
+            None => SourceIdentity::absent(),
+        };
+        ObservationBundle::load(input, scene_format, identity, &self.options, schema_context)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_schema_context(&self) -> bool {
+        self.schema_context.get().is_some()
     }
 
     fn schema_context(&self) -> Result<&Arc<SchemaContext>, SceneToolError> {
+        #[cfg(test)]
+        super::read_tests::record(super::read_tests::ReadEvent::Schema);
         match self.schema_context.get_or_init(|| {
             SchemaContext::from_inputs_cached(&self.options.schema_inputs())
                 .map_err(|err| err.to_string())
@@ -421,6 +439,11 @@ pub struct ExecutionObservationBundle {
 }
 
 impl ExecutionObservationBundle {
+    #[cfg(test)]
+    pub(crate) fn cached_ma_bytes_ptr(&self) -> Option<*const Vec<u8>> {
+        self.observation.cached_ma_bytes_ptr()
+    }
+
     fn new(observation: ObservationBundle) -> Self {
         Self { observation }
     }
@@ -469,11 +492,11 @@ pub struct ObservationBundle {
 }
 
 pub(crate) struct MaObservationData {
-    pub(crate) source_path: PathBuf,
+    pub(crate) snapshot: SourceSnapshot,
     pub(crate) load_options: LoadOptions,
     pub(crate) schema_context: Option<Arc<SchemaContext>>,
     pub(crate) selective_sections_include_execution_attrs: bool,
-    pub(crate) bytes: OnceLock<Vec<u8>>,
+    pub(crate) bytes: OnceLock<Arc<Vec<u8>>>,
     pub(crate) selective_sections: OnceLock<RawMaSelectiveSections>,
     pub(crate) execution_sections: OnceLock<RawMaSelectiveSections>,
     pub(crate) scene_paths: OnceLock<Vec<ScenePathEntry>>,
@@ -488,16 +511,15 @@ impl ObservationBundle {
     pub(crate) fn load(
         input: SourceInput<'_>,
         scene_format: SceneFormat,
+        identity: SourceIdentity,
         options: &LoadOptions,
         schema_context: Option<&Arc<SchemaContext>>,
     ) -> Result<Self, SceneToolError> {
         let path = input.path;
         match scene_format {
             SceneFormat::Ma => {
-                let bytes = match input.bytes {
-                    Some(bytes) => bytes,
-                    None => fs::read(path)?,
-                };
+                let bytes = Arc::new(input.bytes.expect("source bytes acquired before parsing"));
+                let mut snapshot = SourceSnapshot::ma(Arc::clone(&bytes), identity);
                 let sections = if input.intent == SceneReadIntent::Execution {
                     let execution_semantics = schema_context
                         .expect("ma execution observation requires schema context")
@@ -522,6 +544,9 @@ impl ObservationBundle {
                 selective_sections
                     .set(sections)
                     .expect("ma selective sections initialized once");
+                if !input.retain_ma_bytes {
+                    snapshot.release(input.intent == SceneReadIntent::Execution)?;
+                }
                 let retained_bytes = if input.retain_ma_bytes {
                     let stored = OnceLock::new();
                     stored
@@ -532,7 +557,7 @@ impl ObservationBundle {
                     OnceLock::new()
                 };
                 let data = Box::new(MaObservationData {
-                    source_path: path.to_path_buf(),
+                    snapshot,
                     load_options: options.clone(),
                     schema_context: schema_context.map(Arc::clone),
                     selective_sections_include_execution_attrs: input.intent
@@ -565,18 +590,24 @@ impl ObservationBundle {
                 })
             }
             SceneFormat::Mb => {
-                let budget = match input.bytes.as_ref() {
-                    Some(bytes) => options.materialize_mb_parse_budget_for_bytes(bytes.len()),
-                    None => options.materialize_mb_parse_budget_for_path(path)?,
-                };
-                let session = match input.bytes {
-                    Some(bytes) => MbReadSession::load_raw_bytes(
+                let bytes = input.bytes.expect("source bytes acquired before parsing");
+                let budget = options
+                    .materialize_mb_parse_budget_for_bytes(identity.initial_len(bytes.len()));
+                let session = if identity.stability() == snapshot::ReadStability::Absent {
+                    MbReadSession::load_raw_bytes(
                         path,
                         bytes,
                         schema_context.map(Arc::clone),
                         &budget,
-                    )?,
-                    None => MbReadSession::load_raw(path, schema_context.map(Arc::clone), &budget)?,
+                    )?
+                } else {
+                    MbReadSession::load_snapshot_bytes(
+                        path,
+                        bytes,
+                        identity,
+                        schema_context.map(Arc::clone),
+                        &budget,
+                    )?
                 };
                 let validation_state = match input.validation_state {
                     Some(validation_state) => validation_state,
@@ -610,6 +641,13 @@ impl ObservationBundle {
                 path: path.to_path_buf(),
                 detected: scene_format,
             }),
+        }
+    }
+
+    pub(crate) fn source_snapshot(&self) -> &SourceSnapshot {
+        match &self.data {
+            ObservationData::Ma { data } => &data.snapshot,
+            ObservationData::Mb { session } => &session.snapshot,
         }
     }
 
@@ -755,7 +793,7 @@ impl ObservationBundle {
     #[cfg(test)]
     pub(crate) fn cached_ma_bytes_ptr(&self) -> Option<*const Vec<u8>> {
         match &self.data {
-            ObservationData::Ma { data } => data.bytes.get().map(std::ptr::from_ref),
+            ObservationData::Ma { data } => data.bytes.get().map(Arc::as_ptr),
             ObservationData::Mb { .. } => None,
         }
     }
