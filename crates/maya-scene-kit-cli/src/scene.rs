@@ -22,9 +22,9 @@ pub use maya_scene_kit_edit::scene::{
     MaterializeOptions, MayaAsciiConversionReport, MayaAsciiDecodeAttempt, MayaAsciiIssue,
     OperationMode, PathReplaceMode, PathReplaceResult, PathReplaceRule, RawChunkDump, SceneFormat,
     SceneToolError, ScriptNodeCleanResult, SemanticProvenance, UnknownInventoryEntry,
-    ValidationState, convert_to_maya_ascii_with_options, convert_to_maya_ascii_with_report,
-    convert_to_maya_ascii_with_report_and_options, remove_script_nodes_with_options,
-    replace_scene_paths_with_options, write_output_bytes_atomic,
+    ValidationState, WriteOutcome, convert_to_maya_ascii_with_options,
+    convert_to_maya_ascii_with_report, convert_to_maya_ascii_with_report_and_options,
+    remove_script_nodes_with_options, replace_scene_paths_with_options, write_output_bytes_atomic,
 };
 #[allow(unused_imports)]
 pub use maya_scene_kit_observe::scene::dump::SceneDumpReport;

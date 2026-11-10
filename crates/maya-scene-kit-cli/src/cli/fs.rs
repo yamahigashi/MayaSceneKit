@@ -48,7 +48,15 @@ pub(super) fn write_scene_paths(
 }
 
 pub(super) fn write_output_bytes(output: &Path, bytes: &[u8]) -> Result<(), CliOutputError> {
-    write_output_bytes_atomic(output, bytes)?;
+    write_scene_bytes(output, bytes)?;
+    Ok(())
+}
+
+pub(super) fn write_scene_bytes(output: &Path, bytes: &[u8]) -> Result<(), SceneToolError> {
+    let outcome = write_output_bytes_atomic(output, bytes)?;
+    if let Some(error) = outcome.dir_sync_error {
+        eprintln!("warning: output written but directory sync failed: {error}");
+    }
     Ok(())
 }
 

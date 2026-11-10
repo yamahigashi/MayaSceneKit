@@ -235,6 +235,7 @@ fn write_user_allowlist_document(
     )
     .map_err(|error| error.to_string())?;
     maya_scene_kit_edit::scene::write_output_bytes_atomic(path, &bytes)
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -360,12 +361,13 @@ fn save_persisted_state_to(
     normalized.normalize_ignore_folder_settings();
     let payload = serde_json::to_vec_pretty(&normalized)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let result = maya_scene_kit_edit::scene::write_output_bytes_atomic(path, &payload)
-        .map_err(|error| io::Error::other(error.to_string()));
-    if result.is_ok() || fs::read(path).is_ok_and(|bytes| bytes == payload) {
-        *last_saved = sequence;
+    let outcome = maya_scene_kit_edit::scene::write_output_bytes_atomic(path, &payload)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    *last_saved = sequence;
+    match outcome.dir_sync_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    result
 }
 
 #[cfg(test)]

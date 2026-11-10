@@ -33,7 +33,10 @@ pub(crate) fn run_to_ascii(
                     report.validation_state,
                 );
                 if let Some(path) = issues_json {
-                    if let Some(parent) = path.parent() {
+                    if let Some(parent) = path
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                    {
                         if let Err(e) = fs::create_dir_all(parent) {
                             eprintln!("error: {e}");
                             return 2;

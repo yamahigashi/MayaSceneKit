@@ -9,8 +9,21 @@ use crate::scene::SceneToolError;
 
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn write_output_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), SceneToolError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+/// dir_sync_error means replacement succeeded but directory sync failed; ignoring it accepts
+/// that the replacement may not survive a crash.
+#[derive(Debug)]
+pub struct WriteOutcome {
+    pub dir_sync_error: Option<std::io::Error>,
+}
+
+pub fn write_output_bytes_atomic(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<WriteOutcome, SceneToolError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
     let (temp_path, mut file) =
@@ -30,18 +43,16 @@ pub fn write_output_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), SceneT
         let _ = fs::remove_file(&temp_path);
         return Err(SceneToolError::Io(err));
     }
-    if let Err(err) = sync_parent_dir(parent) {
-        return Err(SceneToolError::Io(err));
-    }
-
-    Ok(())
+    Ok(WriteOutcome {
+        dir_sync_error: sync_parent_dir(parent).err(),
+    })
 }
 
 pub(in crate::scene) fn write_bytes_atomic(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), SceneToolError> {
-    write_output_bytes_atomic(path, bytes)
+    write_output_bytes_atomic(path, bytes).map(|_| ())
 }
 
 fn allocate_temp_file(
@@ -131,4 +142,32 @@ fn sync_parent_dir(parent: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn sync_parent_dir(_parent: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    // Every test in this binary that changes the current directory must hold this lock.
+    static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn writes_bare_output_name() {
+        let _lock = CURRENT_DIR_LOCK.lock().unwrap();
+        struct RestoreDirectory(PathBuf);
+        impl Drop for RestoreDirectory {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0).expect("restore current directory");
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let _restore = RestoreDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(directory.path()).unwrap();
+        let result = write_output_bytes_atomic(Path::new("Example.ma"), b"Example");
+        let outcome = result.expect("write bare output name");
+        assert!(outcome.dir_sync_error.is_none());
+        assert_eq!(fs::read("Example.ma").unwrap(), b"Example");
+    }
 }

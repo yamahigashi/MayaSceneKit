@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 pub use self::{
     edit::{MaterializeOptions, Materializer, PatchPlanner, collect_raw_chunks},
     error::SceneToolError,
-    io::write::write_output_bytes_atomic,
+    io::write::{WriteOutcome, write_output_bytes_atomic},
     public::{
         AsciiDecodePolicy, CompositeSceneEditsPreview, CompositeSceneEditsStageResult, Confidence,
         DecodeAttemptResult, DecodeQuality, DecodeQualityDistributionEntry, ExecutionCleanPreview,
