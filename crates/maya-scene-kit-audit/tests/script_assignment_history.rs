@@ -137,9 +137,11 @@ fn script_history_bodies_keep_independent_allowlist_decisions() {
             AuditOptions::strict_default(),
             fingerprint_audit_plan(&plan),
             file_state.clone().into(),
+            &LoadOptions::default(),
         )
-        .unwrap();
-        let cache = AuditCacheStore::new(dir.path().join("audit-cache"));
+        .unwrap()
+        .expect("cacheable schema");
+        let cache = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
         cache.save(&snapshot).unwrap();
         let cached = cache.load_by_identity(&snapshot.identity).unwrap().unwrap();
         assert_eq!(
@@ -151,8 +153,10 @@ fn script_history_bodies_keep_independent_allowlist_decisions() {
             &LoadOptions::default(),
             file_state,
         )
-        .unwrap();
-        let cache = ObserveCacheStore::new(dir.path().join("observe-cache"));
+        .unwrap()
+        .expect("cacheable schema");
+        let cache =
+            ObserveCacheStore::new(dir.path().join("observe-cache"), &LoadOptions::default());
         cache.save(&observed).unwrap();
         let cached = cache.load_by_identity(&observed.identity).unwrap().unwrap();
         assert_eq!(cached.dump_report.script_entries[0].body, last);

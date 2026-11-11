@@ -1,6 +1,7 @@
+#[cfg(test)]
+use std::fs;
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -258,9 +259,10 @@ fn parsed_node_info_with_registry(
         }
     }
 
-    let loaded = load_parsed_node_info_from_paths(
+    let loaded = load_parsed_node_info(
         &registry.paths().node_info_schema_file,
         &registry.paths().additional_node_info_files,
+        |path| registry.bytes(path),
     )
     .map(Arc::new);
     if let Ok(mut cache) = registry.caches().parsed_node_info.lock() {
@@ -269,9 +271,20 @@ fn parsed_node_info_with_registry(
     loaded
 }
 
+#[cfg(test)]
 fn load_parsed_node_info_from_paths(
     base_path: &Path,
     additional_paths: &[PathBuf],
+) -> Result<ParsedNodeInfo, String> {
+    load_parsed_node_info(base_path, additional_paths, |path| {
+        fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
+fn load_parsed_node_info<B: AsRef<[u8]>>(
+    base_path: &Path,
+    additional_paths: &[PathBuf],
+    read: impl Fn(&Path) -> Result<B, String>,
 ) -> Result<ParsedNodeInfo, String> {
     let mut unique_paths = vec![base_path.to_path_buf()];
     for path in additional_paths {
@@ -283,9 +296,9 @@ fn load_parsed_node_info_from_paths(
 
     let mut merged_nodes = HashMap::new();
     for path in unique_paths {
-        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let parsed =
-            parse_external_node_info(&bytes).map_err(|err| format!("{}: {err}", path.display()))?;
+        let bytes = read(&path)?;
+        let parsed = parse_external_node_info(bytes.as_ref())
+            .map_err(|err| format!("{}: {err}", path.display()))?;
         for (node_type, entry) in parsed {
             merged_nodes.insert(node_type, entry);
         }

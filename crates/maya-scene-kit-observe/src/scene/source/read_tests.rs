@@ -568,7 +568,9 @@ fn semantic_stopped_section_scan_is_partial() {
     assert!(catalog.coverage_issues.iter().any(|issue| issue.origin.is_none()
         && matches!(&issue.detail, ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason }
             if reason == "MB section scan stopped")));
-    let snapshot = ObservedSceneSnapshot::from_observation(&observation, &options).unwrap();
+    let snapshot = ObservedSceneSnapshot::from_observation(&observation, &options)
+        .unwrap()
+        .expect("cacheable schema");
     assert_eq!(
         snapshot.paths_report.validation_state,
         ValidationState::Partial

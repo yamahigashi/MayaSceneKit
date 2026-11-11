@@ -177,6 +177,7 @@ impl GuiShell {
         let cancel_generation = self.cache_maintenance_generation;
         let observe_cache_root = self.observe_cache_root.clone();
         let audit_cache_root = self.audit_cache_root.clone();
+        let load_options = self.scene_load_options();
         let view = cx.entity();
         let debounce_generation = if debounced {
             self.cache_maintenance_state.debounce_generation = self
@@ -235,6 +236,7 @@ impl GuiShell {
                                 batch,
                                 observe_cache_root,
                                 audit_cache_root,
+                                &load_options,
                             )
                         })
                         .await;
@@ -378,13 +380,14 @@ fn flush_cache_maintenance_batch(
     batch: CacheMaintenanceBatch,
     observe_cache_root: PathBuf,
     audit_cache_root: PathBuf,
+    load_options: &LoadOptions,
 ) -> CacheMaintenanceFlushResult {
     let mut error_count = 0usize;
     let mut first_error = None;
     let now = SystemTime::now();
 
     if batch.sweep || !batch.observe.is_empty() {
-        let store = ObserveCacheStore::new(observe_cache_root);
+        let store = ObserveCacheStore::new(observe_cache_root, load_options);
         if let Err(err) = store.maintain_batch(
             &batch.observe,
             now,
@@ -397,7 +400,7 @@ fn flush_cache_maintenance_batch(
     }
 
     if batch.sweep || !batch.audit.is_empty() {
-        let store = AuditCacheStore::new(audit_cache_root);
+        let store = AuditCacheStore::new(audit_cache_root, load_options);
         if let Err(err) = store.maintain_batch(
             &batch.audit,
             now,

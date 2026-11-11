@@ -213,38 +213,32 @@ fn previous_cache_versions_are_rejected_for_truncated_input() {
     std::fs::write(&path, form(b"Maya", &[malformed()])).unwrap();
     let options = LoadOptions::default();
     let observation = Loader::new(options.clone()).observe_path(&path).unwrap();
-    let snapshot = ObservedSceneSnapshot::from_observation(&observation, &options).unwrap();
+    let snapshot = ObservedSceneSnapshot::from_observation(&observation, &options)
+        .unwrap()
+        .expect("cacheable schema");
     let mut old = snapshot.clone();
     old.identity.cache_schema_version = snapshot.identity.cache_schema_version - 1;
-    let store = ObserveCacheStore::new(dir.path().join("ExampleObserve"));
+    let store = ObserveCacheStore::new(dir.path().join("ExampleObserve"), &options);
     store.save(&old).unwrap();
-    assert!(
-        store
-            .load_by_path_if_fresh(&path, &options)
-            .unwrap()
-            .is_none()
-    );
+    assert!(store.load_by_path_if_fresh(&path).unwrap().is_none());
     assert!(store.load_by_identity(&old.identity).unwrap().is_none());
     assert_eq!(
         snapshot.paths_report.validation_state,
         ValidationState::Partial
     );
     store.save(&snapshot).unwrap();
-    assert!(
-        store
-            .load_by_path_if_fresh(&path, &options)
-            .unwrap()
-            .is_some()
-    );
+    assert!(store.load_by_path_if_fresh(&path).unwrap().is_some());
 
     let plan = build_script_audit_plan(vec![], 64).unwrap();
     let profile = AuditOptions::strict_default();
     let fingerprint = fingerprint_audit_plan(&plan);
     let report = audit_script_nodes_with_options(&path, &plan, &options, profile).unwrap();
-    let snapshot = AuditedSceneSnapshot::new(report, profile, &fingerprint).unwrap();
+    let snapshot = AuditedSceneSnapshot::new(report, profile, &fingerprint, &options)
+        .unwrap()
+        .expect("cacheable schema");
     let mut old = snapshot.clone();
     old.identity.cache_schema_version = snapshot.identity.cache_schema_version - 1;
-    let store = AuditCacheStore::new(dir.path().join("ExampleAudit"));
+    let store = AuditCacheStore::new(dir.path().join("ExampleAudit"), &options);
     store.save(&old).unwrap();
     assert!(
         store

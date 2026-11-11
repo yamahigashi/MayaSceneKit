@@ -28,6 +28,7 @@ pub(crate) struct SchemaInputs<'a> {
 pub(crate) struct SchemaContext {
     registry: Arc<SchemaRegistry>,
     typeid_resolver: TypeIdTypeNameResolver,
+    schema_bundle_sha256: String,
 }
 
 impl SchemaContext {
@@ -59,16 +60,34 @@ impl SchemaContext {
 
     fn from_paths(paths: SchemaPaths) -> Result<Self, SceneToolError> {
         let registry = Arc::new(SchemaRegistry::new(paths));
-        validate_registry_inputs(registry.as_ref())?;
-        let typeid_resolver =
-            crate::scene::schema::typeid_map::build_typeid_typename_resolver_with_registry(
-                registry.as_ref(),
-            )
-            .map_err(SceneToolError::Config)?;
+        registry.capture_inputs().map_err(SceneToolError::Config)?;
+        let (schema_bundle_sha256, typeid_resolver) =
+            std::thread::scope(|scope| -> Result<_, SceneToolError> {
+                let digest = std::thread::Builder::new()
+                    .spawn_scoped(scope, || registry.schema_bundle_sha256())?;
+                validate_registry_inputs(registry.as_ref())?;
+                let typeid_resolver =
+                    crate::scene::schema::typeid_map::build_typeid_typename_resolver_with_registry(
+                        registry.as_ref(),
+                    )
+                    .map_err(SceneToolError::Config)?;
+                let schema_bundle_sha256 = digest
+                    .join()
+                    .map_err(|_| {
+                        SceneToolError::Message("schema digest worker panicked".to_owned())
+                    })?
+                    .map_err(SceneToolError::Config)?;
+                Ok((schema_bundle_sha256, typeid_resolver))
+            })?;
         Ok(Self {
             registry,
             typeid_resolver,
+            schema_bundle_sha256,
         })
+    }
+
+    pub(crate) fn schema_bundle_sha256(&self) -> &str {
+        &self.schema_bundle_sha256
     }
 
     pub(crate) fn registry(&self) -> Arc<SchemaRegistry> {
@@ -113,21 +132,27 @@ fn validate_registry_inputs(registry: &SchemaRegistry) -> Result<(), SceneToolEr
     if let Some(err) = paths.resolution_error() {
         return Err(SceneToolError::Config(err.to_string()));
     }
-    crate::scene::schema::validate_chunk_schema_pack(&paths.chunk_schema_root)
+    crate::scene::schema::validate_chunk_schema_pack(registry).map_err(SceneToolError::Config)?;
+    crate::scene::schema::addattr_tokens::validate_add_attr_token_schema_file(registry)
         .map_err(SceneToolError::Config)?;
-    crate::scene::schema::addattr_tokens::validate_add_attr_token_schema_file(
-        &paths.addattr_schema_file,
-    )
-    .map_err(SceneToolError::Config)?;
     crate::scene::schema::node_semantics::validate_node_info_with_registry(registry)
         .map_err(SceneToolError::Config)?;
-    crate::scene::schema::structural_attr::validate_structural_attr_schema_file(
-        &paths.structural_attr_schema_file,
+    crate::scene::schema::structural_attr::validate_structural_attr_schema_file(registry)
+        .map_err(SceneToolError::Config)?;
+    crate::scene::schema::refedit::validate_refedit_schema_file(
+        registry,
+        &paths.refedit_schema_file,
     )
     .map_err(SceneToolError::Config)?;
-    crate::scene::schema::refedit::validate_refedit_schema_file(&paths.refedit_schema_file)
-        .map_err(SceneToolError::Config)?;
     Ok(())
+}
+
+impl crate::scene::LoadOptions {
+    pub fn schema_bundle_sha256(&self) -> Result<String, SceneToolError> {
+        Ok(SchemaContext::from_inputs_cached(&self.schema_inputs())?
+            .schema_bundle_sha256()
+            .to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +161,90 @@ mod tests {
 
     use super::SchemaContext;
     use crate::scene::{LoadOptions, SceneToolError};
+
+    #[test]
+    fn schema_free_ma_digests_ignore_broken_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        std::fs::write(&path, b"//Maya ASCII 2026 scene\n").unwrap();
+        let options = LoadOptions::default().with_schema_root(dir.path().join("ExampleMissing"));
+        let loader = crate::scene::Loader::new(options.clone());
+        for observation in [
+            loader.observe_path_without_retained_ma_bytes(&path),
+            loader.observe_paths_path(&path),
+            loader.observe_path(&path),
+        ] {
+            let observation = observation.unwrap();
+            let crate::scene::source::loader::ObservationData::Ma { data } = &observation.data
+            else {
+                panic!("expected MA");
+            };
+            assert!(data.schema_context.is_none());
+        }
+        let observation = loader.observe_path(&path).unwrap();
+        assert!(
+            observation
+                .scene_digests(0)
+                .unwrap()
+                .schema_bundle_sha256
+                .is_none()
+        );
+        let snapshot =
+            crate::scene::ObservedSceneSnapshot::from_observation(&observation, &options).unwrap();
+        assert!(snapshot.is_none());
+        let root = dir.path().join("ExampleCache");
+        let store = crate::scene::ObserveCacheStore::new(&root, &options);
+        assert!(!root.exists());
+        assert!(store.load_by_path_if_fresh(&path).unwrap().is_none());
+        let valid_options = LoadOptions::default();
+        let observation = crate::scene::Loader::new(valid_options.clone())
+            .observe_path(&path)
+            .unwrap();
+        let snapshot =
+            crate::scene::ObservedSceneSnapshot::from_observation(&observation, &valid_options)
+                .unwrap()
+                .unwrap();
+        assert!(snapshot.digests.schema_bundle_sha256.is_none());
+        assert_eq!(
+            snapshot.identity.schema_bundle_sha256,
+            valid_options.schema_bundle_sha256().unwrap()
+        );
+    }
+
+    #[test]
+    fn unreadable_chunk_does_not_disable_other_external_schemas() {
+        use super::super::{SchemaLookupContext, SchemaRegistry, locator::SchemaPaths};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("chunks");
+        std::fs::create_dir_all(root.join("Example")).unwrap();
+        std::fs::create_dir(root.join("Example/Unreadable.yaml")).unwrap();
+        std::fs::write(
+            root.join("Example/Sample.yaml"),
+            "schema_id: ExampleSchema\nform: Example\ntag: Sample\nfields: []\n",
+        )
+        .unwrap();
+        let options = LoadOptions::default().with_chunk_schema_root(&root);
+        let registry =
+            SchemaRegistry::new(SchemaPaths::from_schema_inputs(&options.schema_inputs()));
+        assert!(
+            super::super::lookup::lookup_chunk_schema_with_context_and_registry(
+                &registry,
+                "Example",
+                "Sample",
+                SchemaLookupContext::default()
+            )
+            .is_some()
+        );
+        assert!(
+            super::super::lookup::lookup_chunk_schema_with_context_and_registry(
+                &registry,
+                "Example",
+                "Unreadable",
+                SchemaLookupContext::default()
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn cached_schema_context_reuses_arc_for_identical_inputs() {

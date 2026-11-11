@@ -1990,10 +1990,12 @@ pub(super) fn analyze_row_with_options(
                         audit_report.clone(),
                         options,
                         fingerprint_audit_plan(plan),
+                        load_options,
                     )
                 })
                 .transpose()
-                .map_err(|err| err.to_string())?;
+                .map_err(|err| err.to_string())?
+                .flatten();
             Ok(RowJobResult::Analyze(Box::new(AnalyzeRowResult {
                 audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state,
@@ -2130,14 +2132,21 @@ fn analyze_observation_result(
     let observe_snapshot = file_state
         .map(|state| ObservedSceneSnapshot::with_file_state(observation, load_options, state))
         .transpose()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| err.to_string())?
+        .flatten();
     let audit_snapshot = audit_report
         .file_state()
         .map(|_| {
-            AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(plan))
+            AuditedSceneSnapshot::new(
+                audit_report.clone(),
+                options,
+                fingerprint_audit_plan(plan),
+                load_options,
+            )
         })
         .transpose()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| err.to_string())?
+        .flatten();
 
     Ok(AnalyzeRowResult {
         audit_plan_fingerprint: fingerprint_audit_plan(plan),

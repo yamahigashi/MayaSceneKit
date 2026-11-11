@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,7 +16,7 @@ use crate::{
     scene::{AuditOptions, AuditReport},
 };
 
-const AUDIT_CACHE_SCHEMA_VERSION: u32 = 29;
+const AUDIT_CACHE_SCHEMA_VERSION: u32 = 30;
 const DB_FILE: &str = "cache.sqlite3";
 const AUDIT_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const AUDIT_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -27,6 +28,7 @@ const BLOB_COMPRESSION_LEVEL: i32 = 3;
 pub struct AuditCacheIdentity {
     pub cache_schema_version: u32,
     pub scene_sha256: String,
+    pub schema_bundle_sha256: String,
     pub audit_options_fingerprint: String,
     pub audit_plan_fingerprint: String,
 }
@@ -90,10 +92,12 @@ impl AuditCacheIdentity {
         scene_sha256: impl Into<String>,
         options: AuditOptions,
         plan_fingerprint: impl Into<String>,
+        schema_bundle_sha256: impl Into<String>,
     ) -> Self {
         Self {
             cache_schema_version: AUDIT_CACHE_SCHEMA_VERSION,
             scene_sha256: scene_sha256.into(),
+            schema_bundle_sha256: schema_bundle_sha256.into(),
             audit_options_fingerprint: fingerprint_debug(&options),
             audit_plan_fingerprint: plan_fingerprint.into(),
         }
@@ -101,10 +105,8 @@ impl AuditCacheIdentity {
 
     fn blob_name(&self) -> String {
         format!(
-            "{}-{}-{}-v{}.{}",
-            self.scene_sha256,
-            self.audit_options_fingerprint,
-            self.audit_plan_fingerprint,
+            "{}-v{}.{}",
+            fingerprint_debug(self),
             self.cache_schema_version,
             BLOB_FILE_EXTENSION
         )
@@ -122,18 +124,27 @@ impl From<maya_scene_kit_observe::scene::persistent_cache::ObserveFileState> for
 }
 
 impl AuditedSceneSnapshot {
+    /// Cache identity uses the producing load options, independently of report serialization.
+    /// An unloadable schema yields no cache candidate while leaving the report usable.
     pub fn new(
         report: AuditReport,
         options: AuditOptions,
         plan_fingerprint: impl Into<String>,
-    ) -> io::Result<Self> {
+        load_options: &maya_scene_kit_observe::scene::LoadOptions,
+    ) -> io::Result<Option<Self>> {
         let file_state = report.file_state().cloned().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "audit report has no stable file state",
             )
         })?;
-        Self::with_file_state(report, options, plan_fingerprint, file_state.into())
+        Self::with_file_state(
+            report,
+            options,
+            plan_fingerprint,
+            file_state.into(),
+            load_options,
+        )
     }
 
     pub fn with_file_state(
@@ -141,28 +152,71 @@ impl AuditedSceneSnapshot {
         options: AuditOptions,
         plan_fingerprint: impl Into<String>,
         file_state: AuditFileState,
-    ) -> io::Result<Self> {
+        load_options: &maya_scene_kit_observe::scene::LoadOptions,
+    ) -> io::Result<Option<Self>> {
+        let Ok(schema_digest) = load_options.schema_bundle_sha256() else {
+            return Ok(None);
+        };
         let identity = AuditCacheIdentity::new(
             report.digests.scene_sha256.clone(),
             options,
             plan_fingerprint,
+            schema_digest,
         );
-        Ok(Self {
+        Ok(Some(Self {
             identity,
             file_state,
             report,
-        })
+        }))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AuditCacheStore {
     root: PathBuf,
+    load_options: maya_scene_kit_observe::scene::LoadOptions,
+    schema_digest: Arc<OnceLock<Result<String, String>>>,
 }
 
 impl AuditCacheStore {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    pub fn new(
+        root: impl Into<PathBuf>,
+        load_options: &maya_scene_kit_observe::scene::LoadOptions,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            load_options: load_options.clone(),
+            schema_digest: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn schema_digest(&self) -> Option<&str> {
+        self.schema_digest
+            .get_or_init(|| {
+                self.load_options
+                    .schema_bundle_sha256()
+                    .map_err(|err| err.to_string())
+            })
+            .as_ref()
+            .ok()
+            .map(String::as_str)
+    }
+
+    fn matches_schema(&self, digest: &str) -> bool {
+        self.schema_digest() == Some(digest)
+    }
+
+    fn lookup_identity(
+        &self,
+        options: AuditOptions,
+        plan_fingerprint: &str,
+    ) -> Option<AuditCacheIdentity> {
+        Some(AuditCacheIdentity::new(
+            "",
+            options,
+            plan_fingerprint,
+            self.schema_digest()?,
+        ))
     }
 
     pub fn load_many_by_path_if_fresh_with_access(
@@ -173,17 +227,11 @@ impl AuditCacheStore {
     ) -> io::Result<Vec<io::Result<Option<AuditCacheHit>>>> {
         let conn = self.open_connection()?;
         let now_unix_secs = unix_timestamp_secs(SystemTime::now());
-        let options_fingerprint = fingerprint_debug(&options);
+        let identity = self.lookup_identity(options, plan_fingerprint);
         Ok(paths
             .iter()
             .map(|path| {
-                self.load_cached_hit_from_connection(
-                    &conn,
-                    path,
-                    &options_fingerprint,
-                    plan_fingerprint,
-                    now_unix_secs,
-                )
+                self.load_cached_hit_from_connection(&conn, path, identity.as_ref(), now_unix_secs)
             })
             .collect())
     }
@@ -195,17 +243,19 @@ impl AuditCacheStore {
         plan_fingerprint: &str,
     ) -> io::Result<Option<AuditCacheHit>> {
         let conn = self.open_connection()?;
-        let options_fingerprint = fingerprint_debug(&options);
-        let Some(record) = self.load_index_record_by_path_if_fresh(
-            &conn,
-            path,
-            &options_fingerprint,
-            plan_fingerprint,
-        )?
-        else {
+        let file_state = file_state_for_path(path)?;
+        let Some(identity) = self.lookup_identity(options, plan_fingerprint) else {
             return Ok(None);
         };
-        let file_state = file_state_for_path(path)?;
+        let Some(record) = self.find_fresh_record_by_path(
+            &conn,
+            path,
+            &file_state,
+            &identity,
+            unix_timestamp_secs(SystemTime::now()),
+        ) else {
+            return Ok(None);
+        };
         self.hit_from_record(path, file_state, record)
     }
 
@@ -228,13 +278,14 @@ impl AuditCacheStore {
     ) -> io::Result<Option<AuditCacheHit>> {
         let file_state = file_state_for_path(path)?;
         let conn = self.open_connection()?;
-        let options_fingerprint = fingerprint_debug(&options);
+        let Some(identity) = self.lookup_identity(options, plan_fingerprint) else {
+            return Ok(None);
+        };
         if let Some(record) = self.find_fresh_record_by_path(
             &conn,
             path,
             &file_state,
-            &options_fingerprint,
-            plan_fingerprint,
+            &identity,
             unix_timestamp_secs(SystemTime::now()),
         ) {
             if let Some(hit) = self.hit_from_record(path, file_state.clone(), record)? {
@@ -242,7 +293,10 @@ impl AuditCacheStore {
             }
         }
 
-        let identity = AuditCacheIdentity::new(file_sha256(path)?, options, plan_fingerprint);
+        let identity = AuditCacheIdentity {
+            scene_sha256: file_sha256(path)?,
+            ..identity
+        };
         if !self.identity_has_live_reference(&conn, &identity) {
             return Ok(None);
         }
@@ -287,6 +341,17 @@ impl AuditCacheStore {
             return Ok(());
         }
 
+        let Some(schema_digest) = self.schema_digest() else {
+            return Ok(());
+        };
+        let snapshots = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.identity.schema_bundle_sha256 == schema_digest)
+            .collect::<Vec<_>>();
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+
         let blobs = snapshots
             .iter()
             .map(|snapshot| self.ensure_blob(snapshot))
@@ -302,18 +367,20 @@ impl AuditCacheStore {
                     modified_unix_nanos,
                     cache_schema_version,
                     scene_sha256,
+                    schema_bundle_sha256,
                     audit_options_fingerprint,
                     audit_plan_fingerprint,
                     last_accessed_unix_secs,
                     blob_relative_path,
                     blob_codec,
                     blob_compressed_size
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ON CONFLICT(normalized_path) DO UPDATE SET
                     size=excluded.size,
                     modified_unix_nanos=excluded.modified_unix_nanos,
                     cache_schema_version=excluded.cache_schema_version,
                     scene_sha256=excluded.scene_sha256,
+                    schema_bundle_sha256=excluded.schema_bundle_sha256,
                     audit_options_fingerprint=excluded.audit_options_fingerprint,
                     audit_plan_fingerprint=excluded.audit_plan_fingerprint,
                     last_accessed_unix_secs=excluded.last_accessed_unix_secs,
@@ -329,6 +396,7 @@ impl AuditCacheStore {
                 opt_u128_to_sql(snapshot.file_state.modified_unix_nanos)?,
                 i64::from(snapshot.identity.cache_schema_version),
                 &snapshot.identity.scene_sha256,
+                &snapshot.identity.schema_bundle_sha256,
                 &snapshot.identity.audit_options_fingerprint,
                 &snapshot.identity.audit_plan_fingerprint,
                 u64_to_sql(now_unix_secs)?,
@@ -440,7 +508,7 @@ impl AuditCacheStore {
         let mut stmt = conn
             .prepare(
                 "SELECT normalized_path, size, modified_unix_nanos, cache_schema_version,
-                        scene_sha256, audit_options_fingerprint, audit_plan_fingerprint,
+                        scene_sha256, schema_bundle_sha256, audit_options_fingerprint, audit_plan_fingerprint,
                         last_accessed_unix_secs, blob_relative_path, blob_compressed_size
                  FROM path_index",
             )
@@ -455,9 +523,10 @@ impl AuditCacheStore {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
                 ))
             })
             .map_err(sqlite_io_error)?;
@@ -469,6 +538,7 @@ impl AuditCacheStore {
                 modified_unix_nanos,
                 cache_schema_version,
                 scene_sha256,
+                schema_bundle_sha256,
                 audit_options_fingerprint,
                 audit_plan_fingerprint,
                 last_accessed_unix_secs,
@@ -486,6 +556,7 @@ impl AuditCacheStore {
                     identity: AuditCacheIdentity {
                         cache_schema_version: i64_to_u32(cache_schema_version)?,
                         scene_sha256,
+                        schema_bundle_sha256,
                         audit_options_fingerprint,
                         audit_plan_fingerprint,
                     },
@@ -500,37 +571,18 @@ impl AuditCacheStore {
         Ok(AuditCacheIndex { by_path })
     }
 
-    fn load_index_record_by_path_if_fresh(
-        &self,
-        conn: &Connection,
-        path: &Path,
-        options_fingerprint: &str,
-        plan_fingerprint: &str,
-    ) -> io::Result<Option<AuditCacheIndexRecord>> {
-        let file_state = file_state_for_path(path)?;
-        Ok(self.find_fresh_record_by_path(
-            conn,
-            path,
-            &file_state,
-            options_fingerprint,
-            plan_fingerprint,
-            unix_timestamp_secs(SystemTime::now()),
-        ))
-    }
-
     fn find_fresh_record_by_path(
         &self,
         conn: &Connection,
         path: &Path,
         file_state: &AuditFileState,
-        options_fingerprint: &str,
-        plan_fingerprint: &str,
+        identity: &AuditCacheIdentity,
         now_unix_secs: u64,
     ) -> Option<AuditCacheIndexRecord> {
         let key = normalized_path_key(path);
         let row = conn
             .query_row(
-                "SELECT size, modified_unix_nanos, cache_schema_version, scene_sha256,
+                "SELECT size, modified_unix_nanos, cache_schema_version, scene_sha256, schema_bundle_sha256,
                         audit_options_fingerprint, audit_plan_fingerprint, last_accessed_unix_secs,
                         blob_relative_path, blob_compressed_size
                  FROM path_index
@@ -544,9 +596,10 @@ impl AuditCacheStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, Option<i64>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, i64>(8)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
                     ))
                 },
             )
@@ -559,6 +612,7 @@ impl AuditCacheStore {
                 modified_unix_nanos,
                 cache_schema_version,
                 scene_sha256,
+                schema_bundle_sha256,
                 audit_options_fingerprint,
                 audit_plan_fingerprint,
                 last_accessed_unix_secs,
@@ -574,6 +628,7 @@ impl AuditCacheStore {
                     identity: AuditCacheIdentity {
                         cache_schema_version: i64_to_u32(cache_schema_version).ok()?,
                         scene_sha256,
+                        schema_bundle_sha256,
                         audit_options_fingerprint,
                         audit_plan_fingerprint,
                     },
@@ -593,8 +648,9 @@ impl AuditCacheStore {
             ) && record.file_state.size == file_state.size
                 && record.file_state.modified_unix_nanos == file_state.modified_unix_nanos
                 && record.identity.cache_schema_version == AUDIT_CACHE_SCHEMA_VERSION
-                && record.identity.audit_options_fingerprint == options_fingerprint
-                && record.identity.audit_plan_fingerprint == plan_fingerprint
+                && record.identity.audit_options_fingerprint == identity.audit_options_fingerprint
+                && record.identity.audit_plan_fingerprint == identity.audit_plan_fingerprint
+                && record.identity.schema_bundle_sha256 == identity.schema_bundle_sha256
         })
     }
 
@@ -602,8 +658,7 @@ impl AuditCacheStore {
         &self,
         conn: &Connection,
         path: &Path,
-        options_fingerprint: &str,
-        plan_fingerprint: &str,
+        identity: Option<&AuditCacheIdentity>,
         now_unix_secs: u64,
     ) -> io::Result<Option<AuditCacheHit>> {
         let file_state = match file_state_for_path(path) {
@@ -611,14 +666,12 @@ impl AuditCacheStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some(record) = self.find_fresh_record_by_path(
-            conn,
-            path,
-            &file_state,
-            options_fingerprint,
-            plan_fingerprint,
-            now_unix_secs,
-        ) else {
+        let Some(identity) = identity else {
+            return Ok(None);
+        };
+        let Some(record) =
+            self.find_fresh_record_by_path(conn, path, &file_state, identity, now_unix_secs)
+        else {
             return Ok(None);
         };
         self.hit_from_record(path, file_state, record)
@@ -653,7 +706,8 @@ impl AuditCacheStore {
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM path_index
-                WHERE scene_sha256 = ?1
+                WHERE schema_bundle_sha256 = ?6
+                  AND scene_sha256 = ?1
                   AND audit_options_fingerprint = ?2
                   AND audit_plan_fingerprint = ?3
                   AND cache_schema_version = ?4
@@ -664,7 +718,8 @@ impl AuditCacheStore {
                 &identity.audit_options_fingerprint,
                 &identity.audit_plan_fingerprint,
                 i64::from(identity.cache_schema_version),
-                u64_to_sql(now_unix_secs.saturating_sub(AUDIT_CACHE_TTL.as_secs())).unwrap_or(0)
+                u64_to_sql(now_unix_secs.saturating_sub(AUDIT_CACHE_TTL.as_secs())).unwrap_or(0),
+                &identity.schema_bundle_sha256
             ],
             |row| row.get::<_, i64>(0),
         )
@@ -677,16 +732,19 @@ impl AuditCacheStore {
         conn: &Connection,
         identity: &AuditCacheIdentity,
     ) -> io::Result<Option<AuditedSceneSnapshot>> {
-        if identity.cache_schema_version != AUDIT_CACHE_SCHEMA_VERSION {
+        if identity.cache_schema_version != AUDIT_CACHE_SCHEMA_VERSION
+            || !self.matches_schema(&identity.schema_bundle_sha256)
+        {
             return Ok(None);
         }
         let row = conn
             .query_row(
-                "SELECT cache_schema_version, scene_sha256, audit_options_fingerprint,
+                "SELECT cache_schema_version, scene_sha256, schema_bundle_sha256, audit_options_fingerprint,
                         audit_plan_fingerprint, last_accessed_unix_secs, blob_relative_path,
                         blob_compressed_size
                  FROM path_index
-                 WHERE scene_sha256 = ?1
+                 WHERE schema_bundle_sha256 = ?5
+                   AND scene_sha256 = ?1
                    AND audit_options_fingerprint = ?2
                    AND audit_plan_fingerprint = ?3
                    AND cache_schema_version = ?4
@@ -695,7 +753,8 @@ impl AuditCacheStore {
                     &identity.scene_sha256,
                     &identity.audit_options_fingerprint,
                     &identity.audit_plan_fingerprint,
-                    i64::from(identity.cache_schema_version)
+                    i64::from(identity.cache_schema_version),
+                    &identity.schema_bundle_sha256
                 ],
                 |row| {
                     Ok((
@@ -703,9 +762,10 @@ impl AuditCacheStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
@@ -714,6 +774,7 @@ impl AuditCacheStore {
         let Some((
             cache_schema_version,
             scene_sha256,
+            schema_bundle_sha256,
             audit_options_fingerprint,
             audit_plan_fingerprint,
             last_accessed_unix_secs,
@@ -732,6 +793,7 @@ impl AuditCacheStore {
             identity: AuditCacheIdentity {
                 cache_schema_version: i64_to_u32(cache_schema_version)?,
                 scene_sha256,
+                schema_bundle_sha256,
                 audit_options_fingerprint,
                 audit_plan_fingerprint,
             },
@@ -749,6 +811,17 @@ impl AuditCacheStore {
         let conn = Connection::open(self.db_path()).map_err(sqlite_io_error)?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(sqlite_io_error)?;
+        let columns = conn
+            .prepare("PRAGMA table_info(path_index)")
+            .map_err(sqlite_io_error)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(sqlite_io_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_io_error)?;
+        if !columns.is_empty() && !columns.iter().any(|name| name == "schema_bundle_sha256") {
+            conn.execute_batch("DROP TABLE IF EXISTS path_index;")
+                .map_err(sqlite_io_error)?;
+        }
         conn.execute_batch(
             "PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA journal_mode = WAL;
@@ -758,6 +831,7 @@ impl AuditCacheStore {
                  modified_unix_nanos INTEGER NULL,
                  cache_schema_version INTEGER NOT NULL,
                  scene_sha256 TEXT NOT NULL,
+                 schema_bundle_sha256 TEXT NOT NULL,
                  audit_options_fingerprint TEXT NOT NULL,
                  audit_plan_fingerprint TEXT NOT NULL,
                  last_accessed_unix_secs INTEGER NULL,
@@ -766,7 +840,7 @@ impl AuditCacheStore {
                  blob_compressed_size INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS path_index_identity_idx
-                 ON path_index(scene_sha256, audit_options_fingerprint, audit_plan_fingerprint);
+                 ON path_index(scene_sha256, schema_bundle_sha256, audit_options_fingerprint, audit_plan_fingerprint);
              CREATE INDEX IF NOT EXISTS path_index_last_accessed_idx ON path_index(last_accessed_unix_secs);",
         )
         .map_err(sqlite_io_error)?;
@@ -1124,6 +1198,533 @@ mod tests {
         .expect("write sample scene");
     }
 
+    fn copy_schema_directory(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_schema_directory(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    fn run_schema_cache_process(root: &Path, phase: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "persistent_cache::tests::schema_cache_process",
+                "--nocapture",
+            ])
+            .env("EXAMPLE_SCHEMA_CACHE_ROOT", root)
+            .env("EXAMPLE_SCHEMA_CACHE_PHASE", phase)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn schema_cache_round_trip(changed_file: Option<&str>) {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        copy_schema_directory(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas"),
+            &root.join("schemas"),
+        );
+        write_sample_scene(&root.join("Example.ma"));
+        fs::write(root.join("ExampleNodeInfo.yaml"), "version: 1\nnodes: {}\n").unwrap();
+        run_schema_cache_process(root, "save");
+        if let Some(file) = changed_file {
+            let path = root.join(file);
+            let mut contents = fs::read(&path).unwrap();
+            contents.extend_from_slice(b"\n# Example changed schema input\n");
+            fs::write(path, contents).unwrap();
+        }
+        run_schema_cache_process(
+            root,
+            if changed_file.is_some() {
+                "miss"
+            } else {
+                "hit"
+            },
+        );
+    }
+
+    fn run_lazy_schema_process(root: &Path, mode: &str, phase: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "persistent_cache::tests::lazy_schema_cache_process",
+                "--nocapture",
+            ])
+            .env("EXAMPLE_LAZY_SCHEMA_ROOT", root)
+            .env("EXAMPLE_LAZY_SCHEMA_MODE", mode)
+            .env("EXAMPLE_LAZY_SCHEMA_PHASE", phase)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn changed_lazy_schema_input(mode: &str) {
+        let dir = tempdir().unwrap();
+        write_sample_scene(&dir.path().join("Example.ma"));
+        let node_info = dir.path().join("ExampleNodeInfo.yaml");
+        fs::write(&node_info, "version: 1\nnodes: {}\n").unwrap();
+        run_lazy_schema_process(dir.path(), mode, "save");
+        run_lazy_schema_process(dir.path(), mode, "hit");
+        fs::write(
+            &node_info,
+            "version: 1\nnodes: {}\n# Example changed input\n",
+        )
+        .unwrap();
+        run_lazy_schema_process(dir.path(), mode, "miss");
+    }
+
+    #[test]
+    fn semantic_audit_snapshot_tracks_node_info_contents() {
+        changed_lazy_schema_input("semantic");
+    }
+
+    #[test]
+    fn budget_audit_snapshot_tracks_node_info_contents() {
+        changed_lazy_schema_input("budget");
+    }
+
+    #[test]
+    fn lazy_schema_cache_process() {
+        use maya_scene_kit_observe::scene::{Loader, ObserveCacheStore, ObservedSceneSnapshot};
+        let Some(root) = std::env::var_os("EXAMPLE_LAZY_SCHEMA_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let mode = std::env::var("EXAMPLE_LAZY_SCHEMA_MODE").unwrap();
+        let phase = std::env::var("EXAMPLE_LAZY_SCHEMA_PHASE").unwrap();
+        let path = root.join("Example.ma");
+        let load_options = LoadOptions::default()
+            .with_additional_node_info_paths(vec![root.join("ExampleNodeInfo.yaml")]);
+        let observation = Loader::new(load_options.clone())
+            .observe_path(&path)
+            .unwrap();
+        let observed = ObservedSceneSnapshot::from_observation(&observation, &load_options)
+            .unwrap()
+            .expect("cacheable schema");
+        assert!(observed.digests.schema_bundle_sha256.is_none());
+        let mut options = AuditOptions::strict_default();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let fingerprint = fingerprint_audit_plan(&plan);
+        let report = if mode == "budget" {
+            options.budgets.max_units = 0;
+            let report =
+                audit_script_nodes_with_options(&path, &plan, &load_options, options).unwrap();
+            assert!(report.blocked_on_uncertainty);
+            assert!(report.unit_summaries.len() > options.budgets.max_units);
+            report
+        } else {
+            let report = crate::audit::audit_observation(&observation, &plan, options).unwrap();
+            assert!(report.digests.schema_bundle_sha256.is_none());
+            report
+        };
+        let audited = AuditedSceneSnapshot::new(report, options, &fingerprint, &load_options)
+            .unwrap()
+            .expect("cacheable schema");
+        let observe_store = ObserveCacheStore::new(root.join("ExampleObserve"), &load_options);
+        let audit_store = AuditCacheStore::new(root.join("ExampleAudit"), &load_options);
+        if phase == "save" {
+            observe_store.save(&observed).unwrap();
+            audit_store.save(&audited).unwrap();
+            return;
+        }
+        let renamed = root.join("ExampleCopy.ma");
+        fs::copy(&path, &renamed).unwrap();
+        let expected = phase == "hit";
+        let hits = [
+            observe_store
+                .load_by_path_if_fresh(&path)
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_by_path_if_fresh(&path, options, &fingerprint)
+                .unwrap()
+                .is_some(),
+            observe_store
+                .load_by_path_with_hash_fallback(&renamed)
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_by_path_with_hash_fallback(&renamed, options, &fingerprint)
+                .unwrap()
+                .is_some(),
+            observe_store
+                .load_by_identity(&observed.identity)
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_by_identity(&audited.identity)
+                .unwrap()
+                .is_some(),
+        ];
+        assert_eq!(hits, [expected; 6]);
+    }
+
+    #[test]
+    fn schema_free_records_do_not_match_different_schema() {
+        use maya_scene_kit_observe::scene::{Loader, ObserveCacheStore, ObservedSceneSnapshot};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        write_sample_scene(&path);
+        let defaults = LoadOptions::default();
+        let observation = Loader::new(defaults.clone()).observe_path(&path).unwrap();
+        let observed = ObservedSceneSnapshot::from_observation(&observation, &defaults)
+            .unwrap()
+            .expect("cacheable schema");
+        let options = AuditOptions::strict_default();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let report = crate::audit::audit_observation(&observation, &plan, options).unwrap();
+        let audited =
+            AuditedSceneSnapshot::new(report, options, fingerprint_audit_plan(&plan), &defaults)
+                .unwrap()
+                .expect("cacheable schema");
+        let observe_root = dir.path().join("ExampleObserve");
+        let audit_root = dir.path().join("ExampleAudit");
+        ObserveCacheStore::new(&observe_root, &defaults)
+            .save(&observed)
+            .unwrap();
+        AuditCacheStore::new(&audit_root, &defaults)
+            .save(&audited)
+            .unwrap();
+        let node_info = dir.path().join("ExampleNodeInfo.yaml");
+        fs::write(&node_info, "version: 1\nnodes: {}\n").unwrap();
+        let custom = LoadOptions::default().with_additional_node_info_paths(vec![node_info]);
+        let hits = [
+            ObserveCacheStore::new(&observe_root, &custom)
+                .load_by_identity(&observed.identity)
+                .unwrap()
+                .is_some(),
+            AuditCacheStore::new(&audit_root, &custom)
+                .load_by_identity(&audited.identity)
+                .unwrap()
+                .is_some(),
+        ];
+        assert_eq!(hits, [false; 2]);
+    }
+
+    #[test]
+    fn custom_store_rejects_default_schema_snapshot() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        write_sample_scene(&path);
+        let node_info = dir.path().join("ExampleNodeInfo.yaml");
+        fs::write(&node_info, "version: 1\nnodes: {}\n").unwrap();
+        let load_options = LoadOptions::default().with_additional_node_info_paths(vec![node_info]);
+        let options = AuditOptions::strict_default();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let fingerprint = fingerprint_audit_plan(&plan);
+        let report =
+            audit_script_nodes_with_options(&path, &plan, &LoadOptions::default(), options)
+                .unwrap();
+        let snapshot =
+            AuditedSceneSnapshot::new(report, options, &fingerprint, &LoadOptions::default())
+                .unwrap()
+                .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("ExampleCache"), &load_options);
+        store.save(&snapshot).unwrap();
+        assert!(
+            store
+                .load_by_path_if_fresh(&path, options, &fingerprint)
+                .unwrap()
+                .is_none()
+        );
+        let report = audit_script_nodes_with_options(&path, &plan, &load_options, options).unwrap();
+        let snapshot = AuditedSceneSnapshot::new(report, options, &fingerprint, &load_options)
+            .unwrap()
+            .expect("cacheable schema");
+        store.save(&snapshot).unwrap();
+        assert!(
+            store
+                .load_by_path_if_fresh(&path, options, &fingerprint)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn digest_disabled_audit_can_be_cached() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        write_sample_scene(&path);
+        let load_options = LoadOptions::default();
+        let options = AuditOptions::strict_default();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let fingerprint = fingerprint_audit_plan(&plan);
+        let mut graph = crate::audit::audit_reference_graph_roots_with_options_and_digests(
+            [&path],
+            &plan,
+            &load_options,
+            options,
+            false,
+        );
+        assert_eq!(graph.reports.len(), 1);
+        let report = graph.reports.remove(0);
+        assert!(report.digests.schema_bundle_sha256.is_none());
+        let snapshot = AuditedSceneSnapshot::new(report, options, &fingerprint, &load_options)
+            .unwrap()
+            .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("ExampleCache"), &load_options);
+        store.save(&snapshot).unwrap();
+        let store = AuditCacheStore::new(dir.path().join("ExampleCache"), &load_options);
+        assert!(
+            store
+                .load_by_path_if_fresh(&path, options, &fingerprint)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unloadable_schema_is_a_cache_miss() {
+        use maya_scene_kit_observe::scene::{Loader, ObserveCacheStore, ObservedSceneSnapshot};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        write_sample_scene(&path);
+        let defaults = LoadOptions::default();
+        let observation = Loader::new(defaults.clone())
+            .observe_analysis_path(&path)
+            .unwrap();
+        let observed = ObservedSceneSnapshot::from_observation(&observation, &defaults)
+            .unwrap()
+            .expect("cacheable schema");
+        let options = AuditOptions::strict_default();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let fingerprint = fingerprint_audit_plan(&plan);
+        let report = crate::audit::audit_observation(&observation, &plan, options).unwrap();
+        let audited = AuditedSceneSnapshot::new(report, options, &fingerprint, &defaults)
+            .unwrap()
+            .expect("cacheable schema");
+        let broken = LoadOptions::default().with_schema_root(dir.path().join("ExampleMissing"));
+        assert!(
+            ObservedSceneSnapshot::from_observation(&observation, &broken)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            AuditedSceneSnapshot::new(audited.report.clone(), options, &fingerprint, &broken)
+                .unwrap()
+                .is_none()
+        );
+        let observe = ObserveCacheStore::new(dir.path().join("ExampleObserve"), &broken);
+        let audit = AuditCacheStore::new(dir.path().join("ExampleAudit"), &broken);
+        observe.save(&observed).unwrap();
+        audit.save(&audited).unwrap();
+        assert!(!dir.path().join("ExampleObserve").exists());
+        assert!(!dir.path().join("ExampleAudit").exists());
+        assert!(observe.load_by_path_if_fresh(&path).unwrap().is_none());
+        assert!(
+            audit
+                .load_by_path_if_fresh(&path, options, &fingerprint)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            observe
+                .load_by_path_with_hash_fallback(&path)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            audit
+                .load_by_path_with_hash_fallback(&path, options, &fingerprint)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            observe
+                .load_by_identity(&observed.identity)
+                .unwrap()
+                .is_none()
+        );
+        assert!(audit.load_by_identity(&audited.identity).unwrap().is_none());
+        let missing = dir.path().join("ExampleAbsent.ma");
+        let paths = [path, missing.clone()];
+        for result in observe
+            .load_many_by_path_if_fresh_with_access(&paths)
+            .unwrap()
+        {
+            assert!(result.unwrap().is_none());
+        }
+        for result in audit
+            .load_many_by_path_if_fresh_with_access(&paths, options, &fingerprint)
+            .unwrap()
+        {
+            assert!(result.unwrap().is_none());
+        }
+        assert_eq!(
+            observe.load_by_path_if_fresh(&missing).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            audit
+                .load_by_path_if_fresh(&missing, options, &fingerprint)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            observe
+                .load_by_path_with_hash_fallback(&missing)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            audit
+                .load_by_path_with_hash_fallback(&missing, options, &fingerprint)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn schema_inputs_reject_changed_node_info() {
+        schema_cache_round_trip(Some("ExampleNodeInfo.yaml"));
+    }
+
+    #[test]
+    fn schema_inputs_reject_changed_bundle() {
+        schema_cache_round_trip(Some("schemas/node_info.yaml"));
+    }
+
+    #[test]
+    fn schema_inputs_reuse_identical_inputs_and_digest() {
+        schema_cache_round_trip(None);
+    }
+
+    #[test]
+    fn schema_cache_process() {
+        use maya_scene_kit_observe::scene::{Loader, ObserveCacheStore, ObservedSceneSnapshot};
+        let Some(root) = std::env::var_os("EXAMPLE_SCHEMA_CACHE_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let phase = std::env::var("EXAMPLE_SCHEMA_CACHE_PHASE").unwrap();
+        let source = root.join("Example.ma");
+        let load_options = LoadOptions::default()
+            .with_schema_root(root.join("schemas"))
+            .with_additional_node_info_paths(vec![root.join("ExampleNodeInfo.yaml")]);
+        let options = AuditOptions::strict_default();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let fingerprint = fingerprint_audit_plan(&plan);
+        let observation = Loader::new(load_options.clone())
+            .observe_analysis_path(&source)
+            .unwrap();
+        let observed = ObservedSceneSnapshot::from_observation(&observation, &load_options)
+            .unwrap()
+            .expect("cacheable schema");
+        let report = crate::audit::audit_observation(&observation, &plan, options).unwrap();
+        let audited = AuditedSceneSnapshot::new(report, options, &fingerprint, &load_options)
+            .unwrap()
+            .expect("cacheable schema");
+        let observe_store = ObserveCacheStore::new(root.join("ExampleObserveCache"), &load_options);
+        let audit_store = AuditCacheStore::new(root.join("ExampleAuditCache"), &load_options);
+        if phase == "save" {
+            observe_store.save(&observed).unwrap();
+            audit_store.save(&audited).unwrap();
+            fs::write(
+                root.join("ExampleDigest.json"),
+                serde_json::to_vec(&observed.digests.schema_bundle_sha256).unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+        let expected_hit = phase == "hit";
+        let renamed = root.join("ExampleCopy.ma");
+        fs::copy(&source, &renamed).unwrap();
+        let hits = [
+            observe_store
+                .load_by_path_if_fresh(&source)
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_by_path_if_fresh(&source, options, &fingerprint)
+                .unwrap()
+                .is_some(),
+            observe_store
+                .load_many_by_path_if_fresh_with_access(std::slice::from_ref(&source))
+                .unwrap()
+                .pop()
+                .unwrap()
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_many_by_path_if_fresh_with_access(
+                    std::slice::from_ref(&source),
+                    options,
+                    &fingerprint,
+                )
+                .unwrap()
+                .pop()
+                .unwrap()
+                .unwrap()
+                .is_some(),
+            observe_store
+                .load_by_path_with_hash_fallback(&renamed)
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_by_path_with_hash_fallback(&renamed, options, &fingerprint)
+                .unwrap()
+                .is_some(),
+            observe_store
+                .load_by_identity(&observed.identity)
+                .unwrap()
+                .is_some(),
+            audit_store
+                .load_by_identity(&audited.identity)
+                .unwrap()
+                .is_some(),
+        ];
+        assert_eq!(
+            hits, [expected_hit; 8],
+            "observe/audit fresh, batch, hash fallback, identity"
+        );
+        let digest = observed
+            .digests
+            .schema_bundle_sha256
+            .as_deref()
+            .expect("schema digest");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            audited.report.digests.schema_bundle_sha256.as_deref(),
+            Some(digest)
+        );
+        let previous: Option<String> =
+            serde_json::from_slice(&fs::read(root.join("ExampleDigest.json")).unwrap()).unwrap();
+        assert_eq!(previous.as_deref() == Some(digest), expected_hit);
+        let second = Loader::new(load_options)
+            .observe_analysis_path(&source)
+            .unwrap();
+        assert_eq!(
+            second
+                .scene_digests(0)
+                .unwrap()
+                .schema_bundle_sha256
+                .as_deref(),
+            Some(digest)
+        );
+    }
+
     #[test]
     fn old_schema_judgments_are_rejected_by_every_lookup_path() {
         let dir = tempdir().expect("temporary cache directory");
@@ -1135,15 +1736,21 @@ mod tests {
         let report =
             audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
                 .expect("report");
-        let mut snapshot =
-            AuditedSceneSnapshot::new(report, options, plan_fingerprint.clone()).expect("snapshot");
+        let mut snapshot = AuditedSceneSnapshot::new(
+            report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("snapshot")
+        .expect("cacheable schema");
         let current_identity = snapshot.identity.clone();
         snapshot.identity.cache_schema_version = 1;
         assert_ne!(
             snapshot.identity.cache_schema_version,
             super::AUDIT_CACHE_SCHEMA_VERSION
         );
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
         store.save(&snapshot).expect("save old judgment");
         assert!(
             store
@@ -1214,9 +1821,15 @@ mod tests {
         let report =
             audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
                 .expect("audit report");
-        let snapshot =
-            AuditedSceneSnapshot::new(report, options, plan_fingerprint.clone()).expect("snapshot");
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        let snapshot = AuditedSceneSnapshot::new(
+            report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("snapshot")
+        .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
         store.save(&snapshot).expect("save snapshot");
 
         let loaded = store
@@ -1256,13 +1869,23 @@ mod tests {
         let second_report =
             audit_script_nodes_with_options(&second, &plan, &LoadOptions::default(), options)
                 .expect("second audit report");
-        let first_snapshot =
-            AuditedSceneSnapshot::new(first_report, options, plan_fingerprint.clone())
-                .expect("first snapshot");
-        let second_snapshot =
-            AuditedSceneSnapshot::new(second_report, options, plan_fingerprint.clone())
-                .expect("second snapshot");
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        let first_snapshot = AuditedSceneSnapshot::new(
+            first_report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("first snapshot")
+        .expect("cacheable schema");
+        let second_snapshot = AuditedSceneSnapshot::new(
+            second_report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("second snapshot")
+        .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
 
         store
             .save_batch(&[first_snapshot.clone(), second_snapshot.clone()])
@@ -1305,13 +1928,23 @@ mod tests {
         let second_report =
             audit_script_nodes_with_options(&second, &plan, &LoadOptions::default(), options)
                 .expect("second audit report");
-        let first_snapshot =
-            AuditedSceneSnapshot::new(first_report, options, plan_fingerprint.clone())
-                .expect("first snapshot");
-        let second_snapshot =
-            AuditedSceneSnapshot::new(second_report, options, plan_fingerprint.clone())
-                .expect("second snapshot");
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        let first_snapshot = AuditedSceneSnapshot::new(
+            first_report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("first snapshot")
+        .expect("cacheable schema");
+        let second_snapshot = AuditedSceneSnapshot::new(
+            second_report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("second snapshot")
+        .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
 
         store
             .save_batch(&[first_snapshot, second_snapshot])
@@ -1380,9 +2013,15 @@ mod tests {
         let report =
             audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
                 .expect("audit report");
-        let snapshot =
-            AuditedSceneSnapshot::new(report, options, plan_fingerprint.clone()).expect("snapshot");
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        let snapshot = AuditedSceneSnapshot::new(
+            report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("snapshot")
+        .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
         store.save(&snapshot).expect("save snapshot");
 
         let access = AuditCacheAccess {
@@ -1413,9 +2052,15 @@ mod tests {
         let report =
             audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
                 .expect("audit report");
-        let snapshot =
-            AuditedSceneSnapshot::new(report, options, plan_fingerprint.clone()).expect("snapshot");
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+        let snapshot = AuditedSceneSnapshot::new(
+            report,
+            options,
+            plan_fingerprint.clone(),
+            &LoadOptions::default(),
+        )
+        .expect("snapshot")
+        .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
         store.save(&snapshot).expect("save snapshot");
 
         let blob_relative_path = store
@@ -1457,8 +2102,10 @@ mod tests {
             audit_script_nodes_with_options(&source, &plan, &LoadOptions::default(), options)
                 .expect("audit report");
         let snapshot =
-            AuditedSceneSnapshot::new(report, options, plan_fingerprint).expect("snapshot");
-        let store = AuditCacheStore::new(dir.path().join("audit-cache"));
+            AuditedSceneSnapshot::new(report, options, plan_fingerprint, &LoadOptions::default())
+                .expect("snapshot")
+                .expect("cacheable schema");
+        let store = AuditCacheStore::new(dir.path().join("audit-cache"), &LoadOptions::default());
         store.save(&snapshot).expect("save snapshot");
 
         let conn = store.open_connection().expect("open sqlite");

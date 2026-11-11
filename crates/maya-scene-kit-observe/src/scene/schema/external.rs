@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use serde::Deserialize;
 
@@ -51,45 +51,31 @@ pub(in crate::scene) fn validate_chunk_schema_root(root: &Path) -> Result<(), St
     }
 }
 
-pub(in crate::scene) fn validate_chunk_schema_pack(root: &Path) -> Result<(), String> {
-    validate_chunk_schema_root(root)?;
-
-    for form_entry in fs::read_dir(root).map_err(|e| format!("{}: {e}", root.display()))? {
-        let form_entry = form_entry.map_err(|e| format!("{}: {e}", root.display()))?;
-        let form_path = form_entry.path();
-        if !form_path.is_dir() {
-            continue;
-        }
-        let Some(form) = form_path.file_name().and_then(|v| v.to_str()) else {
+pub(in crate::scene) fn validate_chunk_schema_pack(
+    registry: &SchemaRegistry,
+) -> Result<(), String> {
+    for path in registry.chunk_paths()? {
+        let Some(form) = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|v| v.to_str())
+        else {
             continue;
         };
-
-        for schema_entry in
-            fs::read_dir(&form_path).map_err(|e| format!("{}: {e}", form_path.display()))?
-        {
-            let schema_entry = schema_entry.map_err(|e| format!("{}: {e}", form_path.display()))?;
-            let schema_path = schema_entry.path();
-            if schema_path.extension().and_then(|v| v.to_str()) != Some("yaml") {
-                continue;
-            }
-            let Some(tag) = schema_path.file_stem().and_then(|v| v.to_str()) else {
-                continue;
-            };
-            if is_refedit_schema_asset(form, tag) {
-                validate_refedit_schema_file(&schema_path)?;
-                continue;
-            }
-            let bytes =
-                fs::read(&schema_path).map_err(|e| format!("{}: {e}", schema_path.display()))?;
-            parse_external_schema_yaml(form, tag, &bytes).ok_or_else(|| {
-                format!(
-                    "{}: malformed chunk schema for {form}/{tag}",
-                    schema_path.display()
-                )
-            })?;
+        let Some(tag) = path.file_stem().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if is_refedit_schema_asset(form, tag) {
+            validate_refedit_schema_file(registry, path)?;
+            continue;
         }
+        parse_external_schema_yaml(form, tag, &registry.bytes(path)?).ok_or_else(|| {
+            format!(
+                "{}: malformed chunk schema for {form}/{tag}",
+                path.display()
+            )
+        })?;
     }
-
     Ok(())
 }
 
@@ -186,7 +172,8 @@ pub(in crate::scene) fn lookup_external_schema(
         }
     }
 
-    let loaded = fs::read(&path)
+    let loaded = registry
+        .bytes(&path)
         .ok()
         .and_then(|bytes| parse_external_schema_yaml(form, tag, &bytes))
         .map(Arc::new);

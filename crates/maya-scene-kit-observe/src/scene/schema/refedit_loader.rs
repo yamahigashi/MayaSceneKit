@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -161,13 +161,11 @@ pub(in crate::scene) fn parse_external_refedit_schema(yaml_bytes: &[u8]) -> Opti
     })
 }
 
-fn load_external_refedit_schema(path: &PathBuf) -> Option<RefEditSchema> {
-    let bytes = fs::read(path).ok()?;
-    parse_external_refedit_schema(&bytes)
-}
-
-pub(in crate::scene) fn validate_refedit_schema_file(path: &PathBuf) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+pub(in crate::scene) fn validate_refedit_schema_file(
+    registry: &SchemaRegistry,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let bytes = registry.bytes(path)?;
     parse_external_refedit_schema(&bytes)
         .map(|_| ())
         .ok_or_else(|| format!("{}: malformed refedit schema", path.display()))
@@ -188,7 +186,11 @@ pub(in crate::scene) fn lookup_refedit_schema_with_registry(
         }
     }
 
-    let loaded = load_external_refedit_schema(&registry.paths().refedit_schema_file).map(Arc::new);
+    let loaded = registry
+        .bytes(&registry.paths().refedit_schema_file)
+        .ok()
+        .and_then(|bytes| parse_external_refedit_schema(&bytes))
+        .map(Arc::new);
     if let Ok(mut cache) = registry.caches().refedit_schema.lock() {
         *cache = Some(loaded.clone());
     }

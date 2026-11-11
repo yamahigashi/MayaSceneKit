@@ -54,9 +54,13 @@ fn delayed_snapshots_preserve_load_state_and_miss_changed_files() {
             b"//Maya ASCII 2026 scene\n// Example changed contents\n",
         )
         .unwrap();
-        let observed = ObservedSceneSnapshot::from_observation(&observation, &options).unwrap();
+        let observed = ObservedSceneSnapshot::from_observation(&observation, &options)
+            .unwrap()
+            .expect("cacheable schema");
         let audited =
-            AuditedSceneSnapshot::new(report, profile, fingerprint_audit_plan(&plan)).unwrap();
+            AuditedSceneSnapshot::new(report, profile, fingerprint_audit_plan(&plan), &options)
+                .unwrap()
+                .expect("cacheable schema");
         for (size, modified) in [
             (
                 observed.file_state.size,
@@ -73,24 +77,24 @@ fn delayed_snapshots_preserve_load_state_and_miss_changed_files() {
                 Some(old_time.duration_since(UNIX_EPOCH).unwrap().as_nanos())
             );
         }
-        let observe_store = ObserveCacheStore::new(dir.path().join("ExampleObserve"));
+        let observe_store = ObserveCacheStore::new(dir.path().join("ExampleObserve"), &options);
         observe_store.save(&observed).unwrap();
         assert!(
             observe_store
-                .load_by_path_if_fresh(&path, &options)
+                .load_by_path_if_fresh(&path)
                 .unwrap()
                 .is_none()
         );
         assert!(
             observe_store
-                .load_many_by_path_if_fresh_with_access(std::slice::from_ref(&path), &options)
+                .load_many_by_path_if_fresh_with_access(std::slice::from_ref(&path))
                 .unwrap()
                 .pop()
                 .unwrap()
                 .unwrap()
                 .is_none()
         );
-        let audit_store = AuditCacheStore::new(dir.path().join("ExampleAudit"));
+        let audit_store = AuditCacheStore::new(dir.path().join("ExampleAudit"), &options);
         audit_store.save(&audited).unwrap();
         let fingerprint = fingerprint_audit_plan(&plan);
         assert!(
@@ -114,7 +118,7 @@ fn delayed_snapshots_preserve_load_state_and_miss_changed_files() {
         );
         fs::remove_file(&path).unwrap();
         assert!(ObservedSceneSnapshot::from_observation(&observation, &options).is_ok());
-        assert!(AuditedSceneSnapshot::new(audited.report, profile, fingerprint).is_ok());
+        assert!(AuditedSceneSnapshot::new(audited.report, profile, fingerprint, &options).is_ok());
     }
 }
 
@@ -132,15 +136,20 @@ fn bytes_observations_do_not_create_cache_snapshots() {
         let profile = AuditOptions::strict_default();
         let report = audit_observation(&observation, &plan, profile).unwrap();
         let observed = ObservedSceneSnapshot::from_observation(&observation, &options);
-        let audited = AuditedSceneSnapshot::new(report, profile, fingerprint_audit_plan(&plan));
+        let audited =
+            AuditedSceneSnapshot::new(report, profile, fingerprint_audit_plan(&plan), &options);
         assert!(observed.is_err());
         assert!(audited.is_err());
         let root = dir.path().join("ExampleCache");
-        if let Ok(snapshot) = observed {
-            ObserveCacheStore::new(&root).save(&snapshot).unwrap();
+        if let Ok(Some(snapshot)) = observed {
+            ObserveCacheStore::new(&root, &options)
+                .save(&snapshot)
+                .unwrap();
         }
-        if let Ok(snapshot) = audited {
-            AuditCacheStore::new(&root).save(&snapshot).unwrap();
+        if let Ok(Some(snapshot)) = audited {
+            AuditCacheStore::new(&root, &options)
+                .save(&snapshot)
+                .unwrap();
         }
         assert!(!root.exists());
     }

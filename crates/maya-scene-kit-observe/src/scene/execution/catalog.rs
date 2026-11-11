@@ -347,7 +347,15 @@ pub(crate) fn build_scene_digests(
 ) -> Result<SceneDigestSet, SceneToolError> {
     Ok(SceneDigestSet {
         scene_sha256: observation.source_snapshot().sha256()?.to_owned(),
-        schema_bundle_sha256: None,
+        schema_bundle_sha256: match &observation.data {
+            ObservationData::Ma { data } => data
+                .schema_context
+                .as_ref()
+                .map(|context| context.schema_bundle_sha256().to_owned()),
+            ObservationData::Mb { session } => {
+                Some(session.schema_context()?.schema_bundle_sha256().to_owned())
+            }
+        },
         policy_bundle_sha256: None,
     })
 }

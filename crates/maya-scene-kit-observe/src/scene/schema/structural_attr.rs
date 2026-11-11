@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc};
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -193,14 +193,17 @@ pub(in crate::scene) fn structural_attr_handler_rules_with_registry(
 
 fn load_structural_attr_handler_rules(registry: &SchemaRegistry) -> Vec<StructuralAttrHandlerRule> {
     let path = registry.paths().structural_attr_schema_file.clone();
-    let Ok(bytes) = fs::read(path) else {
+    let Ok(bytes) = registry.bytes(&path) else {
         return Vec::new();
     };
     parse_external_structural_attr_handler_rules(&bytes).unwrap_or_default()
 }
 
-pub(in crate::scene) fn validate_structural_attr_schema_file(path: &Path) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+pub(in crate::scene) fn validate_structural_attr_schema_file(
+    registry: &SchemaRegistry,
+) -> Result<(), String> {
+    let path = &registry.paths().structural_attr_schema_file;
+    let bytes = registry.bytes(path)?;
     parse_external_structural_attr_handler_rules(&bytes)
         .map(|_| ())
         .ok_or_else(|| format!("{}: malformed structural attr schema", path.display()))

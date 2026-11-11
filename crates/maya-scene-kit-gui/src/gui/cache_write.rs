@@ -107,6 +107,7 @@ impl GuiShell {
         let cancel_generation = self.cache_write_generation;
         let observe_cache_root = self.observe_cache_root.clone();
         let audit_cache_root = self.audit_cache_root.clone();
+        let load_options = self.scene_load_options();
         let view = cx.entity();
         let debounce_generation = if debounced {
             self.cache_write_state.debounce_generation =
@@ -155,7 +156,12 @@ impl GuiShell {
 
                     let result = executor
                         .spawn(async move {
-                            flush_cache_write_batch(batch, observe_cache_root, audit_cache_root)
+                            flush_cache_write_batch(
+                                batch,
+                                observe_cache_root,
+                                audit_cache_root,
+                                &load_options,
+                            )
                         })
                         .await;
 
@@ -294,19 +300,24 @@ fn flush_cache_write_batch(
     batch: CacheWriteBatch,
     observe_cache_root: PathBuf,
     audit_cache_root: PathBuf,
+    load_options: &LoadOptions,
 ) -> CacheWriteFlushResult {
     let mut error_count = 0usize;
     let mut first_error = None;
 
     if !batch.observe.is_empty() {
-        if let Err(err) = ObserveCacheStore::new(observe_cache_root).save_batch(&batch.observe) {
+        if let Err(err) =
+            ObserveCacheStore::new(observe_cache_root, load_options).save_batch(&batch.observe)
+        {
             error_count += batch.observe.len();
             first_error.get_or_insert_with(|| err.to_string());
         }
     }
 
     if !batch.audit.is_empty() {
-        if let Err(err) = AuditCacheStore::new(audit_cache_root).save_batch(&batch.audit) {
+        if let Err(err) =
+            AuditCacheStore::new(audit_cache_root, load_options).save_batch(&batch.audit)
+        {
             error_count += batch.audit.len();
             first_error.get_or_insert_with(|| err.to_string());
         }

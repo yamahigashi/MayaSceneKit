@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use serde::Deserialize;
 
@@ -154,7 +154,7 @@ fn add_attr_token_rules(registry: &SchemaRegistry) -> Arc<HashMap<String, AddAtt
 fn load_add_attr_token_rules(registry: &SchemaRegistry) -> HashMap<String, AddAttrTokenRule> {
     let mut rules = default_add_attr_token_rules();
     let path = registry.paths().addattr_schema_file.clone();
-    let Ok(bytes) = fs::read(path) else {
+    let Ok(bytes) = registry.bytes(&path) else {
         return rules;
     };
     let Some(external_rules) = parse_external_token_rules(&bytes) else {
@@ -164,8 +164,11 @@ fn load_add_attr_token_rules(registry: &SchemaRegistry) -> HashMap<String, AddAt
     rules
 }
 
-pub(in crate::scene) fn validate_add_attr_token_schema_file(path: &Path) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+pub(in crate::scene) fn validate_add_attr_token_schema_file(
+    registry: &SchemaRegistry,
+) -> Result<(), String> {
+    let path = &registry.paths().addattr_schema_file;
+    let bytes = registry.bytes(path)?;
     parse_external_token_rules(&bytes)
         .map(|_| ())
         .ok_or_else(|| format!("{}: malformed addattr schema", path.display()))

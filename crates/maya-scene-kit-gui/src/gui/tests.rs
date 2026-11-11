@@ -257,7 +257,9 @@ fn sample_observed_snapshot(path_name: &str) -> ObservedSceneSnapshot {
     let observation = Loader::new(load_options.clone())
         .observe_path(&scene_path)
         .expect("observe sample scene");
-    ObservedSceneSnapshot::from_observation(&observation, &load_options).expect("sample snapshot")
+    ObservedSceneSnapshot::from_observation(&observation, &load_options)
+        .expect("sample snapshot")
+        .expect("cacheable schema")
 }
 
 fn sample_audited_snapshot(path_name: &str) -> AuditedSceneSnapshot {
@@ -270,7 +272,9 @@ fn sample_audited_snapshot(path_name: &str) -> AuditedSceneSnapshot {
     let plan_fingerprint = fingerprint_audit_plan(&plan);
     let report = audit_script_nodes_with_options(&scene_path, &plan, &load_options, options)
         .expect("audit sample scene");
-    AuditedSceneSnapshot::new(report, options, plan_fingerprint).expect("sample audit snapshot")
+    AuditedSceneSnapshot::new(report, options, plan_fingerprint, &load_options)
+        .expect("sample audit snapshot")
+        .expect("cacheable schema")
 }
 
 fn observed_test_row(id: u64, path: &Path) -> SceneRow {
@@ -878,7 +882,8 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
         .observe_path(&scene_path)
         .expect("observe scene");
     let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
-        .expect("observe snapshot");
+        .expect("observe snapshot")
+        .expect("cacheable schema");
 
     let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
     let plan_fingerprint = fingerprint_audit_plan(&plan);
@@ -886,15 +891,17 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
     let audit_report =
         audit_script_nodes_with_options(&scene_path, &plan, &load_options, audit_options)
             .expect("audit scene");
-    let audit_snapshot = AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint)
-        .expect("audit snapshot");
+    let audit_snapshot =
+        AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint, &load_options)
+            .expect("audit snapshot")
+            .expect("cacheable schema");
 
     let observe_root = dir.path().join("cache/observe");
     let audit_root = dir.path().join("cache/audit");
-    ObserveCacheStore::new(&observe_root)
+    ObserveCacheStore::new(&observe_root, &LoadOptions::default())
         .save(&observe_snapshot)
         .expect("save observe snapshot");
-    AuditCacheStore::new(&audit_root)
+    AuditCacheStore::new(&audit_root, &LoadOptions::default())
         .save(&audit_snapshot)
         .expect("save audit snapshot");
 
@@ -957,7 +964,8 @@ fn hydrate_cached_analysis_batch_keeps_row_alignment_for_hits_and_misses() {
         .observe_path(&cached_path)
         .expect("observe scene");
     let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
-        .expect("observe snapshot");
+        .expect("observe snapshot")
+        .expect("cacheable schema");
 
     let plan = build_script_audit_plan(vec![], 64).expect("audit plan");
     let plan_fingerprint = fingerprint_audit_plan(&plan);
@@ -965,16 +973,21 @@ fn hydrate_cached_analysis_batch_keeps_row_alignment_for_hits_and_misses() {
     let audit_report =
         audit_script_nodes_with_options(&cached_path, &plan, &load_options, audit_options)
             .expect("audit scene");
-    let audit_snapshot =
-        AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint.clone())
-            .expect("audit snapshot");
+    let audit_snapshot = AuditedSceneSnapshot::new(
+        audit_report,
+        audit_options,
+        plan_fingerprint.clone(),
+        &load_options,
+    )
+    .expect("audit snapshot")
+    .expect("cacheable schema");
 
     let observe_root = dir.path().join("cache/observe");
     let audit_root = dir.path().join("cache/audit");
-    ObserveCacheStore::new(&observe_root)
+    ObserveCacheStore::new(&observe_root, &LoadOptions::default())
         .save(&observe_snapshot)
         .expect("save observe snapshot");
-    AuditCacheStore::new(&audit_root)
+    AuditCacheStore::new(&audit_root, &LoadOptions::default())
         .save(&audit_snapshot)
         .expect("save audit snapshot");
 
@@ -4819,8 +4832,9 @@ fn disabling_analysis_cache_cancels_restore_and_pending_writes(cx: &mut TestAppC
             audit_script_nodes_with_options(&audit_path, &plan, &load_options, audit_options)
                 .expect("audit report");
         let audit_snapshot =
-            AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint)
-                .expect("audit snapshot");
+            AuditedSceneSnapshot::new(audit_report, audit_options, plan_fingerprint, &load_options)
+                .expect("audit snapshot")
+                .expect("cacheable schema");
         let audit_access = AuditCacheAccess {
             path: audit_snapshot.file_state.path.clone(),
             file_state: audit_snapshot.file_state.clone(),
@@ -6146,7 +6160,8 @@ fn analyze_result_invalidates_path_resolution_state_for_async_refresh(cx: &mut T
         .observe_path(&scene)
         .expect("observe scene");
     let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
-        .expect("observe snapshot");
+        .expect("observe snapshot")
+        .expect("cacheable schema");
 
     visual_cx.update(|window, app| {
         shell.update(app, |shell, cx| {
@@ -6187,7 +6202,8 @@ fn path_table_model_uses_cached_only_resolution_for_passive_render() {
         .observe_path(&scene)
         .expect("observe scene");
     let observe_snapshot = ObservedSceneSnapshot::from_observation(&observation, &load_options)
-        .expect("observe snapshot");
+        .expect("observe snapshot")
+        .expect("cacheable schema");
 
     let mut row = test_row(1, &scene);
     row.selected = true;
@@ -12595,9 +12611,9 @@ mod allowlist_tests {
             assert!(shell.rows[2].audit_report.is_none());
             // Reload starts a new cache-restore generation, so the in-flight batch with a cache hit is dropped.
             let cached = analyze(&path, &shell.audit_plan);
-            AuditCacheStore::new(&shell.audit_cache_root)
+            AuditCacheStore::new(&shell.audit_cache_root, &LoadOptions::default())
                 .save(&cached.audit_snapshot.unwrap()).unwrap();
-            ObserveCacheStore::new(&shell.observe_cache_root)
+            ObserveCacheStore::new(&shell.observe_cache_root, &LoadOptions::default())
                 .save(&cached.observe_snapshot.unwrap()).unwrap();
             shell.state.analysis_cache_enabled = true;
             shell.start_progressive_cache_restore(window, cx);
