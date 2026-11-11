@@ -5,7 +5,7 @@ use regex::Regex;
 use rustpython_parser::{Parse, ast};
 
 use super::python_walk::{
-    PythonAstVisitor, PythonBody, PythonWalkPoint,
+    PythonAstVisitor, PythonBody, PythonScope, PythonWalkPoint,
     bindings::{BodyBindings, enter_body_bindings, leave_body_bindings},
     walk_expr, walk_stmt, walk_suite,
 };
@@ -252,7 +252,7 @@ pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str) -> Vec<String>
         let Some(program) = parse_python_compat_suite(source) else {
             return Vec::new();
         };
-        let mut visitor = MayaMelEvalVisitor::default();
+        let mut visitor = MayaMelEvalVisitor::for_body(&program);
         walk_suite(&mut visitor, &program);
         visitor.payloads
     })
@@ -431,8 +431,12 @@ fn find_top_level_keyword(text: &str, needle: &str) -> Option<usize> {
     })
 }
 
+mod callable_bindings;
+use callable_bindings::CallableBindings;
+
 #[derive(Default)]
 struct MayaMelEvalVisitor {
+    callable_bindings: CallableBindings,
     module_aliases: BodyBindings,
     string_values: BodyBindings,
     payloads: Vec<String>,
@@ -466,6 +470,14 @@ impl PythonAstVisitor for MayaMelEvalVisitor {
         }
     }
 
+    fn enter_scope(&mut self, scope: PythonScope<'_>) {
+        self.callable_bindings.enter_scope(scope);
+    }
+
+    fn leave_scope(&mut self, _scope: PythonScope<'_>) {
+        self.callable_bindings.leave_scope();
+    }
+
     fn enter_body(&mut self, body: PythonBody<'_>) {
         enter_body_bindings(body, &mut self.module_aliases, &mut self.string_values);
     }
@@ -476,6 +488,13 @@ impl PythonAstVisitor for MayaMelEvalVisitor {
 }
 
 impl MayaMelEvalVisitor {
+    fn for_body(body: &[ast::Stmt]) -> Self {
+        Self {
+            callable_bindings: CallableBindings::for_body(body),
+            ..Self::default()
+        }
+    }
+
     fn record_statement(&mut self, stmt: &ast::Stmt) {
         match stmt {
             ast::Stmt::Import(import) => {
@@ -524,7 +543,8 @@ impl MayaMelEvalVisitor {
     }
 
     fn record_call(&mut self, call: &ast::ExprCall) {
-        if is_maya_mel_eval_call(&call.func, &self.module_aliases)
+        if (is_maya_mel_eval_call(&call.func, &self.module_aliases)
+            || self.callable_bindings.is_eval_alias(&call.func))
             && let Some(payload) = call
                 .args
                 .first()
@@ -614,9 +634,12 @@ pub(crate) fn is_maya_mel_eval_call(
     if attr.attr.as_str() != "eval" {
         return false;
     }
-    module_name_for_expr(&attr.value, module_aliases).is_some_and(|module| {
-        module == "maya.mel" || module.ends_with(".maya.mel") || module == "mel"
-    })
+    module_name_for_expr(&attr.value, module_aliases)
+        .is_some_and(|module| is_maya_mel_module(&module))
+}
+
+fn is_maya_mel_module(module: &str) -> bool {
+    module == "maya.mel" || module.ends_with(".maya.mel") || module == "mel"
 }
 
 fn module_name_for_expr(
@@ -663,9 +686,144 @@ pub(super) mod tests {
     pub(in crate::scene::execution) fn collect_payloads_from_suite(
         program: &[ast::Stmt],
     ) -> Vec<String> {
-        let mut visitor = super::MayaMelEvalVisitor::default();
+        let mut visitor = super::MayaMelEvalVisitor::for_body(program);
         super::walk_suite(&mut visitor, program);
         visitor.payloads
+    }
+
+    #[test]
+    fn collects_imported_mel_callable_names() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "from maya.mel import eval as run\nrun('system(\"Example\");')"
+            ),
+            ["system(\"Example\");"]
+        );
+    }
+
+    #[test]
+    fn collects_bare_imported_mel_callable_names() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "from maya.mel import eval\neval('system(\"Example\");')"
+            ),
+            ["system(\"Example\");"]
+        );
+    }
+
+    #[test]
+    fn collects_single_assignment_mel_callable_names() {
+        for source in [
+            "import maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')",
+            "from maya import mel as mm\nrun = mm.eval\nrun('system(\"Example\");')",
+            "from maya import mel\nrun = mel.eval\nrun('system(\"Example\");')",
+            "from maya.mel import eval\nrun = eval\nrun('system(\"Example\");')",
+            "def Example():\n    from maya.mel import eval as run\n    run('system(\"Example\");')",
+        ] {
+            assert_eq!(
+                collect_static_maya_mel_eval_payloads(source),
+                ["system(\"Example\");"]
+            );
+        }
+        for source in [
+            "from maya.mel import eval as run\nrun = Example\nrun('system(\"Example\");')",
+            "if Example:\n    from maya.mel import eval as run\nrun('system(\"Example\");')",
+            "from maya.mel import eval as run\nfor run in Example:\n    run('system(\"Example\");')",
+            "from maya.mel import eval as run\nwith Example as run:\n    run('system(\"Example\");')",
+            "from maya.mel import eval as run\ndel run\nrun('system(\"Example\");')",
+        ] {
+            assert_eq!(
+                collect_static_maya_mel_eval_payloads(source),
+                ["system(\"Example\");"],
+                "{source}"
+            );
+        }
+        assert!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\ndef Example(run):\n    run('system(\"Example\");')").is_empty());
+    }
+
+    #[test]
+    fn collects_may_alias_try_body() {
+        assert_eq!(collect_static_maya_mel_eval_payloads("try:\n    from maya.mel import eval as run\n    run('system(\"Example\");')\nexcept Exception:\n    pass").len(), 1);
+    }
+
+    #[test]
+    fn collects_may_alias_conditional_body() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "if Example:\n    from maya.mel import eval as run\n    run('system(\"Example\");')"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn collects_may_alias_comprehension() {
+        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\n[run('system(\"Example\");') for item in Example]").len(), 1);
+    }
+
+    #[test]
+    fn collects_may_alias_generator() {
+        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\n(run('system(\"Example\");') for item in Example)").len(), 1);
+    }
+
+    #[test]
+    fn collects_may_alias_rebound_name() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "import maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')\nrun = print"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn collects_may_alias_class_local_method() {
+        assert_eq!(collect_static_maya_mel_eval_payloads("class Example:\n    from maya.mel import eval as run\n    def method(self):\n        run('system(\"Example\");')").len(), 0);
+    }
+
+    #[test]
+    fn collects_may_alias_class_attribute_shadow() {
+        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\nclass Example:\n    run = print\n    def method(self):\n        run('system(\"Example\");')").len(), 1);
+    }
+
+    #[test]
+    fn collects_may_alias_later_outer_binding() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "def Example():\n    run('system(\"Example\");')\nfrom maya.mel import eval as run"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn collects_may_alias_shared_import_root() {
+        assert_eq!(collect_static_maya_mel_eval_payloads("import maya.cmds\nimport maya.mel\nrun = maya.mel.eval\nrun('system(\"Example\");')").len(), 1);
+    }
+
+    #[test]
+    fn collects_may_alias_mel_module() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "import mel\nrun = mel.eval\nrun('system(\"Example\");')"
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn collects_may_alias_nested_mel_module() {
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                "import Example.maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')"
+            )
+            .len(),
+            1
+        );
     }
 
     #[test]

@@ -1981,7 +1981,7 @@ fn allowlist_report_json_compatibility() {
     let mut report = audit_script_nodes(&source, &audit_plan()).expect("audit");
     report.scene_path = PathBuf::from("Example.ma");
     const BASELINE: &str = r###"{"scene_path":"Example.ma","scene_format":"ma","profile":"strict_default","validation_state":"validated","effective_rules":[],"surface_count":1,"coverage_state":"complete","coverage_issues":[],"blocked_on_uncertainty":false,"disposition":"deny_malicious","unit_summaries":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"effect":"external_dependency","semantic_class":"dependency_write","certainty":"proven","preview":"exec \"Example\"","reasons":[{"kind":"named","template":"external_dependency_mel_command_detected","value":"exec"}]}],"dependency_facts":[{"kind":"require","risk":"informational","target":"requires maya \"2026\";","detail":{"kind":"require"},"origin":null}],"unknown_semantics":[],"digests":{"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","schema_bundle_sha256":null,"policy_bundle_sha256":null},"notices":[],"surfaces":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"preview":"exec \"Example\"","derivation":"observed"}],"review_signals":[],"findings":[{"code":"mel_exec","severity":"critical","surface_index":0,"sink":"mel_exec","rule":null,"detail":{"kind":"static","value":"mel_exec_command_detected"},"evidence":[{"kind":"key_value","key":"node_name","value":"ExampleScriptNode"},{"kind":"key_value","key":"command","value":"exec"},{"kind":"free_text","value":"fixed literal command: Example"}],"preview_override":"Example"}]}"###;
-    const IDENTITY: &str = r###"{"cache_schema_version":28,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
+    const IDENTITY: &str = r###"{"cache_schema_version":29,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
     assert_eq!(serde_json::to_vec(&report).unwrap(), BASELINE.as_bytes());
     let empty_plan =
         audit_plan().with_allowlist(maya_scene_kit_audit::scene::AuditAllowlist::default());
@@ -2585,4 +2585,145 @@ fn audit_depth_limit_issues_are_capped_across_surfaces() {
     assert!(report.blocked_on_uncertainty);
     assert_eq!(report.coverage_issues.len(), 101);
     assert_eq!(report.coverage_issues.iter().filter(|issue| matches!(&issue.detail, ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } if diagnostic.contains("further depth-limit issues were suppressed"))).count(), 1);
+}
+
+#[test]
+fn python_mel_imported_callable_denies_system_payload() {
+    assert_python_mel_callable_denies_system_payload(
+        "from maya.mel import eval as run\nrun('system(\"Example\");')",
+    );
+}
+
+#[test]
+fn python_mel_assignment_callable_denies_system_payload() {
+    assert_python_mel_callable_denies_system_payload(
+        "import maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')",
+    );
+}
+
+#[test]
+fn python_mel_bare_imported_callable_denies_system_payload() {
+    assert_python_mel_callable_denies_system_payload(
+        "from maya.mel import eval\neval('system(\"Example\");')",
+    );
+}
+
+fn assert_python_mel_callable_denies_system_payload(body: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_python_script_node_scene(&path, "ExampleScript", body);
+    let report = audit_script_nodes(&path, &audit_plan()).unwrap();
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.code.as_str() == "mel_system"),
+        "{body}"
+    );
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+    let body =
+        "from maya.mel import eval as run\ndef Example(run):\n    run('system(\"Example\");')";
+    write_python_script_node_scene(&path, "ExampleScript", body);
+    let report = audit_script_nodes(&path, &audit_plan()).unwrap();
+    assert!(
+        report
+            .surfaces
+            .iter()
+            .all(|surface| surface.origin.lang != ExecutionLanguage::Mel)
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|finding| finding.code.as_str() == "mel_system")
+    );
+}
+
+#[test]
+fn python_mel_may_alias_scopes_preserve_findings_and_shadowing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    let cases = [
+        (
+            "try_body",
+            "try:\n    from maya.mel import eval as run\n    run('system(\"Example\");')\nexcept Exception:\n    pass",
+            true,
+        ),
+        (
+            "conditional_body",
+            "if Example:\n    from maya.mel import eval as run\n    run('system(\"Example\");')",
+            true,
+        ),
+        (
+            "comprehension",
+            "from maya.mel import eval as run\n[run('system(\"Example\");') for item in Example]",
+            true,
+        ),
+        (
+            "generator",
+            "from maya.mel import eval as run\n(run('system(\"Example\");') for item in Example)",
+            true,
+        ),
+        (
+            "rebound_name",
+            "import maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')\nrun = print",
+            true,
+        ),
+        (
+            "class_local_method",
+            "class Example:\n    from maya.mel import eval as run\n    def method(self):\n        run('system(\"Example\");')",
+            false,
+        ),
+        (
+            "class_attribute_shadow",
+            "from maya.mel import eval as run\nclass Example:\n    run = print\n    def method(self):\n        run('system(\"Example\");')",
+            true,
+        ),
+        (
+            "later_outer_binding",
+            "def Example():\n    run('system(\"Example\");')\nfrom maya.mel import eval as run",
+            true,
+        ),
+        (
+            "shared_import_root",
+            "import maya.cmds\nimport maya.mel\nrun = maya.mel.eval\nrun('system(\"Example\");')",
+            true,
+        ),
+        (
+            "mel_module",
+            "import mel\nrun = mel.eval\nrun('system(\"Example\");')",
+            true,
+        ),
+        (
+            "nested_mel_module",
+            "import Example.maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')",
+            true,
+        ),
+    ];
+    let actual: Vec<_> = cases
+        .iter()
+        .map(|(name, body, _)| {
+            write_python_script_node_scene(&path, "ExampleScript", body);
+            let report = audit_script_nodes(&path, &audit_plan()).unwrap();
+            let mel_surface = report
+                .surfaces
+                .iter()
+                .any(|surface| surface.origin.lang == ExecutionLanguage::Mel);
+            let mel_system = report
+                .findings
+                .iter()
+                .any(|finding| finding.code.as_str() == "mel_system");
+            (
+                *name,
+                mel_surface,
+                mel_system,
+                mel_system && report.disposition == AuditDisposition::DenyMalicious,
+            )
+        })
+        .collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(name, _, present)| (*name, *present, *present, *present))
+        .collect();
+    assert_eq!(actual, expected);
 }
