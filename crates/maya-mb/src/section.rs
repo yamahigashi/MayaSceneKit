@@ -129,6 +129,7 @@ impl ParsedSection {
 /// Completion of a bounded section scan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[must_use = "inspect the section scan state before accepting a partial result"]
+#[non_exhaustive]
 pub enum MbSectionScanState {
     #[default]
     Complete,

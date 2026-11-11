@@ -6,6 +6,7 @@ use crate::section::SectionCursor;
 
 #[derive(Debug, Clone)]
 #[must_use = "inspect the section scan state before accepting a partial result"]
+#[non_exhaustive]
 pub struct MbWalkResult {
     pub chunks: Vec<SectionChunk>,
     pub state: MbSectionScanState,

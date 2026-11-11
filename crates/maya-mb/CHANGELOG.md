@@ -6,11 +6,15 @@
 
 Incompatible section-scan API changes:
 
+- MbWalkResult and MbSectionScanState are non_exhaustive. Construct walk results through the provided walk functions and include a wildcard arm when matching scan states.
+
 - ParsedSection::into_chunks(self) -> Vec<SectionChunk> is replaced by into_parts(self) -> (Vec<SectionChunk>, MbSectionScanState).
 - walk_group_chunks_with_layout(data, hints) returns MbWalkResult instead of Vec<SectionChunk>.
 - walk_group_chunks_with_layout_with_budget(data, hints, starting_depth, budget) returns Result<MbWalkResult, MayaBinaryParseError> instead of Result<Vec<SectionChunk>, MayaBinaryParseError>.
 - visit_group_chunks_with_layout(data, hints, visitor) returns MbSectionScanState instead of ().
 - visit_group_chunks_with_layout_with_budget(data, hints, starting_depth, budget, visitor) returns Result<MbSectionScanState, MayaBinaryParseError> instead of Result<(), MayaBinaryParseError>.
+
+Cloning a group Chunk keeps the whole source buffer (Arc<[u8]>) alive. Long-lived consumers retaining only a small subtree should copy the bytes they need.
 
 New public API:
 
