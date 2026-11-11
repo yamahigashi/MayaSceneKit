@@ -2,15 +2,13 @@ use maya_mel::{
     parser::{LightSourceView, SourceEncoding},
     syntax::{TextRange, TextSize},
 };
-use once_cell::sync::Lazy;
-use regex::Regex;
 
-use crate::reference_semantics::{
-    ScenePathAttrKind, classify_scene_path_attr, looks_like_qualified_scene_file_path,
+use crate::{
+    ma::commands::{Token, create_node_flag, token_text, tokenize_command},
+    reference_semantics::{
+        ScenePathAttrKind, classify_scene_path_attr, looks_like_qualified_scene_file_path,
+    },
 };
-
-static CREATE_SCRIPT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\bcreateNode\s+script\b").unwrap());
 
 pub(crate) fn split_lines_keepends(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
@@ -78,37 +76,33 @@ fn parse_create_node_name(line: &[u8], encoding: SourceEncoding) -> Option<Strin
         TextSize::from(0),
         TextSize::from(u32::try_from(line.len()).ok()?),
     ));
-    let text = decoded.text.as_ref();
-    let bytes = text.as_bytes();
-    let mut cursor = 0usize;
-
-    while cursor < bytes.len() {
-        cursor += bytes[cursor..]
-            .iter()
-            .position(|byte| !byte.is_ascii_whitespace())?;
-        if bytes[cursor] != b'-' {
-            cursor += 1;
-            continue;
-        }
-        let flag_start = cursor;
-        cursor += 1;
-        while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if &text[flag_start..cursor] != "-n" {
-            continue;
-        }
-        cursor += bytes[cursor..]
-            .iter()
-            .position(|byte| !byte.is_ascii_whitespace())?;
-        if bytes.get(cursor) != Some(&b'"') {
-            return None;
-        }
-        let (literal, _) = parse_ma_quoted_literal(text, cursor);
-        return literal;
+    let tokens = tokenize_command(&decoded.text).ok()?;
+    if token_text(tokens.first()?)? != "createNode" {
+        return None;
     }
-
-    None
+    let mut name = None;
+    let mut index = 1;
+    while let Some(token) = tokens.get(index) {
+        if let Token::Bare(spelling) = token
+            && spelling.starts_with('-')
+        {
+            let flag = create_node_flag(spelling)?;
+            let args = tokens.get(index + 1..index + 1 + flag.arity)?;
+            if args.iter().any(|arg| {
+                token_text(arg).is_none()
+                    || matches!(arg, Token::Bare(value) if value.starts_with('-'))
+            }) {
+                return None;
+            }
+            if flag.name == "name" {
+                name = Some(token_text(args.first()?)?.to_string());
+            }
+            index += flag.arity + 1;
+        } else {
+            index += 1;
+        }
+    }
+    name
 }
 
 pub(crate) fn parse_ma_quoted_literal(text: &str, start: usize) -> (Option<String>, usize) {
@@ -273,8 +267,43 @@ pub(crate) fn parse_setattr_string_value_tail(trimmed: &str) -> Option<String> {
     Some(parts.join(""))
 }
 
-pub(crate) fn is_create_script_command(line: &[u8]) -> bool {
-    CREATE_SCRIPT_RE.is_match(&String::from_utf8_lossy(line))
+pub(crate) fn is_create_script_command(line: &[u8], encoding: SourceEncoding) -> bool {
+    let Ok(length) = u32::try_from(line.len()) else {
+        return false;
+    };
+    let decoded = LightSourceView::Bytes {
+        bytes: line,
+        encoding,
+    }
+    .decode_slice(TextRange::new(TextSize::from(0), TextSize::from(length)));
+    let Ok(tokens) = tokenize_command(&decoded.text) else {
+        return false;
+    };
+    if !matches!(tokens.first(), Some(Token::Bare(head)) if head == "createNode") {
+        return false;
+    }
+    let mut index = 1;
+    while let Some(token) = tokens.get(index) {
+        if let Token::Bare(flag) = token
+            && flag.starts_with('-')
+        {
+            let arity = create_node_flag(flag).map_or(0, |flag| flag.arity);
+            for _ in 0..arity {
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|arg| !matches!(arg, Token::Bare(value) if value.starts_with('-')))
+                {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            return token_text(token) == Some("script");
+        }
+        index += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -310,10 +339,10 @@ mod tests {
 
     #[test]
     fn create_node_name_parser_handles_escaped_quotes() {
-        let line = b"createNode script -n \"script\\\"Node1\";";
+        let line = br#"createNode script -n "Example\"Script";"#;
         assert_eq!(
             extract_script_node_name_from_create(line, 0, SourceEncoding::Utf8),
-            "script\\\"Node1"
+            "Example\"Script"
         );
     }
 

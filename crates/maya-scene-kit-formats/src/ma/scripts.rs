@@ -2,16 +2,19 @@
 // best-effort extraction. Canonical inspection APIs should prefer MA AST owners.
 use std::collections::HashSet;
 
-use maya_mel::parser::{
-    LightItem, LightParseOptions, LightSourceView, ParseBudgets,
-    scan_light_bytes_with_options_and_sink,
+use maya_mel::{
+    parser::{
+        LightItem, LightParseOptions, LightSourceView, ParseBudgets, SourceEncoding,
+        scan_light_bytes_with_options_and_sink,
+    },
+    syntax::{TextRange, TextSize},
 };
 
 pub use crate::ma::raw_dump::RawMaScriptEntry;
 use crate::ma::{
     lexer::{
-        extract_script_node_name_from_create, is_create_script_command, is_top_level_command,
-        split_lines_keepends,
+        command_has_terminating_semicolon, extract_script_node_name_from_create,
+        is_create_script_command, is_top_level_command, split_lines_keepends, trim_ascii,
     },
     raw_dump::extract_raw_dump_sections_from_ma,
 };
@@ -107,9 +110,18 @@ fn find_script_blocks_in_ma(data: &[u8], lines: &[&[u8]]) -> Vec<(usize, usize, 
     let mut i = 0usize;
     while i < lines.len() {
         let line = &lines[i];
-        if is_top_level_command(line) && is_create_script_command(line) {
-            let name = extract_script_node_name_from_create(line, i, encoding);
-            let mut j = i + 1;
+        if is_top_level_command(line) && trim_ascii(line).starts_with(b"createNode") {
+            let Some((command, next)) = collect_create_command(lines, i, encoding) else {
+                i += 1;
+                continue;
+            };
+            if !is_create_script_command(command.as_bytes(), SourceEncoding::Utf8) {
+                i = next;
+                continue;
+            }
+            let name =
+                extract_script_node_name_from_create(command.as_bytes(), i, SourceEncoding::Utf8);
+            let mut j = next;
             while j < lines.len() {
                 if is_top_level_command(lines[j]) {
                     break;
@@ -123,6 +135,29 @@ fn find_script_blocks_in_ma(data: &[u8], lines: &[&[u8]]) -> Vec<(usize, usize, 
         i += 1;
     }
     blocks
+}
+
+fn collect_create_command(
+    lines: &[&[u8]],
+    start: usize,
+    encoding: SourceEncoding,
+) -> Option<(String, usize)> {
+    let mut command = String::new();
+    let mut next = start;
+    while let Some(line) = lines.get(next) {
+        let length = u32::try_from(line.len()).ok()?;
+        let decoded = LightSourceView::Bytes {
+            bytes: line,
+            encoding,
+        }
+        .decode_slice(TextRange::new(TextSize::from(0), TextSize::from(length)));
+        command.push_str(&decoded.text);
+        next += 1;
+        if command_has_terminating_semicolon(&command) {
+            break;
+        }
+    }
+    Some((command, next))
 }
 
 #[cfg(test)]

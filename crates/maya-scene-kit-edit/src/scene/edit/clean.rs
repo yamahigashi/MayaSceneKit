@@ -30,11 +30,26 @@ pub(super) fn collect_script_owner_ranges_from_ma<'a>(
     ranges.extend(
         rewrite::collect_named_node_owner_ranges_from_ma(bytes, &names)
             .into_iter()
-            .filter(|(_, (node_type, _))| node_type != "script")
             .map(|(range, (_, name))| (range, name)),
     );
+    merge_script_owner_ranges(ranges)
+}
+
+fn merge_script_owner_ranges(
+    mut ranges: Vec<(std::ops::Range<usize>, String)>,
+) -> Vec<(std::ops::Range<usize>, String)> {
     ranges.sort_by_key(|(range, _)| range.start);
-    ranges
+    let mut merged: Vec<(std::ops::Range<usize>, String)> = Vec::with_capacity(ranges.len());
+    for (range, name) in ranges {
+        if let Some((previous, _)) = merged.last_mut()
+            && range.start < previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push((range, name));
+        }
+    }
+    merged
 }
 
 impl PatchPlanner {
@@ -762,4 +777,30 @@ pub(super) fn collect_mb_clean_targets(
 
 pub(super) fn mb_rewrite_error(error: crate::mb::MbRewriteError) -> SceneToolError {
     SceneToolError::Message(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_script_owner_ranges;
+
+    #[test]
+    fn script_owner_ranges_merge_duplicate_and_overlapping_collectors() {
+        let native = vec![
+            (10..30, "ExampleScript".to_string()),
+            (50..60, "SampleScript".to_string()),
+        ];
+        let named = vec![
+            (10..30, "ExampleAlias".to_string()),
+            (20..40, "SampleAlias".to_string()),
+            (35..50, "TestAlias".to_string()),
+        ];
+        let ranges = merge_script_owner_ranges(native.into_iter().chain(named).collect());
+        assert_eq!(
+            ranges,
+            vec![
+                (10..50, "ExampleScript".to_string()),
+                (50..60, "SampleScript".to_string()),
+            ]
+        );
+    }
 }
