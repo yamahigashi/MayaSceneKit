@@ -346,14 +346,35 @@ fn literals_empty_input_and_parse_failures_preserve_semantics() {
 
 #[test]
 fn isolated_imports_and_nested_bodies_preserve_uncertainty() {
-    for body in [
-        "try: pass\nexcept* Exception: import maya.mel as mm",
-        "try: pass\nexcept* Exception: from maya import mel as mm",
-        "match sample:\n    case _: import maya.mel as mm",
-        "match sample:\n    case _:\n        try: pass\n        except* Exception: import maya.mel as mm",
-        "try:\n    match sample:\n        case _: import maya.mel as mm\nexcept* Exception: pass",
-        "match sample:\n    case _:\n        def Example(): import maya.mel as mm",
-        "try:\n    class Example: from maya import mel as mm\nexcept* Exception: pass",
+    for (body, expected_payloads) in [
+        (
+            "try: pass\nexcept* Exception: import maya.mel as mm",
+            &["print 1;"][..],
+        ),
+        (
+            "try: pass\nexcept* Exception: from maya import mel as mm",
+            &["print 1;"][..],
+        ),
+        (
+            "match sample:\n    case _: import maya.mel as mm",
+            &["print 1;"][..],
+        ),
+        (
+            "match sample:\n    case _:\n        try: pass\n        except* Exception: import maya.mel as mm",
+            &["print 1;"][..],
+        ),
+        (
+            "try:\n    match sample:\n        case _: import maya.mel as mm\nexcept* Exception: pass",
+            &["print 1;"][..],
+        ),
+        (
+            "match sample:\n    case _:\n        def Example(): import maya.mel as mm",
+            &[][..],
+        ),
+        (
+            "try:\n    class Example: from maya import mel as mm\nexcept* Exception: pass",
+            &[][..],
+        ),
     ] {
         let source = format!("{body}\nmm.eval('print 1;')");
         assert!(
@@ -361,12 +382,12 @@ fn isolated_imports_and_nested_bodies_preserve_uncertainty() {
                 .is_some(),
             "{source}"
         );
-        assert!(
+        assert_eq!(
             collect_static_maya_mel_eval_payloads(
                 &source,
                 crate::scene::MelParseBudget::default().max_bytes
-            )
-            .is_empty(),
+            ),
+            expected_payloads,
             "{source}"
         );
         assert_eq!(
@@ -561,25 +582,37 @@ fn visitors_preserve_depth_on_two_mib_stack() {
 
 #[test]
 fn captured_and_restored_bindings_keep_visitors_consistent() {
-    for body in [
-        "match sample:\n    case cmd: mm.eval(cmd)",
-        "match sample:\n    case [cmd] if mm.eval(cmd): pass",
-        "match sample:\n    case mm: mm.eval('print 1;')",
-        "match sample:\n    case mm if mm.eval('print 1;'): pass",
-        "try: pass\nexcept* Exception as cmd: mm.eval(cmd)",
-        "try: pass\nexcept* Exception as mm: mm.eval('print 1;')",
+    for (body, expected_payloads) in [
+        ("match sample:\n    case cmd: mm.eval(cmd)", &[][..]),
+        (
+            "match sample:\n    case [cmd] if mm.eval(cmd): pass",
+            &[][..],
+        ),
+        (
+            "match sample:\n    case mm: mm.eval('print 1;')",
+            &["print 1;"][..],
+        ),
+        (
+            "match sample:\n    case mm if mm.eval('print 1;'): pass",
+            &["print 1;"][..],
+        ),
+        ("try: pass\nexcept* Exception as cmd: mm.eval(cmd)", &[][..]),
+        (
+            "try: pass\nexcept* Exception as mm: mm.eval('print 1;')",
+            &["print 1;"][..],
+        ),
     ] {
         let source = format!("import maya.mel as mm\ncmd = 'print 1;'\n{body}");
         assert!(
             parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
                 .is_some()
         );
-        assert!(
+        assert_eq!(
             collect_static_maya_mel_eval_payloads(
                 &source,
                 crate::scene::MelParseBudget::default().max_bytes
-            )
-            .is_empty(),
+            ),
+            expected_payloads,
             "{source}"
         );
         assert_eq!(

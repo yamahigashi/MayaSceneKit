@@ -97,12 +97,12 @@ struct Scope {
 }
 
 #[derive(Default)]
-pub(super) struct CallableBindings {
+pub(crate) struct CallableBindings {
     scopes: Vec<Scope>,
 }
 
 impl CallableBindings {
-    pub(super) fn for_body(body: &[ast::Stmt]) -> Self {
+    pub(crate) fn for_body(body: &[ast::Stmt]) -> Self {
         let mut result = Self::default();
         let mut collector = BindingCollector::default();
         walk_suite(&mut collector, body);
@@ -110,7 +110,7 @@ impl CallableBindings {
         result
     }
 
-    pub(super) fn enter_scope(&mut self, scope: PythonScope<'_>) {
+    pub(crate) fn enter_scope(&mut self, scope: PythonScope<'_>) {
         let mut collector = BindingCollector::default();
         match scope {
             PythonScope::FunctionBody { body, args, .. }
@@ -148,16 +148,24 @@ impl CallableBindings {
         self.push(collector, matches!(scope, PythonScope::ClassBody { .. }));
     }
 
-    pub(super) fn leave_scope(&mut self) {
+    pub(crate) fn leave_scope(&mut self) {
         self.scopes.pop().expect("balanced Python scopes");
     }
 
-    pub(super) fn is_eval_alias(&self, expr: &ast::Expr) -> bool {
-        let ast::Expr::Name(name) = expr else {
-            return false;
-        };
-        self.lookup(self.scopes.len().checked_sub(1), name.id.as_str()) & QualifiedName::Eval.bit()
-            != 0
+    pub(crate) fn is_eval_alias(&self, expr: &ast::Expr) -> bool {
+        let scope = self.scopes.len().checked_sub(1);
+        match expr {
+            ast::Expr::Name(name) => {
+                self.lookup(scope, name.id.as_str()) & QualifiedName::Eval.bit() != 0
+            }
+            ast::Expr::Attribute(attr) if attr.attr.as_str() == "eval" => {
+                let ast::Expr::Name(name) = attr.value.as_ref() else {
+                    return false;
+                };
+                self.lookup(scope, name.id.as_str()) & QualifiedName::Mel.bit() != 0
+            }
+            _ => false,
+        }
     }
 
     fn lookup(&self, mut scope: Option<usize>, name: &str) -> u8 {
@@ -253,6 +261,9 @@ impl BindingCollector {
     }
 
     fn assignment(&mut self, target: &ast::Expr, value: &ast::Expr) {
+        if has_starred_target(target) {
+            return;
+        }
         match (target, value) {
             (ast::Expr::Name(name), value) => self.bind(name.id.as_str(), Source::from_expr(value)),
             (ast::Expr::Tuple(target), ast::Expr::Tuple(value))
@@ -372,5 +383,14 @@ impl PythonAstVisitor for BindingCollector {
     }
     fn leave_scope(&mut self, _scope: PythonScope<'_>) {
         self.nested_scope -= 1;
+    }
+}
+
+fn has_starred_target(target: &ast::Expr) -> bool {
+    match target {
+        ast::Expr::Starred(_) => true,
+        ast::Expr::Tuple(target) => target.elts.iter().any(has_starred_target),
+        ast::Expr::List(target) => target.elts.iter().any(has_starred_target),
+        _ => false,
     }
 }

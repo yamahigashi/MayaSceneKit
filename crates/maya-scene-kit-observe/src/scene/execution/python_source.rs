@@ -447,7 +447,7 @@ fn find_top_level_keyword(text: &str, needle: &str) -> Option<usize> {
 }
 
 mod callable_bindings;
-use callable_bindings::CallableBindings;
+pub(crate) use callable_bindings::CallableBindings;
 
 #[derive(Default)]
 struct MayaMelEvalVisitor {

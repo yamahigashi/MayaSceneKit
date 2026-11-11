@@ -17,7 +17,7 @@ use crate::scene::{
     paths::{PathKind, ScenePathsReport},
 };
 
-const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 27;
+const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 28;
 const DB_FILE: &str = "cache.sqlite3";
 const OBSERVE_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const OBSERVE_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);

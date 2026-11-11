@@ -1982,7 +1982,7 @@ fn allowlist_report_json_compatibility() {
     report.scene_path = PathBuf::from("Example.ma");
     report.digests.schema_bundle_sha256 = Some("ExampleSchemaDigest".into());
     const BASELINE: &str = r###"{"scene_path":"Example.ma","scene_format":"ma","profile":"strict_default","validation_state":"validated","effective_rules":[],"surface_count":1,"coverage_state":"complete","coverage_issues":[],"blocked_on_uncertainty":false,"disposition":"deny_malicious","unit_summaries":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"effect":"external_dependency","semantic_class":"dependency_write","certainty":"proven","preview":"exec \"Example\"","reasons":[{"kind":"named","template":"external_dependency_mel_command_detected","value":"exec"}]}],"dependency_facts":[{"kind":"require","risk":"informational","target":"requires maya \"2026\";","detail":{"kind":"require"},"origin":null}],"unknown_semantics":[],"digests":{"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","schema_bundle_sha256":"ExampleSchemaDigest","policy_bundle_sha256":null},"notices":[],"surfaces":[{"origin":{"lang":"mel","trigger":"file_open","surface_kind":"script_node_body","node_name":"ExampleScriptNode","attr_name":".b","source_kind":"scriptType=1","source_range":null,"chunk_form":null,"chunk_tag":null,"chunk_node_offset":null,"chunk_aux":null,"chunk_payload_offset":null,"chunk_payload_size":null,"chunk_child_alignment":null,"chunk_child_header_size":null},"preview":"exec \"Example\"","derivation":"observed"}],"review_signals":[],"findings":[{"code":"mel_exec","severity":"critical","surface_index":0,"sink":"mel_exec","rule":null,"detail":{"kind":"static","value":"mel_exec_command_detected"},"evidence":[{"kind":"key_value","key":"node_name","value":"ExampleScriptNode"},{"kind":"key_value","key":"command","value":"exec"},{"kind":"free_text","value":"fixed literal command: Example"}],"preview_override":"Example"}]}"###;
-    const IDENTITY: &str = r###"{"cache_schema_version":31,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","schema_bundle_sha256":"ExampleSchemaDigest","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
+    const IDENTITY: &str = r###"{"cache_schema_version":32,"scene_sha256":"647ae161e9ad85afd2341c5b361e65f0b34667e3365eda94ef48ad2f9a2462b7","schema_bundle_sha256":"ExampleSchemaDigest","audit_options_fingerprint":"f745b246cbd75ea83b68ab51dc1ec867f43236e180c77c6a20ef5298b905628e","audit_plan_fingerprint":"9b3f437efff889198d09e4aa020ec1badd32e3bbe3d6161fa0c41e526aa9f5f1"}"###;
     assert_eq!(serde_json::to_vec(&report).unwrap(), BASELINE.as_bytes());
     let empty_plan =
         audit_plan().with_allowlist(maya_scene_kit_audit::scene::AuditAllowlist::default());
@@ -2730,4 +2730,309 @@ fn python_mel_may_alias_scopes_preserve_findings_and_shadowing() {
         .map(|(name, _, present)| (*name, *present, *present, *present))
         .collect();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn python_mel_module_assignment_detects_payload_and_preserves_class_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_python_script_node_scene(
+        &path,
+        "ExampleScript",
+        "class Example:\n    from maya.mel import eval as run\nExample.run('system(\"Example\");')",
+    );
+    let report = audit_script_nodes(&path, &audit_plan()).unwrap();
+    assert_eq!(report.disposition, AuditDisposition::Review);
+    assert!(
+        report
+            .surfaces
+            .iter()
+            .all(|surface| surface.origin.lang != ExecutionLanguage::Mel)
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|finding| finding.code.as_str() == "mel_system")
+    );
+    let body = "import maya.mel as mm\nalias = mm\nalias.eval('system(\"Example\");')";
+    assert_python_mel_callable_denies_system_payload(body);
+    write_python_script_node_scene(&path, "ExampleScript", body);
+    let report = audit_script_nodes(&path, &audit_plan()).unwrap();
+    assert!(
+        report
+            .surfaces
+            .iter()
+            .any(|surface| surface.origin.lang == ExecutionLanguage::Mel)
+    );
+}
+
+#[test]
+fn python_mel_callable_catalog_preserves_alias_uncertainty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_python_script_node_scene(
+        &path,
+        "ExampleScript",
+        "import maya.mel as mm\nmm.eval('print(1)')",
+    );
+    let direct = audit_script_nodes(&path, &audit_plan()).unwrap();
+    write_python_script_node_scene(
+        &path,
+        "ExampleScript",
+        "from maya.mel import eval as run\nrun('print(1)')",
+    );
+    let alias = audit_script_nodes(&path, &audit_plan()).unwrap();
+    assert!(
+        !serde_json::to_string(&alias)
+            .unwrap()
+            .contains("unclassified_python_call")
+    );
+    let alias_python = alias
+        .unit_summaries
+        .iter()
+        .find(|summary| summary.origin.lang == ExecutionLanguage::Python)
+        .unwrap();
+    let direct_python = direct
+        .unit_summaries
+        .iter()
+        .find(|summary| summary.origin.lang == ExecutionLanguage::Python)
+        .unwrap();
+    assert_eq!(
+        alias_python.certainty,
+        maya_scene_kit_observe::scene::evidence::EffectCertainty::Uncertain
+    );
+    assert_eq!(
+        direct_python.certainty,
+        maya_scene_kit_observe::scene::evidence::EffectCertainty::Proven
+    );
+    assert_eq!(alias.disposition, direct.disposition);
+    assert_eq!(
+        serde_json::to_value(&alias.findings).unwrap(),
+        serde_json::to_value(&direct.findings).unwrap()
+    );
+}
+
+#[test]
+fn python_mel_conditional_benign_payload_preserves_direct_classification() {
+    let report = audit_conditional_python_mel_payload("print(1)");
+    assert_eq!(report.disposition, AuditDisposition::Review);
+}
+
+#[test]
+fn python_mel_conditional_system_payload_preserves_direct_classification() {
+    let report = audit_conditional_python_mel_payload("system(\"Example\");");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.code.as_str() == "mel_system")
+    );
+    assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
+}
+
+fn audit_conditional_python_mel_payload(payload: &str) -> AuditReport {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    let body = format!(
+        "if Example:\n    import maya.mel as mm\nmm.eval({})",
+        serde_json::to_string(payload).unwrap()
+    );
+    write_python_script_node_scene(&path, "ExampleScript", &body);
+    let report = audit_script_nodes_with_options(
+        &path,
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+    )
+    .unwrap();
+    assert!(
+        report
+            .surfaces
+            .iter()
+            .any(|surface| surface.origin.lang == ExecutionLanguage::Mel)
+    );
+    assert!(report.blocked_on_uncertainty);
+    let python = report
+        .unit_summaries
+        .iter()
+        .find(|summary| summary.origin.lang == ExecutionLanguage::Python)
+        .unwrap();
+    assert_eq!(
+        python.certainty,
+        maya_scene_kit_observe::scene::evidence::EffectCertainty::Proven
+    );
+    report
+}
+
+#[test]
+fn python_mel_scope_mutations_keep_callable_uncertainty() {
+    assert_uncertain_python_mel_cases(&[
+        (
+            "global",
+            "from maya.mel import eval as run\ndef Example():\n    global run\n    run = print\nrun(PAYLOAD)",
+        ),
+        (
+            "nonlocal",
+            "def Example():\n    from maya.mel import eval as run\n    def Sample():\n        nonlocal run\n        run = print\n    run(PAYLOAD)",
+        ),
+    ]);
+    for source in [
+        "from maya.mel import eval as run\nmatch Example:\n    case run: run('x')",
+        "import maya.mel as mm\nif Example:\n    run = mm.eval\nrun('print(1)')",
+    ] {
+        let report = audit_python_mel_case(source);
+        let python = report
+            .unit_summaries
+            .iter()
+            .find(|summary| summary.origin.lang == ExecutionLanguage::Python)
+            .unwrap();
+        assert_eq!(
+            python.certainty,
+            maya_scene_kit_observe::scene::evidence::EffectCertainty::Uncertain,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn python_mel_star_import_keeps_callable_uncertainty() {
+    assert_uncertain_python_mel_cases(&[(
+        "star_import",
+        "from maya.mel import eval as run\nfrom Example import *\nrun(PAYLOAD)",
+    )]);
+}
+
+#[test]
+fn python_mel_starred_targets_keep_callable_uncertainty() {
+    assert_uncertain_python_mel_cases(&[
+        (
+            "tuple",
+            "import maya.mel as mm\nrun = mm.eval\n*sample, run, last = Example, mm.eval, Example\nrun(PAYLOAD)",
+        ),
+        (
+            "list",
+            "import maya.mel as mm\nrun = mm.eval\n[*sample, run, last] = [Example, mm.eval, Example]\nrun(PAYLOAD)",
+        ),
+    ]);
+    for source in [
+        "import maya.mel as mm\n*sample, run, last = Example, mm.eval, Example\nrun('print(1)')",
+        "import maya.mel as mm\n[*sample, run, last] = [Example, mm.eval, Example]\nrun('print(1)')",
+    ] {
+        let report = audit_python_mel_case(source);
+        assert!(
+            report
+                .surfaces
+                .iter()
+                .all(|surface| surface.origin.lang != ExecutionLanguage::Mel),
+            "{source}"
+        );
+    }
+}
+
+fn assert_uncertain_python_mel_cases(cases: &[(&str, &str)]) {
+    let mut failures = Vec::new();
+    for (name, source) in cases {
+        for (payload, disposition, system) in [
+            ("print(1)", AuditDisposition::Review, false),
+            (
+                "system(\"Example\");",
+                AuditDisposition::DenyMalicious,
+                true,
+            ),
+        ] {
+            let body = source.replace("PAYLOAD", &serde_json::to_string(payload).unwrap());
+            let report = audit_python_mel_case(&body);
+            let python = report
+                .unit_summaries
+                .iter()
+                .find(|summary| summary.origin.lang == ExecutionLanguage::Python)
+                .unwrap();
+            let has_payload = report
+                .surfaces
+                .iter()
+                .any(|surface| surface.origin.lang == ExecutionLanguage::Mel);
+            let has_system = report
+                .findings
+                .iter()
+                .any(|finding| finding.code.as_str() == "mel_system");
+            if python.certainty
+                != maya_scene_kit_observe::scene::evidence::EffectCertainty::Uncertain
+                || report.disposition != disposition
+                || !has_payload
+                || has_system != system
+            {
+                failures.push(format!("{name}, {payload}: certainty={:?}, disposition={:?}, payload={has_payload}, mel_system={has_system}", python.certainty, report.disposition));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn audit_python_mel_case(body: &str) -> AuditReport {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    write_python_script_node_scene(&path, "ExampleScript", body);
+    audit_script_nodes_with_options(
+        &path,
+        &audit_plan(),
+        &LoadOptions::default(),
+        AuditOptions::strict_default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn python_mel_mutated_attribute_alias_stays_uncertain() {
+    assert_uncertain_python_mel_cases(&[(
+        "attribute_store",
+        "import maya.mel as mm\nalias = mm\nmm.eval = print\nalias.eval(PAYLOAD)",
+    )]);
+}
+
+#[test]
+fn python_mel_mutated_comprehension_alias_stays_uncertain() {
+    assert_uncertain_python_mel_cases(&[(
+        "comprehension_walrus",
+        "import maya.mel as mm\nalias = mm\n[(alias := Example) for sample in []]\nalias.eval(PAYLOAD)",
+    )]);
+}
+
+#[test]
+fn python_mel_conditional_eval_retains_dynamic_call_evidence() {
+    assert_python_mel_eval_retains_dynamic_call_evidence(
+        "if Example:\n    from maya.mel import eval\neval(Example_python_text)",
+    );
+}
+
+#[test]
+fn python_mel_try_import_eval_retains_dynamic_call_evidence() {
+    assert_python_mel_eval_retains_dynamic_call_evidence(
+        "try:\n    from maya.mel import eval\nexcept ImportError:\n    pass\neval(text)",
+    );
+}
+
+fn assert_python_mel_eval_retains_dynamic_call_evidence(source: &str) {
+    use maya_scene_kit_observe::scene::evidence::{
+        EffectCertainty, ExecutionReason, ExecutionReasonTemplate, StaticExecutionReason,
+    };
+    let report = audit_python_mel_case(source);
+    let python = report
+        .unit_summaries
+        .iter()
+        .find(|summary| summary.origin.lang == ExecutionLanguage::Python)
+        .unwrap();
+    assert_eq!(python.certainty, EffectCertainty::Uncertain);
+    assert!(
+        python.reasons.iter().any(|reason| matches!(
+            reason,
+            ExecutionReason::Static {
+                value: StaticExecutionReason::UnresolvedPythonCallTargetDetected
+            }
+        )),
+        "{source}"
+    );
+    assert!(python.reasons.iter().any(|reason| matches!(reason,
+        ExecutionReason::Named { template: ExecutionReasonTemplate::DynamicPythonCallDetected, value } if value == "eval"
+    )), "{source}: {:?}", python.reasons);
 }

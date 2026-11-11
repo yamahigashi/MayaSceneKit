@@ -15,12 +15,12 @@ use super::{
     },
     mel_surface,
     python_source::{
-        PythonParseBudgetLimit, check_python_parse_budget_with_max_bytes,
+        CallableBindings, PythonParseBudgetLimit, check_python_parse_budget_with_max_bytes,
         collect_static_maya_mel_eval_payloads, is_maya_mel_eval_call, parse_python_compat_suite,
         static_string_expr, with_python_analysis,
     },
     python_walk::{
-        PythonAstVisitor, PythonBody, PythonWalkPoint,
+        PythonAstVisitor, PythonBody, PythonScope, PythonWalkPoint,
         bindings::{BodyBindings, enter_body_bindings, leave_body_bindings},
         walk_expr, walk_stmt, walk_suite,
     },
@@ -678,7 +678,10 @@ type PythonEffectSummary = (
 fn summarize_python_surface(text: &str, python_max_body_bytes: usize) -> PythonEffectSummary {
     python_summary_result(with_python_analysis(text, |text| {
         let program = parse_python_compat_suite(text, python_max_body_bytes)?;
-        let mut visitor = PythonEffectVisitor::default();
+        let mut visitor = PythonEffectVisitor {
+            callable_bindings: CallableBindings::for_body(&program),
+            ..PythonEffectVisitor::default()
+        };
         walk_suite(&mut visitor, &program);
         Some(visitor.finish())
     }))
@@ -870,6 +873,7 @@ fn should_model_as_execution_unit(origin: &ExecutionOrigin) -> bool {
 }
 
 struct PythonEffectVisitor {
+    callable_bindings: CallableBindings,
     module_aliases: BodyBindings,
     string_values: BodyBindings,
     effect: ExecutionEffectClass,
@@ -882,6 +886,7 @@ struct PythonEffectVisitor {
 impl Default for PythonEffectVisitor {
     fn default() -> Self {
         Self {
+            callable_bindings: CallableBindings::default(),
             module_aliases: BodyBindings::default(),
             string_values: BodyBindings::default(),
             effect: ExecutionEffectClass::PureComputation,
@@ -894,6 +899,14 @@ impl Default for PythonEffectVisitor {
 }
 
 impl PythonAstVisitor for PythonEffectVisitor {
+    fn enter_scope(&mut self, scope: PythonScope<'_>) {
+        self.callable_bindings.enter_scope(scope);
+    }
+
+    fn leave_scope(&mut self, _scope: PythonScope<'_>) {
+        self.callable_bindings.leave_scope();
+    }
+
     fn visit_stmt(&mut self, stmt: &ast::Stmt) {
         self.saw_any_stmt = true;
         self.record_statement(stmt);
@@ -1023,8 +1036,11 @@ impl PythonEffectVisitor {
     }
 
     fn record_call(&mut self, call: &ast::ExprCall) {
-        if is_maya_mel_eval_call(&call.func, &self.module_aliases) {
-            if call.args.is_empty()
+        let direct_eval = is_maya_mel_eval_call(&call.func, &self.module_aliases);
+        let eval_alias = !direct_eval && self.callable_bindings.is_eval_alias(&call.func);
+        if direct_eval || eval_alias {
+            if !direct_eval
+                || call.args.is_empty()
                 || call
                     .args
                     .first()
@@ -1040,7 +1056,9 @@ impl PythonEffectVisitor {
                     },
                 );
             }
-            return;
+            if direct_eval {
+                return;
+            }
         }
         let name = call_target_name(&call.func);
         match name {
@@ -1052,7 +1070,7 @@ impl PythonEffectVisitor {
                         rule.certainty,
                         rule.reason(&name),
                     );
-                } else {
+                } else if !eval_alias {
                     self.raise(
                         ExecutionEffectClass::Unknown,
                         ExecutionSemanticClass::UnknownWrite,
