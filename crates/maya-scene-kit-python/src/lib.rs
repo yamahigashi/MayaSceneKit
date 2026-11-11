@@ -213,6 +213,7 @@ fn scene_tool_error_category(err: &SceneToolError) -> &'static str {
         SceneToolError::RejectedByMode { .. } => "rejected_by_mode",
         SceneToolError::Io(_) => "io",
         SceneToolError::MelParseBudgetExceeded { .. } => "mel_parse_budget_exceeded",
+        SceneToolError::PythonParseBudgetExceeded { .. } => "python_parse_budget_exceeded",
         SceneToolError::MbParseBudgetExceeded { .. } => "mb_parse_budget_exceeded",
         SceneToolError::Parse(_) => "parse",
     }

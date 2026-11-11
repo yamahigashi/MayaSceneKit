@@ -1948,6 +1948,7 @@ pub(super) fn analyze_row_with_options(
         }
         Err(
             maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { .. }
+            | maya_scene_kit_observe::scene::SceneToolError::PythonParseBudgetExceeded { .. }
             | maya_scene_kit_observe::scene::SceneToolError::MbParseBudgetExceeded { .. },
         ) => {
             let options = audit_options_from_preference(audit_mode);
@@ -1999,6 +2000,32 @@ pub(super) fn analyze_row_bytes_with_options(
             plan,
         ),
         Err(maya_scene_kit_observe::scene::SceneToolError::MelParseBudgetExceeded { limit }) => {
+            let options = audit_options_from_preference(audit_mode);
+            let audit_report = build_parse_budget_blocked_audit_report(
+                path.to_path_buf(),
+                scene_format,
+                ValidationState::Invalid,
+                plan,
+                options,
+                limit,
+                None,
+            );
+            Ok(AnalyzeRowResult {
+                audit_plan_fingerprint: fingerprint_audit_plan(plan),
+                audit_file_state: None,
+                audit_report: audit_report.clone(),
+                paths_report: None,
+                dump_report: None,
+                observe_snapshot: None,
+                audit_snapshot: Some(
+                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(plan))
+                        .map_err(|err| err.to_string())?,
+                ),
+                audit_mode,
+                elapsed: started_at.elapsed(),
+            })
+        }
+        Err(maya_scene_kit_observe::scene::SceneToolError::PythonParseBudgetExceeded { limit }) => {
             let options = audit_options_from_preference(audit_mode);
             let audit_report = build_parse_budget_blocked_audit_report(
                 path.to_path_buf(),

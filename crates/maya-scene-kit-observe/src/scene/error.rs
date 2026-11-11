@@ -58,6 +58,10 @@ pub enum SceneToolError {
     /// MEL parse budget exceeded before a trustworthy scene view could be produced.
     #[error("parse budget exceeded: {limit}")]
     MelParseBudgetExceeded { limit: MelParseBudgetLimit },
+    #[error("parse budget exceeded: {limit}")]
+    PythonParseBudgetExceeded {
+        limit: super::execution::PythonParseBudgetLimit,
+    },
     /// Maya Binary parse budget exceeded before a trustworthy scene view could be produced.
     #[error("parse budget exceeded: {limit}")]
     MbParseBudgetExceeded { limit: MbParseBudgetLimit },

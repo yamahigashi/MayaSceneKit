@@ -15,8 +15,8 @@ use super::{
     },
     mel_surface,
     python_source::{
-        collect_static_maya_mel_eval_payloads, is_maya_mel_eval_call, parse_python_compat_suite,
-        static_string_expr,
+        check_python_parse_budget_with_max_bytes, collect_static_maya_mel_eval_payloads,
+        is_maya_mel_eval_call, parse_python_compat_suite, static_string_expr, with_python_analysis,
     },
     python_walk::{
         PythonAstVisitor, PythonBody, PythonWalkPoint,
@@ -194,6 +194,10 @@ fn build_execution_core(
     let mut unknown_semantics = Vec::with_capacity(surface_capacity);
     let mut pending_surfaces = VecDeque::from(coverage.surfaces);
     while let Some(surface) = pending_surfaces.pop_front() {
+        if surface.origin.lang == ExecutionLanguage::Python {
+            check_python_parse_budget_with_max_bytes(&surface.text, mel_parse_budget.max_bytes)
+                .map_err(|limit| SceneToolError::PythonParseBudgetExceeded { limit })?;
+        }
         let should_model =
             surface.requires_mel_modeling || should_model_as_execution_unit(&surface.origin);
         let mel = match surface.origin.lang {
@@ -221,6 +225,14 @@ fn build_execution_core(
         }
 
         if let Some(mel) = mel.as_deref() {
+            for fact in &mel.sink_arg_facts {
+                if fact.sink_kind == MelSinkArgKind::Python
+                    && let Some(body) = fact.rendered_text.as_deref()
+                {
+                    check_python_parse_budget_with_max_bytes(body, mel_parse_budget.max_bytes)
+                        .map_err(|limit| SceneToolError::PythonParseBudgetExceeded { limit })?;
+                }
+            }
             if !mel.diagnostics.is_empty() {
                 coverage
                     .coverage_issues
@@ -571,20 +583,22 @@ fn summarize_python_surface(
     EffectCertainty,
     Vec<ExecutionReason>,
 ) {
-    let Some(program) = parse_python_compat_suite(text) else {
-        return (
-            ExecutionEffectClass::Unknown,
-            ExecutionSemanticClass::UnknownWrite,
-            EffectCertainty::Uncertain,
-            vec![ExecutionReason::Static {
-                value: StaticExecutionReason::PythonParseFailurePreventsProvenEffectSummary,
-            }],
-        );
-    };
+    with_python_analysis(text, |text| {
+        let Some(program) = parse_python_compat_suite(text) else {
+            return (
+                ExecutionEffectClass::Unknown,
+                ExecutionSemanticClass::UnknownWrite,
+                EffectCertainty::Uncertain,
+                vec![ExecutionReason::Static {
+                    value: StaticExecutionReason::PythonParseFailurePreventsProvenEffectSummary,
+                }],
+            );
+        };
 
-    let mut visitor = PythonEffectVisitor::default();
-    walk_suite(&mut visitor, &program);
-    visitor.finish()
+        let mut visitor = PythonEffectVisitor::default();
+        walk_suite(&mut visitor, &program);
+        visitor.finish()
+    })
 }
 
 fn materialize_observed_execution_surface(

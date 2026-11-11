@@ -163,6 +163,8 @@ impl Default for MelParseBudget {
 }
 
 impl MelParseBudget {
+    pub const DEFAULT_MAX_PYTHON_NESTING_DEPTH: usize = 8192;
+
     pub fn to_parse_budgets(self) -> ParseBudgets {
         ParseBudgets {
             max_bytes: self.max_bytes,

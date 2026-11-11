@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use maya_scene_kit_observe::scene::execution::{
-    normalize_python_compat_source,
+    check_python_parse_budget, normalize_python_compat_source,
     python_walk::{
         PythonAstVisitor, PythonScope, PythonWalkPoint, walk_expr, walk_stmt, walk_suite,
     },
+    with_python_analysis,
 };
 use rustpython_parser::{Parse, ast, ast::Ranged};
 
@@ -67,51 +68,58 @@ pub(crate) enum PythonSignal {
 }
 
 pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
-    let original_program = parse_python_suite(source);
-    let original_positions = original_program.is_some();
-    let normalized = (!original_positions).then(|| normalize_python_compat_source(source));
-    let program = original_program.or_else(|| {
-        ast::Suite::parse(normalized.as_deref().expect("normalized source"), "<audit>").ok()
-    });
-    let Some(program) = program else {
-        let mut signals = vec![PythonSignal::ParseFailure {
-            message: "python parse failure".to_string(),
-        }];
-        let markers: Vec<_> =
-            crate::audit::analyze::scan_hard_python_obfuscation_markers(source, false)
-                .into_iter()
-                .map(|marker| marker.label)
-                .collect();
-        if !markers.is_empty() {
-            signals.push(PythonSignal::HardMarker { markers });
+    with_python_analysis(source, |source| {
+        if let Err(limit) = check_python_parse_budget(source) {
+            return vec![PythonSignal::ParseFailure {
+                message: limit.to_string(),
+            }];
         }
-        signals.extend(autorun_persistence_marker_signals(source));
-        return signals;
-    };
-    let mut visitor = SignalVisitor {
-        source: normalized.as_deref().unwrap_or(source),
-        ..SignalVisitor::default()
-    };
-    visitor.enter(ScopeKind::Module, LocalBindings::default());
-    walk_suite(&mut visitor, &program);
-    for marker in crate::audit::analyze::scan_hard_python_obfuscation_markers(source, true) {
-        let offset = ast::text_size::TextSize::from(marker.offset as u32);
-        if !original_positions
-            || !visitor
-                .marker_occurrences
-                .iter()
-                .any(|(label, range)| label == &marker.label && range.contains(offset))
-        {
-            visitor.record_hard_markers(
-                vec![marker.label],
-                ast::text_size::TextRange::at(offset, 1.into()),
-            );
+        let original_program = parse_python_suite(source);
+        let original_positions = original_program.is_some();
+        let normalized = (!original_positions).then(|| normalize_python_compat_source(source));
+        let program = original_program.or_else(|| {
+            ast::Suite::parse(normalized.as_deref().expect("normalized source"), "<audit>").ok()
+        });
+        let Some(program) = program else {
+            let mut signals = vec![PythonSignal::ParseFailure {
+                message: "python parse failure".to_string(),
+            }];
+            let markers: Vec<_> =
+                crate::audit::analyze::scan_hard_python_obfuscation_markers(source, false)
+                    .into_iter()
+                    .map(|marker| marker.label)
+                    .collect();
+            if !markers.is_empty() {
+                signals.push(PythonSignal::HardMarker { markers });
+            }
+            signals.extend(autorun_persistence_marker_signals(source));
+            return signals;
+        };
+        let mut visitor = SignalVisitor {
+            source: normalized.as_deref().unwrap_or(source),
+            ..SignalVisitor::default()
+        };
+        visitor.enter(ScopeKind::Module, LocalBindings::default());
+        walk_suite(&mut visitor, &program);
+        for marker in crate::audit::analyze::scan_hard_python_obfuscation_markers(source, true) {
+            let offset = ast::text_size::TextSize::from(marker.offset as u32);
+            if !original_positions
+                || !visitor
+                    .marker_occurrences
+                    .iter()
+                    .any(|(label, range)| label == &marker.label && range.contains(offset))
+            {
+                visitor.record_hard_markers(
+                    vec![marker.label],
+                    ast::text_size::TextRange::at(offset, 1.into()),
+                );
+            }
         }
-    }
-    visitor
-        .signals
-        .extend(autorun_persistence_marker_signals(source));
-    visitor.signals
+        visitor
+            .signals
+            .extend(autorun_persistence_marker_signals(source));
+        visitor.signals
+    })
 }
 
 fn parse_python_suite(source: &str) -> Option<ast::Suite> {

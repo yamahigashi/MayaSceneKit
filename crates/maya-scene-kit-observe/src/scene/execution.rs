@@ -18,7 +18,10 @@ pub use self::{
         MelSurfaceValidationDiagnostic, collect_mel_surface_facts,
         collect_mel_surface_facts_shared,
     },
-    python_source::normalize_python_compat_source,
+    python_source::{
+        PythonParseBudgetLimit, check_python_parse_budget, normalize_python_compat_source,
+        with_python_analysis,
+    },
     surfaces::ExecutionSurface,
 };
 use crate::scene::{

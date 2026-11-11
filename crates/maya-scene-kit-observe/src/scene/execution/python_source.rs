@@ -1,5 +1,6 @@
-use std::sync::OnceLock;
+use std::{fmt, sync::OnceLock};
 
+use maya_scene_kit_formats::mel::MelParseBudget;
 use regex::Regex;
 use rustpython_parser::{Parse, ast};
 
@@ -9,7 +10,237 @@ use super::python_walk::{
     walk_expr, walk_stmt, walk_suite,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonParseBudgetLimit {
+    MaxBodyBytes,
+    MaxNestingDepth,
+}
+
+impl fmt::Display for PythonParseBudgetLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MaxBodyBytes => "python_max_body_bytes",
+            Self::MaxNestingDepth => "python_max_nesting_depth",
+        })
+    }
+}
+
+#[doc(hidden)]
+pub fn with_python_analysis<T: Send>(source: &str, analyze: impl FnOnce(&str) -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("python-analysis".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, move || analyze(source))
+            .expect("create Python analysis thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+pub fn check_python_parse_budget(source: &str) -> Result<(), PythonParseBudgetLimit> {
+    check_python_parse_budget_with_max_bytes(source, MelParseBudget::default().max_bytes)
+}
+
+pub(crate) fn check_python_parse_budget_with_max_bytes(
+    source: &str,
+    max_bytes: usize,
+) -> Result<(), PythonParseBudgetLimit> {
+    if source.len() > max_bytes {
+        return Err(PythonParseBudgetLimit::MaxBodyBytes);
+    }
+    let mut pending = vec![(std::borrow::Cow::Borrowed(source), 0)];
+    if source.lines().any(|line| {
+        let line = line.trim_start();
+        ["print ", "exec ", "raise ", "except "]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+    }) {
+        let normalized = normalize_python_compat_source(source);
+        if normalized != source {
+            if normalized.len() > max_bytes {
+                return Err(PythonParseBudgetLimit::MaxBodyBytes);
+            }
+            pending.push((std::borrow::Cow::Owned(normalized), 0));
+        }
+    }
+    while let Some((source, base)) = pending.pop() {
+        check_python_nesting(&source, base, &mut pending)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct PythonDepthFrame {
+    base: usize,
+    current: usize,
+    peak: usize,
+    lambda_parameters: usize,
+}
+
+impl PythonDepthFrame {
+    fn new(base: usize) -> Self {
+        Self {
+            base,
+            current: base,
+            peak: base,
+            lambda_parameters: 0,
+        }
+    }
+}
+
+fn check_python_nesting(
+    source: &str,
+    base: usize,
+    pending: &mut Vec<(std::borrow::Cow<'_, str>, usize)>,
+) -> Result<(), PythonParseBudgetLimit> {
+    use rustpython_parser::{Mode, Tok, lexer};
+
+    let limit = MelParseBudget::DEFAULT_MAX_PYTHON_NESTING_DEPTH;
+    let mut indentation = vec![base];
+    let mut conditional_chains = vec![0usize];
+    let mut expression = vec![PythonDepthFrame::new(base)];
+    let mut header_depth = base;
+    let mut line_start = true;
+    // Expression peaks are retained through closing brackets, but siblings share their base.
+    // This conservatively bounds AST chains without parsing them recursively first.
+    for token in lexer::lex(source, Mode::Module) {
+        let Ok((token, _)) = token else { break };
+        match token {
+            Tok::Indent => {
+                let depth = header_depth + 1;
+                indentation.push(depth);
+                conditional_chains.push(0);
+                expression = vec![PythonDepthFrame::new(depth)];
+            }
+            Tok::Dedent => {
+                if indentation.len() > 1 {
+                    indentation.pop();
+                    conditional_chains.pop();
+                }
+                expression = vec![PythonDepthFrame::new(*indentation.last().unwrap())];
+                line_start = true;
+            }
+            Tok::Newline => {
+                header_depth = expression.last().unwrap().peak;
+                expression = vec![PythonDepthFrame::new(*indentation.last().unwrap())];
+                line_start = true;
+            }
+            Tok::Semi => {
+                expression = vec![PythonDepthFrame::new(
+                    indentation.last().unwrap() + conditional_chains.last().unwrap(),
+                )];
+            }
+            Tok::EndOfFile => break,
+            token => {
+                let leading = line_start;
+                if leading {
+                    line_start = false;
+                    let chain = conditional_chains.last_mut().unwrap();
+                    match token {
+                        Tok::If => *chain = 1,
+                        Tok::Elif => *chain += 1,
+                        Tok::Else => {}
+                        _ => *chain = 0,
+                    }
+                    expression = vec![PythonDepthFrame::new(indentation.last().unwrap() + *chain)];
+                }
+                match token {
+                    Tok::Lpar | Tok::Lsqb | Tok::Lbrace => {
+                        let depth = expression.last().unwrap().current + 1;
+                        expression.push(PythonDepthFrame::new(depth));
+                    }
+                    Tok::Rpar | Tok::Rsqb | Tok::Rbrace => {
+                        if expression.len() > 1 {
+                            let child = expression.pop().unwrap();
+                            expression.last_mut().unwrap().current = child.peak;
+                        }
+                    }
+                    Tok::Comma => {
+                        let frame = expression.last_mut().unwrap();
+                        if frame.lambda_parameters == 0 {
+                            frame.current = frame.base;
+                        }
+                    }
+                    Tok::Lambda => {
+                        let frame = expression.last_mut().unwrap();
+                        frame.current += 1;
+                        frame.lambda_parameters += 1;
+                    }
+                    Tok::Colon => {
+                        let frame = expression.last_mut().unwrap();
+                        frame.lambda_parameters = frame.lambda_parameters.saturating_sub(1);
+                    }
+                    Tok::String { value, kind, .. } if kind.is_any_fstring() => {
+                        let depth = expression.last().unwrap().current + 2;
+                        let mut start = 0;
+                        while start < value.len() {
+                            let Some(offset) = value[start..].find('{') else {
+                                break;
+                            };
+                            start += offset + 1;
+                            if value.as_bytes().get(start) == Some(&b'{') {
+                                start += 1;
+                                continue;
+                            }
+                            let mut scanner = PythonSourceScanner::default();
+                            let Some(end) = scanner
+                                .scan(&value[start..], |_, ch, depth| ch == b'}' && depth == 0)
+                            else {
+                                break;
+                            };
+                            pending.push((
+                                std::borrow::Cow::Owned(value[start..start + end].to_string()),
+                                depth,
+                            ));
+                            start += end + 1;
+                        }
+                    }
+                    Tok::Plus
+                    | Tok::Minus
+                    | Tok::Star
+                    | Tok::Slash
+                    | Tok::Vbar
+                    | Tok::Amper
+                    | Tok::Less
+                    | Tok::Greater
+                    | Tok::Equal
+                    | Tok::Dot
+                    | Tok::Percent
+                    | Tok::EqEqual
+                    | Tok::NotEqual
+                    | Tok::LessEqual
+                    | Tok::GreaterEqual
+                    | Tok::Tilde
+                    | Tok::CircumFlex
+                    | Tok::LeftShift
+                    | Tok::RightShift
+                    | Tok::DoubleStar
+                    | Tok::DoubleSlash
+                    | Tok::ColonEqual
+                    | Tok::At
+                    | Tok::And
+                    | Tok::Or
+                    | Tok::Not
+                    | Tok::Await
+                    | Tok::Yield
+                    | Tok::For => expression.last_mut().unwrap().current += 1,
+                    Tok::If | Tok::Else if !leading => expression.last_mut().unwrap().current += 1,
+                    _ => {}
+                }
+            }
+        }
+        let frame = expression.last_mut().unwrap();
+        frame.peak = frame.peak.max(frame.current);
+        if frame.peak > limit {
+            return Err(PythonParseBudgetLimit::MaxNestingDepth);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_python_compat_suite(source: &str) -> Option<ast::Suite> {
+    check_python_parse_budget(source).ok()?;
     ast::Suite::parse(source, "<observe>").ok().or_else(|| {
         let normalized = normalize_python_compat_source(source);
         ast::Suite::parse(&normalized, "<observe>").ok()
@@ -17,12 +248,14 @@ pub(crate) fn parse_python_compat_suite(source: &str) -> Option<ast::Suite> {
 }
 
 pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str) -> Vec<String> {
-    let Some(program) = parse_python_compat_suite(source) else {
-        return Vec::new();
-    };
-    let mut visitor = MayaMelEvalVisitor::default();
-    walk_suite(&mut visitor, &program);
-    visitor.payloads
+    with_python_analysis(source, |source| {
+        let Some(program) = parse_python_compat_suite(source) else {
+            return Vec::new();
+        };
+        let mut visitor = MayaMelEvalVisitor::default();
+        walk_suite(&mut visitor, &program);
+        visitor.payloads
+    })
 }
 
 pub fn normalize_python_compat_source(source: &str) -> String {

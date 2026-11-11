@@ -193,6 +193,22 @@ fn audit_observation_source_with_digests(
                 digests,
             ));
         }
+        Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
+            let digests = if include_digests {
+                Some(observation.scene_digests(0)?)
+            } else {
+                None
+            };
+            return Ok(build_parse_budget_blocked_audit_report(
+                scene_path,
+                scene_format,
+                validation_state,
+                plan,
+                options,
+                limit,
+                digests,
+            ));
+        }
         Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
             let digests = if include_digests {
                 Some(observation.scene_digests(0)?)
@@ -264,6 +280,20 @@ fn evaluate_catalog(
 
     while surface_index < surfaces.len() {
         let surface = &surfaces[surface_index];
+        if surface.origin.lang == ExecutionLanguage::Python
+            && let Err(limit) =
+                maya_scene_kit_observe::scene::execution::check_python_parse_budget(&surface.text)
+        {
+            return build_parse_budget_blocked_audit_report(
+                scene_path,
+                scene_format,
+                validation_state,
+                plan,
+                options,
+                limit,
+                include_digests.then_some(observed_digests),
+            );
+        }
         let analysis = analysis_cache.analyze(surface_index, surface, |surface_index, surface| {
             let mut prefix = surface_uncertainty_findings(surface_index, surface);
             if has_custom_rules {
@@ -430,6 +460,18 @@ pub fn audit_script_nodes_with_options_and_digests(
     let observation = match loader.observe_execution_path(path) {
         Ok(observation) => observation,
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
+            let scene_format = detect_scene_format(path)?;
+            return Ok(build_parse_budget_blocked_audit_report(
+                path.to_path_buf(),
+                scene_format,
+                ValidationState::Invalid,
+                plan,
+                options,
+                limit,
+                None,
+            ));
+        }
+        Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
             let scene_format = detect_scene_format(path)?;
             return Ok(build_parse_budget_blocked_audit_report(
                 path.to_path_buf(),
@@ -628,6 +670,21 @@ impl<'a> ReferenceAuditRun<'a> {
         let observation = match loader.observe_audit_path(path) {
             Ok(observation) => observation,
             Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
+                let scene_format = detect_scene_format(path)?;
+                return Ok((
+                    build_parse_budget_blocked_audit_report(
+                        path.to_path_buf(),
+                        scene_format,
+                        ValidationState::Invalid,
+                        self.plan,
+                        self.options,
+                        limit,
+                        None,
+                    ),
+                    Vec::new(),
+                ));
+            }
+            Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
                 let scene_format = detect_scene_format(path)?;
                 return Ok((
                     build_parse_budget_blocked_audit_report(

@@ -804,3 +804,152 @@ fn dynamic_modes_do_not_claim_an_unproven_action() {
         }
     }
 }
+
+fn python_analysis_child(test_name: &str, analyze: impl FnOnce() + Send + 'static) {
+    if std::env::var_os("EXAMPLE_PYTHON_ANALYSIS_CHILD").is_some() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(analyze)
+            .unwrap()
+            .join()
+            .unwrap();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([test_name, "--exact", "--nocapture"])
+        .env("EXAMPLE_PYTHON_ANALYSIS_CHILD", "1")
+        .output()
+        .expect("child test process");
+    assert!(
+        output.status.success(),
+        "child status: {}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn python_unary_body_budget_survives_child_process() {
+    python_analysis_child("python_unary_body_budget_survives_child_process", || {
+        let source = format!("{}1", "-".repeat(100_000));
+        for report in [
+            audit_source_text(&source, ExecutionLanguage::Python).unwrap(),
+            scene(&source, false),
+        ] {
+            assert!(report.blocked_on_uncertainty);
+            assert!(!matches!(
+                report.disposition,
+                AuditDisposition::Allow | AuditDisposition::AllowWithNotice
+            ));
+            assert!(report.notices.iter().any(|notice| {
+                serde_json::to_string(notice)
+                    .unwrap()
+                    .contains("python_max_")
+            }));
+        }
+        let source = format!("#{}\nprint('Example')", " ".repeat(100_000));
+        let report = audit_source_text(&source, ExecutionLanguage::Python).unwrap();
+        assert!(!report.blocked_on_uncertainty);
+    });
+}
+
+#[test]
+fn python_bracket_depth_budget_survives_child_process() {
+    python_analysis_child("python_bracket_depth_budget_survives_child_process", || {
+        let source = format!("{}1{}", "(".repeat(100_000), ")".repeat(100_000));
+        for report in [
+            audit_source_text(&source, ExecutionLanguage::Python).unwrap(),
+            scene(&source, false),
+        ] {
+            assert!(report.blocked_on_uncertainty);
+            assert!(report.notices.iter().any(|notice| {
+                serde_json::to_string(notice)
+                    .unwrap()
+                    .contains("python_max_")
+            }));
+        }
+        let source = format!("#{}\nprint('{}')", "(".repeat(100_000), "(".repeat(100_000));
+        assert!(
+            !audit_source_text(&source, ExecutionLanguage::Python)
+                .unwrap()
+                .blocked_on_uncertainty
+        );
+    });
+}
+
+#[test]
+fn python_recursive_analysis_survives_small_caller_stack() {
+    python_analysis_child(
+        "python_recursive_analysis_survives_small_caller_stack",
+        || {
+            let source = format!(
+                "if True: pass\n{}else: __import__('os')",
+                "elif True: pass\n".repeat(944)
+            );
+            for report in [
+                audit_source_text(&source, ExecutionLanguage::Python).unwrap(),
+                scene(&source, false),
+            ] {
+                assert!(
+                    report
+                        .findings
+                        .iter()
+                        .any(|finding| finding.sink == AuditSinkKind::PyImport)
+                );
+                assert!(!report.notices.iter().any(|notice| {
+                    serde_json::to_string(notice)
+                        .unwrap()
+                        .contains("python_max_")
+                }));
+            }
+            for shape in [
+                "if",
+                "call",
+                "list",
+                "power",
+                "lambda",
+                "binary",
+                "comprehension",
+                "pattern",
+                "fstring",
+            ] {
+                let depth = 100_000;
+                let source = match shape {
+                    "if" => format!(
+                        "if True: pass; pass\n{}else: print('Example')",
+                        "elif True: pass; pass\n".repeat(depth)
+                    ),
+                    "call" => format!("{}1{}", "Example(".repeat(depth), ")".repeat(depth)),
+                    "list" => format!("{}1{}", "[".repeat(depth), "]".repeat(depth)),
+                    "power" => format!("{}1", "2**".repeat(depth)),
+                    "lambda" => format!("{}1", "lambda Example, Sample: ".repeat(depth)),
+                    "binary" => format!("{}1", "1 + ".repeat(depth)),
+                    "comprehension" => format!(
+                        "{}1{}",
+                        "[sample for sample in [] if ".repeat(depth),
+                        "]".repeat(depth)
+                    ),
+                    "pattern" => format!(
+                        "match sample:\n case {}None{}: pass",
+                        "[".repeat(depth),
+                        "]".repeat(depth)
+                    ),
+                    "fstring" => format!("f'{{{}1}}'", "-".repeat(depth)),
+                    _ => unreachable!(),
+                };
+                let report = audit_source_text(&source, ExecutionLanguage::Python).unwrap();
+                assert!(report.blocked_on_uncertainty, "{shape}");
+                assert!(
+                    report
+                        .notices
+                        .iter()
+                        .any(|notice| serde_json::to_string(notice)
+                            .unwrap()
+                            .contains("python_max_")),
+                    "{shape}"
+                );
+            }
+        },
+    );
+}

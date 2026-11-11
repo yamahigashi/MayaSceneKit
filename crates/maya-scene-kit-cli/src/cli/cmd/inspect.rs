@@ -92,6 +92,10 @@ pub(crate) fn run_inspect(
                 eprintln!("error: parse budget exceeded: {limit}");
                 1
             }
+            Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
+                eprintln!("error: parse budget exceeded: {limit}");
+                1
+            }
             Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
                 eprintln!("error: parse budget exceeded: {limit}");
                 1
