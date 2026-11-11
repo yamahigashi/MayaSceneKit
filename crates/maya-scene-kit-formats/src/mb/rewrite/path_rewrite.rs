@@ -435,7 +435,11 @@ fn rewrite_path_child(
             }
             _ => unreachable!(),
         };
-        let after = if quoted {
+        let after = if form == "FRDI" {
+            let start = value.len() - value.trim_start().len();
+            let end = start + inside.len();
+            format!("{}{after}{}", &value[..start], &value[end..])
+        } else if quoted {
             format!("\"{after}\"")
         } else {
             after
@@ -1143,6 +1147,138 @@ mod tests {
         assert_eq!(fields[0], b"new/char.mb");
         assert_eq!(fields[1], b"charA");
         assert_eq!(fields[2], b"charARN");
+    }
+
+    #[test]
+    fn frdi_trailing_cr_without_matching_rule_is_unchanged() {
+        let source = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01asset/example/Sample.mb\r\0Example\0",
+            &[],
+        );
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (rewritten, changes) =
+            replace_scene_paths_in_mb(&source, parsed.root(), &literal_rules("missing", "sample"))
+                .unwrap();
+        assert_eq!(changes.replacement_count, 0);
+        assert_eq!(changes.paths[0].status, super::MbPathStatus::Unchanged);
+        assert_eq!(rewritten, source);
+    }
+
+    #[test]
+    fn frdi_trailing_cr_with_matching_rule_is_preserved() {
+        let source = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01asset/example/Sample.mb\r\0Example\0",
+            &[],
+        );
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (rewritten, changes) = replace_scene_paths_in_mb(
+            &source,
+            parsed.root(),
+            &literal_rules("Sample", "TestScene"),
+        )
+        .unwrap();
+        assert_eq!(changes.replacement_count, 1);
+        assert_eq!(changes.paths[0].status, super::MbPathStatus::Applied);
+        assert_eq!(
+            rewritten,
+            build_mb_with_single_form(
+                "FRDI",
+                "FRDI",
+                b"\x01asset/example/TestScene.mb\r\0Example\0",
+                &[],
+            )
+        );
+    }
+
+    #[test]
+    fn frdi_targets_preserve_surrounding_whitespace() {
+        let source = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01  asset/example/Sample.mb\r\0Example\0",
+            &[],
+        );
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (rewritten, changes) = replace_scene_paths_in_mb_by_index(
+            &source,
+            parsed.root(),
+            &[(0, "asset/example/TestScene.mb".into())],
+        )
+        .unwrap();
+        assert_eq!(changes.replacement_count, 1);
+        assert_eq!(changes.paths[0].status, super::MbPathStatus::Applied);
+        assert_eq!(
+            rewritten,
+            build_mb_with_single_form(
+                "FRDI",
+                "FRDI",
+                b"\x01  asset/example/TestScene.mb\r\0Example\0",
+                &[],
+            )
+        );
+    }
+
+    #[test]
+    fn frdi_noop_target_preserves_original_bytes() {
+        let source = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01asset/example/Sample.mb\r\0Example\0",
+            &[],
+        );
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (rewritten, changes) = replace_scene_paths_in_mb_by_index(
+            &source,
+            parsed.root(),
+            &[(0, "asset/example/Sample.mb".into())],
+        )
+        .unwrap();
+        assert_eq!(changes.replacement_count, 0);
+        assert_eq!(changes.paths[0].status, super::MbPathStatus::Unchanged);
+        assert_eq!(rewritten, source);
+    }
+
+    #[test]
+    fn frdi_rules_preserve_leading_whitespace() {
+        let source = build_mb_with_single_form(
+            "FRDI",
+            "FRDI",
+            b"\x01  asset/example/Sample.mb\0Example\0",
+            &[],
+        );
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (rewritten, changes) = replace_scene_paths_in_mb(
+            &source,
+            parsed.root(),
+            &literal_rules("Sample", "TestScene"),
+        )
+        .unwrap();
+        assert_eq!(changes.replacement_count, 1);
+        assert_eq!(
+            rewritten,
+            build_mb_with_single_form(
+                "FRDI",
+                "FRDI",
+                b"\x01  asset/example/TestScene.mb\0Example\0",
+                &[],
+            )
+        );
+    }
+
+    #[test]
+    fn frdi_whitespace_only_value_is_not_a_path() {
+        let source = build_mb_with_single_form("FRDI", "FRDI", b"\x01  \t\r\0", &[]);
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (rewritten, changes) =
+            replace_scene_paths_in_mb(&source, parsed.root(), &literal_rules(" ", "Example"))
+                .unwrap();
+        assert_eq!(changes.replacement_count, 0);
+        assert!(changes.paths.is_empty());
+        assert_eq!(rewritten, source);
     }
 
     #[test]
