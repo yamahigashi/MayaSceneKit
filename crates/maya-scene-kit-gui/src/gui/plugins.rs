@@ -305,7 +305,7 @@ fn file_status_key(row: &SceneRow) -> String {
         super::FileStatus::Idle => "idle",
         super::FileStatus::Audited => "audited",
         super::FileStatus::Dirty => "dirty",
-        super::FileStatus::Saved => "saved",
+        super::FileStatus::Saved | super::FileStatus::SavedWithWarning(_) => "saved",
         super::FileStatus::Error(_) => "error",
     }
     .to_string()

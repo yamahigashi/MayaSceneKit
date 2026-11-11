@@ -1160,6 +1160,7 @@ enum FileStatus {
     Audited,
     Dirty,
     Saved,
+    SavedWithWarning(String),
     Error(String),
 }
 
@@ -1169,7 +1170,10 @@ impl FileStatus {
             StatusFilter::All => true,
             StatusFilter::Dirty => matches!(self, Self::Dirty),
             StatusFilter::Error => matches!(self, Self::Error(_)),
-            StatusFilter::Audited => matches!(self, Self::Audited | Self::Saved),
+            StatusFilter::Audited => matches!(
+                self,
+                Self::Audited | Self::Saved | Self::SavedWithWarning(_)
+            ),
             StatusFilter::Processing => false,
         }
     }
@@ -1180,6 +1184,7 @@ impl FileStatus {
             Self::Audited => i18n.text("file_status.audited"),
             Self::Dirty => i18n.text("file_status.dirty"),
             Self::Saved => i18n.text("file_status.saved"),
+            Self::SavedWithWarning(message) => message.clone(),
             Self::Error(message) => {
                 if message.is_empty() {
                     i18n.text("file_status.error")
@@ -1195,7 +1200,7 @@ impl FileStatus {
 
     fn tone(&self) -> u32 {
         match self {
-            Self::Dirty => WARN_SOFT,
+            Self::Dirty | Self::SavedWithWarning(_) => WARN_SOFT,
             Self::Saved => SUCCESS_SOFT,
             Self::Error(_) => ERROR_SOFT,
             Self::Idle | Self::Audited => PANEL_BG,
@@ -1738,6 +1743,7 @@ enum RowJobResult {
         staged_source_bytes: Vec<u8>,
     },
     ToAscii {
+        destination_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
         report: MayaAsciiConversionReport,
         artifact: StagedSceneArtifact,
     },

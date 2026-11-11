@@ -923,9 +923,9 @@ impl GuiShell {
                     shell.complete_edit_transaction_success(edit_sequence, row_id);
                 }
             }
-            RowJobResult::ToAscii { report, artifact } => {
+            RowJobResult::ToAscii { report, artifact, destination_source } => {
                 shell.rows[index].replace_changes = None;
-                shell.rows[index].staged = Staged::ToAscii { report: Some(report), artifact: Some(artifact) };
+                shell.rows[index].staged = Staged::ToAscii { report: Some(report), artifact: Some(artifact), destination_source };
                 shell.rows[index].applied_replace_preview = None;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].status = FileStatus::Dirty;
@@ -960,19 +960,24 @@ impl GuiShell {
                             }
                             if let Some(mode) = reports.audit_mode { shell.rows[index].analyzed_audit_mode = Some(mode); }
                         } else { shell.rows[index].mark_analysis_stale(); }
-                        if let Some(report) = reports.dump_report { shell.rows[index].dump_report = Some(report); }
+                        if let Some(report) = reports.dump_report.filter(|_| saved_file_is_current) { shell.rows[index].dump_report = Some(report); }
                     }
                     SavePromotion::Unanalyzed => shell.rows[index].mark_analysis_stale(),
                 }
                 if !is_ascii {
+                    if !saved_file_is_current {
+                        shell.rows[index].dump_report = None;
+                        shell.rows[index].set_audit_report(None, None);
+                        shell.rows[index].audit_plan_fingerprint = None;
+                    }
                     if saved_paths_report.is_none() || !saved_file_is_current { shell.rows[index].mark_analysis_stale(); }
-                    shell.rows[index].paths_report = saved_paths_report;
+                    shell.rows[index].paths_report = saved_paths_report.filter(|_| saved_file_is_current);
                 }
                 shell.rows[index].staged = Staged::None;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].sync_findings_count();
                 shell.rows[index].status = observation_error.as_ref().map_or(FileStatus::Saved, |error| {
-                    FileStatus::Error(shell.i18n().format(
+                    FileStatus::SavedWithWarning(shell.i18n().format(
                         "file_status.saved_observation_failed",
                         &[("message", error.clone())],
                     ))
@@ -1361,6 +1366,16 @@ impl GuiShell {
                 for index in selected {
                     let row_id = shell.rows[index].id;
                     let options = shell.scene_materialize_options(OperationMode::Forensic);
+                    let analysis_source = shell.rows[index]
+                        .paths_report
+                        .as_ref()
+                        .and_then(|report| report.source.clone());
+                    let row = &shell.rows[index];
+                    let has_analysis = row.paths_report.is_some()
+                        || row.audit_report.is_some()
+                        || row.dump_report.is_some()
+                        || row.analyzed_audit_mode.is_some();
+                    let reanalysis_required = shell.i18n().text("banner.edit_requires_reanalysis");
                     shell.spawn_row_job(
                         row_id,
                         RowOperation::ToAscii,
@@ -1371,7 +1386,17 @@ impl GuiShell {
                         move |path| {
                             let staged = stage_maya_ascii_with_options(&path, &options)
                                 .map_err(|err| err.to_string())?;
+                            if staged.report.scene_format == SceneFormat::Ma && has_analysis {
+                                let source = source_fingerprint(&staged.artifact.bytes);
+                                if analysis_source.as_ref() != Some(&source) {
+                                    return Err(reanalysis_required);
+                                }
+                            }
+                            let destination_source =
+                                read_destination_source(&staged.artifact.suggested_output_path)
+                                    .map_err(|error| error.to_string())?;
                             Ok(RowJobResult::ToAscii {
+                                destination_source,
                                 report: staged.report,
                                 artifact: staged.artifact,
                             })
@@ -1493,6 +1518,10 @@ impl GuiShell {
                     let row = &shell.rows[index];
                     let is_replace = matches!(row.staged, Staged::Replace { .. });
                     let is_ascii = matches!(row.staged, Staged::ToAscii { .. });
+                    let destination_source = match &row.staged {
+                        Staged::ToAscii { destination_source, .. } => destination_source.clone(),
+                        _ => None,
+                    };
                     let promotion = row.save_promotion();
                     let artifact = row.staged.artifact().clone();
                     let replace_changes = row.replace_changes.clone();
@@ -1544,6 +1573,9 @@ impl GuiShell {
                     } else {
                         artifact.ok_or_else(|| "missing staged artifact for save".to_string())?
                     };
+                    if is_ascii && !read_destination_source(&path).is_ok_and(|current| current == destination_source) {
+                        return Err(source_changed);
+                    }
                     save_staged_artifact_with_backup(
                         &artifact, &path, backup_location,
                         source.as_ref().filter(|_| !is_ascii).map(|source| (source, source_changed.as_str())),

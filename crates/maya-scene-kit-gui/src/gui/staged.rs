@@ -42,6 +42,7 @@ pub(super) enum Staged {
         staged_reports: Box<StagedReports>,
     },
     ToAscii {
+        destination_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
         report: Option<MayaAsciiConversionReport>,
         artifact: Option<StagedSceneArtifact>,
     },
@@ -160,12 +161,14 @@ impl Staged {
                 Self::ToAscii {
                     report: a,
                     artifact: b,
+                    destination_source: source_a,
                 },
                 Self::ToAscii {
                     report: x,
                     artifact: y,
+                    destination_source: source_b,
                 },
-            ) => ascii_report_same(a, x) && b == y,
+            ) => ascii_report_same(a, x) && b == y && source_a == source_b,
             _ => false,
         }
     }

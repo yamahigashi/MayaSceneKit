@@ -468,7 +468,7 @@ fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
     });
     visual_cx.run_until_parked();
     shell.read_with(visual_cx, |shell, _| {
-        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message.contains("re-read failed")));
+        assert!(matches!(&shell.rows[0].status, FileStatus::SavedWithWarning(message) if message.contains("re-read failed")));
         assert!(shell.rows[0].paths_report.is_none());
         assert!(shell.rows[0].analyzed_audit_mode.is_none());
         assert!(
@@ -4002,6 +4002,7 @@ fn file_context_menu_state_disables_delete_actions_for_to_ascii_rows() {
     let mut row = test_row(1, &path);
     row.selected = true;
     row.staged = Staged::ToAscii {
+        destination_source: None,
         report: None,
         artifact: None,
     };
@@ -5740,6 +5741,7 @@ fn exit_warning_required_is_true_for_to_ascii_rows() {
     fs::write(&source_path, "FORM").expect("write scene");
     let mut row = test_row(1, &source_path);
     row.staged = Staged::ToAscii {
+        destination_source: None,
         report: None,
         artifact: None,
     };
@@ -14711,8 +14713,8 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
                     saved_paths_report: shell.rows[0].paths_report.clone(),
             replace_changes: Some(expected.clone()),
             replace_preview: preview,
-            output_path: directory.path().join("Sample.ma"),
-            audit_file_state: None,
+            output_path: input.clone(),
+            audit_file_state: GuiFileState::read(&input).ok(),
         }, None, window, cx);
         assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
         assert_eq!(shell.rows[0].paths_report.as_ref().unwrap().entries[0].value, before);
@@ -14975,6 +14977,7 @@ fn settings_notice_disabled_saves_are_logged_once(cx: &mut TestAppContext) {
 fn converted_row_rejects_further_edits() {
     let mut row = SceneRow::new_unloaded_row(1);
     row.staged = Staged::ToAscii {
+        destination_source: None,
         report: None,
         artifact: None,
     };
@@ -15017,6 +15020,7 @@ fn edited_rows_reject_conversion() {
             }
             _ => {
                 row.staged = Staged::ToAscii {
+                    destination_source: None,
                     report: None,
                     artifact: None,
                 };

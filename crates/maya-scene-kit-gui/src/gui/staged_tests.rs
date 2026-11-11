@@ -65,7 +65,7 @@ fn missing_conversion_artifact_save_reports_error(cx: &mut TestAppContext) {
     let (shell, visual_cx) = open_test_shell(cx);
     shell.update_in(visual_cx, |shell, window, cx| {
         let mut row = mutation_row(1, &path);
-        row.staged = Staged::ToAscii { report: None, artifact: None };
+        row.staged = Staged::ToAscii { report: None, artifact: None, destination_source: None };
         shell.replace_rows(vec![row]);
         let job = shell.next_row_job_id;
         shell.spawn_save_jobs(vec![0], window, cx);
@@ -86,6 +86,7 @@ fn replace_menu_reports_converted_and_busy_rows(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, window, cx| {
         let mut converted = mutation_row(1, &path);
         converted.staged = Staged::ToAscii {
+            destination_source: None,
             report: None,
             artifact: None,
         };
@@ -389,6 +390,7 @@ fn conversion_refuses_each_staged_variant_and_succeeds_after_save(cx: &mut TestA
             assert!(matches!(
                 shell.rows[0].staged,
                 Staged::ToAscii {
+                    destination_source: _,
                     report: Some(_),
                     artifact: Some(_)
                 }
@@ -1228,6 +1230,7 @@ fn rejection_summary_preserves_all_counts_and_skip_details(cx: &mut TestAppConte
 fn fixture_accessors_reject_implicit_variant_changes() {
     for accessor in 0..6 {
         let mut staged = Staged::ToAscii {
+            destination_source: None,
             report: None,
             artifact: None,
         };
@@ -1672,6 +1675,7 @@ fn save_conversion_preserves_source_reports(cx: &mut TestAppContext) {
         let mut row = mutation_row(1, &path);
         row.selected = false;
         row.staged = Staged::ToAscii {
+            destination_source: None,
             report: None,
             artifact: None,
         };
@@ -1707,7 +1711,7 @@ fn save_conversion_preserves_source_reports(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn save_changed_file_does_not_promote_audit(cx: &mut TestAppContext) {
+fn save_changed_file_does_not_promote_reports(cx: &mut TestAppContext) {
     let directory = tempdir().unwrap();
     let path = directory.path().join("Example.ma");
     write_mutation_scene(&path);
@@ -1718,7 +1722,8 @@ fn save_changed_file_does_not_promote_audit(cx: &mut TestAppContext) {
         let mut row = mutation_row(1, &path);
         row.selected = false;
         let reports = StagedReports {
-            audit_report: row.audit_report.take(),
+            audit_report: row.audit_report.clone(),
+            dump_report: row.dump_report.clone(),
             audit_mode: Some(AuditModePreference::StrictDefault),
             audit_plan_fingerprint: Some(shell.audit_plan_fingerprint.clone()),
             ..Default::default()
@@ -1744,6 +1749,8 @@ fn save_changed_file_does_not_promote_audit(cx: &mut TestAppContext) {
             window,
             cx,
         );
+        assert!(shell.rows[0].paths_report.is_none());
+        assert!(shell.rows[0].dump_report.is_none());
         assert!(shell.rows[0].audit_report.is_none());
         assert!(shell.rows[0].analyzed_audit_mode.is_none());
     });
@@ -1760,16 +1767,187 @@ fn save_observation_failure_displays_error(cx: &mut TestAppContext) {
         let mut row = mutation_row(1, &path);
         row.selected = false;
         shell.replace_rows(vec![row]);
-        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save {
-            promotion: SavePromotion::Unanalyzed,
-            observation_error: Some("Example observation failure".into()), saved_paths_report: None,
-            replace_changes: None, replace_preview: None,
-            output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
-        }, None, window, cx);
-        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message.contains("Example observation failure") && message.contains("Saved")));
-        assert!(shell.rows[0].status_label(&shell.i18n()).contains("Example observation failure"));
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Save,
+            RowJobResult::Save {
+                promotion: SavePromotion::Unanalyzed,
+                observation_error: Some("Example observation failure".into()),
+                saved_paths_report: None,
+                replace_changes: None,
+                replace_preview: None,
+                output_path: path.clone(),
+                audit_file_state: GuiFileState::read(&path).ok(),
+            },
+            None,
+            window,
+            cx,
+        );
+        assert!(matches!(&shell.rows[0].status, FileStatus::SavedWithWarning(message) if message.contains("Example observation failure")));
+        assert!(shell.rows[0].status_label(&shell.i18n()).contains("Saved"));
+        assert!(
+            shell.rows[0]
+                .status_label(&shell.i18n())
+                .contains("Example observation failure")
+        );
         shell.rows[0].selected = true;
-        assert!(super::super::selected_row_error_lines(shell)[0].contains("Example observation failure"));
+        assert!(
+            super::super::selected_row_error_lines(shell)[0]
+                .contains("Example observation failure")
+        );
         assert!(shell.rows[0].analyzed_audit_mode.is_none());
+        shell.run_selected_auto_analysis(window, cx);
+        assert!(shell.rows[0].busy.is_some());
     });
+}
+
+fn assert_ascii_save_refuses_destination_change(cx: &mut TestAppContext, binary: bool) {
+    let directory = tempdir().unwrap();
+    let path = directory
+        .path()
+        .join(if binary { "Example.mb" } else { "Example.ma" });
+    if binary {
+        fs::write(&path, binary_scene("asset/example/file.tx", true, false)).unwrap();
+    } else {
+        write_mutation_scene(&path);
+    }
+    let output = path.with_extension("ma");
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell.run_to_ascii(window, cx);
+    });
+    visual_cx.run_until_parked();
+    fs::write(&output, "// Example external bytes\n").unwrap();
+    shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(shell.rows[0].staged.artifact().is_some());
+        shell.run_save_selected(window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert_eq!(fs::read(&output).unwrap(), b"// Example external bytes\n");
+        assert!(shell.rows[0].staged.artifact().is_some());
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message == &shell.i18n().text("banner.save_source_changed")));
+    });
+}
+
+#[gpui::test]
+fn ascii_save_refuses_changed_input_destination(cx: &mut TestAppContext) {
+    assert_ascii_save_refuses_destination_change(cx, false);
+}
+
+#[gpui::test]
+fn ascii_save_refuses_created_destination(cx: &mut TestAppContext) {
+    assert_ascii_save_refuses_destination_change(cx, true);
+}
+
+#[gpui::test]
+fn ascii_staging_refuses_changed_analysis_source(cx: &mut TestAppContext) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        let mut changed = fs::read(&path).unwrap();
+        changed.extend_from_slice(b"\n// Example external bytes\n");
+        fs::write(&path, changed).unwrap();
+        shell.run_to_ascii(window, cx);
+    });
+    visual_cx.run_until_parked();
+    shell.read_with(visual_cx, |shell, _| {
+        assert!(matches!(shell.rows[0].staged, Staged::None));
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message == &shell.i18n().text("banner.edit_requires_reanalysis")));
+    });
+}
+
+fn ascii_content_destination_case(cx: &mut TestAppContext, extension: &str) {
+    for created in [false, true] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("Example").with_extension(extension);
+        let output = path.with_extension("ma");
+        write_mutation_scene(&path);
+        let original = fs::read(&path).unwrap();
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state = test_state(directory.path(), "");
+            shell.replace_rows(vec![mutation_row(1, &path)]);
+            shell.run_to_ascii(window, cx);
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, window, cx| {
+            assert!(matches!(
+                &shell.rows[0].staged,
+                Staged::ToAscii {
+                    destination_source: None,
+                    artifact: Some(_),
+                    ..
+                }
+            ));
+            if created {
+                fs::write(&output, "// Example external bytes\n").unwrap();
+            }
+            shell.run_save_selected(window, cx);
+        });
+        visual_cx.run_until_parked();
+        shell.read_with(visual_cx, |shell, _| {
+            if created {
+                assert_eq!(fs::read(&output).unwrap(), b"// Example external bytes\n");
+                assert!(shell.rows[0].staged.artifact().is_some());
+                assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message == &shell.i18n().text("banner.save_source_changed")));
+            } else {
+                assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+                assert_eq!(fs::read(&output).unwrap(), original);
+            }
+            assert_eq!(fs::read(&path).unwrap(), original);
+        });
+    }
+}
+
+#[gpui::test]
+fn ascii_content_mb_uses_destination_state(cx: &mut TestAppContext) {
+    ascii_content_destination_case(cx, "mb");
+}
+
+#[gpui::test]
+fn ascii_content_uppercase_ma_uses_destination_state(cx: &mut TestAppContext) {
+    ascii_content_destination_case(cx, "MA");
+}
+
+#[gpui::test]
+fn ascii_staging_requires_comparable_existing_analysis(cx: &mut TestAppContext) {
+    for analysis in 0..3 {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("Example.ma");
+        write_mutation_scene(&path);
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state = test_state(directory.path(), "");
+            let mut row = if analysis == 2 {
+                test_row(1, &path)
+            } else {
+                mutation_row(1, &path)
+            };
+            row.selected = true;
+            if analysis == 0 {
+                row.paths_report.as_mut().unwrap().source = None;
+            } else if analysis == 1 {
+                row.paths_report = None;
+                row.dump_report = None;
+            }
+            shell.replace_rows(vec![row]);
+            shell.run_to_ascii(window, cx);
+        });
+        visual_cx.run_until_parked();
+        shell.read_with(visual_cx, |shell, _| {
+            if analysis == 2 {
+                assert!(shell.rows[0].staged.artifact().is_some());
+            } else {
+                assert!(matches!(shell.rows[0].staged, Staged::None));
+                assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message == &shell.i18n().text("banner.edit_requires_reanalysis")));
+            }
+        });
+    }
 }

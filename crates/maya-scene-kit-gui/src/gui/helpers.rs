@@ -1151,18 +1151,33 @@ pub(super) fn build_audit_clipboard_payload(
     sections.join("\n\n")
 }
 
+pub(super) fn source_fingerprint(
+    bytes: &[u8],
+) -> maya_scene_kit_observe::scene::paths::SceneSourceFingerprint {
+    use sha2::{Digest, Sha256};
+    maya_scene_kit_observe::scene::paths::SceneSourceFingerprint {
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+        byte_len: bytes.len(),
+    }
+}
+
+pub(super) fn read_destination_source(
+    path: &Path,
+) -> io::Result<Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(source_fingerprint(&bytes))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn validate_save_source(
     output_path: &Path,
     expected: Option<&maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     source_changed: &str,
 ) -> Result<(), io::Error> {
-    use sha2::{Digest, Sha256};
-
     let matches = expected.is_some_and(|expected| {
-        fs::read(output_path).is_ok_and(|bytes| {
-            bytes.len() == expected.byte_len
-                && format!("{:x}", Sha256::digest(&bytes)) == expected.sha256
-        })
+        fs::read(output_path).is_ok_and(|bytes| source_fingerprint(&bytes) == *expected)
     });
     if matches {
         Ok(())
@@ -1434,7 +1449,7 @@ pub(super) fn file_row_state_mark(row: &SceneRow) -> Option<RowStateMark> {
     }
     match row.status {
         FileStatus::Error(_) => Some(RowStateMark::Error),
-        FileStatus::Saved => Some(RowStateMark::Saved),
+        FileStatus::Saved | FileStatus::SavedWithWarning(_) => Some(RowStateMark::Saved),
         _ => None,
     }
 }

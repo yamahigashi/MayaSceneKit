@@ -29,7 +29,8 @@ pub(super) fn selected_row_error_lines(shell: &GuiShell) -> Vec<String> {
         .iter()
         .filter(|row| row.selected)
         .filter_map(|row| {
-            if let FileStatus::Error(message) = &row.status {
+            if let FileStatus::Error(message) | FileStatus::SavedWithWarning(message) = &row.status
+            {
                 Some(format!("{}: {message}", row.name))
             } else {
                 None
