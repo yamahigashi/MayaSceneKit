@@ -15,7 +15,7 @@ use maya_scene_kit_observe::scene::{
 use regex::Regex;
 
 use crate::{
-    mb::{MbPathReplaceRule, parse_file, remove_raw_script_nodes_from_mb},
+    mb::{MbPathReplaceRule, parse_file},
     scene::{
         CompositeSceneEditsPreview, CompositeSceneEditsStageResult, ExecutionCleanPreview,
         ExecutionCleanResult, ExecutionCleanStageResult, ExecutionCleanTarget,

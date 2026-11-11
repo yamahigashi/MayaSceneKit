@@ -9,11 +9,13 @@ pub(crate) use crate::ma::lexer::command_has_terminating_semicolon;
 use crate::{
     PathReplaceRule, PathReplaceSkips, ScenePathEntry,
     ma::{
-        commands::{Token, is_file_command_callback_flag, setattr_flag_arity, tokenize_command},
+        commands::{
+            Token, create_node_flag, is_file_command_callback_flag, setattr_flag_arity, token_text,
+            tokenize_command,
+        },
         lexer::{
-            extract_script_node_name_from_create, is_reference_attr, is_top_level_command,
-            looks_like_scene_path, parse_ma_quoted_literal, split_lines_keepends,
-            unescape_ma_string_literal,
+            is_reference_attr, is_top_level_command, looks_like_scene_path,
+            parse_ma_quoted_literal, split_lines_keepends, unescape_ma_string_literal,
         },
         paths::extract_raw_scene_paths_from_ma,
         text::escape_ma_string,
@@ -1353,6 +1355,27 @@ pub fn collect_path_owner_ranges_from_ma(
         return Vec::new();
     }
 
+    collect_owner_ranges_from_ma(data, |target| targets.contains(target))
+}
+
+pub fn collect_named_node_owner_ranges_from_ma(
+    data: &[u8],
+    node_names: &[String],
+) -> Vec<(Range<usize>, (String, String))> {
+    let names = node_names
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    collect_owner_ranges_from_ma(data, |(_, name)| names.contains(name.as_str()))
+}
+
+fn collect_owner_ranges_from_ma(
+    data: &[u8],
+    matches: impl Fn(&(String, String)) -> bool,
+) -> Vec<(Range<usize>, (String, String))> {
     let encoding = scan_light_bytes_with_options_and_sink(
         data,
         LightParseOptions {
@@ -1372,7 +1395,6 @@ pub fn collect_path_owner_ranges_from_ma(
         offsets.push(offsets.last().unwrap() + line.len());
     }
     let mut i = 0usize;
-    let mut line_number = 0usize;
 
     while i < lines.len() {
         let line_text = decode_owner_command_line(lines[i], encoding);
@@ -1382,36 +1404,35 @@ pub fn collect_path_owner_ranges_from_ma(
             let (command, next) = collect_top_level_command_block(&lines, i, encoding);
             if let Some(entry) = extract_reference_entry_from_raw_file_command(&command) {
                 let target = (entry.node_type, entry.node_name);
-                if targets.contains(&target) {
+                if matches(&target) {
                     ranges.push((offsets[i]..offsets[next], target));
                     i = next;
-                    line_number += command.lines().count().max(1);
                     continue;
                 }
             }
             i = next;
-            line_number += command.lines().count().max(1);
             continue;
         }
 
         if is_top_level_command(lines[i]) && trimmed.starts_with("createNode ") {
             let (command, next) = collect_top_level_command_block(&lines, i, encoding);
-            if let Some(block) = start_raw_create_node_block(trimmed.as_bytes(), line_number) {
+            if let Some(block) = start_raw_create_node_block(&command) {
                 let target = (block.node_type, block.node_name);
-                if targets.contains(&target) {
+                if matches(&target) {
+                    let mut next = next;
+                    while next < lines.len() && !is_top_level_command(lines[next]) {
+                        next += 1;
+                    }
                     ranges.push((offsets[i]..offsets[next], target));
                     i = next;
-                    line_number += command.lines().count().max(1);
                     continue;
                 }
             }
             i = next;
-            line_number += command.lines().count().max(1);
             continue;
         }
 
         i += 1;
-        line_number += 1;
     }
 
     ranges
@@ -1527,24 +1548,46 @@ struct ActiveScenePathBlock {
     node_name: String,
 }
 
-fn start_raw_create_node_block(trimmed: &[u8], line_number: usize) -> Option<ActiveScenePathBlock> {
-    let node_type = raw_create_node_type(trimmed)?;
+fn start_raw_create_node_block(command: &str) -> Option<ActiveScenePathBlock> {
+    let tokens = tokenize_command(command).ok()?;
+    if token_text(tokens.first()?)? != "createNode" {
+        return None;
+    }
+    let mut node_type = None;
+    let mut node_name = None;
+    let mut seen_flags = HashSet::new();
+    let mut index = 1;
+    while let Some(token) = tokens.get(index) {
+        if let Token::Bare(spelling) = token
+            && spelling.starts_with('-')
+        {
+            let flag = create_node_flag(spelling)?;
+            if !seen_flags.insert(flag.name) && !flag.allows_multiple {
+                return None;
+            }
+            let args = tokens.get(index + 1..index + 1 + flag.arity)?;
+            if args.iter().any(|arg| {
+                token_text(arg).is_none()
+                    || matches!(arg, Token::Bare(value) if value.starts_with('-'))
+            }) {
+                return None;
+            }
+            if flag.name == "name" {
+                node_name = Some(token_text(args.first()?)?.to_string());
+            }
+            index += flag.arity + 1;
+        } else {
+            if node_type.is_some() {
+                return None;
+            }
+            node_type = Some(token_text(token)?.to_string());
+            index += 1;
+        }
+    }
     Some(ActiveScenePathBlock {
-        node_type,
-        node_name: extract_script_node_name_from_create(trimmed, line_number),
+        node_type: node_type?,
+        node_name: node_name?,
     })
-}
-
-fn raw_create_node_type(trimmed: &[u8]) -> Option<String> {
-    let rest = trimmed.strip_prefix(b"createNode ")?;
-    let end = rest
-        .iter()
-        .position(|byte| byte.is_ascii_whitespace() || *byte == b';')
-        .unwrap_or(rest.len());
-    (end > 0)
-        .then(|| std::str::from_utf8(&rest[..end]).ok())
-        .flatten()
-        .map(ToOwned::to_owned)
 }
 
 fn scene_path_entry_from_setattr(

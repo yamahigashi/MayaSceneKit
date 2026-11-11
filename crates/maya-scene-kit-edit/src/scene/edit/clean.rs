@@ -1,3 +1,5 @@
+use maya_scene_kit_observe::scene::{Loader, evidence::ExecutionSurfaceKind};
+
 use super::{
     application::{
         Applied, absorbed, change, cleaned_targets, form_locator, normalized_away, range_locator,
@@ -22,12 +24,38 @@ impl PatchPlanner {
         input_path: &Path,
     ) -> Result<(SceneFormat, Applied<CleanChanges>), SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let format = ops::detect_scene_format(input_path)?;
-        let bytes = fs::read(input_path)?;
+        let (observation, bytes) =
+            Loader::new(self.options.load_options().clone()).observe_path_with_bytes(input_path)?;
+        let format = observation.scene_format();
+        let script_origins = observation
+            .execution_surfaces(0)?
+            .into_iter()
+            .map(|surface| surface.origin)
+            .filter(|origin| origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody)
+            .collect::<Vec<_>>();
         let mut scene = SceneEditChanges::default();
         let (output, removed_script_nodes) = if format == SceneFormat::Ma {
-            let (output, names) = scripts::remove_raw_script_nodes_from_ma(&bytes);
-            for (range, name) in scripts::collect_script_node_ranges_from_ma(&bytes, &[]) {
+            let mut ranges = scripts::collect_script_node_ranges_from_ma(&bytes, &[]);
+            let names = script_origins
+                .iter()
+                .filter_map(|origin| origin.node_name.clone())
+                .filter(|name| !ranges.iter().any(|(_, existing)| existing == name))
+                .collect::<Vec<_>>();
+            ranges.extend(
+                rewrite::collect_named_node_owner_ranges_from_ma(&bytes, &names)
+                    .into_iter()
+                    .filter(|(_, (node_type, _))| node_type != "script")
+                    .map(|(range, (_, name))| (range, name)),
+            );
+            ranges.sort_by_key(|(range, _)| range.start);
+            let mut edits = Vec::with_capacity(ranges.len());
+            let mut names = Vec::with_capacity(ranges.len());
+            for (range, name) in ranges {
+                names.push(name.clone());
+                edits.push(rewrite::MaByteEdit {
+                    range: range.clone(),
+                    bytes: Vec::new(),
+                });
                 scene.records.push(change(
                     &SceneEditIntent::Clean(ExecutionCleanTarget::ScriptNode { node_name: name }),
                     range_locator(&range),
@@ -35,19 +63,38 @@ impl PatchPlanner {
                     Vec::new(),
                 ));
             }
-            (output, names)
+            (rewrite::apply_ma_byte_edits(&bytes, &mut edits), names)
         } else if format == SceneFormat::Mb {
             let mb = crate::mb::parse_bytes(bytes)?;
-            let (output, names) =
-                remove_raw_script_nodes_from_mb(mb.data(), mb.root()).map_err(mb_rewrite_error)?;
-            let (forms, resolved_names) =
+            let (mut forms, mut names) =
                 crate::mb::paths::locate_raw_script_node_forms_in_mb_by_name(
                     mb.data(),
                     mb.root(),
                     crate::mb::MbNameSelection::All,
                 )
                 .value;
-            for ((form, offset), name) in forms.into_iter().zip(resolved_names) {
+            for origin in script_origins {
+                if let (Some(form), Some(offset), Some(name)) = (
+                    origin.chunk_form,
+                    origin.chunk_node_offset,
+                    origin.node_name,
+                ) {
+                    let locator = (form, offset);
+                    if !forms.contains(&locator) {
+                        forms.push(locator);
+                        names.push(name);
+                    }
+                }
+            }
+            let (output, removed) =
+                crate::mb::remove_root_forms_from_mb_by_locator(mb.data(), mb.root(), &forms)
+                    .map_err(mb_rewrite_error)?;
+            if forms.iter().any(|form| !removed.contains(form)) {
+                return Err(SceneToolError::Message(
+                    "requested script owner was not removed".into(),
+                ));
+            }
+            for ((form, offset), name) in forms.into_iter().zip(names.iter().cloned()) {
                 scene.records.push(binary_form_change(
                     mb.data(),
                     mb.root(),
@@ -80,8 +127,9 @@ impl PatchPlanner {
         targets: &[ExecutionCleanTarget],
     ) -> Result<(SceneFormat, Applied<CleanChanges>), SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let format = ops::detect_scene_format(input_path)?;
-        let bytes = fs::read(input_path)?;
+        let (observation, bytes) =
+            Loader::new(self.options.load_options().clone()).observe_path_with_bytes(input_path)?;
+        let format = observation.scene_format();
         let applied = apply_execution_clean(bytes, input_path, format, targets)?;
         Ok((format, applied))
     }
