@@ -216,6 +216,11 @@ fn header_path_encoding(data: &[u8]) -> Option<SourceEncoding> {
 }
 
 fn path_source(data: &[u8]) -> Result<(SourceEncoding, PathCommands), MaPathReplaceError> {
+    if data.is_ascii()
+        && let Some(encoding) = header_path_encoding(data)
+    {
+        return Ok((encoding, scan_path_commands(data, encoding, false)));
+    }
     if std::str::from_utf8(data).is_ok() {
         return Ok((
             SourceEncoding::Utf8,
