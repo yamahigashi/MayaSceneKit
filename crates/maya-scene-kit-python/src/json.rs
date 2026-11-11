@@ -495,3 +495,169 @@ mod graph_path_tests {
         assert!(panics.is_empty(), "path rendering panicked: {panics:?}");
     }
 }
+
+#[cfg(test)]
+mod audit_key_tests {
+    use std::collections::BTreeSet;
+
+    use maya_scene_kit_audit::scene::{ExecutionLanguage, audit_source_text};
+    use maya_scene_kit_observe::scene::evidence::{
+        ExecutionCoverageIssue, ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind,
+    };
+
+    use super::*;
+
+    fn populated_report() -> AuditReport {
+        let mut report = audit_source_text(
+            "import os\nos.system('echo Example')",
+            ExecutionLanguage::Python,
+        )
+        .unwrap();
+        report.scene_path = "asset/example/Example.ma".into();
+        report.coverage_issues.push(ExecutionCoverageIssue {
+            kind: ExecutionCoverageIssueKind::TopLevelDiagnostics,
+            detail: ExecutionCoverageIssueDetail::TopLevelDiagnostics {
+                diagnostic: "Example diagnostic".into(),
+            },
+            origin: None,
+            preview: "Example".into(),
+        });
+        report.digests.scene_sha256 = "0".repeat(64);
+        report.digests.schema_bundle_sha256 = Some("1".repeat(64));
+        report.digests.policy_bundle_sha256 = Some("2".repeat(64));
+        assert!(!report.findings.is_empty());
+        assert!(!report.coverage_issues.is_empty());
+        assert!(!report.digests.scene_sha256.is_empty());
+        report
+    }
+
+    fn assert_keys(rendered: Value, serialized: Value, extra_keys: &[&str]) {
+        let actual = rendered
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut expected = serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        expected.extend(extra_keys.iter().copied());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn audit_notice_keys_include_all_serde_fields() {
+        let notice = AuditNotice::parse_budget_exceeded(1);
+        assert_keys(
+            audit_notice(&notice),
+            serde_json::to_value(&notice).unwrap(),
+            &[],
+        );
+    }
+
+    #[test]
+    fn audit_surface_keys_include_all_serde_fields() {
+        let report = populated_report();
+        let surface = &report.surfaces[0];
+        assert_keys(
+            audit_surface(surface),
+            serde_json::to_value(surface).unwrap(),
+            &[],
+        );
+    }
+
+    #[test]
+    fn audit_finding_keys_include_all_serde_fields() {
+        use maya_scene_kit_audit::scene::{AllowlistSource, AuditAllowRef};
+
+        let mut report = populated_report();
+        let finding = &mut report.findings[0];
+        finding.allowed_by = Some(AuditAllowRef {
+            hash: format!("sha256:{}", "0".repeat(64)).parse().unwrap(),
+            source: AllowlistSource::User,
+        });
+        let serialized = serde_json::to_value(&*finding).unwrap();
+        assert!(serialized["allowed_by"].is_object());
+        assert_keys(audit_finding(finding), serialized, &[]);
+    }
+
+    #[test]
+    fn audit_review_signal_keys_include_all_serde_fields() {
+        use maya_scene_kit_audit::scene::{AuditReviewCode, AuditReviewDetail};
+
+        let signal = AuditReviewSignal {
+            code: AuditReviewCode::PythonMayaUncertain,
+            surface_index: 0,
+            detail: AuditReviewDetail::FreeText {
+                message: "Example review".into(),
+            },
+            evidence: vec![],
+            preview_override: Some("Example".into()),
+        };
+        assert_keys(
+            audit_review_signal(&signal),
+            serde_json::to_value(&signal).unwrap(),
+            &[],
+        );
+    }
+
+    #[test]
+    fn audit_report_keys_include_all_serde_fields() {
+        let report = populated_report();
+        assert_keys(
+            audit_report(&report),
+            serde_json::to_value(&report).unwrap(),
+            &[
+                "notice_count",
+                "finding_count",
+                "allowed_finding_count",
+                "review_signal_count",
+            ],
+        );
+    }
+
+    #[test]
+    fn audit_graph_report_keys_include_all_serde_fields() {
+        let scene_report = populated_report();
+        let report = AuditGraphReport {
+            roots: vec![maya_scene_kit_audit::scene::AuditGraphRoot {
+                path: "asset/example/Example.ma".into(),
+                identity: Some("Example".into()),
+                report_index: Some(0),
+                issue_index: None,
+            }],
+            disposition: scene_report.disposition,
+            reports: vec![scene_report],
+            edges: vec![],
+            traversal_issues: vec![],
+        };
+        assert_keys(
+            audit_graph_report(&report),
+            serde_json::to_value(&report).unwrap(),
+            &[
+                "scene_path",
+                "profile",
+                "validation_state",
+                "coverage_state",
+                "coverage_issues",
+                "blocked_on_uncertainty",
+                "root_count",
+                "scene_count",
+                "edge_count",
+                "traversal_issue_count",
+                "surface_count",
+                "finding_count",
+                "allowed_finding_count",
+                "review_signal_count",
+                "notice_count",
+                "notices",
+                "review_signals",
+                "findings",
+                "root_report",
+            ],
+        );
+    }
+}
