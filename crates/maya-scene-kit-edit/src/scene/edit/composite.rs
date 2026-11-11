@@ -40,7 +40,13 @@ impl PatchPlanner {
             }
         };
         if output == bytes {
-            return Err(SceneEditError::NoEffectiveEdits);
+            return Err(SceneEditError::NoEffectiveEdits {
+                skipped: changes
+                    .records
+                    .into_iter()
+                    .filter(|record| record.status == SceneEditStatus::Skipped)
+                    .collect(),
+            });
         }
         summarize(&mut changes);
         let cleaned_targets = changes
@@ -408,7 +414,7 @@ fn apply_ascii(
     intents: &[SceneEditIntent],
 ) -> Result<(Vec<u8>, SceneEditChanges), SceneEditError> {
     let mut changes = SceneEditChanges::default();
-    changes.path_replacements.skipped = Some(rewrite::MaPathReplaceSkips::default());
+    changes.path_replacements.skipped = Some(Box::default());
     let mut edits = Vec::new();
     let commands = intents
         .iter()
@@ -507,7 +513,7 @@ fn apply_ascii(
     let overrides = path_overrides(intents);
     let candidates =
         rewrite::collect_ma_path_candidates(bytes, &overrides.keys().copied().collect::<Vec<_>>())?;
-    *changes.path_replacements.skipped.as_mut().unwrap() = candidates.skipped;
+    **changes.path_replacements.skipped.as_mut().unwrap() = candidates.skipped;
     let mut path_edits = Vec::new();
     for candidate in candidates.candidates {
         let value = overrides[&candidate.entry_index];
@@ -637,7 +643,13 @@ fn apply_ascii(
         bytes: edit.bytes,
     }));
     if path_edits.is_empty() {
-        return Err(SceneEditError::NoEffectiveEdits);
+        return Err(SceneEditError::NoEffectiveEdits {
+            skipped: changes
+                .records
+                .into_iter()
+                .filter(|record| record.status == SceneEditStatus::Skipped)
+                .collect(),
+        });
     }
     Ok((
         rewrite::apply_ma_byte_edits(bytes, &mut path_edits),
@@ -645,7 +657,10 @@ fn apply_ascii(
     ))
 }
 
-fn add_skips(to: &mut rewrite::MaPathReplaceSkips, from: &rewrite::MaPathReplaceSkips) {
+fn add_skips(
+    to: &mut maya_scene_kit_formats::PathReplaceSkips,
+    from: &maya_scene_kit_formats::PathReplaceSkips,
+) {
     to.non_utf8 += from.non_utf8;
     to.non_canonical_escape += from.non_canonical_escape;
     to.unrepresentable += from.unrepresentable;
@@ -673,6 +688,8 @@ fn apply_binary(
     intents: &[SceneEditIntent],
 ) -> Result<(Vec<u8>, SceneEditChanges), SceneEditError> {
     let mut changes = SceneEditChanges::default();
+    changes.path_replacements.skipped =
+        Some(Box::new(maya_scene_kit_formats::PathReplaceSkips::binary()));
     let mut physical = binary::MbOriginalEdits::default();
     for intent in intents {
         let forms = match intent {
@@ -811,22 +828,45 @@ fn apply_binary(
                     &form_locator(&candidate.locator.form, candidate.locator.node_offset),
                     false,
                 );
-            } else if let Some(edit) =
-                binary::plan_mb_path_value(bytes, root, &candidate, &value.after_value)?
-            {
-                record.after.clone_from(&edit.bytes);
-                physical.rewritten_records.push(edit);
             } else {
-                record.status = SceneEditStatus::Unchanged;
-                record.reason = "payload unchanged".into();
-                record.after.clone_from(&record.before);
+                let (edit, status) =
+                    binary::plan_mb_path_value(bytes, root, &candidate, &value.after_value)?;
+                if let Some(edit) = edit {
+                    record.after.clone_from(&edit.bytes);
+                    physical.rewritten_records.push(edit);
+                } else if status == binary::MbPathStatus::Unchanged {
+                    record.status = SceneEditStatus::Unchanged;
+                    record.reason = "payload unchanged".into();
+                } else {
+                    record.status = SceneEditStatus::Skipped;
+                    record.reason = match status {
+                        binary::MbPathStatus::Undecodable => "undecodable",
+                        binary::MbPathStatus::PayloadRejected => "payload_rejected",
+                        _ => unreachable!(),
+                    }
+                    .into();
+                    let skipped = changes.path_replacements.skipped.get_or_insert_with(|| {
+                        Box::new(maya_scene_kit_formats::PathReplaceSkips::binary())
+                    });
+                    if status == binary::MbPathStatus::Undecodable {
+                        skipped.non_utf8 += 1;
+                    } else {
+                        *skipped.payload_rejected.as_mut().unwrap() += 1;
+                    }
+                }
             }
             changes.records.push(record);
         }
     }
     changes.physical_deletion_count = physical.removed_forms.len() + physical.removed_records.len();
     if changes.physical_deletion_count == 0 && physical.rewritten_records.is_empty() {
-        return Err(SceneEditError::NoEffectiveEdits);
+        return Err(SceneEditError::NoEffectiveEdits {
+            skipped: changes
+                .records
+                .into_iter()
+                .filter(|record| record.status == SceneEditStatus::Skipped)
+                .collect(),
+        });
     }
     binary::validate_mb_original_edits(&physical)?;
     Ok((

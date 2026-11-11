@@ -29,11 +29,7 @@ impl PatchPlanner {
         self.options.reject_if_not_forensic()?;
 
         let compiled_rules = super::replace_rules::CompiledPreviewReplaceRules::compile(rules)?;
-        let applied = if report.scene_format == SceneFormat::Ma {
-            Some(self.materialize_replaced_scene_bytes(&report.scene_path, rules)?)
-        } else {
-            None
-        };
+        let applied = Some(self.materialize_replaced_scene_bytes(&report.scene_path, rules)?);
         Ok(self.path_candidate_preview_from_application(report, &compiled_rules, applied.as_ref()))
     }
 
@@ -50,7 +46,9 @@ impl PatchPlanner {
             .iter()
             .enumerate()
             .map(|(entry_index, entry)| {
-                let (after_value, replacement_count) = if applied.is_some() {
+                let (after_value, replacement_count) = if report.scene_format == SceneFormat::Mb {
+                    mb_preview_change(applied.unwrap(), entry_index, &entry.value)
+                } else if applied.is_some() {
                     changes.take(entry)
                 } else {
                     compiled_rules.apply(&entry.value)
@@ -71,7 +69,11 @@ impl PatchPlanner {
             scene_format: report.scene_format,
             operation_mode: self.options.operation_mode,
             validation_state: report.validation_state,
-            matched_count: items.iter().map(|item| item.replacement_count).sum(),
+            matched_count: items
+                .iter()
+                .filter(|item| item.replacement_count > 0)
+                .count(),
+            applied_count: applied.map_or(0, |result| result.changes.replacement_count),
             items,
         }
     }
@@ -94,11 +96,9 @@ impl PatchPlanner {
         self.options.reject_if_not_forensic()?;
 
         let targets = super::replace_rules::resolve_targeted_overrides(report, overrides)?;
-        let applied = if report.scene_format == SceneFormat::Ma {
-            Some(self.materialize_replaced_scene_bytes_from_overrides_in_report(report, overrides)?)
-        } else {
-            None
-        };
+        let applied = Some(
+            self.materialize_replaced_scene_bytes_from_overrides_in_report(report, overrides)?,
+        );
         Ok(self.path_override_preview_from_application(report, &targets, applied.as_ref()))
     }
 
@@ -113,7 +113,9 @@ impl PatchPlanner {
         let items: Vec<_> = targets
             .iter()
             .map(|target| {
-                let (after_value, replacement_count) = if applied.is_some() {
+                let (after_value, replacement_count) = if report.scene_format == SceneFormat::Mb {
+                    mb_preview_change(applied.unwrap(), target.entry_index, &target.entry.value)
+                } else if applied.is_some() {
                     changes.take(&target.entry)
                 } else {
                     (
@@ -137,7 +139,11 @@ impl PatchPlanner {
             scene_format: report.scene_format,
             operation_mode: self.options.operation_mode,
             validation_state: report.validation_state,
-            matched_count: items.iter().map(|item| item.replacement_count).sum(),
+            matched_count: items
+                .iter()
+                .filter(|item| item.replacement_count > 0)
+                .count(),
+            applied_count: applied.map_or(0, |result| result.changes.replacement_count),
             items,
         }
     }
@@ -420,6 +426,7 @@ pub(super) fn matched_path_preview(preview: PathReplaceCandidatePreview) -> Path
         operation_mode: preview.operation_mode,
         validation_state: preview.validation_state,
         matched_count: preview.matched_count,
+        applied_count: preview.applied_count,
         items,
     }
 }
@@ -470,4 +477,24 @@ impl<'a> MaPreviewChanges<'a> {
                 |change| (change.after_value.clone(), change.replacement_count),
             )
     }
+}
+
+fn mb_preview_change(
+    applied: &super::paths::AppliedPathReplacement,
+    entry_index: usize,
+    before: &str,
+) -> (String, usize) {
+    let mut after = before.to_owned();
+    let mut count = 0;
+    for change in &applied.mb_paths {
+        if change.entry_index == Some(entry_index)
+            && change.status == crate::mb::rewrite::MbPathStatus::Applied
+        {
+            count += 1;
+            if let Some(value) = &change.after_value {
+                after.clone_from(value);
+            }
+        }
+    }
+    (after, count)
 }

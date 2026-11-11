@@ -38,7 +38,7 @@ pub struct PathReplaceOverride {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PathReplaceChanges {
     pub replacement_count: usize,
-    pub skipped: Option<maya_scene_kit_formats::ma::rewrite::MaPathReplaceSkips>,
+    pub skipped: Option<Box<maya_scene_kit_formats::PathReplaceSkips>>,
 }
 
 /// Result of rewriting scene paths.
@@ -56,7 +56,7 @@ pub struct PathReplaceResult {
     pub validation_state: ValidationState,
     /// Number of rewritten paths.
     pub replaced_count: usize,
-    pub skipped: Option<maya_scene_kit_formats::ma::rewrite::MaPathReplaceSkips>,
+    pub skipped: Option<Box<maya_scene_kit_formats::PathReplaceSkips>>,
 }
 
 /// One planned path replacement preview row.
@@ -108,8 +108,10 @@ pub struct PathReplacePreview {
     pub operation_mode: OperationMode,
     /// Integrity state associated with the preview path.
     pub validation_state: ValidationState,
-    /// Number of replacements that would be applied.
+    /// Number of report entries with an applied change.
     pub matched_count: usize,
+    /// Number of changed MA literals or MB payload records.
+    pub applied_count: usize,
     /// Expandable before/after details for affected values.
     pub items: Vec<PathReplacePreviewItem>,
 }
@@ -125,8 +127,10 @@ pub struct PathReplaceCandidatePreview {
     pub operation_mode: OperationMode,
     /// Integrity state associated with the preview path.
     pub validation_state: ValidationState,
-    /// Number of replacements that would be applied.
+    /// Number of report entries with an applied change.
     pub matched_count: usize,
+    /// Number of changed MA literals or MB payload records.
+    pub applied_count: usize,
     /// Expandable before/after details for all candidate values.
     pub items: Vec<PathReplaceCandidateItem>,
 }

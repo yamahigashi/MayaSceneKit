@@ -35,7 +35,7 @@ fn preview_stage_and_save_report_actual_literal_changes_and_skips() {
             .unwrap()
             .changes
             .skipped
-            .is_none()
+            .is_some()
     );
     assert_eq!(std::fs::read(&input).unwrap(), original);
     assert_eq!(std::fs::read(&output).unwrap(), stage.artifact.bytes);
@@ -60,7 +60,8 @@ fn preview_counts_concatenated_literals_and_targeted_encoding_skips() {
     }];
     let stage = stage_replace_scene_paths(&input, &rules).unwrap();
     assert_eq!(stage.changes.replacement_count, 2);
-    assert_eq!(stage.preview.matched_count, 2);
+    assert_eq!(stage.preview.matched_count, 1);
+    assert_eq!(stage.preview.applied_count, 2);
     assert_eq!(stage.preview.items[0].replacement_count, 2);
     let crossing = [PathReplaceRule {
         from: "old/old".into(),

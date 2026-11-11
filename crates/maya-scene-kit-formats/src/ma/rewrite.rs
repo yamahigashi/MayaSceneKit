@@ -7,7 +7,7 @@ use std::{
 // can preserve source formatting without becoming a semantic owner.
 pub(crate) use crate::ma::lexer::command_has_terminating_semicolon;
 use crate::{
-    PathReplaceRule, ScenePathEntry,
+    PathReplaceRule, PathReplaceSkips, ScenePathEntry,
     ma::{
         commands::{Token, setattr_flag_arity, tokenize_command},
         lexer::{
@@ -23,26 +23,6 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-pub struct MaPathReplaceSkips {
-    pub non_utf8: usize,
-    pub non_canonical_escape: usize,
-    pub unrepresentable: usize,
-    pub crosses_concat_boundary: usize,
-    pub unterminated_tail: usize,
-    pub unterminated_tail_from: Option<usize>,
-}
-
-impl MaPathReplaceSkips {
-    pub fn total(&self) -> usize {
-        self.non_utf8
-            + self.non_canonical_escape
-            + self.unrepresentable
-            + self.crosses_concat_boundary
-            + self.unterminated_tail
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct MaPathReplaceChange {
     pub entry: Option<ScenePathEntry>,
@@ -55,7 +35,7 @@ pub struct MaPathReplaceChange {
 pub struct MaPathReplaceResult {
     pub bytes: Vec<u8>,
     pub replacement_count: usize,
-    pub skipped: MaPathReplaceSkips,
+    pub skipped: PathReplaceSkips,
     pub paths: Vec<MaPathReplaceChange>,
 }
 
@@ -683,7 +663,7 @@ fn escaped_path_bytes(value: &str, encoding: SourceEncoding) -> Option<Vec<u8>> 
 
 pub struct MaPathRangeSkip {
     pub range: Range<usize>,
-    pub skipped: MaPathReplaceSkips,
+    pub skipped: PathReplaceSkips,
 }
 
 struct MaPathCandidateApplication {
@@ -697,7 +677,7 @@ fn apply_path_candidate(
     candidate: PathCandidate,
     rules: &[PathMatchRule],
     override_value: Option<&str>,
-    skipped: &mut MaPathReplaceSkips,
+    skipped: &mut PathReplaceSkips,
     edits: &mut Vec<MaByteEdit>,
 ) -> MaPathCandidateApplication {
     let decoded: Vec<_> = candidate
@@ -802,7 +782,7 @@ fn apply_path_candidate(
         if !decoded[i].1 && (!crossed[i] || local_match[i]) {
             reasons[i] = 1;
         }
-        let mut range_skipped = MaPathReplaceSkips {
+        let mut range_skipped = PathReplaceSkips {
             non_utf8: usize::from(reasons[i] == 1),
             non_canonical_escape: usize::from(reasons[i] == 2),
             crosses_concat_boundary: usize::from(crossed[i]),
@@ -852,7 +832,7 @@ fn empty_path_result(data: &[u8]) -> MaPathReplaceResult {
     MaPathReplaceResult {
         bytes: data.to_vec(),
         replacement_count: 0,
-        skipped: MaPathReplaceSkips::default(),
+        skipped: PathReplaceSkips::default(),
         paths: Vec::new(),
     }
 }
@@ -918,7 +898,7 @@ fn replace_raw_scene_paths_in_ma_with_rules(
     let mut result = MaPathReplaceResult {
         bytes: Vec::new(),
         replacement_count: 0,
-        skipped: MaPathReplaceSkips::default(),
+        skipped: PathReplaceSkips::default(),
         paths: Vec::new(),
     };
     result.skipped.unterminated_tail_from = commands.unterminated_tail_from;
@@ -972,12 +952,12 @@ impl MaPathCandidatePlan {
 
 pub struct MaPathCandidatesPlan {
     pub candidates: Vec<MaPathCandidatePlan>,
-    pub skipped: MaPathReplaceSkips,
+    pub skipped: PathReplaceSkips,
 }
 
 pub struct MaPathValuePlan {
     pub edits: Vec<MaByteEdit>,
-    pub skipped: MaPathReplaceSkips,
+    pub skipped: PathReplaceSkips,
     pub skipped_ranges: Vec<MaPathRangeSkip>,
 }
 
@@ -988,7 +968,7 @@ pub fn collect_ma_path_candidates(
     if indices.is_empty() {
         return Ok(MaPathCandidatesPlan {
             candidates: Vec::new(),
-            skipped: MaPathReplaceSkips::default(),
+            skipped: PathReplaceSkips::default(),
         });
     }
     let (encoding, commands) = path_source(data)?;
@@ -1017,10 +997,10 @@ pub fn collect_ma_path_candidates(
     }
     Ok(MaPathCandidatesPlan {
         candidates: plans,
-        skipped: MaPathReplaceSkips {
+        skipped: PathReplaceSkips {
             unterminated_tail: usize::from(commands.unterminated_tail_from.is_some()),
             unterminated_tail_from: commands.unterminated_tail_from,
-            ..MaPathReplaceSkips::default()
+            ..PathReplaceSkips::default()
         },
     })
 }
@@ -1034,11 +1014,11 @@ pub fn plan_ma_path_value(
     if after == candidate.entry().value {
         return MaPathValuePlan {
             edits: Vec::new(),
-            skipped: MaPathReplaceSkips::default(),
+            skipped: PathReplaceSkips::default(),
             skipped_ranges: Vec::new(),
         };
     }
-    let mut skipped = MaPathReplaceSkips::default();
+    let mut skipped = PathReplaceSkips::default();
     let mut edits = Vec::new();
     let mut selected = candidate.candidate.clone();
     selected.excluded_ranges = excluded_ranges.to_vec();
@@ -1692,7 +1672,7 @@ setAttr ".ftn" -type "string" ("asset\d/" + "example/file.tx");
             replacement: "Sample".into(),
             literal: true,
         }];
-        let mut skipped = super::MaPathReplaceSkips::default();
+        let mut skipped = super::PathReplaceSkips::default();
         let mut edits = Vec::new();
         let applied = super::apply_path_candidate(
             input,

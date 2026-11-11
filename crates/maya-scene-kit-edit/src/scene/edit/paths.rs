@@ -5,6 +5,7 @@ pub(super) struct AppliedPathReplacement {
     pub bytes: Vec<u8>,
     pub changes: crate::scene::PathReplaceChanges,
     pub paths: Vec<rewrite::MaPathReplaceChange>,
+    pub mb_paths: Vec<crate::mb::rewrite::MbPathChange>,
 }
 
 impl From<rewrite::MaPathReplaceResult> for AppliedPathReplacement {
@@ -13,9 +14,10 @@ impl From<rewrite::MaPathReplaceResult> for AppliedPathReplacement {
             bytes: result.bytes,
             changes: crate::scene::PathReplaceChanges {
                 replacement_count: result.replacement_count,
-                skipped: Some(result.skipped),
+                skipped: Some(Box::new(result.skipped)),
             },
             paths: result.paths,
+            mb_paths: Vec::new(),
         }
     }
 }
@@ -73,10 +75,11 @@ impl PatchPlanner {
             return Ok(AppliedPathReplacement {
                 bytes: rewritten,
                 changes: crate::scene::PathReplaceChanges {
-                    replacement_count,
-                    skipped: None,
+                    replacement_count: replacement_count.replacement_count,
+                    skipped: Some(Box::new(replacement_count.skipped)),
                 },
                 paths: Vec::new(),
+                mb_paths: replacement_count.paths,
             });
         }
 
@@ -118,10 +121,11 @@ impl PatchPlanner {
             return Ok(AppliedPathReplacement {
                 bytes: rewritten,
                 changes: crate::scene::PathReplaceChanges {
-                    replacement_count,
-                    skipped: None,
+                    replacement_count: replacement_count.replacement_count,
+                    skipped: Some(Box::new(replacement_count.skipped)),
                 },
                 paths: Vec::new(),
+                mb_paths: replacement_count.paths,
             });
         }
 

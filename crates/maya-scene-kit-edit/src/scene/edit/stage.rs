@@ -19,11 +19,7 @@ impl PatchPlanner {
             scene_format: staged.preview.scene_format,
             operation_mode: staged.preview.operation_mode,
             validation_state: staged.preview.validation_state,
-            replaced_count: if staged.preview.scene_format == SceneFormat::Ma {
-                staged.changes.replacement_count
-            } else {
-                staged.preview.matched_count
-            },
+            replaced_count: staged.changes.replacement_count,
             skipped: staged.changes.skipped,
         })
     }
@@ -36,12 +32,9 @@ impl PatchPlanner {
         let report = self.collect_scene_paths_report(input_path.as_ref())?;
         let compiled = super::replace_rules::CompiledPreviewReplaceRules::compile(rules)?;
         let applied = self.materialize_replaced_scene_bytes(&input_path, rules)?;
-        let preview =
-            super::preview::matched_path_preview(self.path_candidate_preview_from_application(
-                &report,
-                &compiled,
-                (report.scene_format == SceneFormat::Ma).then_some(&applied),
-            ));
+        let preview = super::preview::matched_path_preview(
+            self.path_candidate_preview_from_application(&report, &compiled, Some(&applied)),
+        );
         Ok(PathReplaceStageResult {
             changes: applied.changes,
             artifact: StagedSceneArtifact {
@@ -78,11 +71,7 @@ impl PatchPlanner {
         let targets = super::replace_rules::resolve_targeted_overrides(report, overrides)?;
         let applied =
             self.materialize_replaced_scene_bytes_from_overrides_in_report(report, overrides)?;
-        let preview = self.path_override_preview_from_application(
-            report,
-            &targets,
-            (report.scene_format == SceneFormat::Ma).then_some(&applied),
-        );
+        let preview = self.path_override_preview_from_application(report, &targets, Some(&applied));
         Ok(PathReplaceStageResult {
             changes: applied.changes,
             artifact: StagedSceneArtifact {

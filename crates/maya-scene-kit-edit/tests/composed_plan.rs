@@ -346,7 +346,7 @@ fn stale_missing_filtered_and_foreign_sources_are_rejected_without_artifact() {
     };
     assert!(matches!(
         stage_scene_edit_plan(&plan, source),
-        Err(SceneEditError::NoEffectiveEdits)
+        Err(SceneEditError::NoEffectiveEdits { .. })
     ));
     let mut missing = plan.clone();
     missing.report.source = None;

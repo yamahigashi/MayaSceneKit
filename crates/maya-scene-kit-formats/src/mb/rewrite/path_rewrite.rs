@@ -1,18 +1,15 @@
-use std::{borrow::Cow, collections::HashMap, num::NonZeroUsize};
+use std::{borrow::Cow, collections::HashMap, num::NonZeroUsize, ops::Range};
 
-use maya_mb::ParsedSection;
-
-// MB rewrite helpers intentionally stay chunk-oriented so replacement can preserve
-// binary layout details without becoming the canonical semantic inspection path.
-use crate::mb::{
-    Chunk, ChunkLayout, FourCC, LayoutHints, parse_section_chunks_with_hints,
-    parse_section_chunks_with_hints_with_budget,
-    paths::{extract_raw_scene_path_records_from_mb_parts, extract_raw_scene_paths_from_mb_parts},
-    resolve_section_layout_hints,
-    rewrite::{encode_chunk, encode_root_chunk, rewrite_attr_payload_string_preserving_shape},
-};
+use super::{MbPayloadLocator, MbRewriteError, encode_chunk, encode_root_chunk};
 use crate::{
+    PathReplaceSkips,
     ma::types::PathReplaceRule,
+    mb::{
+        Chunk, ChunkLayout, FourCC, parse_section_chunks_with_hints,
+        paths::{
+            extract_raw_scene_path_records_from_mb_parts, extract_raw_scene_paths_from_mb_parts,
+        },
+    },
     reference_semantics::{ScenePathAttrKind, classify_scene_path_attr},
     replace_rules::CompiledPathReplaceRules,
 };
@@ -24,967 +21,454 @@ pub struct MbPathReplaceRule {
     pub mode: crate::ma::types::PathReplaceMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MbPathStatus {
+    Applied,
+    Unchanged,
+    Undecodable,
+    PayloadRejected,
+    UnmatchedLocator,
+    DuplicateRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct MbPathChange {
+    pub locator: Option<MbPayloadLocator>,
+    pub entry_index: Option<usize>,
+    pub before_value: Option<String>,
+    pub after_value: Option<String>,
+    pub status: MbPathStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct MbPathChanges {
+    pub replacement_count: usize,
+    pub skipped: PathReplaceSkips,
+    pub paths: Vec<MbPathChange>,
+}
+
+impl Default for MbPathChanges {
+    fn default() -> Self {
+        Self {
+            replacement_count: 0,
+            skipped: PathReplaceSkips::binary(),
+            paths: Vec::new(),
+        }
+    }
+}
+
+impl MbPathChanges {
+    fn push(&mut self, change: MbPathChange) {
+        match change.status {
+            MbPathStatus::Applied => self.replacement_count += 1,
+            MbPathStatus::Undecodable => self.skipped.non_utf8 += 1,
+            MbPathStatus::PayloadRejected => *self.skipped.payload_rejected.as_mut().unwrap() += 1,
+            MbPathStatus::UnmatchedLocator => {
+                *self.skipped.unmatched_locator.as_mut().unwrap() += 1
+            }
+            MbPathStatus::DuplicateRequest => {
+                *self.skipped.duplicate_request.as_mut().unwrap() += 1
+            }
+            MbPathStatus::Unchanged => {}
+        }
+        self.paths.push(change);
+    }
+}
+
+type SectionEncoder = fn(
+    &maya_mb::ParsedSection,
+    &[u8],
+    &[(usize, &[u8])],
+) -> Result<Vec<u8>, crate::mb::EncodeError>;
+type ChunkEncoder = fn(&Chunk, &[u8]) -> Result<Vec<u8>, crate::mb::EncodeError>;
+
+struct PathEncoders {
+    section: SectionEncoder,
+    child: ChunkEncoder,
+    root: ChunkEncoder,
+}
+
+impl Default for PathEncoders {
+    fn default() -> Self {
+        Self {
+            section: maya_mb::ParsedSection::rewrite_payloads,
+            child: |child, payload| {
+                encode_chunk(
+                    child.tag(),
+                    child.aux(),
+                    payload,
+                    ChunkLayout::new(NonZeroUsize::new(4).unwrap(), child.header_format()),
+                )
+            },
+            root: encode_root_chunk,
+        }
+    }
+}
+
+enum Replacement<'a> {
+    Rules(&'a CompiledPathReplaceRules),
+    Targets(&'a HashMap<TargetKey, String>),
+}
+
 pub fn replace_scene_paths_in_mb_cow<'a>(
     data: &'a [u8],
     root: &Chunk,
     rules: &[MbPathReplaceRule],
-) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
-    let compiled_rules = CompiledPathReplaceRules::compile_lossy(&normalize_mb_rules(rules));
-    replace_raw_scene_paths_in_mb_with_rules(data, root, &compiled_rules, &|_, _| true)
+) -> Result<(Cow<'a, [u8]>, MbPathChanges), MbRewriteError> {
+    let compiled = CompiledPathReplaceRules::compile_lossy(&normalize_mb_rules(rules));
+    replace_raw_scene_paths_in_mb_with_rules(data, root, &compiled, &|_, _| true)
 }
 
 fn replace_raw_scene_paths_in_mb_with_rules<'a>(
     data: &'a [u8],
     root: &Chunk,
-    compiled_rules: &CompiledPathReplaceRules,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
-    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
-    if compiled_rules.is_empty() || root.children().is_empty() {
-        return Ok((Cow::Borrowed(data), 0));
-    }
-    let children = root.children();
-    let mut payload_parts: Vec<u8> = Vec::new();
-    payload_parts.extend_from_slice(root.form_type().unwrap_or(FourCC::new(*b"Maya")).as_bytes());
-
-    let first_child_start = children[0].offset();
-    let prefix_start = root.payload_offset() + 4;
-    if first_child_start > prefix_start {
-        payload_parts.extend_from_slice(&data[prefix_start..first_child_start]);
-    }
-
-    let mut total = 0usize;
-    for child in children {
-        let next_offset = crate::mb::rewrite::child_span_end(root, child);
-        let original_span = &data[child.offset()..next_offset];
-
-        if child.form_type().is_some_and(|f| f == "RTFT") {
-            if let Some((rewritten, count)) =
-                rewrite_rtft_child(child, data, compiled_rules, accept_payload)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
-        } else if child.form_type().is_some_and(|f| f == "FRDI") {
-            if let Some((rewritten, count)) =
-                rewrite_frdi_child(child, data, compiled_rules, accept_payload)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
-        } else if child.form_type().is_some_and(|f| f == "FREF") {
-            if let Some((rewritten, count)) =
-                rewrite_fref_child(child, data, compiled_rules, accept_payload)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
-        } else if child.form_type().is_some_and(|f| f == "HEAD") {
-            if let Some((rewritten, count)) =
-                rewrite_head_child(child, data, compiled_rules, accept_payload)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
-        }
-
-        payload_parts.extend_from_slice(original_span);
-    }
-
-    if total == 0 {
-        return Ok((Cow::Borrowed(data), 0));
-    }
-
-    let Ok(encoded) = encode_root_chunk(root, &payload_parts) else {
-        return Ok((Cow::Borrowed(data), 0));
-    };
-    Ok((Cow::Owned(encoded), total))
+    rules: &CompiledPathReplaceRules,
+    accept: &impl Fn(usize, usize) -> bool,
+) -> Result<(Cow<'a, [u8]>, MbPathChanges), MbRewriteError> {
+    replace_mb_paths(
+        data,
+        root,
+        Replacement::Rules(rules),
+        accept,
+        MbPathChanges::default(),
+        &PathEncoders::default(),
+    )
 }
 
 pub fn replace_scene_paths_in_mb(
     data: &[u8],
     root: &Chunk,
     rules: &[MbPathReplaceRule],
-) -> Result<(Vec<u8>, usize), crate::mb::MbRewriteError> {
+) -> Result<(Vec<u8>, MbPathChanges), MbRewriteError> {
     replace_scene_paths_in_mb_cow(data, root, rules)
-        .map(|(bytes, count)| (bytes.into_owned(), count))
+        .map(|(bytes, changes)| (bytes.into_owned(), changes))
 }
 
 pub fn replace_scene_paths_in_mb_by_index(
     data: &[u8],
     root: &Chunk,
     replacements: &[(usize, String)],
-) -> Result<(Vec<u8>, usize), crate::mb::MbRewriteError> {
+) -> Result<(Vec<u8>, MbPathChanges), MbRewriteError> {
     replace_scene_paths_in_mb_by_index_cow(data, root, replacements)
-        .map(|(bytes, count)| (bytes.into_owned(), count))
+        .map(|(bytes, changes)| (bytes.into_owned(), changes))
 }
 
 pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
     data: &'a [u8],
     root: &Chunk,
     replacements: &[(usize, String)],
-) -> Result<(Cow<'a, [u8]>, usize), crate::mb::MbRewriteError> {
-    crate::mb::rewrite::require_complete_mb_sections(data, root)?;
-    if replacements.is_empty() || root.children().is_empty() {
-        return Ok((Cow::Borrowed(data), 0));
+) -> Result<(Cow<'a, [u8]>, MbPathChanges), MbRewriteError> {
+    super::require_complete_mb_sections(data, root)?;
+    let mut changes = MbPathChanges::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, _) in replacements {
+        if !seen.insert(index) {
+            changes.push(MbPathChange {
+                locator: None,
+                entry_index: Some(*index),
+                before_value: None,
+                after_value: None,
+                status: MbPathStatus::DuplicateRequest,
+            });
+        }
     }
     let targets = replacement_targets_for_mb(data, root, replacements);
-    if targets.is_empty() {
-        return Ok((Cow::Borrowed(data), 0));
-    }
-
-    let children = root.children();
-    let mut payload_parts: Vec<u8> = Vec::new();
-    payload_parts.extend_from_slice(root.form_type().unwrap_or(FourCC::new(*b"Maya")).as_bytes());
-
-    let first_child_start = children[0].offset();
-    let prefix_start = root.payload_offset() + 4;
-    if first_child_start > prefix_start {
-        payload_parts.extend_from_slice(&data[prefix_start..first_child_start]);
-    }
-
-    let mut total = 0usize;
-    for child in children {
-        let next_offset = crate::mb::rewrite::child_span_end(root, child);
-        let original_span = &data[child.offset()..next_offset];
-
-        if child.form_type().is_some_and(|f| f == "RTFT") {
-            if let Some((rewritten, count)) =
-                rewrite_rtft_child_by_targets(child, data, &targets, &|_, _| true)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
-        } else if child.form_type().is_some_and(|f| f == "FRDI") {
-            if let Some((rewritten, count)) =
-                rewrite_frdi_child_by_targets(child, data, &targets, &|_, _| true)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
-        } else if child.form_type().is_some_and(|f| f == "FREF") {
-            if let Some((rewritten, count)) =
-                rewrite_fref_child_by_targets(child, data, &targets, &|_, _| true)
-            {
-                payload_parts.extend_from_slice(&rewritten);
-                total += count;
-                continue;
-            }
+    let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
+    for index in seen {
+        if entries.get(*index).is_none_or(|entry| {
+            entry.meta.as_ref().is_none_or(|meta| {
+                meta.trace_node_offset.is_none() || meta.trace_child_chunk_start.is_none()
+            })
+        }) {
+            changes.push(MbPathChange {
+                locator: None,
+                entry_index: Some(*index),
+                before_value: None,
+                after_value: None,
+                status: MbPathStatus::UnmatchedLocator,
+            });
         }
-
-        payload_parts.extend_from_slice(original_span);
     }
-
-    if total == 0 {
-        return Ok((Cow::Borrowed(data), 0));
-    }
-
-    let Ok(encoded) = encode_root_chunk(root, &payload_parts) else {
-        return Ok((Cow::Borrowed(data), 0));
-    };
-    Ok((Cow::Owned(encoded), total))
+    replace_mb_paths(
+        data,
+        root,
+        Replacement::Targets(&targets),
+        &|_, _| true,
+        changes,
+        &PathEncoders::default(),
+    )
 }
 
-fn rewrite_section_payloads_preserving_encode_fallback(
-    inner: &[u8],
-    parsed: &ParsedSection,
-    rewritten_payloads: &[(usize, Vec<u8>)],
-    can_encode_payload: impl Fn(usize, usize) -> bool,
-) -> Option<Vec<u8>> {
-    let rewrites: Vec<(usize, &[u8])> = rewritten_payloads
+fn replace_mb_paths<'a>(
+    data: &'a [u8],
+    root: &Chunk,
+    replacement: Replacement<'_>,
+    accept: &impl Fn(usize, usize) -> bool,
+    mut changes: MbPathChanges,
+    encoders: &PathEncoders,
+) -> Result<(Cow<'a, [u8]>, MbPathChanges), MbRewriteError> {
+    super::require_complete_mb_sections(data, root)?;
+    if root.children().is_empty()
+        || match &replacement {
+            Replacement::Rules(rules) => rules.is_empty(),
+            Replacement::Targets(targets) => targets.is_empty(),
+        }
+    {
+        return Ok((Cow::Borrowed(data), changes));
+    }
+    let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
+    let mut entry_indices = HashMap::new();
+    let physical = extract_raw_scene_path_records_from_mb_parts(data, root).value;
+    let references: HashMap<_, _> = entries
         .iter()
-        .filter(|(index, payload)| can_encode_payload(*index, payload.len()))
-        .map(|(index, payload)| (*index, payload.as_slice()))
+        .enumerate()
+        .filter(|(_, entry)| entry.node_type == "reference")
+        .map(|(index, entry)| ((reference_identity(entry), entry.value.as_str()), index))
         .collect();
-    parsed.rewrite_payloads(inner, &rewrites).ok()
-}
-
-fn rewrite_rtft_child(
-    child: &Chunk,
-    data: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
-    let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
-    }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "STR " {
-            continue;
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(meta) = &entry.meta
+            && let (Some(outer), Some(inner)) =
+                (meta.trace_node_offset, meta.trace_child_chunk_start)
+        {
+            entry_indices.insert((outer, inner), index);
         }
-        if let Some((attr_name, kind, value_raw)) = decode_attr_triplet(chunk_payload) {
-            if matches!(
-                classify_scene_path_attr(&attr_name),
-                Some(ScenePathAttrKind::FileTexturePath)
-            ) {
-                let value = decode_raw_string_value_preserving_whitespace_lossy(&value_raw);
-                let (new_value, count) = compiled_rules.apply(&value);
-                if count > 0 {
-                    if let Some(rewritten_payload) = rewrite_attr_payload_string_preserving_shape(
-                        chunk_payload,
-                        kind,
-                        &new_value,
-                    ) {
-                        if rewritten_payload != chunk_payload {
-                            rewritten_payloads.push((idx, rewritten_payload));
-                            total += count;
-                            changed = true;
-                        }
-                    }
-                }
+    }
+    for entry in &physical {
+        if entry.node_type == "reference"
+            && let Some(index) = references.get(&(reference_identity(entry), entry.value.as_str()))
+            && let Some(meta) = &entry.meta
+            && let (Some(outer), Some(inner)) =
+                (meta.trace_node_offset, meta.trace_child_chunk_start)
+        {
+            entry_indices.insert((outer, inner), *index);
+        }
+    }
+    let mut payload = root
+        .form_type()
+        .unwrap_or(FourCC::new(*b"Maya"))
+        .as_bytes()
+        .to_vec();
+    let mut cursor = root.payload_offset() + 4;
+    for child in root.children() {
+        payload.extend_from_slice(&data[cursor..child.offset()]);
+        let (bytes, child_changes) =
+            rewrite_path_child(child, data, &replacement, accept, encoders)?;
+        let end = super::child_span_end(root, child);
+        if child_changes.replacement_count == 0 {
+            payload.extend_from_slice(&data[child.offset()..end]);
+        } else {
+            payload.extend_from_slice(&bytes);
+        }
+        cursor = end;
+        for mut change in child_changes.paths {
+            change.entry_index = change.locator.as_ref().and_then(|locator| {
+                entry_indices
+                    .get(&(locator.node_offset, locator.chunk_start))
+                    .copied()
+            });
+            changes.push(change);
+        }
+    }
+    payload.extend_from_slice(&data[cursor..root.payload_end()]);
+    if let Replacement::Targets(targets) = &replacement {
+        for key in targets.keys() {
+            if !changes.paths.iter().any(|change| {
+                change.locator.as_ref().is_some_and(|locator| {
+                    locator.node_offset == key.outer_offset
+                        && locator.chunk_start == key.inner_chunk_start
+                })
+            }) {
+                changes.push(MbPathChange {
+                    locator: Some(MbPayloadLocator {
+                        form: key.origin.to_ascii_uppercase(),
+                        node_offset: key.outer_offset,
+                        chunk_start: key.inner_chunk_start,
+                    }),
+                    entry_index: entry_indices
+                        .get(&(key.outer_offset, key.inner_chunk_start))
+                        .copied(),
+                    before_value: Some(key.value.clone()),
+                    after_value: Some(key.value.clone()),
+                    status: MbPathStatus::UnmatchedLocator,
+                });
             }
         }
     }
-
-    if !changed {
-        return None;
+    if changes.replacement_count == 0 {
+        return Ok((Cow::Borrowed(data), changes));
     }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"RTFT");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
+    let bytes = (encoders.root)(root, &payload).map_err(MbRewriteError::RootEncode)?;
+    Ok((Cow::Owned(bytes), changes))
 }
 
-fn rewrite_fref_child(
-    child: &Chunk,
-    data: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
-    let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
-    }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "FREF" {
-            continue;
+fn path_value_range(form: &str, tag: &str, payload: &[u8]) -> Option<Range<usize>> {
+    let start = match (form, tag) {
+        ("RTFT", "STR ") => {
+            let end = payload.iter().position(|byte| *byte == 0)?;
+            let attr = std::str::from_utf8(&payload[..end]).ok()?;
+            if classify_scene_path_attr(attr) != Some(ScenePathAttrKind::FileTexturePath) {
+                return None;
+            }
+            return super::attr_payload::attr_value_range(payload);
         }
-        let (rewritten, count) =
-            replace_first_path_field_in_nul_payload_with_rules(chunk_payload, compiled_rules);
-        if count > 0 && rewritten != chunk_payload {
-            rewritten_payloads.push((idx, rewritten));
-            total += count;
-            changed = true;
+        ("HEAD", "INCL") | ("FREF", "FREF") => 0,
+        ("FRDI", "FRDI") => {
+            let mut offset = 0;
+            let mut found = None;
+            for part in payload.split(|byte| *byte == 0) {
+                let prefix = part
+                    .iter()
+                    .take_while(|byte| (**byte as char).is_control())
+                    .count();
+                let raw = &part[prefix..];
+                let lower: Vec<_> = raw.iter().map(u8::to_ascii_lowercase).collect();
+                if raw.iter().any(|byte| matches!(byte, b'/' | b'\\'))
+                    && [b".mb".as_slice(), b".ma", b".fbx"]
+                        .iter()
+                        .any(|ext| lower.windows(ext.len()).any(|window| window == *ext))
+                {
+                    found = Some(offset + prefix);
+                    break;
+                }
+                offset += part.len() + 1;
+            }
+            found?
         }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"FREF");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
+        _ => return None,
+    };
+    let raw = payload.get(start..)?;
+    let end = if form == "HEAD" {
+        payload.len() - raw.iter().rev().take_while(|byte| **byte == 0).count()
+    } else {
+        start + raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len())
+    };
+    Some(start..end)
 }
 
-fn rewrite_frdi_child(
-    child: &Chunk,
-    data: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
-    let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
+fn inner_quoted(value: &str) -> (&str, bool) {
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        (&value[1..value.len() - 1], true)
+    } else {
+        (value, false)
     }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "FRDI" {
-            continue;
-        }
-        let (rewritten, count) =
-            replace_path_field_in_frdi_payload_with_rules(chunk_payload, compiled_rules);
-        if count > 0 && rewritten != chunk_payload {
-            rewritten_payloads.push((idx, rewritten));
-            total += count;
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"FRDI");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
 }
 
-fn rewrite_head_child(
+fn rewrite_path_child(
     child: &Chunk,
     data: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
+    replacement: &Replacement<'_>,
+    accept: &impl Fn(usize, usize) -> bool,
+    encoders: &PathEncoders,
+) -> Result<(Vec<u8>, MbPathChanges), MbRewriteError> {
+    let mut changes = MbPathChanges::default();
+    let form = child
+        .form_type()
+        .map(|form| form.to_string())
+        .unwrap_or_default();
+    if !matches!(form.as_str(), "RTFT" | "FREF" | "FRDI" | "HEAD") {
+        return Ok((Vec::new(), changes));
+    }
     let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
-    }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "INCL" {
+    let Some(inner) = payload.get(4..) else {
+        return Ok((Vec::new(), changes));
+    };
+    let parsed = parse_section_chunks_with_hints(inner, super::composite::section_hints(child));
+    let mut rewrites = Vec::new();
+    for (index, chunk) in parsed.chunks().iter().enumerate() {
+        let raw = chunk.payload(inner);
+        let Some(range) = path_value_range(&form, &chunk.tag().to_string(), raw) else {
             continue;
-        }
-        let payload_text = String::from_utf8_lossy(chunk_payload);
-        let payload_text = payload_text.trim_end_matches(char::from(0));
-        let (new_text, count) = compiled_rules.apply(payload_text);
-        if count == 0 {
-            continue;
-        }
-        let rewritten_payload =
-            replace_text_payload_preserving_nul_suffix(chunk_payload, new_text.as_ref());
-        if rewritten_payload != chunk_payload {
-            rewritten_payloads.push((idx, rewritten_payload));
-            total += count;
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"HEAD");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
-}
-
-fn rewrite_rtft_child_by_targets(
-    child: &Chunk,
-    data: &[u8],
-    targets: &HashMap<TargetKey, String>,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
-    let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
-    }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "STR " {
-            continue;
-        }
-        if let Some((attr_name, kind, value_raw)) = decode_attr_triplet(chunk_payload) {
-            if matches!(
-                classify_scene_path_attr(&attr_name),
-                Some(ScenePathAttrKind::FileTexturePath)
-            ) {
-                let value = decode_raw_string_value_preserving_whitespace_lossy(&value_raw);
-                let key =
-                    TargetKey::new("rtft", child.offset(), chunk.chunk_start(), value.clone());
-                let Some(after_value) = targets.get(&key) else {
+        };
+        let locator = MbPayloadLocator {
+            form: form.clone(),
+            node_offset: child.offset(),
+            chunk_start: chunk.chunk_start(),
+        };
+        let target = match replacement {
+            Replacement::Targets(targets) => {
+                let target = targets.iter().find(|(key, _)| {
+                    key.outer_offset == child.offset()
+                        && key.inner_chunk_start == chunk.chunk_start()
+                });
+                let Some(target) = target else {
                     continue;
                 };
-                if let Some(rewritten_payload) =
-                    rewrite_attr_payload_string_preserving_shape(chunk_payload, kind, after_value)
-                {
-                    if rewritten_payload != chunk_payload {
-                        rewritten_payloads.push((idx, rewritten_payload));
-                        total += 1;
-                        changed = true;
-                    }
+                Some(target)
+            }
+            Replacement::Rules(rules) if rules.is_empty() => continue,
+            Replacement::Rules(_) => None,
+        };
+        let mut change = MbPathChange {
+            locator: Some(locator),
+            entry_index: None,
+            before_value: None,
+            after_value: None,
+            status: MbPathStatus::Undecodable,
+        };
+        let Ok(value) = std::str::from_utf8(&raw[range.clone()]) else {
+            changes.push(change);
+            continue;
+        };
+        change.before_value = Some(value.to_owned());
+        change.after_value = Some(value.to_owned());
+        let (inside, quoted) = if form == "RTFT" {
+            inner_quoted(value)
+        } else if form == "FRDI" {
+            (value.trim(), false)
+        } else {
+            (value, false)
+        };
+        let after = match (replacement, target) {
+            (Replacement::Rules(rules), _) => rules.apply(inside).0.into_owned(),
+            (_, Some((key, after))) => {
+                if key.value != value.trim() {
+                    change.status = MbPathStatus::UnmatchedLocator;
+                    changes.push(change);
+                    continue;
+                }
+                if quoted {
+                    inner_quoted(after).0.to_owned()
+                } else {
+                    after.clone()
                 }
             }
-        }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"RTFT");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
-}
-
-fn rewrite_frdi_child_by_targets(
-    child: &Chunk,
-    data: &[u8],
-    targets: &HashMap<TargetKey, String>,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
-    let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
-    }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "FRDI" {
-            continue;
-        }
-        let Some(before_value) = path_field_from_frdi_payload(chunk_payload) else {
-            continue;
+            _ => unreachable!(),
         };
-        let key = TargetKey::new(
-            "frdi",
-            child.offset(),
-            chunk.chunk_start(),
-            before_value.clone(),
-        );
-        let Some(after_value) = targets.get(&key) else {
-            continue;
-        };
-        let (rewritten, count) =
-            replace_path_field_in_frdi_payload_exact(chunk_payload, &before_value, after_value);
-        if count > 0 && rewritten != chunk_payload {
-            rewritten_payloads.push((idx, rewritten));
-            total += count;
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"FRDI");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
-}
-
-fn rewrite_fref_child_by_targets(
-    child: &Chunk,
-    data: &[u8],
-    targets: &HashMap<TargetKey, String>,
-    accept_payload: &impl Fn(usize, usize) -> bool,
-) -> Option<(Vec<u8>, usize)> {
-    let payload = &data[child.payload_offset()..child.payload_end()];
-    if payload.len() < 4 {
-        return None;
-    }
-    let inner = &payload[4..];
-    let hints = resolve_section_layout_hints(
-        child.tag(),
-        child.form_type(),
-        child
-            .child_layout()
-            .map_or_else(LayoutHints::new, LayoutHints::from),
-    );
-    let parsed = parse_section_chunks_with_hints_with_budget(
-        inner,
-        hints,
-        child
-            .section_budget()
-            .unwrap_or(&crate::mb::MbParseBudget::default()),
-    );
-    if parsed.chunks().is_empty() {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut total = 0usize;
-    let mut rewritten_payloads: Vec<(usize, Vec<u8>)> = Vec::new();
-
-    for (idx, chunk) in parsed.chunks().iter().enumerate() {
-        let chunk_payload = chunk.payload(inner);
-        if chunk.tag() != "FREF" {
-            continue;
-        }
-        let Some(before_value) = first_path_field_from_nul_payload(chunk_payload) else {
-            continue;
-        };
-        let key = TargetKey::new(
-            "fref",
-            child.offset(),
-            chunk.chunk_start(),
-            before_value.clone(),
-        );
-        let Some(after_value) = targets.get(&key) else {
-            continue;
-        };
-        let (rewritten, count) = replace_first_path_field_in_nul_payload_exact(
-            chunk_payload,
-            &before_value,
-            after_value,
-        );
-        if count > 0 && rewritten != chunk_payload {
-            rewritten_payloads.push((idx, rewritten));
-            total += count;
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return None;
-    }
-
-    let new_inner = rewrite_section_payloads_preserving_encode_fallback(
-        inner,
-        &parsed,
-        &rewritten_payloads,
-        |index, len| parsed.can_encode_payload(index, len) && accept_payload(index, len),
-    )?;
-    let mut new_payload = Vec::new();
-    new_payload.extend_from_slice(b"FREF");
-    new_payload.extend_from_slice(&new_inner);
-    let encoded_child = encode_chunk(
-        child.tag(),
-        child.aux(),
-        &new_payload,
-        ChunkLayout::new(
-            NonZeroUsize::new(4).expect("nonzero alignment"),
-            child.header_format(),
-        ),
-    )
-    .ok()?;
-    Some((encoded_child, total))
-}
-
-fn replace_first_path_field_in_nul_payload_with_rules(
-    payload: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-) -> (Vec<u8>, usize) {
-    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
-    if parts.is_empty() {
-        return (payload.to_vec(), 0);
-    }
-    let mut replaced_count = 0usize;
-    let mut replaced_index: Option<usize> = None;
-    let mut replaced_value: Vec<u8> = Vec::new();
-
-    if let Some(raw) = parts.first() {
-        if let Ok(text) = std::str::from_utf8(raw) {
-            if !text.is_empty() {
-                let (new_text, count) = compiled_rules.apply(text);
-                if count > 0 {
-                    replaced_count = count;
-                    replaced_index = Some(0);
-                    replaced_value = new_text.into_owned().into_bytes();
-                }
-            }
-        }
-    }
-
-    let Some(idx) = replaced_index else {
-        return (payload.to_vec(), 0);
-    };
-
-    let mut out = Vec::new();
-    for i in 0..parts.len() {
-        if i == idx {
-            out.extend_from_slice(&replaced_value);
+        let after = if quoted {
+            format!("\"{after}\"")
         } else {
-            out.extend_from_slice(parts[i]);
+            after
+        };
+        if after == value {
+            change.status = MbPathStatus::Unchanged;
+            changes.push(change);
+            continue;
         }
-        if i + 1 < parts.len() {
-            out.push(0);
-        }
-    }
-    (out, replaced_count)
-}
-
-fn replace_first_path_field_in_nul_payload_exact(
-    payload: &[u8],
-    expected: &str,
-    replacement: &str,
-) -> (Vec<u8>, usize) {
-    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
-    if parts.is_empty() {
-        return (payload.to_vec(), 0);
-    }
-    let Some(raw) = parts.first() else {
-        return (payload.to_vec(), 0);
-    };
-    let Ok(text) = std::str::from_utf8(raw) else {
-        return (payload.to_vec(), 0);
-    };
-    if text != expected {
-        return (payload.to_vec(), 0);
-    }
-
-    let mut out = Vec::new();
-    for i in 0..parts.len() {
-        if i == 0 {
-            out.extend_from_slice(replacement.as_bytes());
+        let mut rewritten = raw.to_vec();
+        rewritten.splice(range, after.bytes());
+        if !parsed.can_encode_payload(index, rewritten.len()) || !accept(index, rewritten.len()) {
+            change.status = MbPathStatus::PayloadRejected;
         } else {
-            out.extend_from_slice(parts[i]);
+            change.status = MbPathStatus::Applied;
+            change.after_value = Some(after);
+            rewrites.push((index, rewritten));
         }
-        if i + 1 < parts.len() {
-            out.push(0);
-        }
+        changes.push(change);
     }
-    (out, 1)
-}
-
-fn first_path_field_from_nul_payload(payload: &[u8]) -> Option<String> {
-    let raw = payload.split(|b| *b == 0).next()?;
-    let text = std::str::from_utf8(raw).ok()?;
-    (!text.is_empty()).then(|| text.to_string())
-}
-
-fn replace_path_field_in_frdi_payload_with_rules(
-    payload: &[u8],
-    compiled_rules: &CompiledPathReplaceRules,
-) -> (Vec<u8>, usize) {
-    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
-    if parts.is_empty() {
-        return (payload.to_vec(), 0);
+    if changes.replacement_count == 0 {
+        let end = (child.payload_end() + (4 - child.size() % 4) % 4).min(data.len());
+        return Ok((data[child.offset()..end].to_vec(), changes));
     }
-
-    let Some((idx, stripped_text)) = frdi_path_field_index(&parts) else {
-        return (payload.to_vec(), 0);
-    };
-
-    let (new_text, count) = compiled_rules.apply(stripped_text);
-    if count == 0 {
-        return (payload.to_vec(), 0);
-    }
-
-    let raw = parts[idx];
-    let prefix_len = raw
+    let refs: Vec<_> = rewrites
         .iter()
-        .take_while(|byte| (**byte as char).is_control())
-        .count();
-    let mut replaced = raw[..prefix_len].to_vec();
-    replaced.extend_from_slice(new_text.as_ref().as_bytes());
-
-    let mut out = Vec::new();
-    for i in 0..parts.len() {
-        if i == idx {
-            out.extend_from_slice(&replaced);
-        } else {
-            out.extend_from_slice(parts[i]);
-        }
-        if i + 1 < parts.len() {
-            out.push(0);
-        }
-    }
-    (out, count)
-}
-
-fn replace_path_field_in_frdi_payload_exact(
-    payload: &[u8],
-    expected: &str,
-    replacement: &str,
-) -> (Vec<u8>, usize) {
-    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
-    if parts.is_empty() {
-        return (payload.to_vec(), 0);
-    }
-
-    let Some((idx, stripped_text)) = frdi_path_field_index(&parts) else {
-        return (payload.to_vec(), 0);
-    };
-    if stripped_text != expected {
-        return (payload.to_vec(), 0);
-    }
-
-    let raw = parts[idx];
-    let prefix_len = raw
-        .iter()
-        .take_while(|byte| (**byte as char).is_control())
-        .count();
-    let mut replaced = raw[..prefix_len].to_vec();
-    replaced.extend_from_slice(replacement.as_bytes());
-
-    let mut out = Vec::new();
-    for i in 0..parts.len() {
-        if i == idx {
-            out.extend_from_slice(&replaced);
-        } else {
-            out.extend_from_slice(parts[i]);
-        }
-        if i + 1 < parts.len() {
-            out.push(0);
-        }
-    }
-    (out, 1)
-}
-
-fn path_field_from_frdi_payload(payload: &[u8]) -> Option<String> {
-    let parts: Vec<&[u8]> = payload.split(|b| *b == 0).collect();
-    let (_, path) = frdi_path_field_index(&parts)?;
-    Some(path.to_string())
-}
-
-fn frdi_path_field_index<'a>(parts: &'a [&'a [u8]]) -> Option<(usize, &'a str)> {
-    for (idx, raw) in parts.iter().enumerate() {
-        let Some(text) = std::str::from_utf8(raw).ok() else {
-            continue;
-        };
-        let stripped = text.trim_start_matches(|c: char| c.is_control()).trim();
-        let lower = stripped.to_ascii_lowercase();
-        if (lower.contains(".mb") || lower.contains(".ma") || lower.contains(".fbx"))
-            && (stripped.contains('/') || stripped.contains('\\'))
-        {
-            return Some((idx, stripped));
-        }
-    }
-    None
-}
-
-fn replace_text_payload_preserving_nul_suffix(payload: &[u8], replacement: &str) -> Vec<u8> {
-    let nul_suffix_len = payload.iter().rev().take_while(|byte| **byte == 0).count();
-    let mut out = Vec::with_capacity(replacement.len() + nul_suffix_len);
-    out.extend_from_slice(replacement.as_bytes());
-    out.extend(std::iter::repeat_n(0, nul_suffix_len));
-    out
-}
-
-fn decode_raw_string_value_preserving_whitespace_lossy(raw: &[u8]) -> String {
-    let value = String::from_utf8_lossy(raw);
-    let value = value.trim_end_matches(char::from(0));
-    if value.is_empty() {
-        return String::new();
-    }
-    value.trim_matches('"').to_string()
-}
-
-fn decode_attr_triplet(payload: &[u8]) -> Option<(String, u8, Vec<u8>)> {
-    let attr_end = payload.iter().position(|b| *b == 0)?;
-    let attr_name = String::from_utf8_lossy(&payload[..attr_end]).to_string();
-    let kind = *payload.get(attr_end + 1)?;
-    let value_raw = payload.get(attr_end + 2..)?.to_vec();
-    Some((attr_name, kind, value_raw))
+        .map(|(index, bytes)| (*index, bytes.as_slice()))
+        .collect();
+    let new_inner =
+        (encoders.section)(&parsed, inner, &refs).map_err(MbRewriteError::SectionEncode)?;
+    let mut new_payload = form.as_bytes().to_vec();
+    new_payload.extend_from_slice(&new_inner);
+    let bytes = (encoders.child)(child, &new_payload).map_err(MbRewriteError::ChildEncode)?;
+    Ok((bytes, changes))
 }
 
 fn normalize_mb_rules(rules: &[MbPathReplaceRule]) -> Vec<PathReplaceRule> {
@@ -1064,7 +548,6 @@ pub struct MbPathCandidatePlan {
     pub locator: super::MbPayloadLocator,
     pub entry: crate::mb::paths::MbScenePathEntry,
     pub before: Vec<u8>,
-    key: TargetKey,
 }
 
 pub fn collect_mb_path_candidates(
@@ -1115,7 +598,6 @@ pub fn collect_mb_path_candidates(
                 locator,
                 entry: entry.clone(),
                 before,
-                key,
             });
         }
     }
@@ -1128,10 +610,7 @@ pub fn plan_mb_path_value(
     root: &Chunk,
     candidate: &MbPathCandidatePlan,
     after: &str,
-) -> Result<Option<super::MbPayloadEdit>, super::MbPlanError> {
-    if after == candidate.entry.value {
-        return Ok(None);
-    }
+) -> Result<(Option<super::MbPayloadEdit>, MbPathStatus), super::MbPlanError> {
     let invalid = || super::MbPlanError::InvalidLocator(format!("{:?}", candidate.locator));
     let child = root
         .children()
@@ -1149,30 +628,40 @@ pub fn plan_mb_path_value(
         .find(|(_, chunk)| chunk.chunk_start() == candidate.locator.chunk_start)
         .ok_or_else(invalid)?;
     let payload = chunk.payload(inner);
-    let rewritten = match candidate.key.origin.as_str() {
-        "rtft" => {
-            let (_, kind, _) = decode_attr_triplet(payload).ok_or_else(invalid)?;
-            rewrite_attr_payload_string_preserving_shape(payload, kind, after)
-                .ok_or_else(invalid)?
-        }
-        "frdi" => replace_path_field_in_frdi_payload_exact(payload, &candidate.key.value, after).0,
-        "fref" => {
-            replace_first_path_field_in_nul_payload_exact(payload, &candidate.key.value, after).0
-        }
-        _ => return Err(invalid()),
+    let range = path_value_range(&candidate.locator.form, &chunk.tag().to_string(), payload)
+        .ok_or_else(invalid)?;
+    let Ok(before) = std::str::from_utf8(&payload[range.clone()]) else {
+        return Ok((None, MbPathStatus::Undecodable));
     };
+    let quoted = candidate.locator.form == "RTFT" && inner_quoted(before).1;
+    let after = if quoted {
+        format!("\"{}\"", inner_quoted(after).0)
+    } else {
+        after.to_owned()
+    };
+    let mut rewritten = payload.to_vec();
+    rewritten.splice(range, after.bytes());
     if rewritten == payload {
-        return Ok(None);
+        return Ok((None, MbPathStatus::Unchanged));
     }
     if !parsed.can_encode_payload(index, rewritten.len()) {
-        // Ask the checked encoder for its precise failure without accepting a fallback.
-        parsed.rewrite_payloads(inner, &[(index, &rewritten)])?;
-        return Err(invalid());
+        return Ok((None, MbPathStatus::PayloadRejected));
     }
-    Ok(Some(super::MbPayloadEdit {
-        locator: candidate.locator.clone(),
-        bytes: rewritten,
-    }))
+    Ok((
+        Some(super::MbPayloadEdit {
+            locator: candidate.locator.clone(),
+            bytes: rewritten,
+        }),
+        MbPathStatus::Applied,
+    ))
+}
+
+fn reference_identity(entry: &crate::mb::paths::MbScenePathEntry) -> &str {
+    entry
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.reference_node.as_deref())
+        .unwrap_or(&entry.node_name)
 }
 
 fn same_reference_identity(
@@ -1227,8 +716,7 @@ mod tests {
 
     use super::{
         MbPathReplaceRule, replace_scene_paths_in_mb, replace_scene_paths_in_mb_by_index,
-        replace_scene_paths_in_mb_cow, replace_text_payload_preserving_nul_suffix,
-        rewrite_rtft_child,
+        replace_scene_paths_in_mb_cow,
     };
     use crate::{
         mb::{
@@ -1238,22 +726,24 @@ mod tests {
         replace_rules::CompiledPathReplaceRules,
     };
 
-    fn replace_first_path_field_in_nul_payload(
+    fn rewritten_test_payload(
+        form: &str,
+        tag: &str,
         payload: &[u8],
         rules: &[MbPathReplaceRule],
     ) -> (Vec<u8>, usize) {
-        let compiled_rules =
-            CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(rules));
-        super::replace_first_path_field_in_nul_payload_with_rules(payload, &compiled_rules)
-    }
-
-    fn replace_path_field_in_frdi_payload(
-        payload: &[u8],
-        rules: &[MbPathReplaceRule],
-    ) -> (Vec<u8>, usize) {
-        let compiled_rules =
-            CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(rules));
-        super::replace_path_field_in_frdi_payload_with_rules(payload, &compiled_rules)
+        let source = build_mb_with_single_form(form, tag, payload, &[]);
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (output, changes) = replace_scene_paths_in_mb(&source, parsed.root(), rules).unwrap();
+        let parsed = crate::mb::parse_bytes(output.clone()).unwrap();
+        let child = &parsed.root().children()[0];
+        let inner = &output[child.payload_offset() + 4..child.payload_end()];
+        let section =
+            parse_section_chunks_with_hints(inner, super::super::composite::section_hints(child));
+        (
+            section.chunks()[0].payload(inner).to_vec(),
+            changes.replacement_count,
+        )
     }
 
     fn with_opaque_tail(source: &[u8], tail: &[u8]) -> Vec<u8> {
@@ -1386,7 +876,7 @@ mod tests {
             to: "asset".to_string(),
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
-        let (rewritten, count) = replace_first_path_field_in_nul_payload(payload, &rules);
+        let (rewritten, count) = rewritten_test_payload("FREF", "FREF", payload, &rules);
         assert_eq!(count, 0);
         assert_eq!(rewritten, payload);
     }
@@ -1407,6 +897,7 @@ mod tests {
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
         let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules).unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 0);
         assert_eq!(rewritten, mb);
     }
@@ -1427,6 +918,7 @@ mod tests {
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
         let (rewritten, count) = replace_scene_paths_in_mb_cow(&mb, parsed.root(), &rules).unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 0);
         assert!(matches!(rewritten, Cow::Borrowed(bytes) if bytes == mb.as_slice()));
     }
@@ -1449,6 +941,7 @@ mod tests {
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
         let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules).unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1534,9 +1027,15 @@ mod tests {
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
         let compiled = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(&rules));
-        let (rewritten, count) =
-            rewrite_rtft_child(child, &child_bytes, &compiled, &|_, _| true).expect("rtft rewrite");
-        assert_eq!(count, 1);
+        let (rewritten, count) = super::rewrite_path_child(
+            child,
+            &child_bytes,
+            &super::Replacement::Rules(&compiled),
+            &|_, _| true,
+            &super::PathEncoders::default(),
+        )
+        .expect("rtft rewrite");
+        assert_eq!(count.replacement_count, 1);
         assert!(
             rewritten
                 .windows(b"archive/layered.psd".len())
@@ -1566,6 +1065,7 @@ mod tests {
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
         let (rewritten, count) = replace_scene_paths_in_mb(&mb, parsed.root(), &rules).unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1612,7 +1112,7 @@ mod tests {
             mode: crate::ma::types::PathReplaceMode::Literal,
         }];
 
-        let (rewritten, count) = replace_path_field_in_frdi_payload(&payload, &rules);
+        let (rewritten, count) = rewritten_test_payload("FRDI", "FRDI", &payload, &rules);
         assert_eq!(count, 1);
         let fields: Vec<&[u8]> = rewritten.split(|b| *b == 0).collect();
         assert_eq!(fields[0], b"\x01new/char.mb");
@@ -1646,6 +1146,7 @@ mod tests {
             &[(0, "asset/example/new_scene.mb".to_string())],
         )
         .unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1729,6 +1230,7 @@ mod tests {
             &[(0, "asset/example/new_scene.mb".to_string())],
         )
         .unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 2);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1795,6 +1297,7 @@ mod tests {
             &[(0, "asset/example/first_scene.mb".to_string())],
         )
         .unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1850,6 +1353,7 @@ mod tests {
             &[(0, "asset/example/first_scene.mb".to_string())],
         )
         .unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1908,6 +1412,7 @@ mod tests {
             ],
         )
         .unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 2);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1959,6 +1464,7 @@ mod tests {
             &[(0, "asset/example/UpdatedAsset.fbx".to_string())],
         )
         .unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         std::fs::write(&output, &rewritten).expect("write");
 
@@ -1983,9 +1489,203 @@ mod tests {
 
     #[test]
     fn replace_text_payload_preserves_nul_suffix() {
-        let rewritten =
-            replace_text_payload_preserving_nul_suffix(b"old/char.mb(\0\0", "new/char.mb(");
+        let rewritten = rewritten_test_payload(
+            "HEAD",
+            "INCL",
+            b"old/char.mb(\0\0",
+            &literal_rules("old/", "new/"),
+        )
+        .0;
         assert_eq!(rewritten, b"new/char.mb(\0\0");
+    }
+
+    #[test]
+    fn undecodable_texture_value_is_preserved() {
+        for (form, tag, payload) in [
+            (
+                "RTFT",
+                "STR ",
+                b"ftn\0\x01asset/example/\x83\x65.png\0".as_slice(),
+            ),
+            ("HEAD", "INCL", b"asset/example/\x83\x65.mb\0"),
+            (
+                "FREF",
+                "FREF",
+                b"asset/example/\x83\x65.mb\0Example\0ExampleRN\0",
+            ),
+            (
+                "FRDI",
+                "FRDI",
+                b"\x01asset/example/\x83\x65.mb\0Example\0\x01\0ExampleRN\0",
+            ),
+        ] {
+            let source = build_mb_with_single_form(form, tag, payload, &[]);
+            let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+            let (bytes, changes) = replace_scene_paths_in_mb(
+                &source,
+                parsed.root(),
+                &literal_rules("example", "sample"),
+            )
+            .unwrap();
+            assert_eq!(bytes, source);
+            assert_eq!(changes.replacement_count, 0);
+            assert_eq!(changes.skipped.non_utf8, 1);
+            assert_eq!(changes.paths.len(), 1);
+            let locator = changes.paths[0].locator.as_ref().unwrap();
+            assert_eq!(locator.node_offset, parsed.root().children()[0].offset());
+            assert_eq!(locator.chunk_start, 0);
+            assert_eq!(locator.form, form);
+            assert_eq!(changes.paths[0].status, super::MbPathStatus::Undecodable);
+            if form == "RTFT" {
+                let (bytes, changes) = replace_scene_paths_in_mb_by_index(
+                    &source,
+                    parsed.root(),
+                    &[(0, "asset/sample/file.png".into())],
+                )
+                .unwrap();
+                assert_eq!(bytes, source);
+                assert_eq!(changes.skipped.non_utf8, 1);
+                let candidate = super::collect_mb_path_candidates(&source, parsed.root(), &[0])
+                    .unwrap()
+                    .remove(0);
+                let (edit, status) = super::plan_mb_path_value(
+                    &source,
+                    parsed.root(),
+                    &candidate,
+                    "asset/sample/file.png",
+                )
+                .unwrap();
+                assert!(edit.is_none());
+                assert_eq!(status, super::MbPathStatus::Undecodable);
+            }
+        }
+    }
+
+    #[test]
+    fn texture_value_quotes_and_opaque_tail_survive_replacement() {
+        for value in [
+            b"\"asset/example/file.png\"\0\xff\0".as_slice(),
+            b"asset/example/file.png\0Sample\0\0",
+            b"\"\"asset/example/file.png\"\"\0",
+            b"\"asset/example/file.png\0",
+            "asset/example/例.png\0\0".as_bytes(),
+            b"\0\0",
+            b"\"\"\0",
+        ] {
+            let mut payload = b"ftn\0\x01".to_vec();
+            payload.extend_from_slice(value);
+            let source = build_mb_with_single_form("RTFT", "STR ", &payload, &[]);
+            let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+            let (unchanged, changes) = replace_scene_paths_in_mb(
+                &source,
+                parsed.root(),
+                &literal_rules("missing", "sample"),
+            )
+            .unwrap();
+            assert_eq!(unchanged, source);
+            assert_eq!(changes.replacement_count, 0);
+            let (bytes, changes) = replace_scene_paths_in_mb(
+                &source,
+                parsed.root(),
+                &literal_rules("example", "long_sample"),
+            )
+            .unwrap();
+            let count = usize::from(payload.windows(7).any(|part| part == b"example"));
+            if let Some(start) = payload.windows(7).position(|part| part == b"example") {
+                payload.splice(start..start + 7, b"long_sample".iter().copied());
+            }
+            assert_eq!(
+                bytes,
+                build_mb_with_single_form("RTFT", "STR ", &payload, &[])
+            );
+            assert_eq!(changes.replacement_count, count);
+            let entries =
+                super::extract_raw_scene_paths_from_mb_parts(&source, parsed.root()).value;
+            if let Some(entry) = entries.first() {
+                let after = entry.value.replace("example", "long_sample");
+                let (targeted, changes) =
+                    replace_scene_paths_in_mb_by_index(&source, parsed.root(), &[(0, after)])
+                        .unwrap();
+                assert_eq!(targeted, bytes);
+                assert_eq!(changes.replacement_count, count);
+            }
+        }
+        for payload in [
+            b"\"asset/example/file.mb\"\0\0".as_slice(),
+            b"asset/example/file.mb\0Sample\0\0",
+            "asset/example/例.mb\0".as_bytes(),
+            b"\0\0",
+        ] {
+            let source = build_mb_with_single_form("HEAD", "INCL", payload, &[]);
+            let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+            assert_eq!(
+                replace_scene_paths_in_mb(
+                    &source,
+                    parsed.root(),
+                    &literal_rules("missing", "sample")
+                )
+                .unwrap()
+                .0,
+                source
+            );
+            let (bytes, changes) = replace_scene_paths_in_mb(
+                &source,
+                parsed.root(),
+                &literal_rules("example", "long_sample"),
+            )
+            .unwrap();
+            let mut expected = payload.to_vec();
+            if let Some(start) = expected.windows(7).position(|part| part == b"example") {
+                expected.splice(start..start + 7, b"long_sample".iter().copied());
+            }
+            assert_eq!(
+                bytes,
+                build_mb_with_single_form("HEAD", "INCL", &expected, &[])
+            );
+            assert_eq!(changes.replacement_count, usize::from(expected != payload));
+        }
+    }
+
+    #[test]
+    fn repeated_matches_count_one_physical_record() {
+        let source = build_mb_with_single_form("HEAD", "INCL", b"asset/example/example.mb\0", &[]);
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let (_, count) =
+            replace_scene_paths_in_mb(&source, parsed.root(), &literal_rules("example", "sample"))
+                .unwrap();
+        let count = count.replacement_count;
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn encoder_failures_return_no_output() {
+        let source = build_mb_with_single_form("HEAD", "INCL", b"asset/example/file.mb\0", &[]);
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let rules = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(
+            &literal_rules("example", "sample"),
+        ));
+        for phase in 0..3 {
+            let mut encoders = super::PathEncoders::default();
+            match phase {
+                0 => encoders.section = |_, _, _| Err(crate::mb::EncodeError::LengthOverflow),
+                1 => encoders.child = |_, _| Err(crate::mb::EncodeError::LengthOverflow),
+                _ => encoders.root = |_, _| Err(crate::mb::EncodeError::LengthOverflow),
+            }
+            let result = super::replace_mb_paths(
+                &source,
+                parsed.root(),
+                super::Replacement::Rules(&rules),
+                &|_, _| true,
+                super::MbPathChanges::default(),
+                &encoders,
+            );
+            assert!(matches!(
+                (phase, result),
+                (0, Err(super::MbRewriteError::SectionEncode(_)))
+                    | (1, Err(super::MbRewriteError::ChildEncode(_)))
+                    | (2, Err(super::MbRewriteError::RootEncode(_)))
+            ));
+        }
     }
 
     fn literal_rules(from: &str, to: &str) -> Vec<MbPathReplaceRule> {
@@ -2069,28 +1769,49 @@ mod tests {
                     )
                 })
                 .collect();
-            match form {
-                "RTFT" => {
-                    super::rewrite_rtft_child_by_targets(child, data, &targets, accept_payload)
-                }
-                "FRDI" => {
-                    super::rewrite_frdi_child_by_targets(child, data, &targets, accept_payload)
-                }
-                "FREF" => {
-                    super::rewrite_fref_child_by_targets(child, data, &targets, accept_payload)
-                }
-                _ => None,
+            let (bytes, changes) = super::rewrite_path_child(
+                child,
+                data,
+                &super::Replacement::Targets(&targets),
+                accept_payload,
+                &super::PathEncoders::default(),
+            )
+            .unwrap();
+            {
+                let expected_skips = changes
+                    .paths
+                    .iter()
+                    .filter(|change| change.status == super::MbPathStatus::PayloadRejected)
+                    .count();
+                assert_eq!(changes.skipped.payload_rejected, Some(expected_skips));
+                assert_eq!(
+                    changes.replacement_count + expected_skips,
+                    changes.paths.len()
+                );
+                (bytes, changes.replacement_count)
             }
-            .unwrap()
         } else {
-            match form {
-                "RTFT" => super::rewrite_rtft_child(child, data, &rules, accept_payload),
-                "FRDI" => super::rewrite_frdi_child(child, data, &rules, accept_payload),
-                "FREF" => super::rewrite_fref_child(child, data, &rules, accept_payload),
-                "HEAD" => super::rewrite_head_child(child, data, &rules, accept_payload),
-                _ => None,
+            let (bytes, changes) = super::rewrite_path_child(
+                child,
+                data,
+                &super::Replacement::Rules(&rules),
+                accept_payload,
+                &super::PathEncoders::default(),
+            )
+            .unwrap();
+            {
+                let expected_skips = changes
+                    .paths
+                    .iter()
+                    .filter(|change| change.status == super::MbPathStatus::PayloadRejected)
+                    .count();
+                assert_eq!(changes.skipped.payload_rejected, Some(expected_skips));
+                assert_eq!(
+                    changes.replacement_count + expected_skips,
+                    changes.paths.len()
+                );
+                (bytes, changes.replacement_count)
             }
-            .unwrap()
         }
     }
 
@@ -2108,14 +1829,18 @@ mod tests {
         let parsed = crate::mb::parse_bytes(source.to_vec()).unwrap();
         let rules = literal_rules("X", "Y");
         let compiled = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(&rules));
-        let (child, count) =
-            super::rewrite_head_child(&parsed.root().children()[0], source, &compiled, &|_, _| {
-                true
-            })
-            .unwrap();
-        assert_eq!(count, 1);
+        let (child, count) = super::rewrite_path_child(
+            &parsed.root().children()[0],
+            source,
+            &super::Replacement::Rules(&compiled),
+            &|_, _| true,
+            &super::PathEncoders::default(),
+        )
+        .unwrap();
+        assert_eq!(count.replacement_count, 1);
         assert_eq!(child, b"FOR4\0\0\0\x10HEADINCL\0\0\0\x01Y\0\0\0");
         let (rewritten, total) = replace_scene_paths_in_mb(source, parsed.root(), &rules).unwrap();
+        let total = total.replacement_count;
         assert_eq!(total, 1);
         assert_eq!(
             rewritten,
@@ -2129,6 +1854,7 @@ mod tests {
         let parsed = crate::mb::parse_bytes(source.to_vec()).unwrap();
         let (rewritten, count) =
             replace_scene_paths_in_mb(source, parsed.root(), &literal_rules("X", "Y")).unwrap();
+        let count = count.replacement_count;
         assert_eq!(count, 1);
         let output = crate::mb::parse_bytes(rewritten.clone()).unwrap();
         let child = &output.root().children()[0];
@@ -2248,7 +1974,11 @@ mod tests {
                     }
                     let (rewritten, count) =
                         rewrite_case(form, by_targets, child, &source, &accept_payload);
-                    assert_eq!(count, 3, "{form}, targets={by_targets}");
+                    assert_eq!(count, 3 - rejected.len(), "{form}, targets={by_targets}");
+                    if rejected.len() == 3 {
+                        assert_eq!(&rewritten, &source[child.offset()..]);
+                        continue;
+                    }
                     assert_eq!(rewritten, expected, "{form}, targets={by_targets}");
                     assert!(
                         rewritten[16 + expected_payload.len()..]
@@ -2310,6 +2040,9 @@ mod tests {
             ],
         )
         .unwrap();
+        assert_eq!(count.skipped.duplicate_request, Some(1));
+        assert_eq!(count.skipped.unmatched_locator, Some(2));
+        let count = count.replacement_count;
         assert_eq!(count, 2);
         let output = crate::mb::parse_bytes(rewritten.clone()).unwrap();
         let values = super::extract_raw_scene_paths_from_mb_parts(&rewritten, output.root())

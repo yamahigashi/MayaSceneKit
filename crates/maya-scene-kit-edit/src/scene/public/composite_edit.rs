@@ -129,8 +129,8 @@ pub enum SceneEditError {
         first: SceneEditLocator,
         second: SceneEditLocator,
     },
-    #[error("no effective edits")]
-    NoEffectiveEdits,
+    #[error("no effective edits; skipped: {skipped:?}")]
+    NoEffectiveEdits { skipped: Vec<SceneEditChange> },
     #[error(transparent)]
     Binary(#[from] maya_scene_kit_formats::mb::rewrite::MbPlanError),
     #[error(transparent)]

@@ -38,7 +38,7 @@ fn replace_reports_skips_for_single_file_and_directory() {
         assert_eq!(
             lines[1],
             format!(
-                "skipped non_utf8=1 non_canonical_escape=1 unrepresentable=0 crosses_concat_boundary=0 unterminated_tail=1 unterminated_tail_from={}",
+                "skipped non_utf8=1 non_canonical_escape=1 unrepresentable=0 crosses_concat_boundary=0 unterminated_tail=1 unterminated_tail_from={} payload_rejected=0 unmatched_locator=0 duplicate_request=0",
                 prefix.len()
             )
         );

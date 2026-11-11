@@ -1137,6 +1137,9 @@ impl GuiShell {
                     row.staged = match preview {
                         Some(preview) => {
                             summary = format!("{} match(es) staged", preview.matched_count);
+                            if preview.applied_count != preview.matched_count {
+                                summary.push_str(&format!(" ({} applied)", preview.applied_count));
+                            }
                             revision = Some(row.replace_generation);
                             Staged::Replace {
                                 overrides: next_overrides,
@@ -2013,13 +2016,16 @@ pub(super) fn replace_skip_summary(changes: Option<&PathReplaceChanges>) -> Opti
         .unterminated_tail_from
         .map_or_else(|| "none".to_string(), |offset| offset.to_string());
     Some(format!(
-        "skipped non_utf8={} non_canonical_escape={} unrepresentable={} crosses_concat_boundary={} unterminated_tail={} unterminated_tail_from={}",
+        "skipped non_utf8={} non_canonical_escape={} unrepresentable={} crosses_concat_boundary={} unterminated_tail={} unterminated_tail_from={} payload_rejected={} unmatched_locator={} duplicate_request={}",
         skipped.non_utf8,
         skipped.non_canonical_escape,
         skipped.unrepresentable,
         skipped.crosses_concat_boundary,
         skipped.unterminated_tail,
-        offset
+        offset,
+        skipped.payload_rejected.unwrap_or(0),
+        skipped.unmatched_locator.unwrap_or(0),
+        skipped.duplicate_request.unwrap_or(0)
     ))
 }
 
@@ -2055,7 +2061,8 @@ fn composed_replace_preview(
         scene_format: staged.preview.scene_format,
         operation_mode: staged.preview.operation_mode,
         validation_state: staged.preview.validation_state,
-        matched_count: staged.changes.path_replacements.replacement_count,
+        matched_count: items.len(),
+        applied_count: staged.changes.path_replacements.replacement_count,
         items: items.into_values().collect(),
     }
 }

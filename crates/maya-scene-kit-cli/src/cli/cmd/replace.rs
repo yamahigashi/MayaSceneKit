@@ -159,13 +159,16 @@ fn write_replace_skips(output: &mut impl std::io::Write, result: &crate::scene::
             .map_or_else(|| "none".to_string(), |offset| offset.to_string());
         let _ = writeln!(
             output,
-            "skipped non_utf8={} non_canonical_escape={} unrepresentable={} crosses_concat_boundary={} unterminated_tail={} unterminated_tail_from={}",
+            "skipped non_utf8={} non_canonical_escape={} unrepresentable={} crosses_concat_boundary={} unterminated_tail={} unterminated_tail_from={} payload_rejected={} unmatched_locator={} duplicate_request={}",
             skipped.non_utf8,
             skipped.non_canonical_escape,
             skipped.unrepresentable,
             skipped.crosses_concat_boundary,
             skipped.unterminated_tail,
-            offset
+            offset,
+            skipped.payload_rejected.unwrap_or(0),
+            skipped.unmatched_locator.unwrap_or(0),
+            skipped.duplicate_request.unwrap_or(0)
         );
     }
 }

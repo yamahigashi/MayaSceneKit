@@ -6,6 +6,33 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- MB path replacement preserves one enclosing quote pair on RTFT values and
+  treats bytes after the first value NUL as an opaque tail. Multiple quote pairs
+  and one-sided quotes are retained; only one complete outer pair is a frame.
+  This fixes quote removal, lossy tail conversion, and duplicated internal-NUL
+  tails. Overrides without enclosing quotes replace the framed value's interior.
+- Non-UTF-8 MB path values are preserved and reported as undecodable, including
+  explicit overrides. Payload size rejection skips only that record. Section,
+  child, and root encoding failures return errors without output. An entirely
+  rejected child retains its original span, including padding. Composite edits
+  with no effective changes return NoEffectiveEdits with their skipped records.
+- replacement_count, replaced_count, and items[].replacement_count count changed
+  MA literals or MB payload records, not rule hits. One reference entry backed
+  by FREF and FRDI can contribute two changes. Preview applied_count exposes the
+  total, including records without a report entry; matched_count counts affected
+  report entries. GUI summaries show both when they differ. For example, one
+  reference entry can have matched_count=1 and applied_count=2.
+- PathReplaceSkips replaces MaPathReplaceSkips. Python skipped now contains an
+  object for MB as well as MA. Existing MA fields remain; payload_rejected,
+  unmatched_locator, and duplicate_request are added. Inapplicable fields are
+  null. With no skips, the old MB JSON was {"skipped":null}; it is now
+  {"skipped":{"non_utf8":0,"non_canonical_escape":null,"unrepresentable":null,
+  "crosses_concat_boundary":null,"unterminated_tail":null,
+  "unterminated_tail_from":null,"payload_rejected":0,"unmatched_locator":0,
+  "duplicate_request":0}}. For MA, the existing five reason counters and
+  unterminated_tail_from retain their values, and the three new fields are null.
+  CLI skip lines append the three MB reason counters.
+
 - MEL audit now emits mel_system, mel_popen, mel_file_open, mel_file_write,
   mel_evalecho, mel_callpython, mel_source, mel_loadplugin, and mel_sysfile
   finding codes in JSON for dangerous command and function calls. Read-only

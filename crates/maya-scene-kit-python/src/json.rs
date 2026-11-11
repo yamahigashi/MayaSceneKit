@@ -168,6 +168,7 @@ pub(crate) fn path_replace_preview(preview: &PathReplacePreview) -> Value {
         "operation_mode": preview.operation_mode,
         "validation_state": preview.validation_state,
         "matched_count": preview.matched_count,
+        "applied_count": preview.applied_count,
         "items": preview.items.iter().map(path_replace_preview_item).collect::<Vec<_>>(),
     })
 }
@@ -378,7 +379,7 @@ mod path_replace_tests {
             [prefix.as_slice(), b"file -r \"unfinished"].concat(),
         )
         .unwrap();
-        let mut result = replace_scene_paths(
+        let result = replace_scene_paths(
             &input,
             &output,
             &[PathReplaceRule {
@@ -396,7 +397,13 @@ mod path_replace_tests {
         assert_eq!(value["skipped"]["crosses_concat_boundary"], 0);
         assert_eq!(value["skipped"]["unterminated_tail"], 1);
         assert_eq!(value["skipped"]["unterminated_tail_from"], prefix.len());
-        result.skipped = None;
-        assert!(super::path_replace_result(&result)["skipped"].is_null());
+        let binary =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/02/sphere.mb");
+        let result = replace_scene_paths(binary, directory.path().join("Sample.mb"), &[]).unwrap();
+        let value = super::path_replace_result(&result);
+        assert_eq!(value["skipped"]["non_utf8"], 0);
+        assert_eq!(value["skipped"]["payload_rejected"], 0);
+        assert!(value["skipped"]["non_canonical_escape"].is_null());
+        assert!(value["skipped"]["unterminated_tail_from"].is_null());
     }
 }

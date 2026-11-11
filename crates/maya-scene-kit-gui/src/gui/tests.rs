@@ -2410,6 +2410,7 @@ fn replace_dialog_state_can_apply_only_for_matching_preview_rule() {
             previewable_row_ids: vec![1],
             failed_files: Vec::new(),
             matched_count: 1,
+            applied_count: 1,
             items: Vec::new(),
             planned_overrides: vec![(
                 1,
@@ -2458,6 +2459,7 @@ fn replace_dialog_state_invalidate_preview_clears_applyability() {
             previewable_row_ids: vec![1],
             failed_files: Vec::new(),
             matched_count: 3,
+            applied_count: 3,
             items: Vec::new(),
             planned_overrides: vec![(
                 1,
@@ -6694,6 +6696,7 @@ fn build_path_table_model_enables_scene_column_for_multi_source_selection() {
         operation_mode: OperationMode::BestEffort,
         validation_state: ValidationState::Validated,
         matched_count: 1,
+        applied_count: 1,
         items: vec![PathReplacePreviewItem {
             entry_index: 0,
             node_type: "file".to_string(),
@@ -6774,6 +6777,7 @@ fn path_overrides_from_replace_preview_uses_after_values_by_entry_index() {
         operation_mode: OperationMode::BestEffort,
         validation_state: ValidationState::Validated,
         matched_count: 2,
+        applied_count: 2,
         items: vec![
             PathReplacePreviewItem {
                 entry_index: 3,
@@ -6810,6 +6814,7 @@ fn replace_dialog_preview_rows_keep_unmatched_candidates_when_query_exists() {
             previewable_row_ids: vec![1],
             failed_files: Vec::new(),
             matched_count: 1,
+            applied_count: 1,
             items: vec![
                 super::ReplaceDialogPreviewRow {
                     before_value: "match/a.tx".to_string(),
@@ -10266,6 +10271,7 @@ fn build_path_table_model_marks_preview_rows_without_value_style() {
         operation_mode: OperationMode::Strict,
         validation_state: ValidationState::Validated,
         matched_count: 1,
+        applied_count: 1,
         items: vec![PathReplacePreviewItem {
             entry_index: 0,
             node_type: "file".into(),
@@ -10323,6 +10329,7 @@ fn build_path_table_model_filters_preview_rows_by_after_value_form() {
         operation_mode: OperationMode::Strict,
         validation_state: ValidationState::Validated,
         matched_count: 1,
+        applied_count: 1,
         items: vec![PathReplacePreviewItem {
             entry_index: 0,
             node_type: "file".into(),
@@ -13649,6 +13656,7 @@ fn prepare_mutation_replace_dialog(
             previewable_row_ids: row_ids,
             failed_files: Vec::new(),
             matched_count: shell.rows.len(),
+            applied_count: shell.rows.len(),
             items: Vec::new(),
             planned_overrides,
         }),
@@ -14565,7 +14573,7 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
         assert_eq!(shell.rows[0].replace_changes.as_ref(), Some(&expected));
         assert_eq!(shell.rows[0].replace_preview().as_ref().unwrap().matched_count, 0);
         let summary = super::path::replace_skip_summary(shell.rows[0].replace_changes.as_ref()).unwrap();
-        assert_eq!(summary, "skipped non_utf8=0 non_canonical_escape=1 unrepresentable=0 crosses_concat_boundary=0 unterminated_tail=0 unterminated_tail_from=none");
+        assert_eq!(summary, "skipped non_utf8=0 non_canonical_escape=1 unrepresentable=0 crosses_concat_boundary=0 unterminated_tail=0 unterminated_tail_from=none payload_rejected=0 unmatched_locator=0 duplicate_request=0");
         assert!(matches!(&shell.status_message, Some(BannerMessage::Raw(message)) if message == &summary));
         let state = shell.rows[0].edit_state();
         shell.rows[0].replace_changes = None;

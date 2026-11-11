@@ -68,7 +68,7 @@ fn nonprintable_chunks_preserve_extraction_and_replacement() {
             mode: maya_scene_kit_formats::ma::types::PathReplaceMode::Literal,
         };
         let (bytes, count) = replace_scene_paths_in_mb_cow(mb.data(), mb.root(), &[rule]).unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count.replacement_count, 1);
         let updated = parse_bytes(bytes.into_owned()).unwrap();
         assert_eq!(
             maya_scene_kit_formats::mb::paths::extract_raw_scene_paths_from_mb(&updated).value[0]

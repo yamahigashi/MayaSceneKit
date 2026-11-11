@@ -8,23 +8,29 @@ mod path_rewrite;
 
 pub(crate) use maya_mb::{encode_chunk, encode_root_chunk};
 
-pub(crate) use self::attr_payload::rewrite_attr_payload_string_preserving_shape;
 pub use self::path_rewrite::{
-    MbPathCandidatePlan, MbPathReplaceRule, collect_mb_path_candidates, plan_mb_path_value,
-    replace_scene_paths_in_mb, replace_scene_paths_in_mb_by_index,
-    replace_scene_paths_in_mb_by_index_cow, replace_scene_paths_in_mb_cow,
+    MbPathCandidatePlan, MbPathChange, MbPathChanges, MbPathReplaceRule, MbPathStatus,
+    collect_mb_path_candidates, plan_mb_path_value, replace_scene_paths_in_mb,
+    replace_scene_paths_in_mb_by_index, replace_scene_paths_in_mb_by_index_cow,
+    replace_scene_paths_in_mb_cow,
 };
 
 #[derive(Debug, Clone)]
 pub enum MbRewriteError {
     IncompleteTree(crate::mb::MbCompleteness),
     SectionScanStopped,
+    SectionEncode(crate::mb::EncodeError),
+    ChildEncode(crate::mb::EncodeError),
+    RootEncode(crate::mb::EncodeError),
     Parse(crate::mb::MayaBinaryParseError),
 }
 
 impl std::fmt::Display for MbRewriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SectionEncode(error) => write!(f, "cannot encode MB section: {error}"),
+            Self::ChildEncode(error) => write!(f, "cannot encode MB child: {error}"),
+            Self::RootEncode(error) => write!(f, "cannot encode MB root: {error}"),
             Self::IncompleteTree(completeness) => write!(
                 f,
                 "cannot rewrite incomplete Maya Binary tree: {completeness}"

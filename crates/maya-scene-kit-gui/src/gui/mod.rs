@@ -966,6 +966,7 @@ struct ReplaceDialogPreviewState {
     previewable_row_ids: Vec<u64>,
     failed_files: Vec<String>,
     matched_count: usize,
+    applied_count: usize,
     items: Vec<ReplaceDialogPreviewRow>,
     planned_overrides: Vec<(u64, Vec<PathReplaceOverride>)>,
 }

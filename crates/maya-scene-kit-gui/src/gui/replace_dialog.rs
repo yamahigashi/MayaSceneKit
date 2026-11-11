@@ -217,6 +217,7 @@ impl GuiShell {
                             let mut previewable_row_ids = Vec::new();
                             let mut failed_files = Vec::new();
                             let mut matched_count = 0usize;
+                            let mut applied_count = 0usize;
                             let mut items = Vec::new();
                             let mut planned_overrides = Vec::new();
                             let mut resolved_cache = BTreeMap::new();
@@ -270,7 +271,9 @@ impl GuiShell {
                                             if !signature.path_type_filter.contains(&path_kind) {
                                                 continue;
                                             }
-                                            matched_count += item.replacement_count;
+                                            matched_count +=
+                                                usize::from(item.replacement_count > 0);
+                                            applied_count += item.replacement_count;
                                             if item.replacement_count > 0 {
                                                 let Some(original_entry) = cache_entry
                                                     .report
@@ -307,6 +310,7 @@ impl GuiShell {
                                     previewable_row_ids,
                                     failed_files,
                                     matched_count,
+                                    applied_count,
                                     items,
                                     planned_overrides,
                                 },
@@ -621,7 +625,17 @@ fn build_replace_dialog(
                 &[
                     ("selected", selected_count.to_string()),
                     ("previewable", preview.previewable_row_ids.len().to_string()),
-                    ("matched", preview.matched_count.to_string()),
+                    (
+                        "matched",
+                        if preview.applied_count == preview.matched_count {
+                            preview.matched_count.to_string()
+                        } else {
+                            format!(
+                                "{} ({} applied)",
+                                preview.matched_count, preview.applied_count
+                            )
+                        },
+                    ),
                     ("failed", preview.failed_files.len().to_string()),
                 ],
             )
