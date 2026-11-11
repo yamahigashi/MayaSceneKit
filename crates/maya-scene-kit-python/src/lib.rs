@@ -204,6 +204,7 @@ fn scene_tool_error_category(err: &SceneToolError) -> &'static str {
     match err {
         SceneToolError::Message(_) => "message",
         SceneToolError::SourceChanged { .. } => "source_changed",
+        SceneToolError::SourceUnstable { .. } => "source_unstable",
         SceneToolError::UnsupportedSceneFormat { .. } => "unsupported_scene_format",
         SceneToolError::Config(_) => "config",
         SceneToolError::AsciiSyntax(_) => "ascii_syntax",

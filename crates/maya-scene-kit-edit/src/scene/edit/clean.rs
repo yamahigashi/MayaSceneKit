@@ -24,8 +24,12 @@ impl PatchPlanner {
         input_path: &Path,
     ) -> Result<(SceneFormat, Applied<CleanChanges>), SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let observation = Loader::new(self.options.load_options().clone())
-            .observe_script_owners_path(input_path)?;
+        let loader = Loader::new(self.options.load_options().clone());
+        let observation = super::source::read_stable(input_path, || {
+            let observation = loader.observe_script_owners_path(input_path)?;
+            let stability = observation.source_read_stability();
+            Ok((observation, stability))
+        })?;
         let format = observation.scene_format();
         let bytes = observation.bytes();
         let script_origins = observation.origins();
@@ -124,7 +128,7 @@ impl PatchPlanner {
     ) -> Result<(SceneFormat, Applied<CleanChanges>), SceneToolError> {
         self.options.reject_if_not_forensic()?;
         let (observation, bytes) =
-            Loader::new(self.options.load_options().clone()).observe_path_with_bytes(input_path)?;
+            super::source::read_scene_edit_source(input_path, self.options.load_options())?;
         let format = observation.scene_format();
         let applied = apply_execution_clean(bytes, input_path, format, targets)?;
         Ok((format, applied))

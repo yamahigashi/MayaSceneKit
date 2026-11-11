@@ -21,7 +21,7 @@ pub(crate) struct FileState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadStability {
+pub enum ReadStability {
     Stable,
     Unstable,
     Absent,

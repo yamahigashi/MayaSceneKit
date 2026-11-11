@@ -299,7 +299,11 @@ impl GuiShell {
                                     }
                                     Err(err) => {
                                         failed_files.push(format!("{scene_name}: {err}"));
-                                        if matches!(err, SceneToolError::SourceChanged { .. }) {
+                                        if matches!(
+                                            err,
+                                            SceneToolError::SourceChanged { .. }
+                                                | SceneToolError::SourceUnstable { .. }
+                                        ) {
                                             source_errors.push((row_id, err));
                                         }
                                     }

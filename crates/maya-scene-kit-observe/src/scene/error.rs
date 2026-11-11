@@ -23,6 +23,8 @@ pub enum SceneToolError {
     },
     #[error("scene file changed since it was analysed: {path}")]
     SourceChanged { path: PathBuf },
+    #[error("scene file changed while it was being read: {path}")]
+    SourceUnstable { path: PathBuf },
     /// Runtime asset or configuration failure.
     #[error("config error: {0}")]
     Config(String),

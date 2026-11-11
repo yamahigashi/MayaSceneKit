@@ -654,6 +654,11 @@ pub(crate) enum ObservationData {
 }
 
 impl ObservationBundle {
+    /// Stability of the file state across acquisition of this observation's source bytes.
+    pub fn source_read_stability(&self) -> snapshot::ReadStability {
+        self.source_snapshot().identity.stability()
+    }
+
     pub(crate) fn load(
         input: SourceInput<'_>,
         scene_format: SceneFormat,
@@ -1031,6 +1036,14 @@ enum ScriptOwnerData {
 }
 
 impl ScriptOwnerObservation {
+    /// Stability of the file state across acquisition of this observation's source bytes.
+    pub fn source_read_stability(&self) -> snapshot::ReadStability {
+        match &self.data {
+            ScriptOwnerData::Ma { snapshot, .. } => snapshot.identity.stability(),
+            ScriptOwnerData::Mb(session) => session.snapshot.identity.stability(),
+        }
+    }
+
     pub fn scene_format(&self) -> SceneFormat {
         match self.data {
             ScriptOwnerData::Ma { .. } => SceneFormat::Ma,

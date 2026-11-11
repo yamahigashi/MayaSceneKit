@@ -37,7 +37,10 @@ mod path_owner_delete;
 mod paths;
 mod preview;
 mod replace_rules;
+mod source;
 mod stage;
+
+pub use source::read_scene_edit_source;
 
 pub use self::paths::collect_raw_chunks;
 

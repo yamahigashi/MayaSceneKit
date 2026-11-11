@@ -73,7 +73,10 @@ pub(crate) fn run_inspect(
                 );
                 1
             }
-            Err(error @ SceneToolError::SourceChanged { .. }) => {
+            Err(
+                error @ (SceneToolError::SourceChanged { .. }
+                | SceneToolError::SourceUnstable { .. }),
+            ) => {
                 eprintln!("error: {error}");
                 1
             }

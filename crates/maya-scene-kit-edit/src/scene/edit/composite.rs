@@ -133,9 +133,10 @@ impl PatchPlanner {
         clean_targets: &[ExecutionCleanTarget],
         owners: &[PathOwnerDeleteTarget],
     ) -> Result<CompositeSceneEditsStageResult, SceneEditError> {
-        let (observation, bytes) =
-            maya_scene_kit_observe::scene::Loader::new(self.options.load_options.clone())
-                .observe_path_with_bytes(input_path)?;
+        let (observation, bytes) = super::source::read_scene_edit_source(
+            input_path.as_ref(),
+            self.options.load_options(),
+        )?;
         let plan = SceneEditPlan {
             report: observation.scene_paths_report(PathKind::All)?,
             clean_source: clean_source.cloned(),

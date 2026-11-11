@@ -1,7 +1,10 @@
 use super::*;
 
 pub(super) fn edit_error_message(error: &SceneToolError, reanalysis_required: &str) -> String {
-    if matches!(error, SceneToolError::SourceChanged { .. }) {
+    if matches!(
+        error,
+        SceneToolError::SourceChanged { .. } | SceneToolError::SourceUnstable { .. }
+    ) {
         format!("{reanalysis_required}: {error}")
     } else {
         error.to_string()
@@ -331,7 +334,10 @@ impl GuiShell {
         error: &SceneToolError,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !matches!(error, SceneToolError::SourceChanged { .. }) {
+        if !matches!(
+            error,
+            SceneToolError::SourceChanged { .. } | SceneToolError::SourceUnstable { .. }
+        ) {
             return false;
         }
         if let Some(index) = self.index_of_row_id(row_id) {

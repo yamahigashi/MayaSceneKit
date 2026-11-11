@@ -49,7 +49,9 @@ mod recover;
 use std::path::{Path, PathBuf};
 
 pub use self::{
-    edit::{MaterializeOptions, Materializer, PatchPlanner, collect_raw_chunks},
+    edit::{
+        MaterializeOptions, Materializer, PatchPlanner, collect_raw_chunks, read_scene_edit_source,
+    },
     error::SceneToolError,
     io::write::{WriteOutcome, write_output_bytes_atomic},
     public::{

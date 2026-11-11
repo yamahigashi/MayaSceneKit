@@ -1573,9 +1573,11 @@ impl GuiShell {
             move |path| {
                 let stale = |reason: &str| format!("{reanalysis_required}: {reason}");
                 let mut clean_source = clean_source.map_err(|reason| stale(&reason))?;
-                let (observation, original_bytes) = Loader::new(load_options.clone())
-                    .observe_path_with_bytes(&path)
-                    .map_err(|err| err.to_string())?;
+                let (observation, original_bytes) =
+                    maya_scene_kit_edit::scene::read_scene_edit_source(&path, &load_options)
+                        .map_err(|err| {
+                            super::mutation::edit_error_message(&err, &reanalysis_required)
+                        })?;
                 let base_report = match &base_report {
                     _ if named_targets_only
                         && path_overrides.is_empty()

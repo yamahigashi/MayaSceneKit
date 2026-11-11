@@ -5,8 +5,11 @@ pub(crate) mod snapshot;
 
 use std::path::Path;
 
-pub use self::loader::{ExecutionObservationBundle, LoadOptions, Loader, ObservationBundle};
 pub(crate) use self::loader::{MaObservationData, ObservationData};
+pub use self::{
+    loader::{ExecutionObservationBundle, LoadOptions, Loader, ObservationBundle},
+    snapshot::ReadStability,
+};
 use crate::scene::{
     SceneToolError,
     core::SceneFormat,
