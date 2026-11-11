@@ -728,6 +728,45 @@ mod tests {
         replace_rules::CompiledPathReplaceRules,
     };
 
+    #[test]
+    fn path_rewrite_refuses_section_trailing_bytes() {
+        let source = build_mb_with_single_form(
+            "RTFT",
+            "STR ",
+            b"ftn\0\0asset/example/file.mb\0",
+            b"Example",
+        );
+        let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
+        let rules = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(
+            &literal_rules("example", "Sample"),
+        ));
+        let result = super::replace_raw_scene_paths_in_mb_with_rules(
+            &source,
+            parsed.root(),
+            &rules,
+            &|_, _| true,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(super::MbRewriteError::IncompleteTree(
+                    crate::mb::MbCompleteness::Truncated {
+                        first_reason: crate::mb::MbTruncationReason::Malformed(
+                            crate::mb::MayaBinaryParseError::HeaderOutOfBounds {
+                                offset: 88,
+                                header_size: 16,
+                                limit: 95,
+                                ..
+                            }
+                        ),
+                        truncated_groups: 1,
+                    }
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
     fn rewritten_test_payload(
         form: &str,
         tag: &str,

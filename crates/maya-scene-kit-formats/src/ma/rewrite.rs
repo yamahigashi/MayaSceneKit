@@ -190,29 +190,26 @@ fn scan_path_commands(
     result
 }
 
-fn header_path_encoding(data: &[u8]) -> Option<SourceEncoding> {
+fn header_path_codesets(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(data);
-    for line in data.split(|byte| matches!(byte, b'\r' | b'\n')) {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let comment = line.strip_prefix(b"//")?;
-        let comment = super::lexer::trim_ascii(comment);
-        let Some(prefix) = comment.get(..8) else {
-            continue;
-        };
-        if !prefix.eq_ignore_ascii_case(b"Codeset:") {
-            continue;
-        }
-        let code = super::lexer::trim_ascii(&comment[8..]);
-        match code {
-            b"932" => return Some(SourceEncoding::Cp932),
-            b"936" => return Some(SourceEncoding::Gbk),
-            b"65001" => return Some(SourceEncoding::Utf8),
-            _ => {}
-        }
-    }
-    None
+    data.split(|byte| matches!(byte, b'\r' | b'\n'))
+        .take_while(|line| line.iter().all(u8::is_ascii_whitespace) || line.starts_with(b"//"))
+        .filter_map(|line| {
+            let comment = super::lexer::trim_ascii(line.strip_prefix(b"//")?);
+            let prefix = comment.get(..8)?;
+            prefix
+                .eq_ignore_ascii_case(b"Codeset:")
+                .then(|| super::lexer::trim_ascii(&comment[8..]))
+        })
+}
+
+fn header_path_encoding(data: &[u8]) -> Option<SourceEncoding> {
+    header_path_codesets(data).find_map(|code| match code {
+        b"932" => Some(SourceEncoding::Cp932),
+        b"936" => Some(SourceEncoding::Gbk),
+        b"65001" => Some(SourceEncoding::Utf8),
+        _ => None,
+    })
 }
 
 fn path_source(data: &[u8]) -> Result<(SourceEncoding, PathCommands), MaPathReplaceError> {
@@ -410,6 +407,7 @@ fn token_value(data: &[u8], token: &PathToken, encoding: SourceEncoding) -> Stri
 
 #[derive(Clone)]
 struct PathCandidate {
+    ascii_only_replacements: bool,
     excluded_ranges: Vec<Range<usize>>,
     ranges: Vec<Range<usize>>,
     entry: Option<ScenePathEntry>,
@@ -442,6 +440,9 @@ fn path_candidates(
     commands: &[PathCommand],
     encoding: SourceEncoding,
 ) -> Vec<PathCandidate> {
+    let ascii_only_replacements = header_path_codesets(data).next().is_some()
+        && header_path_encoding(data).is_none()
+        && data.is_ascii();
     let mut candidates = Vec::new();
     let mut active: Option<ActiveScenePathBlock> = None;
     for command in commands {
@@ -518,6 +519,7 @@ fn path_candidates(
                 && (looks_like_scene_path(&values[i]) || looks_like_scene_file_path(&values[i]))
             {
                 candidates.push(PathCandidate {
+                    ascii_only_replacements,
                     excluded_ranges: Vec::new(),
                     ranges: vec![tokens[i].range.clone()],
                     entry: Some(ScenePathEntry {
@@ -594,6 +596,7 @@ fn path_candidates(
             .as_ref()
             .and_then(|block| scene_path_entry_from_setattr(block, attr, &value));
         candidates.push(PathCandidate {
+            ascii_only_replacements,
             ranges,
             entry,
             excluded_ranges: Vec::new(),
@@ -796,7 +799,10 @@ fn apply_path_candidate(
             ..Default::default()
         };
         if values[i] != original[i] {
-            if let Some(bytes) = escaped_path_bytes(&values[i], encoding) {
+            if let Some(bytes) = (!candidate.ascii_only_replacements || values[i].is_ascii())
+                .then(|| escaped_path_bytes(&values[i], encoding))
+                .flatten()
+            {
                 let (raw, _) = decode_path(&bytes, encoding);
                 values[i] = unescape_ma_string_literal(&raw);
                 if bytes != data[candidate.ranges[i].clone()] {
@@ -1752,6 +1758,60 @@ setAttr ".ftn" -type "string" ("asset\d/" + "example/file.tx");
         replace_raw_scene_paths_in_ma_by_index,
     };
     use crate::{PathReplaceMode, PathReplaceRule};
+
+    fn replace_codeset_example(header: &str, replacement: &str) -> super::MaPathReplaceResult {
+        let input = format!("{header}file -r \"asset/example/file.ma\";\n");
+        replace_raw_scene_paths_in_ma(
+            input.as_bytes(),
+            &[PathReplaceRule {
+                from: "example".into(),
+                to: replacement.into(),
+                mode: PathReplaceMode::Literal,
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unsupported_codeset_non_ascii_replacement_is_unrepresentable() {
+        let result = replace_codeset_example("//Codeset: 1252\n", "例");
+        assert_eq!(result.skipped.unrepresentable, 1);
+        assert_eq!(result.replacement_count, 0);
+        assert_eq!(
+            result.bytes,
+            b"//Codeset: 1252\nfile -r \"asset/example/file.ma\";\n"
+        );
+    }
+
+    #[test]
+    fn supported_codeset_before_unsupported_codeset_preserves_cp932_replacement() {
+        let result = replace_codeset_example("//Codeset: 932\n//Codeset: 1252\n", "例");
+        assert_eq!(result.skipped.unrepresentable, 0);
+        assert_eq!(result.replacement_count, 1);
+        assert_eq!(
+            result.bytes,
+            b"//Codeset: 932\n//Codeset: 1252\nfile -r \"asset/\x97\xe1/file.ma\";\n"
+        );
+    }
+
+    #[test]
+    fn unsupported_codeset_ascii_replacement_is_applied() {
+        let result = replace_codeset_example("//Codeset: 1252\n", "Sample");
+        assert_eq!(result.skipped.unrepresentable, 0);
+        assert_eq!(result.replacement_count, 1);
+        assert_eq!(
+            result.bytes,
+            b"//Codeset: 1252\nfile -r \"asset/Sample/file.ma\";\n"
+        );
+    }
+
+    #[test]
+    fn absent_codeset_non_ascii_replacement_stays_utf8() {
+        let result = replace_codeset_example("", "例");
+        assert_eq!(result.skipped.unrepresentable, 0);
+        assert_eq!(result.replacement_count, 1);
+        assert_eq!(result.bytes, "file -r \"asset/例/file.ma\";\n".as_bytes());
+    }
 
     #[test]
     fn last_literals_stop_at_unterminated_quote() {
