@@ -990,6 +990,8 @@ fn collect_mb_coverage(
                         let attr = attr.split(|byte| *byte == b'[').next().unwrap_or_default();
                         std::str::from_utf8(attr).is_ok_and(|attr| candidate_attrs.contains(attr))
                     })
+                }) || mb_connection_endpoints(payload).is_some_and(|(src, dst)| {
+                    mb_connection_plug(src).is_some() && mb_connection_plug(dst).is_some()
                 }) {
                     connections.push(RawChunkRecord {
                         chunk_ref: ChunkRef {
@@ -1505,8 +1507,20 @@ fn collect_mb_connections(
         {
             continue;
         }
+        let unresolved_execution_attr = canonical.is_none()
+            && !node_type.is_empty()
+            && semantics.canonical_attr(node_type, tail).is_none()
+            && semantics
+                .ma_capture_attr_selectors()
+                .iter()
+                .any(|selector| selector.node_type.eq_ignore_ascii_case(node_type));
         if canonical.is_none()
+            && !unresolved_execution_attr
             && (!node_type.is_empty()
+                || !semantics
+                    .ma_capture_attr_selectors()
+                    .iter()
+                    .any(|selector| selector.attr.strip_prefix('.') == Some(tail))
                 || (semantics.ma_execution_attr_is_ambiguous(tail)
                     && source_is_numeric
                     && !owners.get(dst_name).is_some_and(Option::is_none)))
@@ -1517,6 +1531,10 @@ fn collect_mb_connections(
         origin.node_name = Some(dst_name.to_string());
         origin.attr_name = Some(attr.clone());
         origin.connection_source_plug = src_plug.map(|(name, attr)| format!("{name}.{attr}"));
+        if unresolved_execution_attr {
+            issues.push(issue(origin, "cannot resolve destination attribute"));
+            continue;
+        }
         if state == crate::mb::MbSectionScanState::Stopped
             || !matches!(mb.completeness(), MbCompleteness::Complete)
         {

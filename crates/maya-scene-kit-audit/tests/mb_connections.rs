@@ -100,3 +100,42 @@ fn mb_connection_hash_matches_fixed_vectors() {
         assert_ne!(allowlist_surface_hash(&changed, &surface.text), hash);
     }
 }
+
+#[test]
+fn unknown_connection_attributes_require_review_only_for_execution_nodes() {
+    for (destination, unresolved) in [
+        ("ExampleSource.sampleAttribute", false),
+        ("ExampleScript.sampleAttribute", true),
+    ] {
+        let observation = Loader::new(LoadOptions::default())
+            .observe_analysis_bytes(
+                Path::new("Example.mb"),
+                SceneFormat::Mb,
+                ValidationState::Validated,
+                fixture::example(
+                    &[b"print('Example')"],
+                    "ExampleSource.note",
+                    destination,
+                    &[],
+                ),
+            )
+            .unwrap();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let report =
+            audit_observation(&observation, &plan, AuditOptions::strict_default()).unwrap();
+        assert_eq!(
+            report.coverage_issues.len(),
+            usize::from(unresolved),
+            "{destination}"
+        );
+        assert_eq!(
+            report.disposition,
+            if unresolved {
+                AuditDisposition::Review
+            } else {
+                AuditDisposition::Allow
+            },
+            "{destination}"
+        );
+    }
+}

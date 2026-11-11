@@ -108,3 +108,52 @@ fn connection_hashes_bind_destination_and_preserve_direct_vector() {
     origin.connection_source_plug = Some("SampleSource.note".into());
     assert_ne!(hash, allowlist_surface_hash(&origin, body));
 }
+
+#[test]
+fn unresolved_connection_plugs_require_review() {
+    let mut outcomes = Vec::new();
+    for (connection, unresolved) in [
+        ("connectAttr Example.tx Sample.tx;", false),
+        ("connectAttr Example Sample.dstAttr;", true),
+        ("connectAttr Example.tx Sample;", true),
+    ] {
+        let scene = format!(
+            "createNode transform -n Example; createNode transform -n Sample; {connection}"
+        );
+        let observation = Loader::new(LoadOptions::default())
+            .observe_analysis_bytes(
+                Path::new("Example.ma"),
+                SceneFormat::Ma,
+                ValidationState::Validated,
+                scene.into_bytes(),
+            )
+            .unwrap();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let report =
+            audit_observation(&observation, &plan, AuditOptions::strict_default()).unwrap();
+        outcomes.push((connection, report.coverage_issues.len(), report.disposition));
+        if !unresolved {
+            assert!(report.coverage_issues.is_empty());
+        }
+    }
+    assert_eq!(
+        outcomes,
+        vec![
+            (
+                "connectAttr Example.tx Sample.tx;",
+                0,
+                AuditDisposition::Allow
+            ),
+            (
+                "connectAttr Example Sample.dstAttr;",
+                1,
+                AuditDisposition::Review
+            ),
+            (
+                "connectAttr Example.tx Sample;",
+                1,
+                AuditDisposition::Review
+            ),
+        ]
+    );
+}

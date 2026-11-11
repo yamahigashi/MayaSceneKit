@@ -947,9 +947,11 @@ impl SelectiveScanSink {
             return;
         }
         if !positional[0].contains('.') {
+            self.push_context_diagnostic(command.span, "cannot determine connectAttr destination");
             return;
         }
         let Some(dst) = self.connection_plug(source, &positional[1]) else {
+            self.push_context_diagnostic(command.span, "cannot determine connectAttr destination");
             return;
         };
         if let Some(id) = dst.history_id {
@@ -980,6 +982,7 @@ impl SelectiveScanSink {
             return;
         }
         let Some(src) = self.connection_plug(source, &positional[0]) else {
+            self.push_context_diagnostic(command.span, "cannot determine connectAttr destination");
             return;
         };
         self.connections.connections.push(RawMaConnection {
@@ -2121,11 +2124,7 @@ mod tests {
                     "{input}"
                 );
                 if !executable {
-                    assert_eq!(
-                        !facts.diagnostics.is_empty(),
-                        diagnostic || !padding.is_empty() || tail.starts_with('('),
-                        "{input}"
-                    );
+                    assert!(!facts.diagnostics.is_empty(), "{input}");
                 }
             }
         }
