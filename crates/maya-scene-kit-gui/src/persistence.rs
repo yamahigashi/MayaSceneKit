@@ -558,6 +558,23 @@ fn read_settings(path: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
+fn is_settings_backup_suffix(suffix: &str) -> bool {
+    let stamp = match suffix.split_once('-') {
+        Some((stamp, collision)) => {
+            if !collision
+                .parse::<u64>()
+                .is_ok_and(|number| number != 0 && number.to_string() == collision)
+            {
+                return false;
+            }
+            stamp
+        }
+        None => suffix,
+    };
+    chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S")
+        .is_ok_and(|time| time.format("%Y%m%dT%H%M%S").to_string() == stamp)
+}
+
 fn preserve_settings(
     path: &Path,
     bytes: &[u8],
@@ -565,6 +582,33 @@ fn preserve_settings(
     timestamp: &str,
 ) -> io::Result<PathBuf> {
     use std::io::Write;
+    if kind == "lenient" {
+        let mut prefix = path.file_name().unwrap_or_default().to_os_string();
+        prefix.push(".lenient-");
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let matches_name = name
+                    .as_encoded_bytes()
+                    .strip_prefix(prefix.as_encoded_bytes())
+                    .and_then(|suffix| std::str::from_utf8(suffix).ok())
+                    .is_some_and(is_settings_backup_suffix);
+                if matches_name
+                    && entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry
+                        .metadata()
+                        .is_ok_and(|meta| meta.len() == bytes.len() as u64)
+                    && fs::read(entry.path()).is_ok_and(|candidate| candidate == bytes)
+                {
+                    return Ok(entry.path());
+                }
+            }
+        }
+    }
     for suffix in 0u64.. {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(format!(".{kind}-{timestamp}"));
@@ -880,6 +924,106 @@ mod tests {
             let saved = serde_json::to_value(&loaded.state).unwrap();
             assert_eq!(saved.get("Example"), original.get("Example"));
         }
+    }
+
+    #[test]
+    fn lenient_restarts_reuse_identical_backup() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        let payload = br#"{"locale":"Example","max_bytes":123}"#;
+        fs::write(&path, payload).unwrap();
+        let first = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        let first_backup = first.recovery.unwrap().path;
+        let second = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        let recovery = second.recovery.unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_eq!(recovery.path, first_backup);
+        assert!(recovery.lenient);
+        assert!(!recovery.saving_disabled);
+        assert!(
+            recovery
+                .banner(&crate::i18n::I18n::new(
+                    crate::model::SupportedLocale::English
+                ))
+                .contains(&first_backup.display().to_string())
+        );
+        assert_eq!(fs::read(&path).unwrap(), payload);
+        save_persisted_state_to(&path, &second.state, 1, &Mutex::new(0)).unwrap();
+        assert_eq!(fs::read(first_backup).unwrap(), payload);
+        let normalized = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        assert!(normalized.recovery.is_none());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn lenient_restarts_preserve_changed_content_separately() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        let original = br#"{"locale":"Example","max_bytes":123}"#;
+        let changed = br#"{"locale":"Example","max_bytes":456}"#;
+        fs::write(&path, original).unwrap();
+        let first = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        let first_backup = first.recovery.unwrap().path;
+        fs::write(&path, changed).unwrap();
+        let second = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        let second_backup = second.recovery.unwrap().path;
+        assert_ne!(first_backup, second_backup);
+        assert_eq!(fs::read(&first_backup).unwrap(), original);
+        assert_eq!(fs::read(&second_backup).unwrap(), changed);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+        let third = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+        assert_eq!(third.recovery.unwrap().path, second_backup);
+        assert_eq!(fs::read(&path).unwrap(), changed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn lenient_recovery_skips_unreadable_backup() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        let backup = dir.path().join("Example.json.lenient-20261110T120000");
+        let payload = br#"{"locale":"Example","max_bytes":123}"#;
+        fs::write(&path, payload).unwrap();
+        fs::write(&backup, payload).unwrap();
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = fs::read(&backup).is_err();
+        if !unreadable {
+            fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
+            eprintln!("permission regression skipped: process can read mode 000 (root)");
+            return;
+        }
+        let protection = super::SaveProtection::default();
+        let loaded = super::recover_settings(&path, &protection, || {});
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
+        let recovery = loaded.recovery.unwrap();
+        assert!(!recovery.saving_disabled);
+        assert!(protection.permits_save());
+        assert!(recovery.lenient);
+        assert_ne!(recovery.path, backup);
+        assert_eq!(fs::read(&recovery.path).unwrap(), payload);
+        assert_eq!(fs::read(&path).unwrap(), payload);
+        assert_eq!(loaded.state.max_bytes, Some(123));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn lenient_recovery_skips_unrelated_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Example.json");
+        let unrelated = dir.path().join("Example.json.lenient-notes.txt");
+        let payload = br#"{"locale":"Example","max_bytes":123}"#;
+        fs::write(&path, payload).unwrap();
+        fs::write(&unrelated, payload).unwrap();
+        let loaded = super::recover_settings(&path, &super::SaveProtection::default(), || {});
+        let recovery = loaded.recovery.unwrap();
+        assert_ne!(recovery.path, unrelated);
+        assert!(!recovery.saving_disabled);
+        assert!(recovery.lenient);
+        assert_eq!(fs::read(&recovery.path).unwrap(), payload);
+        assert_eq!(fs::read(&unrelated).unwrap(), payload);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[test]
