@@ -5,7 +5,7 @@ use crate::{
     PathReplaceSkips,
     ma::types::PathReplaceRule,
     mb::{
-        Chunk, ChunkLayout, FourCC, parse_section_chunks_with_hints,
+        Chunk, ChunkLayout, FourCC,
         paths::{
             extract_raw_scene_path_records_from_mb_parts, extract_raw_scene_paths_from_mb_parts,
         },
@@ -252,7 +252,7 @@ fn replace_mb_paths<'a>(
     for child in root.children() {
         payload.extend_from_slice(&data[cursor..child.offset()]);
         let (bytes, child_changes) =
-            rewrite_path_child(child, data, &replacement, accept, encoders)?;
+            rewrite_path_child(root, child, data, &replacement, accept, encoders)?;
         let end = super::child_span_end(root, child);
         if child_changes.replacement_count == 0 {
             payload.extend_from_slice(&data[child.offset()..end]);
@@ -354,6 +354,7 @@ fn inner_quoted(value: &str) -> (&str, bool) {
 }
 
 fn rewrite_path_child(
+    root: &Chunk,
     child: &Chunk,
     data: &[u8],
     replacement: &Replacement<'_>,
@@ -372,7 +373,7 @@ fn rewrite_path_child(
     let Some(inner) = payload.get(4..) else {
         return Ok((Vec::new(), changes));
     };
-    let parsed = parse_section_chunks_with_hints(inner, super::composite::section_hints(child));
+    let parsed = super::parse_complete_section(inner, child, root)?;
     let mut rewrites = Vec::new();
     for (index, chunk) in parsed.chunks().iter().enumerate() {
         let raw = chunk.payload(inner);
@@ -555,6 +556,7 @@ pub fn collect_mb_path_candidates(
     root: &Chunk,
     indices: &[usize],
 ) -> Result<Vec<MbPathCandidatePlan>, super::MbPlanError> {
+    super::require_complete_mb_sections(data, root)?;
     let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
     let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -584,8 +586,7 @@ pub fn collect_mb_path_candidates(
                 return Err(super::MbPlanError::AmbiguousEntry { entry_index });
             }
             let inner = &data[child.payload_offset() + 4..child.payload_end()];
-            let parsed =
-                parse_section_chunks_with_hints(inner, super::composite::section_hints(child));
+            let parsed = super::parse_complete_section(inner, child, root)?;
             let before = parsed
                 .chunks()
                 .iter()
@@ -611,6 +612,7 @@ pub fn plan_mb_path_value(
     candidate: &MbPathCandidatePlan,
     after: &str,
 ) -> Result<(Option<super::MbPayloadEdit>, MbPathStatus), super::MbPlanError> {
+    super::require_complete_mb_sections(data, root)?;
     let invalid = || super::MbPlanError::InvalidLocator(format!("{:?}", candidate.locator));
     let child = root
         .children()
@@ -620,7 +622,7 @@ pub fn plan_mb_path_value(
     let inner = data
         .get(child.payload_offset() + 4..child.payload_end())
         .ok_or_else(invalid)?;
-    let parsed = parse_section_chunks_with_hints(inner, super::composite::section_hints(child));
+    let parsed = super::parse_complete_section(inner, child, root)?;
     let (index, chunk) = parsed
         .chunks()
         .iter()
@@ -1028,6 +1030,7 @@ mod tests {
         }];
         let compiled = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(&rules));
         let (rewritten, count) = super::rewrite_path_child(
+            child,
             child,
             &child_bytes,
             &super::Replacement::Rules(&compiled),
@@ -1771,6 +1774,7 @@ mod tests {
                 .collect();
             let (bytes, changes) = super::rewrite_path_child(
                 child,
+                child,
                 data,
                 &super::Replacement::Targets(&targets),
                 accept_payload,
@@ -1792,6 +1796,7 @@ mod tests {
             }
         } else {
             let (bytes, changes) = super::rewrite_path_child(
+                child,
                 child,
                 data,
                 &super::Replacement::Rules(&rules),
@@ -1830,6 +1835,7 @@ mod tests {
         let rules = literal_rules("X", "Y");
         let compiled = CompiledPathReplaceRules::compile_lossy(&super::normalize_mb_rules(&rules));
         let (child, count) = super::rewrite_path_child(
+            parsed.root(),
             &parsed.root().children()[0],
             source,
             &super::Replacement::Rules(&compiled),
@@ -1886,7 +1892,6 @@ mod tests {
                 manual_chunk(b"DATA", 0x55667788, b"Example", HeaderFormat::EightByte, 8);
             *neighbor.last_mut().unwrap() = 0xDD;
             inner.extend_from_slice(&neighbor);
-            inner.extend_from_slice(&[0xFA, 0xFB, 0xFC]);
             let mut child_payload = form.as_bytes().to_vec();
             child_payload.extend_from_slice(&inner);
             let child_bytes = manual_chunk(
@@ -1935,16 +1940,9 @@ mod tests {
     #[test]
     fn all_seven_rewriters_keep_individual_fallback_and_counts() {
         for (form, tag, payload) in path_cases() {
-            let mut source = build_mb_with_form_payloads(
-                form,
-                tag,
-                &[payload, payload, payload],
-                &[0xFA, 0xFB, 0xFC],
-            );
+            let source = build_mb_with_form_payloads(form, tag, &[payload, payload, payload], &[]);
             let parsed = crate::mb::parse_bytes(source.clone()).unwrap();
             let child = &parsed.root().children()[0];
-            assert!(child.payload_end() < source.len());
-            source[child.payload_end()..].fill(0xDD);
             let inner = &source[child.payload_offset() + 4..child.payload_end()];
             let section = parse_section_chunks_with_hints(
                 inner,
@@ -1997,7 +1995,7 @@ mod tests {
                         &compiled,
                         &accept_payload,
                     )
-                    .is_err()
+                    .is_ok()
                 );
             }
         }

@@ -80,3 +80,20 @@ pub(crate) fn child_span_end(root: &crate::mb::Chunk, child: &crate::mb::Chunk) 
         .saturating_add(padding)
         .min(root.payload_end())
 }
+
+fn parse_complete_section(
+    inner: &[u8],
+    child: &crate::mb::Chunk,
+    root: &crate::mb::Chunk,
+) -> Result<maya_mb::ParsedSection, MbRewriteError> {
+    let parsed = crate::mb::parse_section_chunks_with_hints_with_budget(
+        inner,
+        composite::section_hints(child),
+        root.section_budget()
+            .unwrap_or(&crate::mb::MbParseBudget::default()),
+    );
+    if parsed.state() == crate::mb::MbSectionScanState::Stopped {
+        return Err(MbRewriteError::SectionScanStopped);
+    }
+    Ok(parsed)
+}

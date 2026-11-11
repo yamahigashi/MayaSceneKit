@@ -1,8 +1,7 @@
 use std::{collections::BTreeSet, num::NonZeroUsize};
 
 use crate::mb::{
-    Chunk, ChunkLayout, EncodeError, LayoutHints, MbRewriteError, parse_section_chunks_with_hints,
-    resolve_section_layout_hints,
+    Chunk, ChunkLayout, EncodeError, LayoutHints, MbRewriteError, resolve_section_layout_hints,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -67,7 +66,8 @@ pub fn collect_mb_plugin_require_records(
     data: &[u8],
     root: &Chunk,
     requested: &[String],
-) -> Vec<(MbPayloadLocator, Vec<u8>)> {
+) -> Result<Vec<(MbPayloadLocator, Vec<u8>)>, MbRewriteError> {
+    super::require_complete_mb_sections(data, root)?;
     let mut records = Vec::new();
     for child in root
         .children()
@@ -78,7 +78,7 @@ pub fn collect_mb_plugin_require_records(
         let Some(inner) = payload.get(4..) else {
             continue;
         };
-        let parsed = parse_section_chunks_with_hints(inner, section_hints(child));
+        let parsed = super::parse_complete_section(inner, child, root)?;
         for chunk in parsed.chunks() {
             if chunk.tag() != "PLUG" {
                 continue;
@@ -100,7 +100,7 @@ pub fn collect_mb_plugin_require_records(
             }
         }
     }
-    records
+    Ok(records)
 }
 
 pub(super) fn section_hints(child: &Chunk) -> LayoutHints {
@@ -195,7 +195,7 @@ fn apply_mb_original_edits_with_encoder(
         let inner = data
             .get(child.payload_offset() + 4..child.payload_end())
             .ok_or_else(|| MbPlanError::InvalidLocator(form.clone()))?;
-        let parsed = parse_section_chunks_with_hints(inner, section_hints(child));
+        let parsed = super::parse_complete_section(inner, child, root)?;
         let new_inner = if removals.is_empty() {
             let mut rewrites = Vec::new();
             for edit in updates {

@@ -1,13 +1,14 @@
 use crate::{
     mb::{
-        LayoutHints, MayaBinaryFile, resolve_section_layout_hints, walk_group_chunks_with_layout,
+        LayoutHints, MayaBinaryFile, resolve_section_layout_hints,
+        walk_group_chunks_with_layout_with_budget,
     },
     scene::ir::{ChunkRef, RawChunkRecord},
 };
 
 pub(crate) fn collect_raw_chunk_records(
     mb: &MayaBinaryFile,
-) -> (Vec<RawChunkRecord>, crate::mb::MbSectionScanState) {
+) -> Result<(Vec<RawChunkRecord>, crate::mb::MbSectionScanState), crate::mb::MayaBinaryParseError> {
     let mut raw_chunks = Vec::new();
     let mut state = crate::mb::MbSectionScanState::Complete;
 
@@ -28,7 +29,14 @@ pub(crate) fn collect_raw_chunk_records(
         } else {
             &[]
         };
-        let walked = walk_group_chunks_with_layout(inner_data, hints);
+        let walked = walk_group_chunks_with_layout_with_budget(
+            inner_data,
+            hints,
+            2,
+            mb.root()
+                .section_budget()
+                .unwrap_or(&crate::mb::MbParseBudget::default()),
+        )?;
         state.merge(walked.state);
         for chunk in walked.chunks {
             raw_chunks.push(RawChunkRecord {
@@ -47,5 +55,5 @@ pub(crate) fn collect_raw_chunk_records(
         }
     }
 
-    (raw_chunks, state)
+    Ok((raw_chunks, state))
 }

@@ -16,6 +16,15 @@ fn complete_mixed_width_tree_refuses_noop_rewrite() {
         maya_scene_kit_formats::mb::MbSectionScanState::Stopped
     );
     assert!(replace_scene_paths_in_mb_cow(mb.data(), mb.root(), &[]).is_err());
+    let records = maya_scene_kit_formats::mb::rewrite::collect_mb_plugin_require_records(
+        mb.data(),
+        mb.root(),
+        &["requires \"ExamplePlugin\" \"1.0\";".into()],
+    );
+    assert!(matches!(
+        records,
+        Err(maya_scene_kit_formats::mb::MbRewriteError::SectionScanStopped)
+    ));
 }
 
 #[test]
@@ -141,4 +150,120 @@ fn rewrite_budget_error_retains_its_reason() {
             .unwrap_err();
     assert!(error.to_string().contains("child budget"), "{error}");
     assert!(!error.to_string().contains("section scan stopped"));
+}
+
+fn section_with_late_record(
+    tag: &[u8; 4],
+    value: &[u8],
+) -> maya_scene_kit_formats::mb::MayaBinaryFile {
+    use maya_scene_kit_formats::mb::{
+        ChunkLayout, FourCC, HeaderFormat, MbParseBudget, parse_bytes_with_budget,
+    };
+    let layout = ChunkLayout::new(
+        std::num::NonZeroUsize::new(4).unwrap(),
+        HeaderFormat::FourByte,
+    );
+    let mut section = if tag == b"PLUG" { b"HEAD" } else { b"RTFT" }.to_vec();
+    let budget = MbParseBudget::default();
+    let filler = maya_mb::encode_chunk(FourCC::new(*b"DATA"), 0, &[], layout).unwrap();
+    for _ in 0..budget.max_children_per_group {
+        section.extend_from_slice(&filler);
+    }
+    section.extend_from_slice(&maya_mb::encode_chunk(FourCC::new(*tag), 0, value, layout).unwrap());
+    let mut root = b"Maya".to_vec();
+    root.extend_from_slice(
+        &maya_mb::encode_chunk(FourCC::new(*b"FOR4"), 0, &section, layout).unwrap(),
+    );
+    let budget = MbParseBudget {
+        max_children_per_group: budget.max_children_per_group + 1,
+        ..budget
+    };
+    let mb = parse_bytes_with_budget(
+        maya_mb::encode_chunk(FourCC::new(*b"FOR4"), 0, &root, layout).unwrap(),
+        &budget,
+    )
+    .unwrap();
+    assert!(matches!(mb.completeness(), MbCompleteness::Complete));
+    mb
+}
+
+#[test]
+fn raised_budget_rewrites_late_path_by_rules() {
+    use maya_scene_kit_formats::{ma::types::PathReplaceMode, mb::MbPathReplaceRule};
+    let mb = section_with_late_record(b"STR ", b"ftn\0\0asset/example/Example.mb\0");
+    let rule = MbPathReplaceRule {
+        from: "Example.mb".into(),
+        to: "Sample.mb".into(),
+        mode: PathReplaceMode::Literal,
+    };
+    let (bytes, changes) = replace_scene_paths_in_mb_cow(mb.data(), mb.root(), &[rule]).unwrap();
+    assert_eq!(changes.replacement_count, 1);
+    assert!(
+        bytes
+            .windows(b"asset/example/Sample.mb".len())
+            .any(|part| part == b"asset/example/Sample.mb")
+    );
+}
+
+#[test]
+fn raised_budget_rewrites_late_path_by_index() {
+    use maya_scene_kit_formats::mb::rewrite::replace_scene_paths_in_mb_by_index;
+    let mb = section_with_late_record(b"STR ", b"ftn\0\0asset/example/Example.mb\0");
+    let (bytes, changes) = replace_scene_paths_in_mb_by_index(
+        mb.data(),
+        mb.root(),
+        &[(0, "asset/example/Sample.mb".into())],
+    )
+    .unwrap();
+    assert_eq!(changes.replacement_count, 1);
+    assert!(
+        bytes
+            .windows(b"asset/example/Sample.mb".len())
+            .any(|part| part == b"asset/example/Sample.mb")
+    );
+}
+
+#[test]
+fn raised_budget_removes_late_plugin_record() {
+    use maya_scene_kit_formats::mb::{
+        MbParseBudget, parse_bytes_with_budget,
+        rewrite::{
+            MbOriginalEdits, MbPayloadLocator, apply_mb_original_edits,
+            collect_mb_plugin_require_records,
+        },
+    };
+    let mb = section_with_late_record(b"PLUG", b"ExamplePlugin\x001.0\0");
+    let records = collect_mb_plugin_require_records(
+        mb.data(),
+        mb.root(),
+        &["requires \"ExamplePlugin\" \"1.0\";".into()],
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].1, b"ExamplePlugin\x001.0\0");
+    assert_eq!(
+        records[0].0,
+        MbPayloadLocator {
+            form: "HEAD".into(),
+            node_offset: mb.root().children()[0].offset(),
+            chunk_start: MbParseBudget::default().max_children_per_group * 8,
+        }
+    );
+    let plan = MbOriginalEdits {
+        removed_records: records.into_iter().map(|(locator, _)| locator).collect(),
+        ..Default::default()
+    };
+    let bytes = apply_mb_original_edits(mb.data(), mb.root(), &plan).unwrap();
+    let updated = parse_bytes_with_budget(bytes, mb.root().section_budget().unwrap()).unwrap();
+    assert!(matches!(updated.completeness(), MbCompleteness::Complete));
+    assert_eq!(
+        updated.root().children()[0].children().len(),
+        MbParseBudget::default().max_children_per_group
+    );
+    assert!(
+        !updated
+            .data()
+            .windows(b"ExamplePlugin".len())
+            .any(|part| part == b"ExamplePlugin")
+    );
 }

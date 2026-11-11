@@ -276,7 +276,8 @@ fn binary_clean_records(
                     bytes,
                     root,
                     std::slice::from_ref(rendered),
-                );
+                )
+                .map_err(mb_rewrite_error)?;
                 if found.is_empty() {
                     return Err(missing_target(path, target));
                 }

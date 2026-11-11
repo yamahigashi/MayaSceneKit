@@ -173,8 +173,15 @@ pub fn collect_raw_chunks(path: impl AsRef<Path>) -> Result<Vec<RawChunkDump>, S
         return Ok(vec![]);
     }
     let mb = parse_file(scene_path)?;
-    Ok(collect_raw_chunk_records(&mb)
-        .0
+    crate::mb::rewrite::require_complete_mb_tree(mb.root())
+        .map_err(|error| SceneToolError::Message(error.to_string()))?;
+    let (raw_chunks, state) = collect_raw_chunk_records(&mb)?;
+    if state == crate::mb::MbSectionScanState::Stopped {
+        return Err(SceneToolError::Message(
+            "cannot collect raw chunks: incomplete Maya Binary section scan".into(),
+        ));
+    }
+    Ok(raw_chunks
         .into_iter()
         .map(|raw| {
             let payload = raw.payload(mb.data()).to_vec();

@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+- Section rescans can retain the original parse budget with the existing explicit-budget parser; callers must inspect ParsedSection::state before using its chunks as a complete inventory.
+
 Incompatible section-scan API changes:
 
 - ParsedSection::into_chunks(self) -> Vec<SectionChunk> is replaced by into_parts(self) -> (Vec<SectionChunk>, MbSectionScanState).

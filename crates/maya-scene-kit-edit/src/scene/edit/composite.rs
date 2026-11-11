@@ -641,7 +641,8 @@ fn apply_binary(
                     bytes,
                     root,
                     std::slice::from_ref(rendered),
-                );
+                )
+                .map_err(binary::MbPlanError::from)?;
                 if records.is_empty() {
                     return Err(invalid(format!(
                         "requested require was not found: {rendered}"
