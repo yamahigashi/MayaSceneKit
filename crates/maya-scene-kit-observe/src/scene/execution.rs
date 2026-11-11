@@ -19,7 +19,8 @@ pub use self::{
         collect_mel_surface_facts_shared,
     },
     python_source::{
-        PythonParseBudgetLimit, check_python_parse_budget, normalize_python_compat_source,
+        PythonParseBudgetLimit, check_python_parse_budget,
+        check_python_parse_budget_with_max_bytes, normalize_python_compat_source,
         with_python_analysis,
     },
     surfaces::ExecutionSurface,
@@ -31,12 +32,16 @@ use crate::scene::{
 
 #[derive(Debug, Clone)]
 pub struct ObservedExecutionSurface {
+    /// The budget that prevented Python analysis of this retained surface.
+    pub python_parse_budget_limit: Option<PythonParseBudgetLimit>,
     pub surface: ExecutionSurface,
     pub mel: Option<Arc<MelSurfaceFacts>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ObservedExecutionCatalog {
+    /// The observation byte limit, also applied to Python bodies derived during audit.
+    pub python_max_body_bytes: usize,
     pub surfaces: Vec<ObservedExecutionSurface>,
     pub unit_summaries: Vec<ExecutionUnitSummary>,
     pub dependency_facts: Vec<DependencyFact>,

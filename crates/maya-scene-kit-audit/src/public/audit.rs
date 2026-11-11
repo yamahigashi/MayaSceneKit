@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use maya_scene_kit_observe::scene::{
     core::{SceneFormat, ValidationState},
     evidence::{
-        DependencyFact, ExecutionCoverageIssue, ExecutionCoverageState, ExecutionOrigin,
-        ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
+        DependencyFact, ExecutionCoverageIssue, ExecutionCoverageIssueKind, ExecutionCoverageState,
+        ExecutionOrigin, ExecutionUnitSummary, SceneDigestSet, UnknownSemanticFact,
     },
     paths::ScenePathResolutionStatus,
 };
@@ -726,11 +726,15 @@ impl AuditReport {
         self.notices.len()
     }
 
-    /// Returns `true` when the report was blocked by a parse budget exceed notice.
+    /// Returns true when any analysis was blocked by a parse budget.
     pub fn is_parse_budget_blocked(&self) -> bool {
         self.notices
             .iter()
             .any(|notice| notice.code == AuditNoticeCode::ParseBudgetExceeded)
+            || self
+                .coverage_issues
+                .iter()
+                .any(|issue| issue.kind == ExecutionCoverageIssueKind::PythonParseBudgetExceeded)
     }
 
     /// Returns the report-local surface referenced by the finding.

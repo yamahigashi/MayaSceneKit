@@ -52,8 +52,9 @@ pub(crate) fn analyze_mel_surface(
 pub(crate) fn analyze_python_surface(
     surface_index: usize,
     surface: &AnalysisSurface,
+    python_max_body_bytes: usize,
 ) -> SurfaceAnalysis {
-    analyze_python_surface_impl(surface_index, surface)
+    analyze_python_surface_impl(surface_index, surface, python_max_body_bytes)
 }
 
 #[cfg(test)]

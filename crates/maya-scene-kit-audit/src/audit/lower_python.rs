@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use maya_scene_kit_observe::scene::execution::{
-    check_python_parse_budget, normalize_python_compat_source,
+    check_python_parse_budget_with_max_bytes, normalize_python_compat_source,
     python_walk::{
         PythonAstVisitor, PythonScope, PythonWalkPoint, walk_expr, walk_stmt, walk_suite,
     },
@@ -67,9 +67,9 @@ pub(crate) enum PythonSignal {
     },
 }
 
-pub(crate) fn collect_python_signals(source: &str) -> Vec<PythonSignal> {
+pub(crate) fn collect_python_signals(source: &str, max_bytes: usize) -> Vec<PythonSignal> {
     with_python_analysis(source, |source| {
-        if let Err(limit) = check_python_parse_budget(source) {
+        if let Err(limit) = check_python_parse_budget_with_max_bytes(source, max_bytes) {
             return vec![PythonSignal::ParseFailure {
                 message: limit.to_string(),
             }];
@@ -1254,22 +1254,33 @@ mod tests {
     use super::{PythonBodyArgKind, PythonCallKind, PythonSignal, collect_python_signals};
 
     fn has_call(source: &str, kind: PythonCallKind) -> bool {
-        collect_python_signals(source).iter().any(
-            |signal| matches!(signal, PythonSignal::Call { kind: actual, .. } if *actual == kind),
+        collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
         )
+        .iter()
+        .any(|signal| matches!(signal, PythonSignal::Call { kind: actual, .. } if *actual == kind))
     }
 
     fn call_count(source: &str, kind: PythonCallKind) -> usize {
-        collect_python_signals(source)
-            .iter()
-            .filter(|signal| {
-                matches!(signal, PythonSignal::Call { kind: actual, .. } if *actual == kind)
-            })
-            .count()
+        collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+        )
+        .iter()
+        .filter(
+            |signal| matches!(signal, PythonSignal::Call { kind: actual, .. } if *actual == kind),
+        )
+        .count()
     }
 
     fn has_assembled_call(source: &str, kind: PythonCallKind) -> bool {
-        collect_python_signals(source).iter().any(|signal| {
+        collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+        )
+        .iter()
+        .any(|signal| {
             matches!(
                 signal,
                 PythonSignal::Call {
@@ -1281,18 +1292,43 @@ mod tests {
     }
 
     fn has_parse_failure(source: &str) -> bool {
-        collect_python_signals(source)
-            .iter()
-            .any(|signal| matches!(signal, PythonSignal::ParseFailure { .. }))
+        collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+        )
+        .iter()
+        .any(|signal| matches!(signal, PythonSignal::ParseFailure { .. }))
     }
 
     fn has_hard_marker(source: &str, expected: &str) -> bool {
-        collect_python_signals(source).iter().any(|signal| {
+        collect_python_signals(source, maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes).iter().any(|signal| {
             matches!(
                 signal,
                 PythonSignal::HardMarker { markers } if markers.iter().any(|marker| marker == expected)
             )
         })
+    }
+
+    #[test]
+    fn python_signals_use_the_supplied_byte_budget() {
+        let source = "__import__('os')";
+        assert!(matches!(
+            collect_python_signals(source, 8).as_slice(),
+            [PythonSignal::ParseFailure { .. }]
+        ));
+        let signals = collect_python_signals(source, 128);
+        assert!(
+            !signals
+                .iter()
+                .any(|signal| matches!(signal, PythonSignal::ParseFailure { .. }))
+        );
+        assert!(signals.iter().any(|signal| matches!(
+            signal,
+            PythonSignal::Call {
+                kind: PythonCallKind::Import,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1393,8 +1429,10 @@ mod tests {
 
     #[test]
     fn collect_python_signals_does_not_mark_join_without_sink_as_hard_marker() {
-        let signals =
-            collect_python_signals("target = '.'.join([node_name, 'attr_name'])\nuse(target)");
+        let signals = collect_python_signals(
+            "target = '.'.join([node_name, 'attr_name'])\nuse(target)",
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+        );
 
         assert!(
             signals
@@ -1443,7 +1481,10 @@ mod tests {
 
     #[test]
     fn collect_python_signals_uses_hard_marker_text_fallback_after_parse_failure() {
-        let signals = collect_python_signals("if broken syntax:\n    value = data.decode(");
+        let signals = collect_python_signals(
+            "if broken syntax:\n    value = data.decode(",
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+        );
 
         assert!(
             signals

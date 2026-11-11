@@ -13,6 +13,8 @@ use std::{
 
 use maya_scene_kit_observe::scene::{
     SceneFileIdentity, ScenePathResolutionContext, SceneResourceResolver, detect_scene_format,
+    evidence::ExecutionCoverageIssueDetail,
+    execution::{MelSinkArgKind, check_python_parse_budget_with_max_bytes},
     paths::{PathKind, ScenePathResolutionStatus},
 };
 
@@ -21,11 +23,11 @@ use crate::scene::{
     AuditDisposition, AuditEvidence, AuditFinding, AuditFindingCode, AuditFindingDetail,
     AuditGraphReport, AuditGraphRoot, AuditNotice, AuditOptions, AuditProfile, AuditReferenceEdge,
     AuditReport, AuditSeverity, AuditSinkKind, AuditTraversalIssue, AuditTraversalIssueKind,
-    DependencyFact, DependencyRiskClass, EffectCertainty, ExecutionCoverageState,
-    ExecutionEffectClass, ExecutionLanguage, ExecutionObservationBundle, ExecutionSemanticClass,
-    ExecutionUnitSummary, LoadOptions, Loader, ObservationBundle, ReferenceGraphOptions,
-    SceneDigestSet, SceneFormat, SceneToolError, StaticAuditFindingDetail, ValidationState,
-    execution::ObservedExecutionCatalog,
+    DependencyFact, DependencyRiskClass, EffectCertainty, ExecutionCoverageIssue,
+    ExecutionCoverageIssueKind, ExecutionCoverageState, ExecutionEffectClass, ExecutionLanguage,
+    ExecutionObservationBundle, ExecutionSemanticClass, ExecutionUnitSummary, LoadOptions, Loader,
+    ObservationBundle, ReferenceGraphOptions, SceneDigestSet, SceneFormat, SceneToolError,
+    StaticAuditFindingDetail, ValidationState, execution::ObservedExecutionCatalog,
 };
 
 pub fn build_script_audit_plan(
@@ -209,22 +211,6 @@ fn audit_observation_source_with_digests(
                 digests,
             ));
         }
-        Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
-            let digests = if include_digests {
-                Some(observation.scene_digests(0)?)
-            } else {
-                None
-            };
-            return Ok(build_parse_budget_blocked_audit_report(
-                scene_path,
-                scene_format,
-                validation_state,
-                plan,
-                options,
-                limit,
-                digests,
-            ));
-        }
         Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
             let digests = if include_digests {
                 Some(observation.scene_digests(0)?)
@@ -252,9 +238,7 @@ fn audit_observation_source_with_digests(
         options,
         include_digests,
     );
-    if !report.is_parse_budget_blocked() {
-        report.file_state = observation.file_state();
-    }
+    report.file_state = observation.file_state();
     Ok(report)
 }
 
@@ -268,6 +252,7 @@ fn evaluate_catalog(
     include_digests: bool,
 ) -> AuditReport {
     let ObservedExecutionCatalog {
+        python_max_body_bytes,
         surfaces: observed_surfaces,
         unit_summaries,
         dependency_facts,
@@ -277,6 +262,24 @@ fn evaluate_catalog(
         mut coverage_issues,
     } = catalog;
     let surface_count = observed_surfaces.len();
+    let skipped_python = observed_surfaces
+        .iter()
+        .map(|surface| surface.python_parse_budget_limit)
+        .collect::<Vec<_>>();
+    let observed_python_bodies = observed_surfaces
+        .iter()
+        .enumerate()
+        .flat_map(|(index, surface)| {
+            surface.mel.iter().flat_map(move |mel| {
+                mel.sink_arg_facts.iter().filter_map(move |fact| {
+                    (fact.sink_kind == MelSinkArgKind::Python)
+                        .then_some(fact.rendered_text.as_ref())
+                        .flatten()
+                        .map(|body| (index, Arc::clone(body)))
+                })
+            })
+        })
+        .collect::<HashSet<_>>();
     let mut mel_surface_facts_cache = HashMap::<Arc<str>, Arc<_>>::with_capacity(surface_count);
     let has_custom_rules = !plan.rules.is_empty();
     let mut surfaces = observed_surfaces
@@ -300,47 +303,63 @@ fn evaluate_catalog(
 
     while surface_index < surfaces.len() {
         let surface = &surfaces[surface_index];
-        if surface.origin.lang == ExecutionLanguage::Python
-            && let Err(limit) =
-                maya_scene_kit_observe::scene::execution::check_python_parse_budget(&surface.text)
-        {
-            return build_parse_budget_blocked_audit_report(
-                scene_path,
-                scene_format,
-                validation_state,
-                plan,
-                options,
-                limit,
-                include_digests.then_some(observed_digests),
-            );
+        findings.extend(surface_uncertainty_findings(surface_index, surface));
+        if has_custom_rules {
+            findings.extend(analyze::findings_for_custom_rules(
+                surface_index,
+                surface,
+                &plan.rules,
+            ));
         }
-        let analysis = analysis_cache.analyze(surface_index, surface, |surface_index, surface| {
-            let mut prefix = surface_uncertainty_findings(surface_index, surface);
-            if has_custom_rules {
-                prefix.extend(analyze::findings_for_custom_rules(
-                    surface_index,
-                    surface,
-                    &plan.rules,
-                ));
+        if surface.origin.lang == ExecutionLanguage::Python
+            && let Some(limit) = skipped_python
+                .get(surface_index)
+                .copied()
+                .flatten()
+                .or_else(|| {
+                    check_python_parse_budget_with_max_bytes(&surface.text, python_max_body_bytes)
+                        .err()
+                })
+        {
+            if surface_index >= surface_count
+                && !observed_python_bodies
+                    .contains(&(surface.root_index, Arc::clone(&surface.text)))
+            {
+                coverage_issues.push(ExecutionCoverageIssue {
+                    kind: ExecutionCoverageIssueKind::PythonParseBudgetExceeded,
+                    detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+                        diagnostic: AuditNotice::parse_budget_exceeded(limit).message,
+                    },
+                    origin: Some(surface.origin.clone()),
+                    preview: surface.preview.clone(),
+                });
             }
-            let mut analysis = match surface.origin.lang {
-                ExecutionLanguage::Python => {
-                    analyze::analyze_python_surface(surface_index, surface)
-                }
-                ExecutionLanguage::Mel | ExecutionLanguage::Unknown => {
-                    analyze::analyze_mel_surface(
+            if coverage_state == ExecutionCoverageState::Complete {
+                coverage_state = ExecutionCoverageState::Incomplete;
+            }
+            surfaces[surface_index].discard_analysis_state();
+            surface_index += 1;
+            continue;
+        }
+        let analysis =
+            analysis_cache.analyze(
+                surface_index,
+                surface,
+                |surface_index, surface| match surface.origin.lang {
+                    ExecutionLanguage::Python => analyze::analyze_python_surface(
                         surface_index,
                         surface,
-                        &mut mel_surface_facts_cache,
-                    )
-                }
-            };
-            if !prefix.is_empty() {
-                prefix.append(&mut analysis.findings);
-                analysis.findings = prefix;
-            }
-            analysis
-        });
+                        python_max_body_bytes,
+                    ),
+                    ExecutionLanguage::Mel | ExecutionLanguage::Unknown => {
+                        analyze::analyze_mel_surface(
+                            surface_index,
+                            surface,
+                            &mut mel_surface_facts_cache,
+                        )
+                    }
+                },
+            );
         findings.extend(analysis.findings);
         review_signals.extend(analysis.review_signals);
         unknown_semantics.extend(analysis.unknown_semantics);
@@ -481,18 +500,6 @@ pub fn audit_script_nodes_with_options_and_digests(
     let observation = match loader.observe_execution_path(path) {
         Ok(observation) => observation,
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
-            let scene_format = detect_scene_format(path)?;
-            return Ok(build_parse_budget_blocked_audit_report(
-                path.to_path_buf(),
-                scene_format,
-                ValidationState::Invalid,
-                plan,
-                options,
-                limit,
-                None,
-            ));
-        }
-        Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
             let scene_format = detect_scene_format(path)?;
             return Ok(build_parse_budget_blocked_audit_report(
                 path.to_path_buf(),
@@ -691,21 +698,6 @@ impl<'a> ReferenceAuditRun<'a> {
         let observation = match loader.observe_audit_path(path) {
             Ok(observation) => observation,
             Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
-                let scene_format = detect_scene_format(path)?;
-                return Ok((
-                    build_parse_budget_blocked_audit_report(
-                        path.to_path_buf(),
-                        scene_format,
-                        ValidationState::Invalid,
-                        self.plan,
-                        self.options,
-                        limit,
-                        None,
-                    ),
-                    Vec::new(),
-                ));
-            }
-            Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
                 let scene_format = detect_scene_format(path)?;
                 return Ok((
                     build_parse_budget_blocked_audit_report(

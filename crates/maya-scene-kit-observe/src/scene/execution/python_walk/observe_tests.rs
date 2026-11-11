@@ -61,8 +61,14 @@ fn added_positions(call: &str) -> Vec<String> {
 fn added_expression_positions_report_effects() {
     let mut missed = Vec::new();
     for source in added_positions(PROCESS) {
-        assert!(parse_python_compat_suite(&source).is_some(), "{source}");
-        if summarize_python_surface(&source).0 == ExecutionEffectClass::PureComputation {
+        assert!(
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some(),
+            "{source}"
+        );
+        if summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).0
+            == ExecutionEffectClass::PureComputation
+        {
             missed.push(source);
         }
     }
@@ -74,8 +80,16 @@ fn added_expression_positions_extract_bridges() {
     let mut missed = Vec::new();
     for source in added_positions(BRIDGE) {
         let source = format!("import maya.mel as mm\n{source}");
-        assert!(parse_python_compat_suite(&source).is_some(), "{source}");
-        if collect_static_maya_mel_eval_payloads(&source) != [PAYLOAD] {
+        assert!(
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some(),
+            "{source}"
+        );
+        if collect_static_maya_mel_eval_payloads(
+            &source,
+            crate::scene::MelParseBudget::default().max_bytes,
+        ) != [PAYLOAD]
+        {
             missed.push(source);
         }
     }
@@ -112,8 +126,16 @@ fn added_statement_positions_extract_bridges() {
     let mut missed = Vec::new();
     for source in sources {
         let source = format!("import maya.mel as mm\n{source}");
-        assert!(parse_python_compat_suite(&source).is_some(), "{source}");
-        if collect_static_maya_mel_eval_payloads(&source) != [PAYLOAD] {
+        assert!(
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some(),
+            "{source}"
+        );
+        if collect_static_maya_mel_eval_payloads(
+            &source,
+            crate::scene::MelParseBudget::default().max_bytes,
+        ) != [PAYLOAD]
+        {
             missed.push(source);
         }
     }
@@ -132,9 +154,15 @@ fn new_bodies_resolve_local_strings_and_restore_outer_bindings() {
     ] {
         let source =
             format!("import maya.mel as mm\ncmd = 'print \"Example\";'\n{body}\nmm.eval(cmd)");
-        assert!(parse_python_compat_suite(&source).is_some());
+        assert!(
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some()
+        );
         assert_eq!(
-            collect_static_maya_mel_eval_payloads(&source),
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            ),
             ["print \"Sample\";", "print \"Example\";"],
             "{source}"
         );
@@ -157,9 +185,16 @@ fn new_body_captures_invalidate_only_local_strings() {
         let source = format!(
             "import maya.mel as mm\ncmd = 'print \"Example\";'\nmatch sample:\n    case {pattern}:\n        mm.eval(cmd)\n        {BRIDGE}\nmm.eval(cmd)"
         );
-        assert!(parse_python_compat_suite(&source).is_some(), "{source}");
+        assert!(
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some(),
+            "{source}"
+        );
         assert_eq!(
-            collect_static_maya_mel_eval_payloads(&source),
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            ),
             [PAYLOAD, "print \"Example\";"],
             "{source}"
         );
@@ -168,7 +203,10 @@ fn new_body_captures_invalidate_only_local_strings() {
         "import maya.mel as mm\ncmd = 'print \"Example\";'\ntry: pass\nexcept* Exception as cmd:\n    mm.eval(cmd)\n    {BRIDGE}\nmm.eval(cmd)"
     );
     assert_eq!(
-        collect_static_maya_mel_eval_payloads(&source),
+        collect_static_maya_mel_eval_payloads(
+            &source,
+            crate::scene::MelParseBudget::default().max_bytes
+        ),
         [PAYLOAD, "print \"Example\";"]
     );
 }
@@ -183,11 +221,15 @@ fn existing_binding_notifications_preserve_order() {
         let source = format!("import maya.mel as mm\ncmd = 'print \"Example\";'\n{body}");
         let expected = if body.starts_with("del") { 0 } else { 1 };
         assert_eq!(
-            collect_static_maya_mel_eval_payloads(&source).len(),
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            )
+            .len(),
             expected
         );
         assert_eq!(
-            summarize_python_surface(&source).2,
+            summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).2,
             EffectCertainty::Uncertain
         );
     }
@@ -198,7 +240,10 @@ fn existing_binding_notifications_preserve_order() {
     ] {
         let source = format!("import maya.mel as mm\ncmd = 'print \"Example\";'\n{body}");
         assert_eq!(
-            collect_static_maya_mel_eval_payloads(&source),
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            ),
             ["print \"Example\";"]
         );
     }
@@ -214,8 +259,10 @@ fn existing_expression_positions_are_visited_once() {
         format!("Example(sample={BRIDGE})"),
         format!("mm.eval('print \"Sample\";', sample={BRIDGE})"),
     ] {
-        let payloads =
-            collect_static_maya_mel_eval_payloads(&format!("import maya.mel as mm\n{source}"));
+        let payloads = collect_static_maya_mel_eval_payloads(
+            &format!("import maya.mel as mm\n{source}"),
+            crate::scene::MelParseBudget::default().max_bytes,
+        );
         assert_eq!(
             payloads
                 .iter()
@@ -224,10 +271,14 @@ fn existing_expression_positions_are_visited_once() {
             1
         );
     }
-    let summary = summarize_python_surface("Example(sample=Sample())");
+    let summary = summarize_python_surface(
+        "Example(sample=Sample())",
+        crate::scene::MelParseBudget::default().max_bytes,
+    );
     assert_eq!(summary.3.len(), 2);
     let summary = summarize_python_surface(
         "import maya.mel as mm\nmm.eval('print \"Example\";', sample=Example())",
+        crate::scene::MelParseBudget::default().max_bytes,
     );
     assert_eq!(summary.2, EffectCertainty::Uncertain);
     assert_eq!(summary.3.len(), 2);
@@ -236,9 +287,19 @@ fn existing_expression_positions_are_visited_once() {
 #[test]
 fn literals_empty_input_and_parse_failures_preserve_semantics() {
     let annotation = format!("import maya.mel as mm\nsample: '''{BRIDGE}'''");
-    assert!(collect_static_maya_mel_eval_payloads(&annotation).is_empty());
+    assert!(
+        collect_static_maya_mel_eval_payloads(
+            &annotation,
+            crate::scene::MelParseBudget::default().max_bytes
+        )
+        .is_empty()
+    );
     assert_eq!(
-        summarize_python_surface(&annotation).2,
+        summarize_python_surface(
+            &annotation,
+            crate::scene::MelParseBudget::default().max_bytes
+        )
+        .2,
         EffectCertainty::Proven
     );
     for source in [
@@ -247,11 +308,21 @@ fn literals_empty_input_and_parse_failures_preserve_semantics() {
         "sample: 'Example()'",
         "match sample:\n    case Example.Value: pass\n    case Example(sample=Example.Value): pass\n    case {'Example': [None, *_]}: pass",
     ] {
-        assert!(parse_python_compat_suite(source).is_some());
-        let summary = summarize_python_surface(source);
+        assert!(
+            parse_python_compat_suite(source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some()
+        );
+        let summary =
+            summarize_python_surface(source, crate::scene::MelParseBudget::default().max_bytes);
         assert_eq!(summary.0, ExecutionEffectClass::PureComputation);
         assert_eq!(summary.2, EffectCertainty::Proven);
-        assert!(collect_static_maya_mel_eval_payloads(source).is_empty());
+        assert!(
+            collect_static_maya_mel_eval_payloads(
+                source,
+                crate::scene::MelParseBudget::default().max_bytes
+            )
+            .is_empty()
+        );
     }
     for source in [
         "import maya.mel as mm\nmm.eval(f'Example')",
@@ -259,9 +330,15 @@ fn literals_empty_input_and_parse_failures_preserve_semantics() {
         "import maya.mel as mm\nmm.eval()",
         "def (",
     ] {
-        assert!(collect_static_maya_mel_eval_payloads(source).is_empty());
+        assert!(
+            collect_static_maya_mel_eval_payloads(
+                source,
+                crate::scene::MelParseBudget::default().max_bytes
+            )
+            .is_empty()
+        );
         assert_eq!(
-            summarize_python_surface(source).2,
+            summarize_python_surface(source, crate::scene::MelParseBudget::default().max_bytes).2,
             EffectCertainty::Uncertain
         );
     }
@@ -279,13 +356,21 @@ fn isolated_imports_and_nested_bodies_preserve_uncertainty() {
         "try:\n    class Example: from maya import mel as mm\nexcept* Exception: pass",
     ] {
         let source = format!("{body}\nmm.eval('print 1;')");
-        assert!(parse_python_compat_suite(&source).is_some(), "{source}");
         assert!(
-            collect_static_maya_mel_eval_payloads(&source).is_empty(),
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some(),
+            "{source}"
+        );
+        assert!(
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            )
+            .is_empty(),
             "{source}"
         );
         assert_eq!(
-            summarize_python_surface(&source).2,
+            summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).2,
             EffectCertainty::Uncertain,
             "{source}"
         );
@@ -296,11 +381,14 @@ fn isolated_imports_and_nested_bodies_preserve_uncertainty() {
         "try: cmd = 'print 2;'\nexcept* Exception: pass\nelse: mm.eval(cmd)\nfinally: mm.eval(cmd)",
     ] {
         let source = format!("import maya.mel as mm\ncmd = 'print 1;'\n{body}");
-        let payloads = collect_static_maya_mel_eval_payloads(&source);
+        let payloads = collect_static_maya_mel_eval_payloads(
+            &source,
+            crate::scene::MelParseBudget::default().max_bytes,
+        );
         assert!(!payloads.is_empty(), "{source}");
         assert!(payloads.iter().all(|s| s == "print 1;"), "{source}");
         assert_eq!(
-            summarize_python_surface(&source).2,
+            summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).2,
             EffectCertainty::Uncertain,
             "{source}"
         );
@@ -316,8 +404,17 @@ fn local_body_bridges_and_existing_reason_sets_are_preserved() {
         "try:\n    cmd = 'print 1;'\n    mm.eval(cmd)\nexcept Exception: pass",
     ] {
         let source = format!("import maya.mel as mm\n{body}");
-        assert_eq!(collect_static_maya_mel_eval_payloads(&source), ["print 1;"]);
-        assert_eq!(summarize_python_surface(&source).2, EffectCertainty::Proven);
+        assert_eq!(
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            ),
+            ["print 1;"]
+        );
+        assert_eq!(
+            summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).2,
+            EffectCertainty::Proven
+        );
     }
     for source in [
         "Example(sample=Sample())",
@@ -326,7 +423,8 @@ fn local_body_bridges_and_existing_reason_sets_are_preserved() {
         "try: Example()\nexcept Sample(): pass",
         "match Example():\n    case _ if Sample(): pass",
     ] {
-        let reasons = summarize_python_surface(source).3;
+        let reasons =
+            summarize_python_surface(source, crate::scene::MelParseBudget::default().max_bytes).3;
         for name in ["Example", "Sample"] {
             assert!(
                 reasons.iter().any(|reason| matches!(reason,
@@ -429,13 +527,31 @@ fn visitors_preserve_depth_on_two_mib_stack() {
                     return;
                 }
                 let source = depth_source(shape, effect_depth, "ExampleSink()");
-                assert!(parse_python_compat_suite(&source).is_some());
-                assert_sink_reason(&summarize_python_surface(&source).3);
+                assert!(
+                    parse_python_compat_suite(
+                        &source,
+                        crate::scene::MelParseBudget::default().max_bytes
+                    )
+                    .is_some()
+                );
+                assert_sink_reason(
+                    &summarize_python_surface(
+                        &source,
+                        crate::scene::MelParseBudget::default().max_bytes,
+                    )
+                    .3,
+                );
                 let source = format!(
                     "import maya.mel as mm\n{}",
                     depth_source(shape, bridge_depth, BRIDGE)
                 );
-                assert_eq!(collect_static_maya_mel_eval_payloads(&source), [PAYLOAD]);
+                assert_eq!(
+                    collect_static_maya_mel_eval_payloads(
+                        &source,
+                        crate::scene::MelParseBudget::default().max_bytes
+                    ),
+                    [PAYLOAD]
+                );
             })
             .unwrap()
             .join()
@@ -454,21 +570,34 @@ fn captured_and_restored_bindings_keep_visitors_consistent() {
         "try: pass\nexcept* Exception as mm: mm.eval('print 1;')",
     ] {
         let source = format!("import maya.mel as mm\ncmd = 'print 1;'\n{body}");
-        assert!(parse_python_compat_suite(&source).is_some());
         assert!(
-            collect_static_maya_mel_eval_payloads(&source).is_empty(),
+            parse_python_compat_suite(&source, crate::scene::MelParseBudget::default().max_bytes)
+                .is_some()
+        );
+        assert!(
+            collect_static_maya_mel_eval_payloads(
+                &source,
+                crate::scene::MelParseBudget::default().max_bytes
+            )
+            .is_empty(),
             "{source}"
         );
         assert_eq!(
-            summarize_python_surface(&source).2,
+            summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).2,
             EffectCertainty::Uncertain,
             "{source}"
         );
     }
     let source = "import maya.mel as mm\ntry:\n    cmd = 'print 1;'\nexcept* Exception: pass\nelse: mm.eval(cmd)";
-    assert!(collect_static_maya_mel_eval_payloads(source).is_empty());
+    assert!(
+        collect_static_maya_mel_eval_payloads(
+            source,
+            crate::scene::MelParseBudget::default().max_bytes
+        )
+        .is_empty()
+    );
     assert_eq!(
-        summarize_python_surface(source).2,
+        summarize_python_surface(source, crate::scene::MelParseBudget::default().max_bytes).2,
         EffectCertainty::Uncertain
     );
 }
@@ -486,11 +615,14 @@ fn modified_body_bindings_make_later_bridges_uncertain() {
         "match sample:\n    case _:\n        class Example: import Example as mm",
     ] {
         let source = format!("import maya.mel as mm\ncmd = 'print 1;'\n{body}\nmm.eval(cmd)");
-        let payloads = collect_static_maya_mel_eval_payloads(&source);
+        let payloads = collect_static_maya_mel_eval_payloads(
+            &source,
+            crate::scene::MelParseBudget::default().max_bytes,
+        );
         assert!(payloads.iter().all(|s| s == "print 1;"), "{source}");
         assert!(!payloads.is_empty());
         assert_eq!(
-            summarize_python_surface(&source).2,
+            summarize_python_surface(&source, crate::scene::MelParseBudget::default().max_bytes).2,
             EffectCertainty::Uncertain,
             "{source}"
         );
@@ -499,11 +631,19 @@ fn modified_body_bindings_make_later_bridges_uncertain() {
 
 fn nested_fstring_suite(depth: usize, sink: &str) -> rustpython_parser::ast::Suite {
     use rustpython_parser::ast;
-    let mut suite = parse_python_compat_suite(&format!("import maya.mel as mm\n{sink}")).unwrap();
+    let mut suite = parse_python_compat_suite(
+        &format!("import maya.mel as mm\n{sink}"),
+        crate::scene::MelParseBudget::default().max_bytes,
+    )
+    .unwrap();
     let ast::Stmt::Expr(statement) = suite.last_mut().unwrap() else {
         unreachable!()
     };
-    let ast::Stmt::Expr(template) = parse_python_compat_suite("f'{0}'").unwrap().pop().unwrap()
+    let ast::Stmt::Expr(template) =
+        parse_python_compat_suite("f'{0}'", crate::scene::MelParseBudget::default().max_bytes)
+            .unwrap()
+            .pop()
+            .unwrap()
     else {
         unreachable!()
     };

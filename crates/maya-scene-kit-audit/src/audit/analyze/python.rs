@@ -13,10 +13,11 @@ use crate::{
 pub(super) fn analyze_python_surface_impl(
     surface_index: usize,
     surface: &AnalysisSurface,
+    python_max_body_bytes: usize,
 ) -> SurfaceAnalysis {
     let mut analysis = SurfaceAnalysis::default();
 
-    for signal in collect_python_signals(&surface.text) {
+    for signal in collect_python_signals(&surface.text, python_max_body_bytes) {
         match signal {
             PythonSignal::Call { kind, first_arg } => {
                 let (sink, message) = match kind {

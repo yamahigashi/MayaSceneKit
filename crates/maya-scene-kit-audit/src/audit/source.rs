@@ -32,31 +32,21 @@ pub fn audit_source_text(
                 None,
             ));
         }
-        Err(SceneToolError::PythonParseBudgetExceeded { limit }) => {
-            return Ok(build_parse_budget_blocked_audit_report(
-                PathBuf::new(),
-                SceneFormat::Unknown,
-                ValidationState::Invalid,
-                &plan,
-                options,
-                limit,
-                None,
-            ));
-        }
         Err(err) => return Err(err),
     };
-    let validation_state = if catalog.coverage_issues.is_empty() {
+    let mut report = evaluate_catalog(
+        catalog,
+        PathBuf::new(),
+        SceneFormat::Unknown,
+        ValidationState::Validated,
+        &plan,
+        options,
+        false,
+    );
+    report.validation_state = if report.coverage_issues.is_empty() {
         ValidationState::Validated
     } else {
         ValidationState::Invalid
     };
-    Ok(evaluate_catalog(
-        catalog,
-        PathBuf::new(),
-        SceneFormat::Unknown,
-        validation_state,
-        &plan,
-        options,
-        false,
-    ))
+    Ok(report)
 }

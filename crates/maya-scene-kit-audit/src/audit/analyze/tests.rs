@@ -536,7 +536,11 @@ fn literal_sink_calls_preserve_every_body_and_parser_fallback() {
                 }
                 let dangerous = &analysis.derived_surfaces[1];
                 let nested = if sink == "python" {
-                    super::analyze_python_surface(1, dangerous)
+                    super::analyze_python_surface(
+                        1,
+                        dangerous,
+                        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+                    )
                 } else {
                     analyze_mel_surface(1, dangerous, &mut Default::default())
                 };
@@ -620,7 +624,11 @@ fn repeated_literal_analysis_preserves_each_occurrence() {
     for index in [21, 22] {
         let analysis = cache.analyze(index, &python, |index, surface| {
             python_analyses += 1;
-            super::analyze_python_surface(index, surface)
+            super::analyze_python_surface(
+                index,
+                surface,
+                maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+            )
         });
         assert!(
             analysis

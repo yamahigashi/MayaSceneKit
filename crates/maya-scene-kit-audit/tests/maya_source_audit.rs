@@ -842,8 +842,8 @@ fn python_unary_body_budget_survives_child_process() {
                 report.disposition,
                 AuditDisposition::Allow | AuditDisposition::AllowWithNotice
             ));
-            assert!(report.notices.iter().any(|notice| {
-                serde_json::to_string(notice)
+            assert!(report.coverage_issues.iter().any(|issue| {
+                serde_json::to_string(issue)
                     .unwrap()
                     .contains("python_max_")
             }));
@@ -863,8 +863,8 @@ fn python_bracket_depth_budget_survives_child_process() {
             scene(&source, false),
         ] {
             assert!(report.blocked_on_uncertainty);
-            assert!(report.notices.iter().any(|notice| {
-                serde_json::to_string(notice)
+            assert!(report.coverage_issues.iter().any(|issue| {
+                serde_json::to_string(issue)
                     .unwrap()
                     .contains("python_max_")
             }));
@@ -897,8 +897,8 @@ fn python_recursive_analysis_survives_small_caller_stack() {
                         .iter()
                         .any(|finding| finding.sink == AuditSinkKind::PyImport)
                 );
-                assert!(!report.notices.iter().any(|notice| {
-                    serde_json::to_string(notice)
+                assert!(!report.coverage_issues.iter().any(|issue| {
+                    serde_json::to_string(issue)
                         .unwrap()
                         .contains("python_max_")
                 }));
@@ -942,9 +942,9 @@ fn python_recursive_analysis_survives_small_caller_stack() {
                 assert!(report.blocked_on_uncertainty, "{shape}");
                 assert!(
                     report
-                        .notices
+                        .coverage_issues
                         .iter()
-                        .any(|notice| serde_json::to_string(notice)
+                        .any(|issue| serde_json::to_string(issue)
                             .unwrap()
                             .contains("python_max_")),
                     "{shape}"

@@ -1,22 +1,28 @@
 use super::*;
 
 fn unresolved(source: &str) -> usize {
-    collect_python_signals(source)
-        .iter()
-        .filter(|signal| matches!(signal, PythonSignal::UnresolvedCallTarget { .. }))
-        .count()
+    collect_python_signals(
+        source,
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    )
+    .iter()
+    .filter(|signal| matches!(signal, PythonSignal::UnresolvedCallTarget { .. }))
+    .count()
 }
 
 fn marker_count(source: &str, marker: &str) -> usize {
-    collect_python_signals(source)
-        .iter()
-        .filter_map(|signal| match signal {
-            PythonSignal::HardMarker { markers } => Some(markers),
-            _ => None,
-        })
-        .flatten()
-        .filter(|value| value.as_str() == marker)
-        .count()
+    collect_python_signals(
+        source,
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    )
+    .iter()
+    .filter_map(|signal| match signal {
+        PythonSignal::HardMarker { markers } => Some(markers),
+        _ => None,
+    })
+    .flatten()
+    .filter(|value| value.as_str() == marker)
+    .count()
 }
 
 #[test]
@@ -96,13 +102,16 @@ fn unresolved_targets_and_named_callables_are_distinguished() {
             if matches!(method, "write" | "writelines") {
                 assert_unresolved_positions(&source, &[]);
                 assert_eq!(
-                    collect_python_signals(&source)
-                        .iter()
-                        .filter(|signal| matches!(
-                            signal,
-                            PythonSignal::Capability(PythonCapabilityKind::FileWrite)
-                        ))
-                        .count(),
+                    collect_python_signals(
+                        &source,
+                        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+                    )
+                    .iter()
+                    .filter(|signal| matches!(
+                        signal,
+                        PythonSignal::Capability(PythonCapabilityKind::FileWrite)
+                    ))
+                    .count(),
                     1,
                     "{source}"
                 );
@@ -153,7 +162,10 @@ fn decorated_definitions_and_implicit_calls_are_checked() {
             .collect();
         assert_unresolved_positions(source, &expected);
     }
-    let signals = collect_python_signals("@exec\ndef Example(): pass");
+    let signals = collect_python_signals(
+        "@exec\ndef Example(): pass",
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    );
     assert_eq!(
         signals
             .iter()
@@ -169,26 +181,32 @@ fn decorated_definitions_and_implicit_calls_are_checked() {
     );
     assert_unresolved_positions("@exec\ndef Example(): pass", &[]);
     assert!(
-        collect_python_signals("def Example():\n    exec('Example')\nExample()")
-            .iter()
-            .any(|signal| matches!(
-                signal,
-                PythonSignal::Call {
-                    kind: PythonCallKind::Exec,
-                    ..
-                }
-            ))
+        collect_python_signals(
+            "def Example():\n    exec('Example')\nExample()",
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+        )
+        .iter()
+        .any(|signal| matches!(
+            signal,
+            PythonSignal::Call {
+                kind: PythonCallKind::Exec,
+                ..
+            }
+        ))
     );
     assert!(
-        collect_python_signals("class Example:\n    exec('Example')\nExample()")
-            .iter()
-            .any(|signal| matches!(
-                signal,
-                PythonSignal::Call {
-                    kind: PythonCallKind::Exec,
-                    ..
-                }
-            ))
+        collect_python_signals(
+            "class Example:\n    exec('Example')\nExample()",
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+        )
+        .iter()
+        .any(|signal| matches!(
+            signal,
+            PythonSignal::Call {
+                kind: PythonCallKind::Exec,
+                ..
+            }
+        ))
     );
 }
 
@@ -218,7 +236,12 @@ fn builtin_mutations_and_existing_binding_signals_are_preserved() {
         "import os\nos.system('echo Example')",
     ] {
         assert!(
-            collect_python_signals(source).iter().any(|signal| matches!(
+            collect_python_signals(
+                source,
+                maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+            )
+            .iter()
+            .any(|signal| matches!(
                 signal,
                 PythonSignal::Call { .. } | PythonSignal::Capability(_)
             )),
@@ -265,8 +288,10 @@ fn introspection_attributes_are_marked_at_each_occurrence() {
             assert_unresolved_positions(&format!("{receiver}.{marker}[0]()"), &[0]);
         }
     }
-    let signals =
-        collect_python_signals("f\"{print.__self__.__import__('os').system('echo Example')}\"");
+    let signals = collect_python_signals(
+        "f\"{print.__self__.__import__('os').system('echo Example')}\"",
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    );
     assert!(
         !signals
             .iter()
@@ -299,23 +324,26 @@ fn successful_text_scan_tracks_positions_and_excludes_comments() {
 }
 
 fn assert_unresolved_positions(source: &str, expected: &[usize]) {
-    let mut actual: Vec<usize> = collect_python_signals(source)
-        .iter()
-        .filter_map(|signal| match signal {
-            PythonSignal::UnresolvedCallTarget { message } => Some(
-                message
-                    .split("at byte ")
-                    .nth(1)
-                    .unwrap()
-                    .split_whitespace()
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap(),
-            ),
-            _ => None,
-        })
-        .collect();
+    let mut actual: Vec<usize> = collect_python_signals(
+        source,
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    )
+    .iter()
+    .filter_map(|signal| match signal {
+        PythonSignal::UnresolvedCallTarget { message } => Some(
+            message
+                .split("at byte ")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        ),
+        _ => None,
+    })
+    .collect();
     actual.sort_unstable();
     assert_eq!(actual, expected, "{source}");
 }

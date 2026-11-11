@@ -15,8 +15,9 @@ use super::{
     },
     mel_surface,
     python_source::{
-        check_python_parse_budget_with_max_bytes, collect_static_maya_mel_eval_payloads,
-        is_maya_mel_eval_call, parse_python_compat_suite, static_string_expr, with_python_analysis,
+        PythonParseBudgetLimit, check_python_parse_budget_with_max_bytes,
+        collect_static_maya_mel_eval_payloads, is_maya_mel_eval_call, parse_python_compat_suite,
+        static_string_expr, with_python_analysis,
     },
     python_walk::{
         PythonAstVisitor, PythonBody, PythonWalkPoint,
@@ -38,6 +39,7 @@ const CHANGED_DURING_READ: &str = "scene file changed while it was being read";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedExecutionCore {
+    pub(super) python_max_body_bytes: usize,
     pub(super) surfaces: Vec<ObservedExecutionSurfaceCore>,
     pub(super) unit_summaries: Vec<ExecutionUnitSummaryCore>,
     pub(super) dependency_facts: Vec<DependencyFact>,
@@ -48,6 +50,7 @@ pub(crate) struct ObservedExecutionCore {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedExecutionSurfaceCore {
+    pub(super) python_parse_budget_limit: Option<PythonParseBudgetLimit>,
     pub(super) text: Arc<str>,
     pub(super) origin: ExecutionOrigin,
     pub(super) mel: Option<Arc<MelSurfaceFacts>>,
@@ -183,6 +186,20 @@ pub fn observe_source_text(
     ))
 }
 
+fn python_budget_issue(
+    surface: &surfaces::ExecutionSurfaceRecord,
+    limit: PythonParseBudgetLimit,
+) -> surfaces::ExecutionCoverageIssueRecord {
+    surfaces::ExecutionCoverageIssueRecord {
+        kind: ExecutionCoverageIssueKind::PythonParseBudgetExceeded,
+        detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+            diagnostic: format!("parse budget exceeded: {limit}"),
+        },
+        origin: Some(surface.origin.clone()),
+        preview: surface_preview_spec(&surface.text),
+    }
+}
+
 fn build_execution_core(
     mut coverage: surfaces::ExecutionCoverageCollection,
     mel_parse_budget: &MelParseBudget,
@@ -194,9 +211,20 @@ fn build_execution_core(
     let mut unknown_semantics = Vec::with_capacity(surface_capacity);
     let mut pending_surfaces = VecDeque::from(coverage.surfaces);
     while let Some(surface) = pending_surfaces.pop_front() {
-        if surface.origin.lang == ExecutionLanguage::Python {
-            check_python_parse_budget_with_max_bytes(&surface.text, mel_parse_budget.max_bytes)
-                .map_err(|limit| SceneToolError::PythonParseBudgetExceeded { limit })?;
+        if surface.origin.lang == ExecutionLanguage::Python
+            && let Err(limit) =
+                check_python_parse_budget_with_max_bytes(&surface.text, mel_parse_budget.max_bytes)
+        {
+            coverage
+                .coverage_issues
+                .push(python_budget_issue(&surface, limit));
+            observed.push(ObservedExecutionSurfaceCore {
+                text: surface.text,
+                origin: surface.origin,
+                mel: None,
+                python_parse_budget_limit: Some(limit),
+            });
+            continue;
         }
         let should_model =
             surface.requires_mel_modeling || should_model_as_execution_unit(&surface.origin);
@@ -229,8 +257,13 @@ fn build_execution_core(
                 if fact.sink_kind == MelSinkArgKind::Python
                     && let Some(body) = fact.rendered_text.as_deref()
                 {
-                    check_python_parse_budget_with_max_bytes(body, mel_parse_budget.max_bytes)
-                        .map_err(|limit| SceneToolError::PythonParseBudgetExceeded { limit })?;
+                    if let Err(limit) =
+                        check_python_parse_budget_with_max_bytes(body, mel_parse_budget.max_bytes)
+                    {
+                        coverage
+                            .coverage_issues
+                            .push(python_budget_issue(&surface, limit));
+                    }
                 }
             }
             if !mel.diagnostics.is_empty() {
@@ -240,9 +273,12 @@ fn build_execution_core(
             }
         }
 
-        if let Some((summary, unknown)) =
-            summarize_execution_unit(&surface.origin, &surface.text, mel.as_deref())
-        {
+        if let Some((summary, unknown)) = summarize_execution_unit(
+            &surface.origin,
+            &surface.text,
+            mel.as_deref(),
+            mel_parse_budget.max_bytes,
+        ) {
             if let Some(unknown) = unknown {
                 unknown_semantics.push(UnknownSemanticFactCore {
                     origin: surface.origin.clone(),
@@ -254,7 +290,9 @@ fn build_execution_core(
         }
 
         if surface.origin.lang == ExecutionLanguage::Python {
-            for payload in collect_static_maya_mel_eval_payloads(&surface.text) {
+            for payload in
+                collect_static_maya_mel_eval_payloads(&surface.text, mel_parse_budget.max_bytes)
+            {
                 let mut origin = surface.origin.clone();
                 origin.lang = ExecutionLanguage::Mel;
                 origin.source_kind = Some("python->maya.mel.eval literal bridge".to_string());
@@ -267,6 +305,7 @@ fn build_execution_core(
         }
 
         observed.push(ObservedExecutionSurfaceCore {
+            python_parse_budget_limit: None,
             text: surface.text,
             origin: surface.origin,
             mel,
@@ -277,6 +316,7 @@ fn build_execution_core(
     let dependency_facts = dependency::collect_surface_dependency_facts(&observed);
 
     Ok(ObservedExecutionCore {
+        python_max_body_bytes: mel_parse_budget.max_bytes,
         surfaces: observed,
         unit_summaries,
         dependency_facts,
@@ -299,6 +339,7 @@ pub(crate) fn materialize_observed_execution_catalog(
     digests: SceneDigestSet,
 ) -> ObservedExecutionCatalog {
     ObservedExecutionCatalog {
+        python_max_body_bytes: core.python_max_body_bytes,
         surfaces: core
             .surfaces
             .iter()
@@ -364,6 +405,7 @@ fn summarize_mel_surface(
     origin: &ExecutionOrigin,
     mel: Option<&MelSurfaceFacts>,
     text: &str,
+    python_max_body_bytes: usize,
 ) -> (
     ExecutionEffectClass,
     ExecutionSemanticClass,
@@ -421,6 +463,7 @@ fn summarize_mel_surface(
             let expression_bridge_summary = if name.eq_ignore_ascii_case("python") {
                 expression_literal_python_bridge_summary(
                     expression_python_bridge,
+                    python_max_body_bytes,
                     mel,
                     &mut consumed_sink_args,
                     command.span_start,
@@ -472,6 +515,7 @@ fn summarize_mel_surface(
             let expression_bridge_summary = if name.eq_ignore_ascii_case("python") {
                 expression_literal_python_bridge_summary(
                     expression_python_bridge,
+                    python_max_body_bytes,
                     mel,
                     &mut consumed_sink_args,
                     call.span_start,
@@ -530,6 +574,7 @@ fn summarize_mel_surface(
 
 fn expression_literal_python_bridge_summary(
     expression_python_bridge: bool,
+    python_max_body_bytes: usize,
     mel: &MelSurfaceFacts,
     consumed_sink_args: &mut [bool],
     command_start: usize,
@@ -546,8 +591,15 @@ fn expression_literal_python_bridge_summary(
     let (index, fact) =
         literal_python_sink_arg_in_command(mel, consumed_sink_args, command_start, command_end)?;
     consumed_sink_args[index] = true;
-    let (effect, semantic_class, certainty, reasons) =
-        summarize_python_surface(fact.rendered_text.as_deref().unwrap_or_default());
+    check_python_parse_budget_with_max_bytes(
+        fact.rendered_text.as_deref().unwrap_or_default(),
+        python_max_body_bytes,
+    )
+    .ok()?;
+    let (effect, semantic_class, certainty, reasons) = summarize_python_surface(
+        fact.rendered_text.as_deref().unwrap_or_default(),
+        python_max_body_bytes,
+    );
     Some((effect, semantic_class, certainty, reasons))
 }
 
@@ -585,6 +637,7 @@ fn is_expression_node_attr_surface(origin: &ExecutionOrigin) -> bool {
 
 fn summarize_python_surface(
     text: &str,
+    python_max_body_bytes: usize,
 ) -> (
     ExecutionEffectClass,
     ExecutionSemanticClass,
@@ -592,7 +645,7 @@ fn summarize_python_surface(
     Vec<ExecutionReason>,
 ) {
     with_python_analysis(text, |text| {
-        let Some(program) = parse_python_compat_suite(text) else {
+        let Some(program) = parse_python_compat_suite(text, python_max_body_bytes) else {
             return (
                 ExecutionEffectClass::Unknown,
                 ExecutionSemanticClass::UnknownWrite,
@@ -614,6 +667,7 @@ fn materialize_observed_execution_surface(
     max_preview: usize,
 ) -> ObservedExecutionSurface {
     ObservedExecutionSurface {
+        python_parse_budget_limit: surface.python_parse_budget_limit,
         surface: surfaces::ExecutionSurface {
             text: Arc::clone(&surface.text),
             origin: surface.origin.clone(),
@@ -707,14 +761,15 @@ fn summarize_execution_unit(
     origin: &ExecutionOrigin,
     text: &Arc<str>,
     mel: Option<&MelSurfaceFacts>,
+    python_max_body_bytes: usize,
 ) -> Option<(ExecutionUnitSummaryCore, Option<UnknownSemanticDetail>)> {
     if !should_model_as_execution_unit(origin) {
         return None;
     }
 
     let (effect, semantic_class, certainty, reasons) = match origin.lang {
-        ExecutionLanguage::Python => summarize_python_surface(text),
-        ExecutionLanguage::Mel => summarize_mel_surface(origin, mel, text),
+        ExecutionLanguage::Python => summarize_python_surface(text, python_max_body_bytes),
+        ExecutionLanguage::Mel => summarize_mel_surface(origin, mel, text, python_max_body_bytes),
         ExecutionLanguage::Unknown => (
             ExecutionEffectClass::Unknown,
             ExecutionSemanticClass::UnknownWrite,
@@ -1105,6 +1160,58 @@ mod tests {
     use crate::scene::{EffectCertainty, ExecutionEffectClass};
 
     #[test]
+    fn python_summary_uses_the_supplied_byte_budget() {
+        let source = "print('Example')";
+        assert_eq!(
+            summarize_python_surface(source, 8).0,
+            ExecutionEffectClass::Unknown
+        );
+        assert_eq!(
+            summarize_python_surface(source, 128).0,
+            ExecutionEffectClass::DiagnosticOutput
+        );
+    }
+
+    #[test]
+    fn python_body_budget_preserves_catalog_surfaces() {
+        use std::sync::Arc;
+
+        use maya_scene_kit_formats::mel::MelParseBudget;
+
+        use super::{build_execution_core, surfaces};
+        use crate::scene::{ExecutionLanguage, ExecutionOrigin};
+
+        let surface = |text: &str| surfaces::ExecutionSurfaceRecord {
+            text: Arc::from(text),
+            origin: ExecutionOrigin {
+                lang: ExecutionLanguage::Python,
+                ..ExecutionOrigin::without_chunk_address()
+            },
+            requires_mel_modeling: true,
+        };
+        let core = build_execution_core(
+            surfaces::ExecutionCoverageCollection {
+                surfaces: vec![surface("import os; os.system('Example')"), surface("pass")],
+                coverage_issues: Vec::new(),
+            },
+            &MelParseBudget {
+                max_bytes: 8,
+                ..MelParseBudget::default()
+            },
+        )
+        .expect("catalog retains skipped Python");
+        assert_eq!(core.surfaces.len(), 2);
+        assert_eq!(
+            core.surfaces[0].text.as_ref(),
+            "import os; os.system('Example')"
+        );
+        assert_eq!(core.coverage_issues.len(), 1);
+        assert!(matches!(&core.coverage_issues[0].detail,
+            super::ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic }
+                if diagnostic == "parse budget exceeded: python_max_body_bytes"));
+    }
+
+    #[test]
     fn execution_core_uses_session_completeness() {
         use super::{ExecutionCoverageIssueDetail, ObservationData, build_observed_execution_core};
         use crate::scene::{LoadOptions, Loader, SceneFormat, ValidationState};
@@ -1151,8 +1258,10 @@ mod tests {
 
     #[test]
     fn python_summary_uses_compat_normalization_for_python2_print() {
-        let (_effect, _semantic_class, certainty, reasons) =
-            summarize_python_surface("print u'Example message'\n");
+        let (_effect, _semantic_class, certainty, reasons) = summarize_python_surface(
+            "print u'Example message'\n",
+            crate::scene::MelParseBudget::default().max_bytes,
+        );
 
         assert_eq!(certainty, EffectCertainty::Proven);
         assert!(reasons.iter().all(|reason| {
@@ -1164,6 +1273,7 @@ mod tests {
     fn python_summary_does_not_treat_static_maya_mel_eval_as_unknown_python_call() {
         let (effect, _semantic_class, certainty, reasons) = summarize_python_surface(
             "import maya.mel as mm\ncmd = 'set' + 'Project \"asset/example\";'\nmm.eval(cmd)\n",
+            crate::scene::MelParseBudget::default().max_bytes,
         );
 
         assert_eq!(effect, ExecutionEffectClass::ExternalDependency);
@@ -1177,8 +1287,10 @@ mod tests {
 
     #[test]
     fn python_summary_keeps_dynamic_maya_mel_eval_uncertain() {
-        let (_effect, _semantic_class, certainty, _reasons) =
-            summarize_python_surface("import maya.mel as mm\nmm.eval(build_command())\n");
+        let (_effect, _semantic_class, certainty, _reasons) = summarize_python_surface(
+            "import maya.mel as mm\nmm.eval(build_command())\n",
+            crate::scene::MelParseBudget::default().max_bytes,
+        );
 
         assert_eq!(certainty, EffectCertainty::Uncertain);
     }

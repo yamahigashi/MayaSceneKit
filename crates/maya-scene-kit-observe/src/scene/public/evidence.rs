@@ -212,6 +212,8 @@ impl ExecutionCoverageState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionCoverageIssueKind {
+    /// Python analysis stopped at its configured parse budget.
+    PythonParseBudgetExceeded,
     /// The file-level MEL parser reported diagnostics.
     TopLevelDiagnostics,
     /// A specific surface reported MEL diagnostics.
@@ -227,6 +229,7 @@ pub enum ExecutionCoverageIssueKind {
 impl ExecutionCoverageIssueKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::PythonParseBudgetExceeded => "python_parse_budget_exceeded",
             Self::TopLevelDiagnostics => "top_level_diagnostics",
             Self::SurfaceDiagnostics => "surface_diagnostics",
             Self::UnknownRawMbPayload => "unknown_raw_mb_payload",

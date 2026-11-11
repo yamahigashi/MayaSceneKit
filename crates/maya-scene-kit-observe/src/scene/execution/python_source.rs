@@ -42,7 +42,8 @@ pub fn check_python_parse_budget(source: &str) -> Result<(), PythonParseBudgetLi
     check_python_parse_budget_with_max_bytes(source, MelParseBudget::default().max_bytes)
 }
 
-pub(crate) fn check_python_parse_budget_with_max_bytes(
+/// Checks Python parsing limits using the byte limit of the originating observation.
+pub fn check_python_parse_budget_with_max_bytes(
     source: &str,
     max_bytes: usize,
 ) -> Result<(), PythonParseBudgetLimit> {
@@ -239,17 +240,17 @@ fn check_python_nesting(
     Ok(())
 }
 
-pub(crate) fn parse_python_compat_suite(source: &str) -> Option<ast::Suite> {
-    check_python_parse_budget(source).ok()?;
+pub(crate) fn parse_python_compat_suite(source: &str, max_bytes: usize) -> Option<ast::Suite> {
+    check_python_parse_budget_with_max_bytes(source, max_bytes).ok()?;
     ast::Suite::parse(source, "<observe>").ok().or_else(|| {
         let normalized = normalize_python_compat_source(source);
         ast::Suite::parse(&normalized, "<observe>").ok()
     })
 }
 
-pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str) -> Vec<String> {
+pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str, max_bytes: usize) -> Vec<String> {
     with_python_analysis(source, |source| {
-        let Some(program) = parse_python_compat_suite(source) else {
+        let Some(program) = parse_python_compat_suite(source, max_bytes) else {
             return Vec::new();
         };
         let mut visitor = MayaMelEvalVisitor::for_body(&program);
@@ -692,10 +693,23 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn python_collectors_use_the_supplied_byte_budget() {
+        let source = "import maya.mel as mm\nmm.eval('print 1;')";
+        assert!(super::parse_python_compat_suite(source, 8).is_none());
+        assert!(super::collect_static_maya_mel_eval_payloads(source, 8).is_empty());
+        assert!(super::parse_python_compat_suite(source, 128).is_some());
+        assert_eq!(
+            super::collect_static_maya_mel_eval_payloads(source, 128),
+            ["print 1;"]
+        );
+    }
+
+    #[test]
     fn collects_imported_mel_callable_names() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "from maya.mel import eval as run\nrun('system(\"Example\");')"
+                "from maya.mel import eval as run\nrun('system(\"Example\");')",
+                crate::scene::MelParseBudget::default().max_bytes
             ),
             ["system(\"Example\");"]
         );
@@ -705,7 +719,8 @@ pub(super) mod tests {
     fn collects_bare_imported_mel_callable_names() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "from maya.mel import eval\neval('system(\"Example\");')"
+                "from maya.mel import eval\neval('system(\"Example\");')",
+                crate::scene::MelParseBudget::default().max_bytes
             ),
             ["system(\"Example\");"]
         );
@@ -721,7 +736,10 @@ pub(super) mod tests {
             "def Example():\n    from maya.mel import eval as run\n    run('system(\"Example\");')",
         ] {
             assert_eq!(
-                collect_static_maya_mel_eval_payloads(source),
+                collect_static_maya_mel_eval_payloads(
+                    source,
+                    crate::scene::MelParseBudget::default().max_bytes
+                ),
                 ["system(\"Example\");"]
             );
         }
@@ -733,24 +751,27 @@ pub(super) mod tests {
             "from maya.mel import eval as run\ndel run\nrun('system(\"Example\");')",
         ] {
             assert_eq!(
-                collect_static_maya_mel_eval_payloads(source),
+                collect_static_maya_mel_eval_payloads(
+                    source,
+                    crate::scene::MelParseBudget::default().max_bytes
+                ),
                 ["system(\"Example\");"],
                 "{source}"
             );
         }
-        assert!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\ndef Example(run):\n    run('system(\"Example\");')").is_empty());
+        assert!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\ndef Example(run):\n    run('system(\"Example\");')", crate::scene::MelParseBudget::default().max_bytes).is_empty());
     }
 
     #[test]
     fn collects_may_alias_try_body() {
-        assert_eq!(collect_static_maya_mel_eval_payloads("try:\n    from maya.mel import eval as run\n    run('system(\"Example\");')\nexcept Exception:\n    pass").len(), 1);
+        assert_eq!(collect_static_maya_mel_eval_payloads("try:\n    from maya.mel import eval as run\n    run('system(\"Example\");')\nexcept Exception:\n    pass", crate::scene::MelParseBudget::default().max_bytes).len(), 1);
     }
 
     #[test]
     fn collects_may_alias_conditional_body() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "if Example:\n    from maya.mel import eval as run\n    run('system(\"Example\");')"
+                "if Example:\n    from maya.mel import eval as run\n    run('system(\"Example\");')", crate::scene::MelParseBudget::default().max_bytes
             )
             .len(),
             1
@@ -759,19 +780,20 @@ pub(super) mod tests {
 
     #[test]
     fn collects_may_alias_comprehension() {
-        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\n[run('system(\"Example\");') for item in Example]").len(), 1);
+        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\n[run('system(\"Example\");') for item in Example]", crate::scene::MelParseBudget::default().max_bytes).len(), 1);
     }
 
     #[test]
     fn collects_may_alias_generator() {
-        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\n(run('system(\"Example\");') for item in Example)").len(), 1);
+        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\n(run('system(\"Example\");') for item in Example)", crate::scene::MelParseBudget::default().max_bytes).len(), 1);
     }
 
     #[test]
     fn collects_may_alias_rebound_name() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "import maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')\nrun = print"
+                "import maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')\nrun = print",
+                crate::scene::MelParseBudget::default().max_bytes
             )
             .len(),
             1
@@ -780,19 +802,20 @@ pub(super) mod tests {
 
     #[test]
     fn collects_may_alias_class_local_method() {
-        assert_eq!(collect_static_maya_mel_eval_payloads("class Example:\n    from maya.mel import eval as run\n    def method(self):\n        run('system(\"Example\");')").len(), 0);
+        assert_eq!(collect_static_maya_mel_eval_payloads("class Example:\n    from maya.mel import eval as run\n    def method(self):\n        run('system(\"Example\");')", crate::scene::MelParseBudget::default().max_bytes).len(), 0);
     }
 
     #[test]
     fn collects_may_alias_class_attribute_shadow() {
-        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\nclass Example:\n    run = print\n    def method(self):\n        run('system(\"Example\");')").len(), 1);
+        assert_eq!(collect_static_maya_mel_eval_payloads("from maya.mel import eval as run\nclass Example:\n    run = print\n    def method(self):\n        run('system(\"Example\");')", crate::scene::MelParseBudget::default().max_bytes).len(), 1);
     }
 
     #[test]
     fn collects_may_alias_later_outer_binding() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "def Example():\n    run('system(\"Example\");')\nfrom maya.mel import eval as run"
+                "def Example():\n    run('system(\"Example\");')\nfrom maya.mel import eval as run",
+                crate::scene::MelParseBudget::default().max_bytes
             )
             .len(),
             1
@@ -801,14 +824,15 @@ pub(super) mod tests {
 
     #[test]
     fn collects_may_alias_shared_import_root() {
-        assert_eq!(collect_static_maya_mel_eval_payloads("import maya.cmds\nimport maya.mel\nrun = maya.mel.eval\nrun('system(\"Example\");')").len(), 1);
+        assert_eq!(collect_static_maya_mel_eval_payloads("import maya.cmds\nimport maya.mel\nrun = maya.mel.eval\nrun('system(\"Example\");')", crate::scene::MelParseBudget::default().max_bytes).len(), 1);
     }
 
     #[test]
     fn collects_may_alias_mel_module() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "import mel\nrun = mel.eval\nrun('system(\"Example\");')"
+                "import mel\nrun = mel.eval\nrun('system(\"Example\");')",
+                crate::scene::MelParseBudget::default().max_bytes
             )
             .len(),
             1
@@ -819,7 +843,8 @@ pub(super) mod tests {
     fn collects_may_alias_nested_mel_module() {
         assert_eq!(
             collect_static_maya_mel_eval_payloads(
-                "import Example.maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')"
+                "import Example.maya.mel as mm\nrun = mm.eval\nrun('system(\"Example\");')",
+                crate::scene::MelParseBudget::default().max_bytes
             )
             .len(),
             1
@@ -863,6 +888,7 @@ pub(super) mod tests {
     fn collects_static_maya_mel_eval_payload_from_alias() {
         let payloads = collect_static_maya_mel_eval_payloads(
             "import maya.mel as mm\ncmd = 'set' + 'Project \"asset/example\";'\nmm.eval(cmd)\n",
+            crate::scene::MelParseBudget::default().max_bytes,
         );
         assert_eq!(payloads, vec!["setProject \"asset/example\";"]);
     }
@@ -871,6 +897,7 @@ pub(super) mod tests {
     fn ignores_dynamic_maya_mel_eval_payload() {
         let payloads = collect_static_maya_mel_eval_payloads(
             "import maya.mel as mm\nmm.eval(build_command())\n",
+            crate::scene::MelParseBudget::default().max_bytes,
         );
         assert!(payloads.is_empty());
     }

@@ -1,7 +1,10 @@
 use super::*;
 
 fn assert_import(source: &str) {
-    let signals = collect_python_signals(source);
+    let signals = collect_python_signals(
+        source,
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    );
     assert!(
         !signals
             .iter()
@@ -38,7 +41,10 @@ fn unvisited_positions_produce_ast_signals() {
 
 #[test]
 fn visited_positions_preserve_signals() {
-    let expected = collect_python_signals("__import__('os').system('echo Example')");
+    let expected = collect_python_signals(
+        "__import__('os').system('echo Example')",
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    );
     for source in [
         "sample: __import__('os').system('echo Example')",
         "@__import__('os').system('echo Example')\ndef Example(): pass",
@@ -47,7 +53,14 @@ fn visited_positions_preserve_signals() {
         "[sample for sample in [1] if __import__('os').system('echo Example')]",
         "lambda sample=__import__('os').system('echo Example'): sample",
     ] {
-        assert_eq!(collect_python_signals(source), expected, "{source}");
+        assert_eq!(
+            collect_python_signals(
+                source,
+                maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+            ),
+            expected,
+            "{source}"
+        );
     }
 }
 
@@ -61,16 +74,22 @@ fn deeply_nested_binary_expression() {
 fn with_and_handler_bindings_change_after_expression() {
     let source = "import maya.cmds as sample\nwith Example() as sample, sample.file('asset/example/file.ma', open=True):\n    pass";
     assert!(
-        !collect_python_signals(source)
-            .iter()
-            .any(|signal| matches!(signal, PythonSignal::Maya(_)))
+        !collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+        )
+        .iter()
+        .any(|signal| matches!(signal, PythonSignal::Maya(_)))
     );
     let source = "import maya.cmds as sample\ntry:\n    pass\nexcept sample.file('asset/example/file.ma', open=True) as sample:\n    sample.file('asset/example/file.ma', open=True)";
     assert_eq!(
-        collect_python_signals(source)
-            .iter()
-            .filter(|signal| matches!(signal, PythonSignal::Maya(_)))
-            .count(),
+        collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+        )
+        .iter()
+        .filter(|signal| matches!(signal, PythonSignal::Maya(_)))
+        .count(),
         1
     );
 }
@@ -78,10 +97,17 @@ fn with_and_handler_bindings_change_after_expression() {
 #[test]
 fn first_comprehension_iterable_preserves_enclosing_alias() {
     let source = "import os as helper\ndata = [sample for sample in [(helper := \"Example\")]]\nhelper.system(\"echo Example\")";
-    assert!(collect_python_signals(source).iter().any(|signal| matches!(
-        signal,
-        PythonSignal::Capability(PythonCapabilityKind::Subprocess)
-    )));
+    assert!(
+        collect_python_signals(
+            source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes
+        )
+        .iter()
+        .any(|signal| matches!(
+            signal,
+            PythonSignal::Capability(PythonCapabilityKind::Subprocess)
+        ))
+    );
 }
 
 fn depth_source(shape: &str, depth: usize) -> String {
@@ -124,10 +150,13 @@ depth_test!(deeply_nested_lambdas, "lambda", 565);
 
 fn maya_count(source: &str) -> usize {
     assert!(ast::Suite::parse(source, "Example").is_ok());
-    collect_python_signals(source)
-        .iter()
-        .filter(|signal| matches!(signal, PythonSignal::Maya(_)))
-        .count()
+    collect_python_signals(
+        source,
+        maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+    )
+    .iter()
+    .filter(|signal| matches!(signal, PythonSignal::Maya(_)))
+    .count()
 }
 
 #[test]
@@ -198,7 +227,10 @@ fn conditional_alias_bindings_are_unresolved_after_control_flow() {
     ] {
         let source = format!("{body}\nsample.file('asset/example/file.ma', open=True)");
         assert!(ast::Suite::parse(&source, "Example").is_ok());
-        let signals = collect_python_signals(&source);
+        let signals = collect_python_signals(
+            &source,
+            maya_scene_kit_observe::scene::MelParseBudget::default().max_bytes,
+        );
         assert_eq!(
             signals
                 .iter()
