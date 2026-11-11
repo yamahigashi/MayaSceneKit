@@ -149,6 +149,27 @@ pub(crate) fn create_node_flag(flag: &str) -> Option<CreateNodeFlag> {
     FLAGS.get(flag.strip_prefix('-')?).copied()
 }
 
+pub(crate) fn is_file_command_callback_flag(flag: &[u8]) -> bool {
+    static ALIASES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+        MAYA_COMMAND_REGISTRY
+            .lookup("file")
+            .and_then(|schema| {
+                schema
+                    .flags
+                    .iter()
+                    .find(|flag| flag.long_name.as_ref() == "command")
+            })
+            .map(|flag| {
+                std::iter::once(flag.long_name.as_ref())
+                    .chain(flag.short_name.as_deref())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    flag.strip_prefix(b"-")
+        .is_some_and(|name| ALIASES.iter().any(|alias| alias.as_bytes() == name))
+}
+
 fn command_flag_arities(command: &str) -> HashMap<String, FlagArity> {
     let mut flags = HashMap::new();
     if let Some(schema) = MAYA_COMMAND_REGISTRY.lookup(command) {

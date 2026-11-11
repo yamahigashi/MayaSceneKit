@@ -22,7 +22,8 @@ use crate::{
         block_context::{BlockCommand, BlockContext, BlockTracker, ContextWord, SelectedTarget},
         commands::{
             MAYA_COMMAND_REGISTRY, Token, bare_token, connect_attr_flag_arity, create_node_flag,
-            setattr_flag_arity, token_text, tokenize_command, unquoted_range_value,
+            is_file_command_callback_flag, setattr_flag_arity, token_text, tokenize_command,
+            unquoted_range_value,
         },
         lexer::{
             is_reference_attr, parse_ma_quoted_literal, parse_setattr_string_value_tail,
@@ -2008,9 +2009,6 @@ fn non_flag_range(word: &LightWord) -> Option<TextRange> {
 }
 
 fn extract_file_command_callback(command: &str) -> Option<String> {
-    if !command.contains("-command") {
-        return None;
-    }
     let tokens = tokenize_command(command).ok()?;
     if !matches!(tokens.first().and_then(bare_token), Some("file")) {
         return None;
@@ -2022,7 +2020,7 @@ fn extract_file_command_callback(command: &str) -> Option<String> {
             idx += 1;
             continue;
         };
-        if flag != "-command" {
+        if !is_file_command_callback_flag(flag.as_bytes()) {
             idx += 1;
             continue;
         }
@@ -2052,15 +2050,25 @@ fn extract_file_command_callback(command: &str) -> Option<String> {
 }
 
 fn file_command_has_flag(command: &str, target_flag: &str) -> bool {
+    let matches_flag = |flag: &str| {
+        if target_flag == "-command" {
+            is_file_command_callback_flag(flag.as_bytes())
+        } else {
+            flag == target_flag
+        }
+    };
     tokenize_command(command)
         .ok()
         .map(|tokens| {
             tokens
                 .iter()
                 .skip(1)
-                .any(|token| bare_token(token) == Some(target_flag))
+                .filter_map(bare_token)
+                .any(matches_flag)
         })
-        .unwrap_or_else(|| command.contains(target_flag))
+        .unwrap_or_else(|| {
+            command.contains(target_flag) || command.split_ascii_whitespace().any(matches_flag)
+        })
 }
 
 #[cfg(test)]
@@ -2569,6 +2577,35 @@ mod tests {
         assert_eq!(
             sections.dump_sections.script_entries[0].source_type(),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn short_file_callback_is_extracted_with_matching_coverage() {
+        let short = extract_raw_selective_sections_from_ma(
+            br#"file -r -c "Example" "print(1)" "asset/example/file.ma";"#,
+        );
+        let long = extract_raw_selective_sections_from_ma(
+            br#"file -r -command "Example" "print(1)" "asset/example/file.ma";"#,
+        );
+        let callbacks = |sections: &super::RawMaSelectiveSections| {
+            sections
+                .audit_top_level
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    crate::mel::MelAuditTopLevelItemFact::Command(command) => {
+                        command.file_command_callback.clone()
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(callbacks(&short), vec!["print(1)".to_string()]);
+        assert_eq!(callbacks(&short), callbacks(&long));
+        assert_eq!(
+            short.audit_top_level.diagnostics,
+            long.audit_top_level.diagnostics
         );
     }
 

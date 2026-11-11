@@ -9,7 +9,7 @@ pub(crate) use crate::ma::lexer::command_has_terminating_semicolon;
 use crate::{
     PathReplaceRule, PathReplaceSkips, ScenePathEntry,
     ma::{
-        commands::{Token, setattr_flag_arity, tokenize_command},
+        commands::{Token, is_file_command_callback_flag, setattr_flag_arity, tokenize_command},
         lexer::{
             extract_script_node_name_from_create, is_reference_attr, is_top_level_command,
             looks_like_scene_path, parse_ma_quoted_literal, split_lines_keepends,
@@ -1128,7 +1128,7 @@ impl MaCommandRanges {
         let mut index = 0;
         while index < tokens.len() {
             let token = &tokens[index];
-            if !token.quoted && &command[token.range.clone()] == b"-command" {
+            if !token.quoted && is_file_command_callback_flag(&command[token.range.clone()]) {
                 removed = true;
                 index += 1;
                 for _ in 0..2 {
@@ -1459,7 +1459,8 @@ pub fn file_command_without_callback(
     let mut removed = false;
 
     while idx < tokens.len() {
-        if matches!(tokens.get(idx), Some(Token::Bare(flag)) if flag == "-command") {
+        if matches!(tokens.get(idx), Some(Token::Bare(flag)) if is_file_command_callback_flag(flag.as_bytes()))
+        {
             removed = true;
             idx += 1;
             let mut removed_args = 0usize;
@@ -1911,6 +1912,37 @@ file -r "safe.ma";
         assert!(!text.contains("python(\"print(1)\")"));
         assert!(text.contains("requires maya \"2026\";"));
         assert!(text.contains("file -r \"safe.ma\";"));
+    }
+
+    #[test]
+    fn short_file_callback_is_present() {
+        let input = br#"file -r -c "Example" "print(1)" "asset/example/file.ma";"#;
+        assert!(ma_file_command_callback_present(input, 0, input.len()));
+    }
+
+    #[test]
+    fn short_file_callback_range_edit_removes_flag_and_arguments() {
+        let input = br#"file -r -c "Example" "print(1)" "asset/example/file.ma";"#;
+        let (rewritten, count) = apply_ma_range_edits(
+            input,
+            &[MaRangeEdit {
+                start: 0,
+                end: input.len(),
+                kind: MaRangeEditKind::StripFileCommandCallback,
+            }],
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(rewritten, br#"file -r "asset/example/file.ma";"#);
+    }
+
+    #[test]
+    fn short_file_callback_byte_rewrite_removes_flag_and_arguments() {
+        let input = br#"file -r -c "Example" "print(1)" "asset/example/file.ma";"#;
+        let ranges = super::collect_ma_command_ranges(input);
+        let (rewritten, changed) = ranges.file_command_without_callback(input).unwrap();
+        assert!(changed);
+        assert_eq!(rewritten, br#"file -r "asset/example/file.ma";"#);
     }
 
     #[test]
