@@ -86,7 +86,7 @@ fn incomplete_mb_preview_composite_and_indexed_callers_refuse() {
     };
     use maya_scene_kit_observe::scene::{
         SceneFormat, ValidationState,
-        paths::{ScenePathEntry, ScenePathsReport},
+        paths::{ScenePathEntry, ScenePathsReport, SceneSourceFingerprint},
     };
 
     let dir = tempfile::tempdir().unwrap();
@@ -140,8 +140,12 @@ fn incomplete_mb_preview_composite_and_indexed_callers_refuse() {
             .remove_script_nodes_by_name(&input, &output, &["ExampleScript".into()])
             .unwrap_err(),
     );
+    use sha2::{Digest, Sha256};
     let report = ScenePathsReport {
-        source: None,
+        source: Some(SceneSourceFingerprint {
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            byte_len: bytes.len(),
+        }),
         kind: Some(maya_scene_kit_observe::scene::paths::PathKind::All),
         scene_path: input.clone(),
         scene_format: SceneFormat::Mb,

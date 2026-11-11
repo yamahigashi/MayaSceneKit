@@ -203,6 +203,7 @@ fn scene_tool_error_to_pyerr(err: SceneToolError) -> PyErr {
 fn scene_tool_error_category(err: &SceneToolError) -> &'static str {
     match err {
         SceneToolError::Message(_) => "message",
+        SceneToolError::SourceChanged { .. } => "source_changed",
         SceneToolError::UnsupportedSceneFormat { .. } => "unsupported_scene_format",
         SceneToolError::Config(_) => "config",
         SceneToolError::AsciiSyntax(_) => "ascii_syntax",

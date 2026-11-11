@@ -216,6 +216,7 @@ impl GuiShell {
                         .spawn(async move {
                             let mut previewable_row_ids = Vec::new();
                             let mut failed_files = Vec::new();
+                            let mut source_errors = Vec::new();
                             let mut matched_count = 0usize;
                             let mut applied_count = 0usize;
                             let mut items = Vec::new();
@@ -298,6 +299,9 @@ impl GuiShell {
                                     }
                                     Err(err) => {
                                         failed_files.push(format!("{scene_name}: {err}"));
+                                        if matches!(err, SceneToolError::SourceChanged { .. }) {
+                                            source_errors.push((row_id, err));
+                                        }
                                     }
                                 }
                             }
@@ -314,6 +318,7 @@ impl GuiShell {
                                     items,
                                     planned_overrides,
                                 },
+                                source_errors,
                             )
                         })
                         .await;
@@ -331,6 +336,9 @@ impl GuiShell {
                             dialog.preview_signature = Some(outcome.1.clone());
                             dialog.source_cache.extend(outcome.2.clone());
                             dialog.preview = Some(outcome.3.clone());
+                            for (row_id, error) in &outcome.4 {
+                                shell.reject_changed_report_source(*row_id, error, cx);
+                            }
                             shell.sync_replace_preview_table(cx);
                             cx.notify();
                         },
@@ -460,7 +468,9 @@ impl GuiShell {
                 &replacements,
                 &options,
             ) {
-                self.report_edit_detail(error.to_string());
+                if !self.reject_changed_report_source(row_id, &error, cx) {
+                    self.report_edit_detail(error.to_string());
+                }
                 rejected.skipped += 1;
                 continue;
             }
@@ -471,12 +481,15 @@ impl GuiShell {
         }
         let mut applied = planned_edits.len();
         if applied > 0 {
-            if self
-                .apply_path_override_updates(planned_edits, window, cx)
-                .is_err()
-            {
-                rejected.skipped += applied;
-                applied = 0;
+            match self.apply_path_override_updates(planned_edits, window, cx) {
+                Ok(skipped) => {
+                    rejected.skipped += skipped;
+                    applied = applied.saturating_sub(skipped);
+                }
+                Err(_) => {
+                    rejected.skipped += applied;
+                    applied = 0;
+                }
             }
             self.clear_replace_dialog_state(window, cx);
             window.close_dialog(cx);

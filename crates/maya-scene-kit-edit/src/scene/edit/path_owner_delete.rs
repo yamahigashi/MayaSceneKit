@@ -24,7 +24,8 @@ impl PatchPlanner {
         targets: &[PathOwnerDeleteTarget],
     ) -> Result<PathOwnerDeletePreview, SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let applied = apply_owner_deletion(fs::read(&report.scene_path)?, report, targets)?;
+        let applied =
+            apply_owner_deletion(super::paths::read_report_source(report)?, report, targets)?;
         Ok(self.owner_preview_from_application(report, &applied.changes))
     }
 
@@ -43,7 +44,8 @@ impl PatchPlanner {
         targets: &[PathOwnerDeleteTarget],
     ) -> Result<PathOwnerDeleteStageResult, SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let applied = apply_owner_deletion(fs::read(&report.scene_path)?, report, targets)?;
+        let applied =
+            apply_owner_deletion(super::paths::read_report_source(report)?, report, targets)?;
         let preview = self.owner_preview_from_application(report, &applied.changes);
         Ok(PathOwnerDeleteStageResult {
             changes: applied.changes,

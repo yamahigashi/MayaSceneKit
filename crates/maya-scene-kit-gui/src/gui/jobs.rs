@@ -1489,6 +1489,7 @@ impl GuiShell {
                     let artifact_current = row.replace_artifact_is_current();
                     let source = row.staged.source().cloned();
                     let source_changed = shell.i18n().text("banner.save_source_changed");
+                    let reanalysis_required = shell.i18n().text("banner.edit_requires_reanalysis");
                     let report = row.paths_report.clone();
                     let staged_paths_report = row.staged.reports().paths_report.as_ref().filter(|_| {
                         matches!(row.staged, Staged::SceneEdits { .. })
@@ -1524,7 +1525,7 @@ impl GuiShell {
                                     .map_err(|err| err.to_string())?;
                                 let staged = stage_replace_scene_paths_with_overrides_in_report_with_options(
                                     &report, &overrides, &options,
-                                ).map_err(|err| err.to_string())?;
+                                ).map_err(|err| edit_error_message(&err, &reanalysis_required))?;
                                 replace_changes = Some(staged.changes);
                                 replace_preview = Some(staged.preview);
                                 staged.artifact

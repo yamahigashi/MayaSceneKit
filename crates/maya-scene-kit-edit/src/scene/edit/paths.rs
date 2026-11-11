@@ -1,5 +1,22 @@
+use sha2::{Digest, Sha256};
+
 use super::{application::Applied, *};
 use crate::scene::edit::materialize::unsupported_scene_format;
+
+pub(super) fn read_report_source(report: &ScenePathsReport) -> Result<Vec<u8>, SceneToolError> {
+    let source = report
+        .source
+        .as_ref()
+        .filter(|source| !source.sha256.is_empty())
+        .ok_or_else(|| SceneToolError::Message("paths report has no source fingerprint".into()))?;
+    let bytes = fs::read(&report.scene_path)?;
+    if source.byte_len != bytes.len() || source.sha256 != format!("{:x}", Sha256::digest(&bytes)) {
+        return Err(SceneToolError::SourceChanged {
+            path: report.scene_path.clone(),
+        });
+    }
+    Ok(bytes)
+}
 
 pub(super) struct PathApplicationChanges {
     pub summary: crate::scene::PathReplaceChanges,
@@ -115,6 +132,20 @@ impl PatchPlanner {
         apply_paths(bytes, src, format, PathPlan::Rules(rules))
     }
 
+    pub(super) fn apply_path_rules_in_report(
+        &self,
+        report: &ScenePathsReport,
+        rules: &[PathReplaceRule],
+    ) -> Result<AppliedPathReplacement, SceneToolError> {
+        let bytes = read_report_source(report)?;
+        apply_paths(
+            bytes,
+            &report.scene_path,
+            report.scene_format,
+            PathPlan::Rules(rules),
+        )
+    }
+
     pub(super) fn apply_path_overrides_in_report(
         &self,
         report: &ScenePathsReport,
@@ -125,7 +156,7 @@ impl PatchPlanner {
             .iter()
             .map(|target| (target.entry_index, target.after_value.clone()))
             .collect::<Vec<_>>();
-        let bytes = fs::read(&report.scene_path)?;
+        let bytes = read_report_source(report)?;
         apply_paths(
             bytes,
             &report.scene_path,

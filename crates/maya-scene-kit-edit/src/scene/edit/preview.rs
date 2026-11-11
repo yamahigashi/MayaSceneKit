@@ -27,7 +27,7 @@ impl PatchPlanner {
     ) -> Result<PathReplaceCandidatePreview, SceneToolError> {
         self.options.reject_if_not_forensic()?;
 
-        let applied = self.apply_path_rules_in_path(&report.scene_path, rules)?;
+        let applied = self.apply_path_rules_in_report(report, rules)?;
         Ok(self.path_candidate_preview_from_application(report, &applied))
     }
 

@@ -1498,3 +1498,134 @@ fn save_refuses_changed_source_after_redo(cx: &mut TestAppContext) {
 fn save_accepts_unchanged_source_after_refusal(cx: &mut TestAppContext) {
     assert_save_source_guard(cx, false, false, true);
 }
+
+#[gpui::test]
+fn changed_report_source_preserves_rows_across_edit_entrypoints(cx: &mut TestAppContext) {
+    for operation in 0..4 {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("Example.ma");
+        let second = directory.path().join("Sample.ma");
+        write_mutation_scene(&first);
+        write_mutation_scene(&second);
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.settings_save_disabled_path = Some(directory.path().join("settings.json"));
+            shell.state = test_state(directory.path(), "");
+            shell.state.workspace_auto_analyze = false;
+            shell.replace_rows(vec![mutation_row(1, &first), mutation_row(2, &second)]);
+            shell
+                .apply_path_override_updates(
+                    vec![(0, BTreeMap::from([(0, "asset/sample/file.tx".into())]))],
+                    window,
+                    cx,
+                )
+                .unwrap();
+        });
+        visual_cx.run_until_parked();
+        if operation == 0 {
+            shell.update_in(visual_cx, |shell, window, cx| {
+                prepare_mutation_replace_dialog(shell, window, cx);
+            });
+            visual_cx.run_until_parked();
+        }
+        let previous = shell.read_with(visual_cx, |shell, _| shell.rows[0].staged.clone());
+        fs::write(
+            &first,
+            fs::read_to_string(&first)
+                .unwrap()
+                .replace("ExampleScript", "SampleScript"),
+        )
+        .unwrap();
+        shell.update_in(visual_cx, |shell, window, cx| match operation {
+            0 => {
+                shell.run_replace_preview(window, cx);
+            }
+            1 => {
+                shell
+                    .apply_path_override_updates(
+                        vec![
+                            (0, BTreeMap::from([(0, "asset/sample/next.tx".into())])),
+                            (1, BTreeMap::from([(0, "asset/sample/next.tx".into())])),
+                        ],
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+            }
+            2 => {
+                let revision = shell.rows[0].replace_generation;
+                shell.spawn_replace_artifact_refresh(1, revision, cx);
+                shell
+                    .apply_path_override_updates(
+                        vec![(1, BTreeMap::from([(0, "asset/sample/next.tx".into())]))],
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+            }
+            _ => {
+                for index in 0..2 {
+                    shell.stage_scene_edits_for_row(
+                        index,
+                        BTreeSet::new(),
+                        BTreeSet::from([PathOwnerDeleteTarget {
+                            node_type: "file".into(),
+                            node_name: "Example".into(),
+                        }]),
+                        ResultTab::Paths,
+                        None,
+                        false,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
+        visual_cx.run_until_parked();
+        shell.read_with(visual_cx, |shell, _| {
+            assert!(
+                matches!(shell.rows[0].status, FileStatus::Error(_)),
+                "operation {operation}, banner {}, dialog {:?}",
+                mutation_banner(shell),
+                shell.replace_dialog.as_ref().map(|dialog| (
+                    dialog.generation,
+                    dialog.is_previewing,
+                    dialog.preview_signature.is_some(),
+                    dialog.preview.as_ref().map(|preview| &preview.failed_files)
+                ))
+            );
+            assert!(
+                shell.rows[0].staged.same_as(&previous),
+                "operation {operation}"
+            );
+            assert!(
+                mutation_banner(shell)
+                    .contains(&shell.i18n().text("banner.edit_requires_reanalysis")),
+                "operation {operation}, banner {}",
+                mutation_banner(shell)
+            );
+            assert!(
+                !matches!(shell.rows[1].status, FileStatus::Error(_)),
+                "operation {operation}"
+            );
+            if operation == 0 {
+                assert_eq!(
+                    shell
+                        .replace_dialog
+                        .as_ref()
+                        .unwrap()
+                        .preview
+                        .as_ref()
+                        .unwrap()
+                        .previewable_row_ids,
+                    vec![2]
+                );
+            } else {
+                assert!(
+                    shell.rows[1].staged.artifact().is_some(),
+                    "operation {operation}"
+                );
+            }
+        });
+    }
+}

@@ -73,6 +73,10 @@ pub(crate) fn run_inspect(
                 );
                 1
             }
+            Err(error @ SceneToolError::SourceChanged { .. }) => {
+                eprintln!("error: {error}");
+                1
+            }
             Err(SceneToolError::Parse(e)) => {
                 eprintln!("parse error: {e}");
                 1

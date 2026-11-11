@@ -21,6 +21,8 @@ pub enum SceneToolError {
         path: PathBuf,
         detected: SceneFormat,
     },
+    #[error("scene file changed since it was analysed: {path}")]
+    SourceChanged { path: PathBuf },
     /// Runtime asset or configuration failure.
     #[error("config error: {0}")]
     Config(String),

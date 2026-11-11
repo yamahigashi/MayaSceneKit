@@ -266,7 +266,6 @@ impl GuiShell {
                     stage_replace_scene_paths_with_overrides_in_report_with_options(
                         &report, &overrides, &options,
                     )
-                    .map_err(|err| err.to_string())
                 })
                 .await;
             let _ = view.update(cx, |shell, cx| {
@@ -281,7 +280,7 @@ impl GuiShell {
         &mut self,
         row_id: u64,
         revision: u64,
-        result: Result<PathReplaceStageResult, String>,
+        result: Result<PathReplaceStageResult, SceneToolError>,
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.index_of_row_id(row_id) else {
@@ -296,6 +295,11 @@ impl GuiShell {
             return;
         }
         if !self.admit_mutation(row_id, RowMutation::ReplaceArtifact, cx) {
+            return;
+        }
+        if let Err(error) = &result
+            && self.reject_changed_report_source(row_id, error, cx)
+        {
             return;
         }
         let row = &mut self.rows[index];
@@ -317,6 +321,7 @@ impl GuiShell {
                 }
             }
             Err(error) => {
+                let error = error.to_string();
                 *artifact = None;
                 row.status = FileStatus::Error(error.clone());
                 row.replace_changes = None;
@@ -1044,7 +1049,7 @@ impl GuiShell {
             .filter_map(|(index, _)| self.rows.get(*index).map(|row| row.id))
             .collect::<Vec<_>>();
         let (indices, rejected) = self.mutation_targets(row_ids, RowMutation::PathEdit);
-        let skipped = rejected.busy_count();
+        let mut skipped = rejected.busy_count();
         let planned_edits = planned_edits
             .into_iter()
             .filter(|(index, _)| indices.contains(index))
@@ -1058,16 +1063,6 @@ impl GuiShell {
         }
         let result = (|| {
             let path_order_snapshot = self.capture_path_order_snapshot();
-            let row_indices = planned_edits
-                .iter()
-                .map(|(row_index, _)| *row_index)
-                .collect::<Vec<_>>();
-            let requires_scene_edit_restaging = planned_edits.iter().any(|(row_index, _)| {
-                let row = &self.rows[*row_index];
-                row.scene_edits_are_staged()
-                    || !row.staged.clean().targets.is_empty()
-                    || !row.staged.owner_delete().targets.is_empty()
-            });
             let mut prepared_edits = Vec::with_capacity(planned_edits.len());
             for (row_index, next_overrides) in planned_edits {
                 let Some(report) = self.rows[row_index].display_paths_report() else {
@@ -1087,18 +1082,41 @@ impl GuiShell {
                     None
                 } else {
                     let options = self.scene_materialize_options(OperationMode::Forensic);
-                    Some(
-                        preview_replace_scene_paths_with_overrides_in_report_with_options(
-                            report,
-                            &staged_overrides,
-                            &options,
-                        )
-                        .map_err(|err| err.to_string())?,
-                    )
+                    match preview_replace_scene_paths_with_overrides_in_report_with_options(
+                        report,
+                        &staged_overrides,
+                        &options,
+                    ) {
+                        Ok(preview) => Some(preview),
+                        Err(error) => {
+                            if self.reject_changed_report_source(
+                                self.rows[row_index].id,
+                                &error,
+                                cx,
+                            ) {
+                                skipped += 1;
+                                continue;
+                            }
+                            return Err(error.to_string());
+                        }
+                    }
                 };
 
                 prepared_edits.push((row_index, next_overrides, preview));
             }
+            if prepared_edits.is_empty() {
+                return Ok(skipped);
+            }
+            let row_indices = prepared_edits
+                .iter()
+                .map(|(row_index, _, _)| *row_index)
+                .collect::<Vec<_>>();
+            let requires_scene_edit_restaging = prepared_edits.iter().any(|(row_index, _, _)| {
+                let row = &self.rows[*row_index];
+                row.scene_edits_are_staged()
+                    || !row.staged.clean().targets.is_empty()
+                    || !row.staged.owner_delete().targets.is_empty()
+            });
             let before = (!requires_scene_edit_restaging)
                 .then(|| self.capture_row_edit_states(&row_indices));
             let edit_sequence = if requires_scene_edit_restaging {

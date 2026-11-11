@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn edit_error_message(error: &SceneToolError, reanalysis_required: &str) -> String {
+    if matches!(error, SceneToolError::SourceChanged { .. }) {
+        format!("{reanalysis_required}: {error}")
+    } else {
+        error.to_string()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum RowMutation {
     Job(RowOperation),
@@ -315,6 +323,26 @@ impl GuiShell {
             }
         }
         self.status_message = Some(summary);
+    }
+
+    pub(super) fn reject_changed_report_source(
+        &mut self,
+        row_id: u64,
+        error: &SceneToolError,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(error, SceneToolError::SourceChanged { .. }) {
+            return false;
+        }
+        if let Some(index) = self.index_of_row_id(row_id) {
+            let message =
+                edit_error_message(error, &self.i18n().text("banner.edit_requires_reanalysis"));
+            self.rows[index].status = FileStatus::Error(message.clone());
+            self.report_edit_detail(message);
+            self.refresh_file_table(cx);
+            cx.notify();
+        }
+        true
     }
 
     pub(super) fn report_edit_detail(&mut self, message: String) {
