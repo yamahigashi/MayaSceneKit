@@ -51,6 +51,15 @@ impl NodeExecutionSemantics {
         self.ambiguous_ma_execution_attrs.contains(attr)
     }
 
+    pub(crate) fn connection_attr_is_unmapped(&self, node_type: &str, attr: &str) -> bool {
+        !node_type.is_empty()
+            && self.canonical_attr(node_type, attr).is_none()
+            && self
+                .ma_capture_attr_selectors
+                .iter()
+                .any(|selector| selector.node_type.eq_ignore_ascii_case(node_type))
+    }
+
     pub(crate) fn ma_capture_attr_selectors(&self) -> &HashSet<RawMaNodeAttrSelector> {
         &self.ma_capture_attr_selectors
     }

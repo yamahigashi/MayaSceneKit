@@ -975,7 +975,16 @@ impl SelectiveScanSink {
             .split('[')
             .next()
             .unwrap_or("");
-        if !self.execution_attr_names.contains(last)
+        let execution_owner = self.selected_node_attr_selectors.iter().any(|selector| {
+            (!selector.node_type.is_empty()
+                && dst
+                    .node_type
+                    .as_deref()
+                    .is_some_and(|node_type| selector.node_type.eq_ignore_ascii_case(node_type)))
+                || selector.node_name.as_deref() == Some(dst.owner.as_str())
+        });
+        if !execution_owner
+            && !self.execution_attr_names.contains(last)
             && script_attr(&format!(".{last}")).is_none()
             && !matches!(last, "e" | "expression" | "ixp" | "internalExpression")
         {

@@ -409,7 +409,9 @@ fn collect_ma_connections(
             && (!semantics.ma_execution_attr_is_ambiguous(candidate)
                 || history.is_some()
                 || (src.history_id.is_none() && !dst.owner.contains(':')));
-        if canonical.is_none() && !unknown_candidate {
+        let unresolved_execution_attr =
+            canonical.is_none() && semantics.connection_attr_is_unmapped(node_type, candidate);
+        if canonical.is_none() && !unknown_candidate && !unresolved_execution_attr {
             continue;
         }
         let attr = canonical.unwrap_or_else(|| format!(".{candidate}"));
@@ -435,6 +437,10 @@ fn collect_ma_connections(
                 preview: PreviewWindowSpec::new(Arc::from(""), 0, 0),
             });
         };
+        if unresolved_execution_attr {
+            issue("cannot resolve destination attribute".into(), &origin);
+            continue;
+        }
         if node_type.is_empty() || dst.attr.contains(['.', '[']) {
             issue("cannot resolve connection destination".into(), &origin);
             continue;
@@ -1507,13 +1513,8 @@ fn collect_mb_connections(
         {
             continue;
         }
-        let unresolved_execution_attr = canonical.is_none()
-            && !node_type.is_empty()
-            && semantics.canonical_attr(node_type, tail).is_none()
-            && semantics
-                .ma_capture_attr_selectors()
-                .iter()
-                .any(|selector| selector.node_type.eq_ignore_ascii_case(node_type));
+        let unresolved_execution_attr =
+            canonical.is_none() && semantics.connection_attr_is_unmapped(node_type, tail);
         if canonical.is_none()
             && !unresolved_execution_attr
             && (!node_type.is_empty()
@@ -1805,14 +1806,11 @@ fn collect_mb_native_script_surfaces(
             else {
                 continue;
             };
-            let attr_name = if form_type == "SCRP" {
-                execution_semantics
-                    .canonical_attr("script", &attr_name)
-                    .unwrap_or(&attr_name)
-                    .to_string()
-            } else {
-                attr_name
-            };
+            let attr_name = node_type
+                .as_deref()
+                .and_then(|node_type| execution_semantics.canonical_attr(node_type, &attr_name))
+                .unwrap_or(&attr_name)
+                .to_string();
             attr_values.push((
                 attr_name,
                 value,

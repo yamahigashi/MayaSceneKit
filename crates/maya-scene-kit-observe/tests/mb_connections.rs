@@ -449,3 +449,63 @@ fn connection_issues_identify_both_plugs() {
         assert!(issue.preview.contains(plug), "{}", issue.preview);
     }
 }
+
+#[test]
+fn native_callback_long_alias_matches_short_name() {
+    let short = catalog(scene(&[node(
+        "RGLB",
+        "Example",
+        &[attr("STR ", "prm", b"print 1;\0")],
+    )]));
+    let long = catalog(scene(&[node(
+        "RGLB",
+        "Example",
+        &[attr("STR ", "preRenderMel", b"print 1;\0")],
+    )]));
+    assert_eq!(short.surfaces.len(), 1);
+    assert_eq!(long.surfaces.len(), 1);
+    assert_eq!(
+        long.surfaces[0].surface.text,
+        short.surfaces[0].surface.text
+    );
+    assert_eq!(
+        long.surfaces[0].surface.origin.attr_name,
+        short.surfaces[0].surface.origin.attr_name
+    );
+    assert!(long.coverage_issues.is_empty());
+}
+
+#[test]
+fn numeric_connections_to_untyped_long_names_require_coverage() {
+    for name in [
+        "before",
+        "after",
+        "scriptType",
+        "sourceType",
+        "expression",
+        "internalExpression",
+    ] {
+        let result = catalog(scene(&[
+            node(
+                "XFRM",
+                "Sample",
+                &[attr("DBLE", "tx", &1.0f64.to_be_bytes())],
+            ),
+            form(
+                "CONS",
+                &[connection("Sample.tx", &format!("ns:Example.{name}"))],
+            ),
+        ]));
+        assert!(result.surfaces.is_empty(), "{name}");
+        assert_eq!(result.coverage_issues.len(), 1, "{name}");
+        assert_eq!(
+            result.coverage_issues[0]
+                .origin
+                .as_ref()
+                .unwrap()
+                .chunk_tag
+                .as_deref(),
+            Some("CWFL")
+        );
+    }
+}

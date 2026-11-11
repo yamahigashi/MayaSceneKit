@@ -391,3 +391,39 @@ fn direct_callback_aliases_are_overwritten_by_connections() {
     assert_eq!(result.surfaces.len(), 2);
     assert!(result.surfaces[0].surface.origin.overwritten_by_connection);
 }
+
+#[test]
+fn untyped_connection_long_names_require_coverage() {
+    for attr in [
+        "before",
+        "after",
+        "scriptType",
+        "sourceType",
+        "expression",
+        "internalExpression",
+    ] {
+        assert_connection_issue(
+            &format!("connectAttr Sample.o ns:Example.{attr};"),
+            0,
+            "cannot resolve connection destination",
+        );
+    }
+}
+
+#[test]
+fn unmapped_execution_connection_is_reported_but_ordinary_connections_are_silent() {
+    let result = catalog(
+        "createNode transform -n Example; createNode script -n ExampleScript; connectAttr Example.tx ExampleScript.sampleAttribute;",
+    );
+    assert_eq!(result.coverage_issues.len(), 1);
+    assert!(
+        format!("{:?}", result.coverage_issues[0].detail)
+            .contains("cannot resolve destination attribute")
+    );
+    assert!(result.surfaces.is_empty());
+    let ordinary = catalog(
+        "createNode transform -n Example; createNode transform -n Sample; connectAttr Example.tx Sample.sampleAttribute; connectAttr Example.tx Sample.tx;",
+    );
+    assert!(ordinary.coverage_issues.is_empty());
+    assert!(ordinary.surfaces.is_empty());
+}
