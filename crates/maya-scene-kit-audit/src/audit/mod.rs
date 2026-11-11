@@ -191,17 +191,25 @@ fn audit_observation_source_with_digests(
     let scene_path = observation.scene_path().to_path_buf();
     let scene_format = observation.scene_format();
     let validation_state = observation.validation_state();
-    let catalog = match observation
+    let mut report = match observation
         .observed_execution_catalog_with_digests(plan.max_preview, include_digests)
     {
-        Ok(catalog) => catalog,
+        Ok(catalog) => evaluate_catalog(
+            catalog,
+            scene_path,
+            scene_format,
+            validation_state,
+            plan,
+            options,
+            include_digests,
+        ),
         Err(SceneToolError::MelParseBudgetExceeded { limit }) => {
             let digests = if include_digests {
                 Some(observation.scene_digests(0)?)
             } else {
                 None
             };
-            return Ok(build_parse_budget_blocked_audit_report(
+            build_parse_budget_blocked_audit_report(
                 scene_path,
                 scene_format,
                 validation_state,
@@ -209,7 +217,7 @@ fn audit_observation_source_with_digests(
                 options,
                 limit,
                 digests,
-            ));
+            )
         }
         Err(SceneToolError::MbParseBudgetExceeded { limit }) => {
             let digests = if include_digests {
@@ -217,7 +225,7 @@ fn audit_observation_source_with_digests(
             } else {
                 None
             };
-            return Ok(build_parse_budget_blocked_audit_report(
+            build_parse_budget_blocked_audit_report(
                 scene_path,
                 scene_format,
                 ValidationState::Invalid,
@@ -225,19 +233,10 @@ fn audit_observation_source_with_digests(
                 options,
                 limit,
                 digests,
-            ));
+            )
         }
         Err(err) => return Err(err),
     };
-    let mut report = evaluate_catalog(
-        catalog,
-        scene_path,
-        scene_format,
-        validation_state,
-        plan,
-        options,
-        include_digests,
-    );
     report.file_state = observation.file_state();
     Ok(report)
 }

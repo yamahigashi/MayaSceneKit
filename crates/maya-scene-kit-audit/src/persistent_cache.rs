@@ -16,7 +16,7 @@ use crate::{
     scene::{AuditOptions, AuditReport},
 };
 
-const AUDIT_CACHE_SCHEMA_VERSION: u32 = 34;
+const AUDIT_CACHE_SCHEMA_VERSION: u32 = 35;
 const DB_FILE: &str = "cache.sqlite3";
 const AUDIT_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const AUDIT_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -31,6 +31,7 @@ pub struct AuditCacheIdentity {
     pub schema_bundle_sha256: String,
     pub audit_options_fingerprint: String,
     pub audit_plan_fingerprint: String,
+    pub load_options_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +94,7 @@ impl AuditCacheIdentity {
         options: AuditOptions,
         plan_fingerprint: impl Into<String>,
         schema_bundle_sha256: impl Into<String>,
+        load_options_fingerprint: impl Into<String>,
     ) -> Self {
         Self {
             cache_schema_version: AUDIT_CACHE_SCHEMA_VERSION,
@@ -100,6 +102,7 @@ impl AuditCacheIdentity {
             schema_bundle_sha256: schema_bundle_sha256.into(),
             audit_options_fingerprint: fingerprint_debug(&options),
             audit_plan_fingerprint: plan_fingerprint.into(),
+            load_options_fingerprint: load_options_fingerprint.into(),
         }
     }
 
@@ -162,6 +165,7 @@ impl AuditedSceneSnapshot {
             options,
             plan_fingerprint,
             schema_digest,
+            fingerprint_debug(load_options),
         );
         Ok(Some(Self {
             identity,
@@ -176,6 +180,7 @@ pub struct AuditCacheStore {
     root: PathBuf,
     load_options: maya_scene_kit_observe::scene::LoadOptions,
     schema_digest: Arc<OnceLock<Result<String, String>>>,
+    load_options_fingerprint: String,
 }
 
 impl AuditCacheStore {
@@ -187,6 +192,7 @@ impl AuditCacheStore {
             root: root.into(),
             load_options: load_options.clone(),
             schema_digest: Arc::new(OnceLock::new()),
+            load_options_fingerprint: fingerprint_debug(load_options),
         }
     }
 
@@ -216,6 +222,7 @@ impl AuditCacheStore {
             options,
             plan_fingerprint,
             self.schema_digest()?,
+            &self.load_options_fingerprint,
         ))
     }
 
@@ -346,7 +353,10 @@ impl AuditCacheStore {
         };
         let snapshots = snapshots
             .iter()
-            .filter(|snapshot| snapshot.identity.schema_bundle_sha256 == schema_digest)
+            .filter(|snapshot| {
+                snapshot.identity.schema_bundle_sha256 == schema_digest
+                    && snapshot.identity.load_options_fingerprint == self.load_options_fingerprint
+            })
             .collect::<Vec<_>>();
         if snapshots.is_empty() {
             return Ok(());
@@ -373,8 +383,9 @@ impl AuditCacheStore {
                     last_accessed_unix_secs,
                     blob_relative_path,
                     blob_codec,
-                    blob_compressed_size
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    blob_compressed_size,
+                    load_options_fingerprint
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 ON CONFLICT(normalized_path) DO UPDATE SET
                     size=excluded.size,
                     modified_unix_nanos=excluded.modified_unix_nanos,
@@ -386,7 +397,8 @@ impl AuditCacheStore {
                     last_accessed_unix_secs=excluded.last_accessed_unix_secs,
                     blob_relative_path=excluded.blob_relative_path,
                     blob_codec=excluded.blob_codec,
-                    blob_compressed_size=excluded.blob_compressed_size",
+                    blob_compressed_size=excluded.blob_compressed_size,
+                    load_options_fingerprint=excluded.load_options_fingerprint",
             )
             .map_err(sqlite_io_error)?;
         for (snapshot, blob) in snapshots.iter().zip(blobs.iter()) {
@@ -403,6 +415,7 @@ impl AuditCacheStore {
                 blob.relative_path.to_string_lossy().to_string(),
                 BLOB_CODEC_ZSTD,
                 u64_to_sql(blob.compressed_size)?,
+                &snapshot.identity.load_options_fingerprint,
             ])
             .map_err(sqlite_io_error)?;
         }
@@ -509,7 +522,7 @@ impl AuditCacheStore {
             .prepare(
                 "SELECT normalized_path, size, modified_unix_nanos, cache_schema_version,
                         scene_sha256, schema_bundle_sha256, audit_options_fingerprint, audit_plan_fingerprint,
-                        last_accessed_unix_secs, blob_relative_path, blob_compressed_size
+                        last_accessed_unix_secs, blob_relative_path, blob_compressed_size, load_options_fingerprint
                  FROM path_index",
             )
             .map_err(sqlite_io_error)?;
@@ -527,6 +540,7 @@ impl AuditCacheStore {
                     row.get::<_, Option<i64>>(8)?,
                     row.get::<_, String>(9)?,
                     row.get::<_, i64>(10)?,
+                    row.get::<_, String>(11)?,
                 ))
             })
             .map_err(sqlite_io_error)?;
@@ -544,6 +558,7 @@ impl AuditCacheStore {
                 last_accessed_unix_secs,
                 blob_relative_path,
                 blob_compressed_size,
+                load_options_fingerprint,
             ) = row.map_err(sqlite_io_error)?;
             by_path.insert(
                 path.clone(),
@@ -559,6 +574,7 @@ impl AuditCacheStore {
                         schema_bundle_sha256,
                         audit_options_fingerprint,
                         audit_plan_fingerprint,
+                        load_options_fingerprint,
                     },
                     last_accessed_unix_secs: opt_i64_to_u64(last_accessed_unix_secs)?,
                     blob: AuditBlobRef {
@@ -584,7 +600,7 @@ impl AuditCacheStore {
             .query_row(
                 "SELECT size, modified_unix_nanos, cache_schema_version, scene_sha256, schema_bundle_sha256,
                         audit_options_fingerprint, audit_plan_fingerprint, last_accessed_unix_secs,
-                        blob_relative_path, blob_compressed_size
+                        blob_relative_path, blob_compressed_size, load_options_fingerprint
                  FROM path_index
                  WHERE normalized_path = ?1",
                 params![key],
@@ -600,6 +616,7 @@ impl AuditCacheStore {
                         row.get::<_, Option<i64>>(7)?,
                         row.get::<_, String>(8)?,
                         row.get::<_, i64>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
@@ -618,6 +635,7 @@ impl AuditCacheStore {
                 last_accessed_unix_secs,
                 blob_relative_path,
                 blob_compressed_size,
+                load_options_fingerprint,
             )| {
                 Some(AuditCacheIndexRecord {
                     file_state: AuditFileState {
@@ -631,6 +649,7 @@ impl AuditCacheStore {
                         schema_bundle_sha256,
                         audit_options_fingerprint,
                         audit_plan_fingerprint,
+                        load_options_fingerprint,
                     },
                     last_accessed_unix_secs: opt_i64_to_u64(last_accessed_unix_secs).ok()?,
                     blob: AuditBlobRef {
@@ -651,6 +670,7 @@ impl AuditCacheStore {
                 && record.identity.audit_options_fingerprint == identity.audit_options_fingerprint
                 && record.identity.audit_plan_fingerprint == identity.audit_plan_fingerprint
                 && record.identity.schema_bundle_sha256 == identity.schema_bundle_sha256
+                && record.identity.load_options_fingerprint == identity.load_options_fingerprint
         })
     }
 
@@ -707,6 +727,7 @@ impl AuditCacheStore {
             "SELECT EXISTS(
                 SELECT 1 FROM path_index
                 WHERE schema_bundle_sha256 = ?6
+                  AND load_options_fingerprint = ?7
                   AND scene_sha256 = ?1
                   AND audit_options_fingerprint = ?2
                   AND audit_plan_fingerprint = ?3
@@ -719,7 +740,8 @@ impl AuditCacheStore {
                 &identity.audit_plan_fingerprint,
                 i64::from(identity.cache_schema_version),
                 u64_to_sql(now_unix_secs.saturating_sub(AUDIT_CACHE_TTL.as_secs())).unwrap_or(0),
-                &identity.schema_bundle_sha256
+                &identity.schema_bundle_sha256,
+                &identity.load_options_fingerprint
             ],
             |row| row.get::<_, i64>(0),
         )
@@ -734,6 +756,7 @@ impl AuditCacheStore {
     ) -> io::Result<Option<AuditedSceneSnapshot>> {
         if identity.cache_schema_version != AUDIT_CACHE_SCHEMA_VERSION
             || !self.matches_schema(&identity.schema_bundle_sha256)
+            || identity.load_options_fingerprint != self.load_options_fingerprint
         {
             return Ok(None);
         }
@@ -741,9 +764,10 @@ impl AuditCacheStore {
             .query_row(
                 "SELECT cache_schema_version, scene_sha256, schema_bundle_sha256, audit_options_fingerprint,
                         audit_plan_fingerprint, last_accessed_unix_secs, blob_relative_path,
-                        blob_compressed_size
+                        blob_compressed_size, load_options_fingerprint
                  FROM path_index
                  WHERE schema_bundle_sha256 = ?5
+                   AND load_options_fingerprint = ?6
                    AND scene_sha256 = ?1
                    AND audit_options_fingerprint = ?2
                    AND audit_plan_fingerprint = ?3
@@ -754,7 +778,8 @@ impl AuditCacheStore {
                     &identity.audit_options_fingerprint,
                     &identity.audit_plan_fingerprint,
                     i64::from(identity.cache_schema_version),
-                    &identity.schema_bundle_sha256
+                    &identity.schema_bundle_sha256,
+                    &identity.load_options_fingerprint
                 ],
                 |row| {
                     Ok((
@@ -766,6 +791,7 @@ impl AuditCacheStore {
                         row.get::<_, Option<i64>>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
                     ))
                 },
             )
@@ -780,6 +806,7 @@ impl AuditCacheStore {
             last_accessed_unix_secs,
             blob_relative_path,
             blob_compressed_size,
+            load_options_fingerprint,
         )) = row
         else {
             return Ok(None);
@@ -796,6 +823,7 @@ impl AuditCacheStore {
                 schema_bundle_sha256,
                 audit_options_fingerprint,
                 audit_plan_fingerprint,
+                load_options_fingerprint,
             },
             last_accessed_unix_secs: opt_i64_to_u64(last_accessed_unix_secs)?,
             blob: AuditBlobRef {
@@ -818,7 +846,11 @@ impl AuditCacheStore {
             .map_err(sqlite_io_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_io_error)?;
-        if !columns.is_empty() && !columns.iter().any(|name| name == "schema_bundle_sha256") {
+        if !columns.is_empty()
+            && !columns
+                .iter()
+                .any(|name| name == "load_options_fingerprint")
+        {
             conn.execute_batch("DROP TABLE IF EXISTS path_index;")
                 .map_err(sqlite_io_error)?;
         }
@@ -837,10 +869,11 @@ impl AuditCacheStore {
                  last_accessed_unix_secs INTEGER NULL,
                  blob_relative_path TEXT NOT NULL,
                  blob_codec TEXT NOT NULL,
-                 blob_compressed_size INTEGER NOT NULL
+                 blob_compressed_size INTEGER NOT NULL,
+                 load_options_fingerprint TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS path_index_identity_idx
-                 ON path_index(scene_sha256, schema_bundle_sha256, audit_options_fingerprint, audit_plan_fingerprint);
+                 ON path_index(scene_sha256, schema_bundle_sha256, audit_options_fingerprint, audit_plan_fingerprint, load_options_fingerprint);
              CREATE INDEX IF NOT EXISTS path_index_last_accessed_idx ON path_index(last_accessed_unix_secs);",
         )
         .map_err(sqlite_io_error)?;
@@ -1196,6 +1229,111 @@ mod tests {
             ),
         )
         .expect("write sample scene");
+    }
+
+    #[test]
+    fn audit_cache_separates_parse_budgets() {
+        use maya_scene_kit_observe::scene::{Loader, MelParseBudget};
+
+        use crate::audit::audit_observation;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("Example.ma");
+        fs::write(
+            &source,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "createNode script -n \"ExampleScript\";\n",
+                "setAttr \".b\" -type \"string\" \"if (1) { if (1) { print(1); } }\";\n",
+                "setAttr \".st\" 1;\n",
+            ),
+        )
+        .unwrap();
+        let plan = build_script_audit_plan(vec![], 64).unwrap();
+        let plan_fingerprint = fingerprint_audit_plan(&plan);
+        let options = AuditOptions::strict_default();
+        let small = LoadOptions::default().with_mel_parse_budget(MelParseBudget {
+            max_nesting_depth: 1,
+            ..MelParseBudget::default()
+        });
+        let large = LoadOptions::default();
+        let root = dir.path().join("cache");
+        let small_store = AuditCacheStore::new(&root, &small);
+        let large_store = AuditCacheStore::new(&root, &large);
+        let mut snapshots = Vec::new();
+        for (load_options, blocked) in [(&small, true), (&large, false)] {
+            let observation = Loader::new(load_options.clone())
+                .observe_analysis_path(&source)
+                .unwrap();
+            let report = audit_observation(&observation, &plan, options).unwrap();
+            assert_eq!(report.is_parse_budget_blocked(), blocked);
+            snapshots.push(
+                AuditedSceneSnapshot::new(report, options, &plan_fingerprint, load_options)
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let copied = dir.path().join("ExampleCopy.ma");
+        fs::copy(&source, &copied).unwrap();
+        for (producer, consumer, snapshot) in [
+            (&small_store, &large_store, &snapshots[0]),
+            (&large_store, &small_store, &snapshots[1]),
+        ] {
+            producer.save(snapshot).unwrap();
+            assert!(
+                producer
+                    .load_by_path_if_fresh(&source, options, &plan_fingerprint)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                consumer
+                    .load_by_path_if_fresh(&source, options, &plan_fingerprint)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                consumer
+                    .load_many_by_path_if_fresh_with_access(
+                        std::slice::from_ref(&source),
+                        options,
+                        &plan_fingerprint
+                    )
+                    .unwrap()[0]
+                    .as_ref()
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                consumer
+                    .load_by_path_with_hash_fallback(&copied, options, &plan_fingerprint)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                consumer
+                    .load_by_identity(&snapshot.identity)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                producer
+                    .load_by_path_with_hash_fallback(&copied, options, &plan_fingerprint)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        small_store.save(&snapshots[0]).unwrap();
+        small_store.save(&snapshots[1]).unwrap();
+        assert!(
+            small_store
+                .load_by_path_if_fresh(&source, options, &plan_fingerprint)
+                .unwrap()
+                .unwrap()
+                .report
+                .is_parse_budget_blocked()
+        );
     }
 
     fn copy_schema_directory(source: &Path, destination: &Path) {

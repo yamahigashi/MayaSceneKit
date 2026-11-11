@@ -2694,6 +2694,63 @@ mod snapshot_tests {
     }
 
     #[test]
+    fn budget_blocked_analysis_has_cacheable_snapshot() {
+        use maya_scene_kit_audit::scene::AuditCacheStore;
+        use maya_scene_kit_observe::scene::MelParseBudget;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        fs::write(
+            &path,
+            concat!(
+                "//Maya ASCII 2026 scene\n",
+                "requires maya \"2026\";\n",
+                "createNode script -n \"ExampleScript\";\n",
+                "setAttr \".b\" -type \"string\" \"if (1) { if (1) { print(1); } }\";\n",
+                "setAttr \".st\" 1;\n",
+            ),
+        )
+        .unwrap();
+        let options = LoadOptions::default().with_mel_parse_budget(MelParseBudget {
+            max_nesting_depth: 1,
+            ..MelParseBudget::default()
+        });
+        let observation = Loader::new(options.clone())
+            .observe_analysis_path(&path)
+            .unwrap();
+        let plan = gui_audit_plan(AuditAllowlist::default()).unwrap();
+        let result = analyze_observation_result(
+            &observation,
+            AuditModePreference::StrictDefault,
+            &options,
+            Duration::ZERO,
+            &plan,
+        )
+        .unwrap();
+        assert!(result.audit_report.is_parse_budget_blocked());
+        assert!(result.audit_file_state.is_some());
+        assert!(result.observe_snapshot.is_some());
+        let snapshot = result.audit_snapshot.expect("cacheable audit snapshot");
+        let store = AuditCacheStore::new(dir.path().join("cache"), &options);
+        store.save(&snapshot).unwrap();
+        let hit = store
+            .load_by_path_if_fresh(
+                &path,
+                super::audit_options_from_preference(AuditModePreference::StrictDefault),
+                &result.audit_plan_fingerprint,
+            )
+            .unwrap()
+            .expect("second analysis cache hit");
+        assert!(hit.report.is_parse_budget_blocked());
+        assert_eq!(hit.file_state.path, snapshot.file_state.path);
+        assert_eq!(hit.file_state.size, snapshot.file_state.size);
+        assert_eq!(
+            hit.file_state.modified_unix_nanos,
+            snapshot.file_state.modified_unix_nanos
+        );
+    }
+
+    #[test]
     fn bytes_analysis_has_no_snapshots_to_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Example.ma");
