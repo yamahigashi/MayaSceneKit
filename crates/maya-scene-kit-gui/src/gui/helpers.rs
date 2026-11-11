@@ -2066,14 +2066,11 @@ pub(super) fn analyze_row_bytes_with_options(
             Ok(AnalyzeRowResult {
                 audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state: None,
-                audit_report: audit_report.clone(),
+                audit_report,
                 paths_report: None,
                 dump_report: None,
                 observe_snapshot: None,
-                audit_snapshot: Some(
-                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(plan))
-                        .map_err(|err| err.to_string())?,
-                ),
+                audit_snapshot: None,
                 audit_mode,
                 elapsed: started_at.elapsed(),
             })
