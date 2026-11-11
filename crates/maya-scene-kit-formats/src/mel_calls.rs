@@ -1156,6 +1156,9 @@ fn is_bare_identifier(text: &str) -> bool {
     chars.all(|ch| matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
 }
 
+const CODE_LIKE_MAX_BYTES: usize = 64 * 1024;
+const CODE_LIKE_MIN_TOKENS: usize = CODE_LIKE_MAX_BYTES + 16;
+const CODE_LIKE_MIN_LITERAL_BYTES: usize = CODE_LIKE_MAX_BYTES + 16;
 const CODE_LIKE_MIN_NESTING_DEPTH: usize = 8;
 const CODE_LIKE_MIN_STATEMENTS: usize = 16;
 
@@ -1167,10 +1170,12 @@ fn is_code_like_rendered_text(text: &str) -> bool {
         return true;
     }
     let mut budgets = MelParseBudget::default()
-        .with_max_bytes(text.len().max(1).saturating_mul(4).min(64 * 1024))
+        .with_max_bytes(text.len().max(1).saturating_mul(4).min(CODE_LIKE_MAX_BYTES))
         .to_parse_budgets();
     budgets.max_nesting_depth = budgets.max_nesting_depth.max(CODE_LIKE_MIN_NESTING_DEPTH);
     budgets.max_statements = budgets.max_statements.max(CODE_LIKE_MIN_STATEMENTS);
+    budgets.max_tokens = budgets.max_tokens.max(CODE_LIKE_MIN_TOKENS);
+    budgets.max_literal_bytes = budgets.max_literal_bytes.max(CODE_LIKE_MIN_LITERAL_BYTES);
     let parse = parse_source_with_options(
         text,
         ParseOptions {
@@ -1178,6 +1183,13 @@ fn is_code_like_rendered_text(text: &str) -> bool {
             budgets,
         },
     );
+    if parse
+        .errors
+        .iter()
+        .any(|error| error.message.starts_with("source exceeds parse budget"))
+    {
+        return true;
+    }
     if let [Item::Stmt(stmt)] = parse.syntax.items.as_slice()
         && let Stmt::Expr {
             expr: Expr::Invoke(invoke),
@@ -1192,10 +1204,10 @@ fn is_code_like_rendered_text(text: &str) -> bool {
             .iter()
             .all(|word| matches!(word, ShellWord::BareWord { .. }))
     {
-        // The permissive parser also represents namespace and plug names as shell calls.
+        // The permissive parser also represents namespace, plug, and path names as shell calls.
         let name = text.trim();
         if name
-            .split([':', '.'])
+            .split([':', '.', '/'])
             .all(|part| part == part.trim() && is_bare_identifier(part))
             && MayaCommandRegistry::new().lookup(name).is_none()
         {
@@ -1414,6 +1426,47 @@ mod tests {
         ] {
             assert!(super::is_code_like_rendered_text(code), "{code}");
         }
+    }
+
+    #[test]
+    fn short_names_paths_and_literals_are_not_code_like() {
+        let code_like: Vec<_> = [
+            "x",
+            "tx",
+            "a.b.c.d",
+            "|a|b|c",
+            "asset/example/file.ma",
+            "\"Example\"",
+        ]
+        .into_iter()
+        .filter(|text| super::is_code_like_rendered_text(text))
+        .collect();
+        assert!(
+            code_like.is_empty(),
+            "unexpected code-like values: {code_like:?}"
+        );
+    }
+
+    #[test]
+    fn statement_padded_rendered_code_is_code_like() {
+        let text = format!("{}system(\"echo Example\");", "1;".repeat(17));
+        assert!(super::is_code_like_rendered_text(&text));
+    }
+
+    #[test]
+    fn literal_padded_rendered_code_is_code_like() {
+        let text = format!("\"{}\";system(\"echo Example\");", "Example".repeat(8));
+        assert!(super::is_code_like_rendered_text(&text));
+    }
+
+    #[test]
+    fn deeply_nested_rendered_code_is_code_like() {
+        let text = format!(
+            "{}system(\"echo Example\"){};",
+            "(".repeat(9),
+            ")".repeat(9)
+        );
+        assert!(super::is_code_like_rendered_text(&text));
     }
 
     #[test]
