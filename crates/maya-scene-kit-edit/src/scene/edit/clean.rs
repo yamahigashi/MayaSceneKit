@@ -1,4 +1,4 @@
-use maya_scene_kit_observe::scene::{Loader, evidence::ExecutionSurfaceKind};
+use maya_scene_kit_observe::scene::Loader;
 
 use super::{
     application::{
@@ -24,25 +24,21 @@ impl PatchPlanner {
         input_path: &Path,
     ) -> Result<(SceneFormat, Applied<CleanChanges>), SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let (observation, bytes) =
-            Loader::new(self.options.load_options().clone()).observe_path_with_bytes(input_path)?;
+        let observation = Loader::new(self.options.load_options().clone())
+            .observe_script_owners_path(input_path)?;
         let format = observation.scene_format();
-        let script_origins = observation
-            .execution_surfaces(0)?
-            .into_iter()
-            .map(|surface| surface.origin)
-            .filter(|origin| origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody)
-            .collect::<Vec<_>>();
+        let bytes = observation.bytes();
+        let script_origins = observation.origins();
         let mut scene = SceneEditChanges::default();
         let (output, removed_script_nodes) = if format == SceneFormat::Ma {
-            let mut ranges = scripts::collect_script_node_ranges_from_ma(&bytes, &[]);
+            let mut ranges = scripts::collect_script_node_ranges_from_ma(bytes, &[]);
             let names = script_origins
                 .iter()
                 .filter_map(|origin| origin.node_name.clone())
                 .filter(|name| !ranges.iter().any(|(_, existing)| existing == name))
                 .collect::<Vec<_>>();
             ranges.extend(
-                rewrite::collect_named_node_owner_ranges_from_ma(&bytes, &names)
+                rewrite::collect_named_node_owner_ranges_from_ma(bytes, &names)
                     .into_iter()
                     .filter(|(_, (node_type, _))| node_type != "script")
                     .map(|(range, (_, name))| (range, name)),
@@ -63,9 +59,9 @@ impl PatchPlanner {
                     Vec::new(),
                 ));
             }
-            (rewrite::apply_ma_byte_edits(&bytes, &mut edits), names)
+            (rewrite::apply_ma_byte_edits(bytes, &mut edits), names)
         } else if format == SceneFormat::Mb {
-            let mb = crate::mb::parse_bytes(bytes)?;
+            let mb = observation.binary().expect("binary script owner source");
             let (mut forms, mut names) =
                 crate::mb::paths::locate_raw_script_node_forms_in_mb_by_name(
                     mb.data(),
@@ -75,9 +71,9 @@ impl PatchPlanner {
                 .value;
             for origin in script_origins {
                 if let (Some(form), Some(offset), Some(name)) = (
-                    origin.chunk_form,
+                    origin.chunk_form.clone(),
                     origin.chunk_node_offset,
-                    origin.node_name,
+                    origin.node_name.clone(),
                 ) {
                     let locator = (form, offset);
                     if !forms.contains(&locator) {

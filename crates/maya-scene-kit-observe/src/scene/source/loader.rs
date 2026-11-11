@@ -398,6 +398,115 @@ impl Loader {
         self.observe(input)
     }
 
+    /// Reads source bytes and supplemental script-owner evidence without modeling execution.
+    /// Native MA script blocks remain the responsibility of format-native owner-range lookup.
+    pub fn observe_script_owners_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ScriptOwnerObservation, SceneToolError> {
+        use crate::scene::{
+            ExecutionSurfaceKind, execution::surfaces,
+            schema::node_semantics::NodeExecutionProfileKind,
+        };
+
+        let path = path.as_ref();
+        let reader = snapshot::SourceReader::open(path)?;
+        let format = reader.format();
+        let acquired = reader.read(&self.options)?;
+        let schema = self.schema_context()?;
+        let semantics = schema.node_execution_semantics()?;
+        match format {
+            SceneFormat::Ma => {
+                let needs_profile_owners =
+                    semantics
+                        .ma_capture_attr_selectors()
+                        .iter()
+                        .any(|selector| {
+                            selector.node_type != "script"
+                                && semantics.profiles_for_node(&selector.node_type).iter().any(
+                                    |profile| {
+                                        matches!(
+                                            profile.kind,
+                                            NodeExecutionProfileKind::ScriptNode(_)
+                                        )
+                                    },
+                                )
+                        });
+                let origins = if needs_profile_owners {
+                    let sections = selective::extract_raw_selective_sections_from_ma_with_budget_and_node_attr_selectors(
+                        &acquired.bytes,
+                        self.options.mel_parse_budget(),
+                        semantics.ma_capture_attr_selectors(),
+                    );
+                    if let Some(limit) =
+                        first_mel_parse_budget_limit(&sections.audit_top_level.diagnostics)
+                    {
+                        return Err(SceneToolError::MelParseBudgetExceeded { limit });
+                    }
+                    surfaces::collect_execution_coverage_from_ma_parts(
+                        &sections.dump_sections.script_entries,
+                        &sections.node_attr_values,
+                        &sections.connections,
+                        &sections.audit_top_level,
+                        &semantics,
+                    )?
+                    .surfaces
+                    .into_iter()
+                    .filter(|surface| {
+                        surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                    })
+                    .map(|surface| surface.origin)
+                    .collect()
+                } else {
+                    Vec::new()
+                };
+                let bytes = Arc::new(acquired.bytes);
+                Ok(ScriptOwnerObservation {
+                    data: ScriptOwnerData::Ma {
+                        snapshot: SourceSnapshot::ma(Arc::clone(&bytes), acquired.identity),
+                        bytes,
+                    },
+                    origins,
+                })
+            }
+            SceneFormat::Mb => {
+                let budget = self.options.materialize_mb_parse_budget_for_bytes(
+                    acquired.identity.initial_len(acquired.bytes.len()),
+                );
+                let session = MbReadSession::load_snapshot_bytes(
+                    path,
+                    acquired.bytes,
+                    acquired.identity,
+                    Some(Arc::clone(schema)),
+                    &budget,
+                )?;
+                let origins = surfaces::collect_execution_coverage_from_mb_with_budget(
+                    &session.mb,
+                    &session.completeness,
+                    session.section_state(),
+                    session.budget(),
+                    schema.registry(),
+                    &semantics,
+                )?
+                .surfaces
+                .into_iter()
+                .filter(|surface| {
+                    surface.origin.surface_kind == ExecutionSurfaceKind::ScriptNodeBody
+                })
+                .map(|surface| surface.origin)
+                .collect();
+                Ok(ScriptOwnerObservation {
+                    data: ScriptOwnerData::Mb(Box::new(session)),
+                    origins,
+                })
+            }
+            SceneFormat::Unknown => Err(SceneToolError::UnsupportedSceneFormat {
+                path: path.to_path_buf(),
+                detected: format,
+            }),
+        }
+    }
+
     /// Acquires one source snapshot and returns its original bytes with its observation.
     pub fn observe_path_with_bytes(
         &self,
@@ -904,5 +1013,61 @@ impl ObservationBundle {
             ObservationData::Ma { .. } => None,
             ObservationData::Mb { session } => session.cached_build_ptr(),
         }
+    }
+}
+
+/// Source bytes and supplemental script-owner evidence for whole-owner removal.
+pub struct ScriptOwnerObservation {
+    data: ScriptOwnerData,
+    origins: Vec<crate::scene::ExecutionOrigin>,
+}
+
+enum ScriptOwnerData {
+    Ma {
+        bytes: Arc<Vec<u8>>,
+        snapshot: SourceSnapshot,
+    },
+    Mb(Box<MbReadSession>),
+}
+
+impl ScriptOwnerObservation {
+    pub fn scene_format(&self) -> SceneFormat {
+        match self.data {
+            ScriptOwnerData::Ma { .. } => SceneFormat::Ma,
+            ScriptOwnerData::Mb(_) => SceneFormat::Mb,
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        match &self.data {
+            ScriptOwnerData::Ma { bytes, .. } => bytes,
+            ScriptOwnerData::Mb(session) => session.mb.data(),
+        }
+    }
+
+    pub fn binary(&self) -> Option<&crate::mb::MayaBinaryFile> {
+        match &self.data {
+            ScriptOwnerData::Ma { .. } => None,
+            ScriptOwnerData::Mb(session) => Some(&session.mb),
+        }
+    }
+
+    /// Supplemental MA owners, or all observed MB script owners.
+    /// Native MA blocks are located by the format-native rewrite helpers.
+    pub fn origins(&self) -> &[crate::scene::ExecutionOrigin] {
+        &self.origins
+    }
+
+    pub fn source_fingerprint(
+        &self,
+    ) -> Result<crate::scene::paths::SceneSourceFingerprint, SceneToolError> {
+        let snapshot = match &self.data {
+            ScriptOwnerData::Ma { snapshot, .. } => snapshot,
+            ScriptOwnerData::Mb(session) => &session.snapshot,
+        };
+        Ok(crate::scene::paths::SceneSourceFingerprint {
+            sha256: snapshot.sha256()?.to_string(),
+            byte_len: self.bytes().len(),
+        })
     }
 }
