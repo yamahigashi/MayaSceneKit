@@ -1338,16 +1338,16 @@ pub fn remove_path_owner_nodes_from_ma(
     if ranges.is_empty() {
         return (data.to_vec(), Vec::new());
     }
-    let mut out = String::new();
+    let mut out = Vec::with_capacity(data.len());
     let mut cursor = 0;
     let mut removed = HashSet::new();
     for (range, target) in ranges {
-        out.push_str(&String::from_utf8_lossy(&data[cursor..range.start]));
+        out.extend_from_slice(&data[cursor..range.start]);
         cursor = range.end;
         removed.insert(target);
     }
-    out.push_str(&String::from_utf8_lossy(&data[cursor..]));
-    (out.into_bytes(), removed.into_iter().collect())
+    out.extend_from_slice(&data[cursor..]);
+    (out, removed.into_iter().collect())
 }
 pub fn collect_path_owner_ranges_from_ma(
     data: &[u8],
