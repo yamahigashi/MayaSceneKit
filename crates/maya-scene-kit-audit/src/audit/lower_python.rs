@@ -68,7 +68,7 @@ pub(crate) enum PythonSignal {
 }
 
 pub(crate) fn collect_python_signals(source: &str, max_bytes: usize) -> Vec<PythonSignal> {
-    with_python_analysis(source, |source| {
+    python_signal_result(with_python_analysis(source, |source| {
         if let Err(limit) = check_python_parse_budget_with_max_bytes(source, max_bytes) {
             return vec![PythonSignal::ParseFailure {
                 message: limit.to_string(),
@@ -119,6 +119,14 @@ pub(crate) fn collect_python_signals(source: &str, max_bytes: usize) -> Vec<Pyth
             .signals
             .extend(autorun_persistence_marker_signals(source));
         visitor.signals
+    }))
+}
+
+fn python_signal_result(result: std::io::Result<Vec<PythonSignal>>) -> Vec<PythonSignal> {
+    result.unwrap_or_else(|error| {
+        vec![PythonSignal::ParseFailure {
+            message: format!("Python analysis unavailable: {error}"),
+        }]
     })
 }
 
@@ -1252,6 +1260,15 @@ fn push_marker(target: &mut Vec<String>, marker: &str) {
 #[cfg(test)]
 mod tests {
     use super::{PythonBodyArgKind, PythonCallKind, PythonSignal, collect_python_signals};
+
+    #[test]
+    fn python_spawn_failure_reports_analysis_gap() {
+        let signals =
+            super::python_signal_result(Err(std::io::Error::other("Example spawn failure")));
+        assert!(
+            matches!(signals.as_slice(), [PythonSignal::ParseFailure { message }] if message.contains("Example spawn failure"))
+        );
+    }
 
     fn has_call(source: &str, kind: PythonCallKind) -> bool {
         collect_python_signals(

@@ -25,16 +25,29 @@ impl fmt::Display for PythonParseBudgetLimit {
     }
 }
 
+thread_local! {
+    static IN_PYTHON_ANALYSIS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[doc(hidden)]
-pub fn with_python_analysis<T: Send>(source: &str, analyze: impl FnOnce(&str) -> T + Send) -> T {
+pub fn with_python_analysis<T: Send>(
+    source: &str,
+    analyze: impl FnOnce(&str) -> T + Send,
+) -> std::io::Result<T> {
+    if IN_PYTHON_ANALYSIS.get() {
+        return Ok(analyze(source));
+    }
     std::thread::scope(|scope| {
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("python-analysis".to_string())
             .stack_size(64 * 1024 * 1024)
-            .spawn_scoped(scope, move || analyze(source))
-            .expect("create Python analysis thread")
+            .spawn_scoped(scope, move || {
+                IN_PYTHON_ANALYSIS.set(true);
+                analyze(source)
+            })?;
+        Ok(thread
             .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
     })
 }
 
@@ -257,6 +270,7 @@ pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str, max_bytes: usi
         walk_suite(&mut visitor, &program);
         visitor.payloads
     })
+    .unwrap_or_default()
 }
 
 pub fn normalize_python_compat_source(source: &str) -> String {
@@ -690,6 +704,25 @@ pub(super) mod tests {
         let mut visitor = super::MayaMelEvalVisitor::for_body(program);
         super::walk_suite(&mut visitor, program);
         visitor.payloads
+    }
+
+    #[test]
+    fn nested_python_analysis_stays_on_the_analysis_thread() {
+        super::with_python_analysis("print('Example')", |source| {
+            let outer = std::thread::current().id();
+            let catalog = crate::scene::execution::observe_source_text(
+                source,
+                crate::scene::evidence::ExecutionLanguage::Python,
+            )
+            .unwrap();
+            assert_eq!(catalog.unit_summaries.len(), 1);
+            assert!(super::IN_PYTHON_ANALYSIS.get());
+            super::with_python_analysis(source, |_| {
+                assert_eq!(std::thread::current().id(), outer);
+            })
+            .unwrap();
+        })
+        .unwrap();
     }
 
     #[test]

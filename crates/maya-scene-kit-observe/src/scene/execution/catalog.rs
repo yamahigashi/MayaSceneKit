@@ -200,6 +200,25 @@ fn python_budget_issue(
     }
 }
 
+fn python_surface_analysis_result<T>(
+    result: std::io::Result<T>,
+    surface: &surfaces::ExecutionSurfaceRecord,
+    issues: &mut Vec<surfaces::ExecutionCoverageIssueRecord>,
+) -> Option<T> {
+    result
+        .map_err(|error| {
+            issues.push(surfaces::ExecutionCoverageIssueRecord {
+                kind: ExecutionCoverageIssueKind::SurfaceDiagnostics,
+                detail: ExecutionCoverageIssueDetail::SurfaceDiagnostics {
+                    diagnostic: format!("Python analysis unavailable: {error}"),
+                },
+                origin: Some(surface.origin.clone()),
+                preview: surface_preview_spec(&surface.text),
+            });
+        })
+        .ok()
+}
+
 fn build_execution_core(
     mut coverage: surfaces::ExecutionCoverageCollection,
     mel_parse_budget: &MelParseBudget,
@@ -273,12 +292,30 @@ fn build_execution_core(
             }
         }
 
-        if let Some((summary, unknown)) = summarize_execution_unit(
-            &surface.origin,
-            &surface.text,
-            mel.as_deref(),
-            mel_parse_budget.max_bytes,
-        ) {
+        let summarize = || {
+            summarize_execution_unit(
+                &surface.origin,
+                &surface.text,
+                mel.as_deref(),
+                mel_parse_budget.max_bytes,
+            )
+        };
+        let (summary, payloads) = if surface.origin.lang == ExecutionLanguage::Python {
+            python_surface_analysis_result(
+                with_python_analysis(&surface.text, |text| {
+                    (
+                        summarize(),
+                        collect_static_maya_mel_eval_payloads(text, mel_parse_budget.max_bytes),
+                    )
+                }),
+                &surface,
+                &mut coverage.coverage_issues,
+            )
+            .unwrap_or_default()
+        } else {
+            (summarize(), Vec::new())
+        };
+        if let Some((summary, unknown)) = summary {
             if let Some(unknown) = unknown {
                 unknown_semantics.push(UnknownSemanticFactCore {
                     origin: surface.origin.clone(),
@@ -289,19 +326,15 @@ fn build_execution_core(
             unit_summaries.push(summary);
         }
 
-        if surface.origin.lang == ExecutionLanguage::Python {
-            for payload in
-                collect_static_maya_mel_eval_payloads(&surface.text, mel_parse_budget.max_bytes)
-            {
-                let mut origin = surface.origin.clone();
-                origin.lang = ExecutionLanguage::Mel;
-                origin.source_kind = Some("python->maya.mel.eval literal bridge".to_string());
-                pending_surfaces.push_back(surfaces::ExecutionSurfaceRecord {
-                    text: Arc::from(payload),
-                    origin,
-                    requires_mel_modeling: true,
-                });
-            }
+        for payload in payloads {
+            let mut origin = surface.origin.clone();
+            origin.lang = ExecutionLanguage::Mel;
+            origin.source_kind = Some("python->maya.mel.eval literal bridge".to_string());
+            pending_surfaces.push_back(surfaces::ExecutionSurfaceRecord {
+                text: Arc::from(payload),
+                origin,
+                requires_mel_modeling: true,
+            });
         }
 
         observed.push(ObservedExecutionSurfaceCore {
@@ -635,30 +668,34 @@ fn is_expression_node_attr_surface(origin: &ExecutionOrigin) -> bool {
         )
 }
 
-fn summarize_python_surface(
-    text: &str,
-    python_max_body_bytes: usize,
-) -> (
+type PythonEffectSummary = (
     ExecutionEffectClass,
     ExecutionSemanticClass,
     EffectCertainty,
     Vec<ExecutionReason>,
-) {
-    with_python_analysis(text, |text| {
-        let Some(program) = parse_python_compat_suite(text, python_max_body_bytes) else {
-            return (
-                ExecutionEffectClass::Unknown,
-                ExecutionSemanticClass::UnknownWrite,
-                EffectCertainty::Uncertain,
-                vec![ExecutionReason::Static {
-                    value: StaticExecutionReason::PythonParseFailurePreventsProvenEffectSummary,
-                }],
-            );
-        };
+);
 
+fn summarize_python_surface(text: &str, python_max_body_bytes: usize) -> PythonEffectSummary {
+    python_summary_result(with_python_analysis(text, |text| {
+        let program = parse_python_compat_suite(text, python_max_body_bytes)?;
         let mut visitor = PythonEffectVisitor::default();
         walk_suite(&mut visitor, &program);
-        visitor.finish()
+        Some(visitor.finish())
+    }))
+}
+
+fn python_summary_result(
+    result: std::io::Result<Option<PythonEffectSummary>>,
+) -> PythonEffectSummary {
+    result.ok().flatten().unwrap_or_else(|| {
+        (
+            ExecutionEffectClass::Unknown,
+            ExecutionSemanticClass::UnknownWrite,
+            EffectCertainty::Uncertain,
+            vec![ExecutionReason::Static {
+                value: StaticExecutionReason::PythonParseFailurePreventsProvenEffectSummary,
+            }],
+        )
     })
 }
 
@@ -1158,6 +1195,50 @@ fn semantic_rank(class: ExecutionSemanticClass) -> u8 {
 mod tests {
     use super::summarize_python_surface;
     use crate::scene::{EffectCertainty, ExecutionEffectClass};
+
+    #[test]
+    fn python_spawn_failure_reports_surface_coverage_gap() {
+        let surface = super::surfaces::ExecutionSurfaceRecord {
+            text: std::sync::Arc::from("print('Example')"),
+            origin: super::ExecutionOrigin {
+                lang: super::ExecutionLanguage::Python,
+                ..super::ExecutionOrigin::without_chunk_address()
+            },
+            requires_mel_modeling: true,
+        };
+        let mut issues = Vec::new();
+        assert!(
+            super::python_surface_analysis_result::<()>(
+                Err(std::io::Error::other("Example spawn failure")),
+                &surface,
+                &mut issues,
+            )
+            .is_none()
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].kind,
+            super::ExecutionCoverageIssueKind::SurfaceDiagnostics
+        );
+        assert!(
+            matches!(&issues[0].detail, super::ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } if diagnostic.contains("Example spawn failure"))
+        );
+        assert_eq!(issues[0].origin, Some(surface.origin));
+    }
+
+    #[test]
+    fn python_spawn_failure_leaves_summary_uncertain() {
+        let result =
+            super::python_summary_result(Err(std::io::Error::other("Example spawn failure")));
+        assert_eq!(result.0, ExecutionEffectClass::Unknown);
+        assert_eq!(result.2, EffectCertainty::Uncertain);
+        assert!(matches!(
+            result.3.as_slice(),
+            [super::ExecutionReason::Static {
+                value: super::StaticExecutionReason::PythonParseFailurePreventsProvenEffectSummary,
+            }]
+        ));
+    }
 
     #[test]
     fn python_summary_uses_the_supplied_byte_budget() {
