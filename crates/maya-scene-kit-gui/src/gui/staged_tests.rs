@@ -1380,3 +1380,121 @@ fn replacement_skip_completion_preserves_rejection_counts(cx: &mut TestAppContex
         assert!(banner.contains("non_canonical_escape=1"), "{banner}");
     });
 }
+
+fn assert_save_source_guard(
+    cx: &mut TestAppContext,
+    scene_edits: bool,
+    history: bool,
+    retry: bool,
+) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let original = fs::read(&path).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        shell.state.backup_location = BackupLocationPreference::SameDirectory;
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        if scene_edits {
+            let sequence = shell.begin_edit_transaction(&[0]);
+            shell.stage_scene_edits_for_row(
+                0,
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleScript".into(),
+                }]),
+                BTreeSet::new(),
+                ResultTab::Paths,
+                sequence,
+                false,
+                window,
+                cx,
+            );
+        } else {
+            shell
+                .apply_path_override_updates(
+                    vec![(0, BTreeMap::from([(0, "asset/sample/file.tx".into())]))],
+                    window,
+                    cx,
+                )
+                .unwrap();
+        }
+    });
+    visual_cx.run_until_parked();
+    let expected = shell.read_with(visual_cx, |shell, _| {
+        shell.rows[0]
+            .staged
+            .artifact()
+            .as_ref()
+            .unwrap()
+            .bytes
+            .clone()
+    });
+    if history {
+        shell.update_in(visual_cx, |shell, _, cx| shell.run_menu_undo(cx));
+    }
+    let changed = String::from_utf8(original.clone())
+        .unwrap()
+        .replace("ExampleScript", "SampleScriptX");
+    fs::write(&path, &changed).unwrap();
+    if history {
+        shell.update_in(visual_cx, |shell, _, cx| shell.run_menu_redo(cx));
+        visual_cx.run_until_parked();
+    }
+    shell.update_in(visual_cx, |shell, window, cx| {
+        if history {
+            shell.run_context_save_from_row(1, window, cx);
+        } else if scene_edits {
+            shell.run_save_all(window, cx);
+        } else {
+            shell.run_save_selected(window, cx);
+        }
+    });
+    if scene_edits && !history {
+        visual_cx.simulate_prompt_answer("Save All");
+    }
+    visual_cx.run_until_parked();
+    assert_eq!(fs::read(&path).unwrap(), changed.as_bytes());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    shell.read_with(visual_cx, |shell, _| {
+        assert!(shell.rows[0].dirty());
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message.contains("changed on disk")));
+        assert!(mutation_banner(shell).contains("re-analysed"));
+    });
+    if retry {
+        fs::write(&path, &original).unwrap();
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.run_save_selected(window, cx)
+        });
+        visual_cx.run_until_parked();
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        assert_eq!(
+            fs::read(directory.path().join("Example.backup.ma")).unwrap(),
+            original
+        );
+        shell.read_with(visual_cx, |shell, _| {
+            assert!(matches!(shell.rows[0].status, FileStatus::Saved))
+        });
+    }
+}
+
+#[gpui::test]
+fn save_refuses_changed_replace_source(cx: &mut TestAppContext) {
+    assert_save_source_guard(cx, false, false, false);
+}
+
+#[gpui::test]
+fn save_refuses_changed_scene_edit_source(cx: &mut TestAppContext) {
+    assert_save_source_guard(cx, true, false, false);
+}
+
+#[gpui::test]
+fn save_refuses_changed_source_after_redo(cx: &mut TestAppContext) {
+    assert_save_source_guard(cx, true, true, false);
+}
+
+#[gpui::test]
+fn save_accepts_unchanged_source_after_refusal(cx: &mut TestAppContext) {
+    assert_save_source_guard(cx, false, false, true);
+}

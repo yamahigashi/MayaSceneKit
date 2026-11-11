@@ -1151,11 +1151,38 @@ pub(super) fn build_audit_clipboard_payload(
     sections.join("\n\n")
 }
 
+pub(super) fn validate_save_source(
+    output_path: &Path,
+    expected: Option<&maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
+    source_changed: &str,
+) -> Result<(), io::Error> {
+    use sha2::{Digest, Sha256};
+
+    let matches = expected.is_some_and(|expected| {
+        fs::read(output_path).is_ok_and(|bytes| {
+            bytes.len() == expected.byte_len
+                && format!("{:x}", Sha256::digest(&bytes)) == expected.sha256
+        })
+    });
+    if matches {
+        Ok(())
+    } else {
+        Err(io::Error::other(source_changed.to_string()))
+    }
+}
+
 pub(super) fn save_staged_artifact_with_backup(
     artifact: &StagedSceneArtifact,
     output_path: &Path,
     backup_location: BackupLocationPreference,
+    source_check: Option<(
+        &maya_scene_kit_observe::scene::paths::SceneSourceFingerprint,
+        &str,
+    )>,
 ) -> Result<PathBuf, io::Error> {
+    if let Some((source, message)) = source_check {
+        validate_save_source(output_path, Some(source), message)?;
+    }
     if output_path.exists() {
         let backup_path = next_backup_path(output_path, backup_location);
         if let Some(parent) = backup_path.parent() {

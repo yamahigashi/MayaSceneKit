@@ -82,6 +82,10 @@ fn composed_length_changing_replace_cleans_original_command_only(cx: &mut TestAp
         .position(|entry| entry.value == before)
         .unwrap();
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -433,7 +437,13 @@ fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
         owner_delete: OwnerEdits::default(),
         overrides: BTreeMap::new(),
         artifact: None,
-        staged_reports: Box::default(),
+        staged_reports: Box::new(StagedReports {
+            source: row
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
+            ..Default::default()
+        }),
     };
 
     *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
@@ -472,7 +482,13 @@ fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
         owner_delete: OwnerEdits::default(),
         overrides: BTreeMap::new(),
         artifact: None,
-        staged_reports: Box::default(),
+        staged_reports: Box::new(StagedReports {
+            source: row
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
+            ..Default::default()
+        }),
     };
 
     test_scene_state(&mut row.staged).4.paths_report = row.paths_report.clone();
@@ -511,7 +527,13 @@ fn save_then_clean_named_script_without_auto_analysis(cx: &mut TestAppContext) {
         owner_delete: OwnerEdits::default(),
         overrides: BTreeMap::new(),
         artifact: None,
-        staged_reports: Box::default(),
+        staged_reports: Box::new(StagedReports {
+            source: row
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
+            ..Default::default()
+        }),
     };
 
     *test_artifact(&mut row.staged) = Some(StagedSceneArtifact {
@@ -636,6 +658,10 @@ fn replace_save_refreshes_path_source_without_auto_analysis(cx: &mut TestAppCont
     )
     .unwrap();
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -738,6 +764,10 @@ fn scene_edit_save_after_audit_plan_change_allows_path_only_composition(cx: &mut
     shell.update_in(visual_cx, |shell, window, cx| {
         assert!(matches!(shell.rows[0].status, FileStatus::Saved));
         shell.rows[0].staged = Staged::Replace {
+            source: shell.rows[0]
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
             overrides: BTreeMap::new(),
             preview: None,
             artifact: None,
@@ -1222,6 +1252,11 @@ fn staged_clean_result(scene: &Path, node_name: &str) -> RowJobResult {
     let staged_dump_report = analyzed.dump_report.expect("staged dump");
 
     RowJobResult::SceneEdits {
+        source: Loader::new(LoadOptions::default())
+            .observe_path(scene)
+            .unwrap()
+            .source_fingerprint()
+            .unwrap(),
         replace_preview: None,
         clean_source: row
             .paths_report
@@ -1600,6 +1635,10 @@ fn save_result_keeps_active_tab(cx: &mut TestAppContext) {
         shell.update(app, |shell, cx| {
             let mut row = test_row(1, &scene);
             row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -1664,6 +1703,10 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                 )
                 .expect("stage replace");
             row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -1779,6 +1822,10 @@ fn replace_then_delete_owner_rebuilds_missing_replace_artifact(cx: &mut TestAppC
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -2374,6 +2421,10 @@ fn scene_row_dirty_when_path_overrides_exist_without_artifact() {
     let mut row = test_row(1, &scene);
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -3087,6 +3138,10 @@ fn compute_visible_rows_combines_dirty_with_findings_missing_filters_using_or_lo
 
     let mut dirty_row = test_row(1, &dirty);
     dirty_row.staged = Staged::Replace {
+        source: dirty_row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -5623,6 +5678,10 @@ fn exit_warning_required_is_true_for_replace_rows() {
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -5690,6 +5749,10 @@ fn exit_warning_required_is_true_for_path_override_rows() {
     fs::write(&path, "//Maya ASCII 2026 scene\n").expect("write scene");
     let mut row = test_row(1, &path);
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -5742,6 +5805,10 @@ fn exit_application_cancel_keeps_window_open_when_dirty(cx: &mut TestAppContext)
     shell.update_in(visual_cx, |shell, window, cx| {
         let mut row = test_row(1, &path);
         row.staged = Staged::Replace {
+            source: row
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
             overrides: BTreeMap::new(),
             preview: None,
             artifact: None,
@@ -6686,6 +6753,10 @@ fn build_path_table_model_enables_scene_column_for_multi_source_selection() {
     let mut second_row = test_row(2, &second);
     second_row.selected = true;
     second_row.staged = Staged::Replace {
+        source: second_row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -6972,6 +7043,10 @@ fn build_path_table_model_marks_overridden_entries_as_dirty() {
     row.selected = true;
     row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -7021,6 +7096,10 @@ fn path_context_undo_targets_clear_all_selected_rows_in_same_file(cx: &mut TestA
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -9425,6 +9504,10 @@ fn search_missing_path_write_back_skips_targets_whose_value_changed(cx: &mut Tes
             shell.rows = vec![row];
             let targets = shell.missing_path_search_targets(&vec![(1, 0)]);
             shell.rows[0].staged = Staged::Replace {
+                source: shell.rows[0]
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -9882,6 +9965,10 @@ fn path_dirty_filter_keeps_only_dirty_path_rows(cx: &mut TestAppContext) {
             row.selected = true;
             row.paths_report = Some(collect_scene_paths(&scene, PathKind::All).expect("paths"));
             row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -10261,6 +10348,10 @@ fn build_path_table_model_marks_preview_rows_without_value_style() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -10319,6 +10410,10 @@ fn build_path_table_model_filters_preview_rows_by_after_value_form() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -13119,6 +13214,10 @@ fn file_row_state_mark_survives_selection() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -13778,6 +13877,10 @@ fn row_mutation_history_refuses_partial_restore(cx: &mut TestAppContext) {
             let before = shell.capture_row_edit_states(&[0, 1]);
             for row in &mut shell.rows {
                 row.staged = Staged::Replace {
+                    source: row
+                        .paths_report
+                        .as_ref()
+                        .and_then(|report| report.source.clone()),
                     overrides: BTreeMap::new(),
                     preview: None,
                     artifact: None,
@@ -14177,6 +14280,10 @@ fn row_mutation_missing_job_row_finalizes_pending_history(cx: &mut TestAppContex
         shell.replace_rows(vec![mutation_row(2, &path)]);
         let before = shell.capture_row_edit_states(&[0]);
         shell.rows[0].staged = Staged::Replace {
+            source: shell.rows[0]
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
             overrides: BTreeMap::new(),
             preview: None,
             artifact: None,
@@ -14315,6 +14422,10 @@ fn row_mutation_undo_filters_unmodified_candidates(cx: &mut TestAppContext) {
         for operation in 0..3 {
             shell.replace_rows(vec![mutation_row(1, &path), mutation_row(2, &path)]);
             shell.rows[0].staged = Staged::Replace {
+                source: shell.rows[0]
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -14564,7 +14675,7 @@ fn path_application_skips_survive_stage_history_and_save(cx: &mut TestAppContext
         shell.state.workspace_auto_analyze = false;
         let mut row = test_row(1, &input);
         row.paths_report = Some(report);
-        row.staged = Staged::Replace { overrides: BTreeMap::new(), preview: None, artifact: None };
+        row.staged = Staged::Replace { source: row.paths_report.as_ref().and_then(|report| report.source.clone()), overrides: BTreeMap::new(), preview: None, artifact: None };
         test_overrides(&mut row.staged).insert(0, "asset/Example.ma".into());
 
         row.replace_generation = 1;
@@ -14619,6 +14730,10 @@ fn path_application_skips_survive_scene_edit_composition(cx: &mut TestAppContext
             let mut row = observed_test_row(1, &input);
             row.paths_report = Some(report.clone());
             row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides: BTreeMap::new(),
                 preview: None,
                 artifact: None,
@@ -14866,6 +14981,10 @@ fn edited_rows_reject_conversion() {
         match kind {
             0 => {
                 row.staged = Staged::Replace {
+                    source: row
+                        .paths_report
+                        .as_ref()
+                        .and_then(|report| report.source.clone()),
                     overrides: BTreeMap::new(),
                     preview: None,
                     artifact: None,
@@ -14895,6 +15014,10 @@ fn edited_rows_reject_conversion() {
 fn restoring_replace_state_never_rewinds_generation() {
     let mut row = SceneRow::new_unloaded_row(1);
     row.staged = Staged::Replace {
+        source: row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.clone()),
         overrides: BTreeMap::new(),
         preview: None,
         artifact: None,
@@ -15095,6 +15218,10 @@ fn replace_dialog_removes_overrides_equal_to_original(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, window, cx| {
         shell.replace_rows(vec![mutation_row(1, &path)]);
         shell.rows[0].staged = Staged::Replace {
+            source: shell.rows[0]
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
             overrides: BTreeMap::new(),
             preview: None,
             artifact: None,
@@ -15222,6 +15349,7 @@ fn test_replace_state(
         "fixture accessor requires an explicitly constructed Replace"
     );
     let Staged::Replace {
+        source: _,
         overrides,
         preview,
         artifact,

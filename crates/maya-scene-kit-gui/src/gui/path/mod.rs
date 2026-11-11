@@ -1142,6 +1142,10 @@ impl GuiShell {
                             }
                             revision = Some(row.replace_generation);
                             Staged::Replace {
+                                source: row
+                                    .paths_report
+                                    .as_ref()
+                                    .and_then(|report| report.source.clone()),
                                 overrides: next_overrides,
                                 preview: Some(preview),
                                 artifact: None,
@@ -1419,6 +1423,10 @@ impl GuiShell {
             Staged::None
         } else {
             Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
                 overrides,
                 preview: None,
                 artifact: None,
@@ -1634,6 +1642,7 @@ impl GuiShell {
                     "parse budget exceeded while rebuilding dump preview".to_string()
                 })?;
                 Ok(RowJobResult::SceneEdits {
+                    source: acquired_source,
                     clean_source,
                     replace_changes,
                     replace_preview,

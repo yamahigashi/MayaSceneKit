@@ -856,6 +856,7 @@ impl GuiShell {
                 shell.enqueue_cache_writes(observe_snapshot, audit_snapshot, window, cx);
             }
             RowJobResult::SceneEdits {
+                source,
                 clean_source,
                 replace_changes,
                 replace_preview,
@@ -897,6 +898,7 @@ impl GuiShell {
                         }),
                     },
                     staged_reports: Box::new(StagedReports {
+                        source: Some(source),
                         audit_mode: current_plan.then_some(audit_mode), audit_report: Some(staged_audit_report),
                         audit_plan_fingerprint: Some(audit_plan_fingerprint), paths_report: Some(staged_paths_report),
                         dump_report: Some(staged_dump_report), source_bytes: Some(staged_source_bytes),
@@ -1485,6 +1487,8 @@ impl GuiShell {
                     let replace_changes = row.replace_changes.clone();
                     let replace_preview = row.replace_preview().clone();
                     let artifact_current = row.replace_artifact_is_current();
+                    let source = row.staged.source().cloned();
+                    let source_changed = shell.i18n().text("banner.save_source_changed");
                     let report = row.paths_report.clone();
                     let staged_paths_report = row.staged.reports().paths_report.as_ref().filter(|_| {
                         matches!(row.staged, Staged::SceneEdits { .. })
@@ -1504,6 +1508,11 @@ impl GuiShell {
                 move |_input_path| {
                     let mut replace_changes = replace_changes;
                     let mut replace_preview = replace_preview;
+                    if !is_ascii && source.as_ref().is_none_or(|source| {
+                        is_replace && !artifact_current && report.as_ref().and_then(|report| report.source.as_ref()) != Some(source)
+                    }) {
+                        return Err(source_changed);
+                    }
                     let artifact = if is_replace {
                             if artifact_current {
                                 artifact
@@ -1511,6 +1520,8 @@ impl GuiShell {
                             } else {
                                 let report = report
                                     .ok_or_else(|| "missing path report for save".to_string())?;
+                                validate_save_source(&path, source.as_ref(), &source_changed)
+                                    .map_err(|err| err.to_string())?;
                                 let staged = stage_replace_scene_paths_with_overrides_in_report_with_options(
                                     &report, &overrides, &options,
                                 ).map_err(|err| err.to_string())?;
@@ -1521,8 +1532,10 @@ impl GuiShell {
                     } else {
                         artifact.ok_or_else(|| "missing staged artifact for save".to_string())?
                     };
-                    save_staged_artifact_with_backup(&artifact, &path, backup_location)
-                        .map_err(|err| err.to_string())?;
+                    save_staged_artifact_with_backup(
+                        &artifact, &path, backup_location,
+                        source.as_ref().filter(|_| !is_ascii).map(|source| (source, source_changed.as_str())),
+                    ).map_err(|err| err.to_string())?;
                     let saved_paths = if is_ascii {
                         Ok(None)
                     } else if let Some(mut report) = staged_paths_report {

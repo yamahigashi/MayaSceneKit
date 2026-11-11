@@ -1722,6 +1722,7 @@ impl SceneRow {
 enum RowJobResult {
     Analyze(Box<AnalyzeRowResult>),
     SceneEdits {
+        source: maya_scene_kit_observe::scene::paths::SceneSourceFingerprint,
         clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
         replace_changes: Option<PathReplaceChanges>,
         replace_preview: Option<PathReplacePreview>,

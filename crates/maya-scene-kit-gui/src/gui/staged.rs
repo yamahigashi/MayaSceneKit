@@ -15,6 +15,7 @@ pub(super) struct OwnerEdits {
 
 #[derive(Clone, Default)]
 pub(super) struct StagedReports {
+    pub(super) source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     pub(super) audit_mode: Option<AuditModePreference>,
     pub(super) audit_report: Option<AuditReport>,
     pub(super) audit_plan_fingerprint: Option<String>,
@@ -28,6 +29,7 @@ pub(super) enum Staged {
     #[default]
     None,
     Replace {
+        source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
         overrides: BTreeMap<usize, String>,
         preview: Option<PathReplacePreview>,
         artifact: Option<StagedSceneArtifact>,
@@ -46,6 +48,16 @@ pub(super) enum Staged {
 }
 
 impl Staged {
+    pub(super) fn source(
+        &self,
+    ) -> Option<&maya_scene_kit_observe::scene::paths::SceneSourceFingerprint> {
+        match self {
+            Self::Replace { source, .. } => source.as_ref(),
+            Self::SceneEdits { staged_reports, .. } => staged_reports.source.as_ref(),
+            Self::None | Self::ToAscii { .. } => None,
+        }
+    }
+
     pub(super) fn overrides(&self) -> &BTreeMap<usize, String> {
         static EMPTY: BTreeMap<usize, String> = BTreeMap::new();
         match self {
@@ -79,6 +91,7 @@ impl Staged {
 
     pub(super) fn reports(&self) -> &StagedReports {
         static EMPTY: StagedReports = StagedReports {
+            source: None,
             audit_mode: None,
             audit_report: None,
             audit_plan_fingerprint: None,
@@ -109,13 +122,15 @@ impl Staged {
                     overrides: a,
                     preview: b,
                     artifact: c,
+                    source: source_a,
                 },
                 Self::Replace {
                     overrides: x,
                     preview: y,
                     artifact: z,
+                    source: source_b,
                 },
-            ) => a == x && b == y && c == z,
+            ) => a == x && b == y && c == z && source_a == source_b,
             (
                 Self::SceneEdits {
                     clean: a,
@@ -132,7 +147,8 @@ impl Staged {
                     ..
                 },
             ) => {
-                a.targets == w.targets
+                self.source() == other.source()
+                    && a.targets == w.targets
                     && a.preview == w.preview
                     && a.source == w.source
                     && b.targets == x.targets

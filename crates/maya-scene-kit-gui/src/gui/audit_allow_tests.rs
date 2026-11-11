@@ -527,6 +527,10 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
         shell.rows[0].busy = None;
         shell.rows[0].status = FileStatus::Audited;
         shell.rows[0].staged = Staged::Replace {
+            source: shell.rows[0]
+                .paths_report
+                .as_ref()
+                .and_then(|report| report.source.clone()),
             overrides: BTreeMap::new(),
             preview: None,
             artifact: None,
