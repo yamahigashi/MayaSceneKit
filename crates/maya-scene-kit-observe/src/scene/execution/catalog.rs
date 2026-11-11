@@ -35,7 +35,7 @@ use crate::scene::{
     source::{ObservationBundle, ObservationData},
 };
 
-const CHANGED_DURING_READ: &str = "scene file changed while it was being read";
+pub(crate) const CHANGED_DURING_READ: &str = "scene file changed while it was being read";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ObservedExecutionCore {

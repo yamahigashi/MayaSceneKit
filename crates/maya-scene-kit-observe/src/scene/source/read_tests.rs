@@ -599,7 +599,19 @@ fn unstable_ma_reads_are_partial_for_every_intent() {
         }
         .unwrap();
         assert_eq!(observation.validation_state(), ValidationState::Partial);
-        if intent >= 2 {
+        if intent == 2 {
+            let report = observation
+                .scene_paths_report(crate::scene::paths::PathKind::All)
+                .unwrap();
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(
+                json["diagnostics"],
+                serde_json::json!(["scene file changed while it was being read"])
+            );
+            assert!(observation.cached_ma_bytes_ptr().is_none());
+            continue;
+        }
+        if intent == 3 {
             continue;
         }
         assert!(

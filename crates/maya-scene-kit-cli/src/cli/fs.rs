@@ -134,7 +134,7 @@ pub(super) fn render_scene_paths_json(
 ) -> Result<String, CliOutputError> {
     let report = collect_scene_paths_with_options(input, kind, load_options)?;
     let kind_label = scene_path_kind_label(kind);
-    let doc = json!({
+    let mut doc = json!({
         "contract_version": JSON_CONTRACT_VERSION,
         "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
@@ -161,6 +161,9 @@ pub(super) fn render_scene_paths_json(
             })),
         })).collect::<Vec<_>>()
     });
+    if !report.diagnostics.is_empty() {
+        doc["diagnostics"] = json!(report.diagnostics);
+    }
     serde_json::to_string_pretty(&doc)
         .map(|s| format!("{s}\n"))
         .map_err(|e| CliOutputError::JsonRender(format!("failed to render json: {e}")))
@@ -176,7 +179,7 @@ pub(super) fn render_scene_paths_collection_json(
     let mut items = Vec::new();
     for file in files {
         let report = collect_scene_paths_with_options(file, kind, load_options)?;
-        items.push(json!({
+        let mut item = json!({
             "scene_path": report.scene_path.to_string_lossy(),
             "scene_format": report.scene_format,
             "count": report.entries.len(),
@@ -200,7 +203,11 @@ pub(super) fn render_scene_paths_collection_json(
                     "trace_child_header_size": m.trace_child_header_size,
                 })),
             })).collect::<Vec<_>>()
-        }));
+        });
+        if !report.diagnostics.is_empty() {
+            item["diagnostics"] = json!(report.diagnostics);
+        }
+        items.push(item);
     }
     let doc = json!({
         "contract_version": JSON_CONTRACT_VERSION,

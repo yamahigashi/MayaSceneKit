@@ -22,13 +22,17 @@ pub(crate) fn inspect_report(report: &MbInspectReport) -> Value {
 }
 
 pub(crate) fn scene_paths_report(report: &ScenePathsReport) -> Value {
-    json!({
+    let mut rendered = json!({
         "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "validation_state": report.validation_state,
         "count": report.count(),
         "entries": report.entries.iter().map(scene_path_entry).collect::<Vec<_>>(),
-    })
+    });
+    if !report.diagnostics.is_empty() {
+        rendered["diagnostics"] = json!(report.diagnostics);
+    }
+    rendered
 }
 
 pub(crate) fn script_entries_report(report: &ScriptNodeEntriesReport) -> Value {
@@ -497,7 +501,7 @@ mod graph_path_tests {
 }
 
 #[cfg(test)]
-mod audit_key_tests {
+mod report_key_tests {
     use std::collections::BTreeSet;
 
     use maya_scene_kit_audit::scene::{ExecutionLanguage, audit_source_text};
@@ -546,6 +550,32 @@ mod audit_key_tests {
             .collect::<BTreeSet<_>>();
         expected.extend(extra_keys.iter().copied());
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scene_paths_report_keys_match_serde_fields() {
+        use maya_scene_kit_observe::scene::{SceneFormat, ValidationState};
+
+        for diagnostics in [Vec::new(), vec!["Example diagnostic".to_string()]] {
+            let report = ScenePathsReport {
+                source: None,
+                kind: None,
+                scene_path: "asset/example/Example.ma".into(),
+                scene_format: SceneFormat::Ma,
+                validation_state: ValidationState::Partial,
+                entries: Vec::new(),
+                diagnostics,
+            };
+            let mut serialized = serde_json::to_value(&report).unwrap();
+            let fields = serialized.as_object_mut().unwrap();
+            fields.remove("source");
+            fields.remove("kind");
+            let rendered = scene_paths_report(&report);
+            assert_keys(rendered.clone(), serialized, &["count"]);
+            if !report.diagnostics.is_empty() {
+                assert_eq!(rendered["diagnostics"], json!(report.diagnostics));
+            }
+        }
     }
 
     #[test]

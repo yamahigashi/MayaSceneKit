@@ -111,6 +111,9 @@ pub struct ScenePathsReport {
     pub scene_format: SceneFormat,
     /// Integrity summary shared with other read-only APIs.
     pub validation_state: ValidationState,
+    /// Diagnostics from acquiring the source bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
     /// Collected path entries.
     pub entries: Vec<ScenePathEntry>,
 }

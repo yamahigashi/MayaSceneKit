@@ -8466,6 +8466,7 @@ fn build_path_table_model_marks_mb_rows_without_trace_as_not_owner_deletable() {
     let mut row = test_row(1, &scene);
     row.selected = true;
     row.paths_report = Some(ScenePathsReport {
+        diagnostics: Vec::new(),
         source: None,
         kind: Some(PathKind::All),
         scene_path: scene.clone(),
@@ -12776,6 +12777,7 @@ fn check_path_override_failure(cx: &mut TestAppContext, pending: bool) {
         shell.update(app, |shell, cx| {
             let mut first = SceneRow::new_unloaded_row(1);
             first.paths_report = Some(super::ScenePathsReport {
+                diagnostics: Vec::new(),
                 source: None,
                 kind: Some(PathKind::All),
                 entries: Vec::new(),

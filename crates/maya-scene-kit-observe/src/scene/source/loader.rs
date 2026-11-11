@@ -659,6 +659,15 @@ impl ObservationBundle {
         self.source_snapshot().identity.stability()
     }
 
+    /// Diagnostics from acquiring this observation's source bytes.
+    pub fn source_read_diagnostics(&self) -> Vec<String> {
+        if self.source_read_stability() == snapshot::ReadStability::Unstable {
+            vec![catalog::CHANGED_DURING_READ.to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn load(
         input: SourceInput<'_>,
         scene_format: SceneFormat,
@@ -835,6 +844,7 @@ impl ObservationBundle {
             scene_path: self.scene_path().to_path_buf(),
             scene_format: self.scene_format(),
             validation_state: self.validation_state(),
+            diagnostics: self.source_read_diagnostics(),
             entries: self.scene_paths(kind)?,
         })
     }

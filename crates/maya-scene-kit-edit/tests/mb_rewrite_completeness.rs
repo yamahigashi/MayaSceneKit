@@ -142,6 +142,7 @@ fn incomplete_mb_preview_composite_and_indexed_callers_refuse() {
     );
     use sha2::{Digest, Sha256};
     let report = ScenePathsReport {
+        diagnostics: Vec::new(),
         source: Some(SceneSourceFingerprint {
             sha256: format!("{:x}", Sha256::digest(&bytes)),
             byte_len: bytes.len(),
