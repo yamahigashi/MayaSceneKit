@@ -100,7 +100,7 @@ impl PatchPlanner {
         intents.sort();
         validate_overrides(&plan.report, &intents)?;
         let (output, mut changes) = match plan.report.scene_format {
-            SceneFormat::Ma => apply_ascii(plan, bytes, &intents)?,
+            SceneFormat::Ma => apply_ascii(plan, bytes, &intents, self.options.load_options())?,
             SceneFormat::Mb => apply_binary(plan, bytes, mb.as_ref().unwrap().root(), &intents)?,
             other => {
                 return Err(super::materialize::unsupported_scene_format(
@@ -366,6 +366,7 @@ fn apply_ascii(
     plan: &SceneEditPlan,
     bytes: &[u8],
     intents: &[SceneEditIntent],
+    load_options: &LoadOptions,
 ) -> Result<(Vec<u8>, SceneEditChanges), SceneEditError> {
     let mut changes = SceneEditChanges::default();
     changes.path_replacements.skipped = Some(Box::default());
@@ -382,6 +383,38 @@ fn apply_ascii(
             )
         })
         .then(|| rewrite::collect_ma_command_ranges(bytes));
+    let mut script_owners = if intents.iter().any(|intent| {
+        matches!(
+            intent,
+            SceneEditIntent::Clean(ExecutionCleanTarget::ScriptNode { .. })
+        )
+    }) {
+        super::clean::collect_script_owner_ranges_from_ma(bytes, std::iter::empty())
+    } else {
+        Vec::new()
+    };
+    if intents.iter().any(|intent| {
+        matches!(intent, SceneEditIntent::Clean(ExecutionCleanTarget::ScriptNode { node_name })
+            if !node_name.trim().is_empty() && !script_owners.iter().any(|(_, name)| name == node_name))
+    }) {
+        let observation = maya_scene_kit_observe::scene::Loader::new(load_options.clone())
+            .observe_execution_bytes(
+                &plan.report.scene_path,
+                SceneFormat::Ma,
+                plan.report.validation_state,
+                bytes.to_vec(),
+            )?;
+        let catalog = observation.observed_execution_catalog_with_digests(0, false)?;
+        script_owners = super::clean::collect_script_owner_ranges_from_ma(
+            bytes,
+            catalog.surfaces.iter().filter_map(|surface| {
+                let origin = &surface.surface.origin;
+                (origin.surface_kind == maya_scene_kit_observe::scene::evidence::ExecutionSurfaceKind::ScriptNodeBody)
+                    .then_some(origin.node_name.as_deref())
+                    .flatten()
+            }),
+        );
+    }
     let mut owner_locations = BTreeMap::new();
     for intent in intents {
         match intent {
@@ -396,13 +429,11 @@ fn apply_ascii(
                         if node_name.trim().is_empty() {
                             return Err(invalid("empty script node target"));
                         }
-                        scripts::collect_script_node_ranges_from_ma(
-                            bytes,
-                            std::slice::from_ref(node_name),
-                        )
-                        .into_iter()
-                        .map(|(range, _)| range)
-                        .collect()
+                        script_owners
+                            .iter()
+                            .filter(|(_, name)| name == node_name)
+                            .map(|(range, _)| range.clone())
+                            .collect()
                     }
                     ExecutionCleanTarget::PluginRequire { rendered } => {
                         if rendered.trim().is_empty() {

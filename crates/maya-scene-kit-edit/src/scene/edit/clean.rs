@@ -18,6 +18,25 @@ pub(super) struct CleanChanges {
     pub removed_plugin_requires: Vec<String>,
 }
 
+pub(super) fn collect_script_owner_ranges_from_ma<'a>(
+    bytes: &[u8],
+    origin_names: impl Iterator<Item = &'a str>,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut ranges = scripts::collect_script_node_ranges_from_ma(bytes, &[]);
+    let names = origin_names
+        .filter(|name| !ranges.iter().any(|(_, existing)| existing == name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ranges.extend(
+        rewrite::collect_named_node_owner_ranges_from_ma(bytes, &names)
+            .into_iter()
+            .filter(|(_, (node_type, _))| node_type != "script")
+            .map(|(range, (_, name))| (range, name)),
+    );
+    ranges.sort_by_key(|(range, _)| range.start);
+    ranges
+}
+
 impl PatchPlanner {
     pub(super) fn apply_script_clean_in_path(
         &self,
@@ -35,19 +54,12 @@ impl PatchPlanner {
         let script_origins = observation.origins();
         let mut scene = SceneEditChanges::default();
         let (output, removed_script_nodes) = if format == SceneFormat::Ma {
-            let mut ranges = scripts::collect_script_node_ranges_from_ma(bytes, &[]);
-            let names = script_origins
-                .iter()
-                .filter_map(|origin| origin.node_name.clone())
-                .filter(|name| !ranges.iter().any(|(_, existing)| existing == name))
-                .collect::<Vec<_>>();
-            ranges.extend(
-                rewrite::collect_named_node_owner_ranges_from_ma(bytes, &names)
-                    .into_iter()
-                    .filter(|(_, (node_type, _))| node_type != "script")
-                    .map(|(range, (_, name))| (range, name)),
+            let ranges = collect_script_owner_ranges_from_ma(
+                bytes,
+                script_origins
+                    .iter()
+                    .filter_map(|origin| origin.node_name.as_deref()),
             );
-            ranges.sort_by_key(|(range, _)| range.start);
             let mut edits = Vec::with_capacity(ranges.len());
             let mut names = Vec::with_capacity(ranges.len());
             for (range, name) in ranges {
