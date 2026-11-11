@@ -276,6 +276,8 @@ pub(crate) fn collect_static_maya_mel_eval_payloads(source: &str, max_bytes: usi
 pub fn normalize_python_compat_source(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut scanner = PythonSourceScanner::default();
+    let mut statement_start = 0;
+    let mut line_start = 0;
     for line in source.split_inclusive('\n') {
         let (content, newline) = line
             .strip_suffix('\n')
@@ -283,18 +285,47 @@ pub fn normalize_python_compat_source(source: &str) -> String {
             .unwrap_or((line, ""));
         let starts_in_string = scanner.quote.is_some();
         let comment_start = scanner.scan(line, |_, ch, _| ch == b'#');
-        if starts_in_string || scanner.quote.is_some() {
+        if matches!(scanner.quote, Some((_, true)))
+            && (statement_start < line_start || !starts_in_string)
+        {
+            line_start += line.len();
+            continue;
+        }
+        if statement_start < line_start {
+            let code_end = line_start + comment_start.unwrap_or(content.len());
+            let code = &source[statement_start..code_end];
+            let comment = &source[code_end..line_start + content.len()];
+            out.push_str(&normalize_python_compat_line(code, comment));
+        } else if starts_in_string || scanner.quote.is_some() {
             out.push_str(content);
         } else {
             let (code, comment) = content.split_at(comment_start.unwrap_or(content.len()));
             out.push_str(&normalize_python_compat_line(code, comment));
         }
         out.push_str(newline);
+        line_start += line.len();
+        statement_start = line_start;
     }
+    out.push_str(&source[statement_start..]);
     out
 }
 
 fn normalize_python_compat_line(code: &str, comment: &str) -> String {
+    let mut out = String::with_capacity(code.len() + comment.len());
+    let mut start = 0;
+    PythonSourceScanner::default().scan(code, |idx, ch, depth| {
+        if ch == b';' && depth == 0 {
+            out.push_str(&normalize_python_compat_statement(&code[start..idx], ""));
+            out.push(';');
+            start = idx + 1;
+        }
+        false
+    });
+    out.push_str(&normalize_python_compat_statement(&code[start..], comment));
+    out
+}
+
+fn normalize_python_compat_statement(code: &str, comment: &str) -> String {
     let indent_len = code.len() - code.trim_start_matches([' ', '\t']).len();
     let indent = &code[..indent_len];
     let trimmed = &code[indent_len..];
@@ -304,12 +335,13 @@ fn normalize_python_compat_line(code: &str, comment: &str) -> String {
     }
     if let Some(rest) = trimmed.strip_prefix("print ")
         && !rest.starts_with('(')
-        && !rest.starts_with(">>")
+        && !starts_with_python_assignment_or_binary_operator(rest)
     {
         return format!("{indent}print({rest}){comment}");
     }
     if let Some(rest) = trimmed.strip_prefix("exec ")
         && !rest.starts_with('(')
+        && !starts_with_python_assignment_or_binary_operator(rest)
     {
         return format!(
             "{indent}exec({}){comment}",
@@ -326,6 +358,19 @@ fn normalize_python_compat_line(code: &str, comment: &str) -> String {
     }
 
     format!("{code}{comment}")
+}
+
+fn starts_with_python_assignment_or_binary_operator(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    if rest.starts_with([
+        '=', '+', '-', '*', '/', '%', '@', '&', '|', '^', '<', '>', '!',
+    ]) {
+        return true;
+    }
+    let word_end = |ch: char| !ch.is_alphanumeric() && ch != '_';
+    let first = rest.split(word_end).next();
+    matches!(first, Some("and" | "or" | "in" | "is"))
+        || (first == Some("not") && rest[3..].trim_start().split(word_end).next() == Some("in"))
 }
 
 #[derive(Default)]
@@ -347,8 +392,13 @@ impl PythonSourceScanner {
             let ch = bytes[idx];
             if self.escape {
                 self.escape = false;
+                if ch == b'\r' && bytes.get(idx + 1) == Some(&b'\n') {
+                    idx += 1;
+                }
             } else if let Some((quote, triple)) = self.quote {
-                if ch == b'\\' {
+                if ch == b'\n' && !triple {
+                    self.quote = None;
+                } else if ch == b'\\' {
                     self.escape = true;
                 } else if ch == quote && (!triple || bytes.get(idx..idx + 3) == Some(&[quote; 3])) {
                     self.quote = None;
@@ -892,6 +942,103 @@ pub(super) mod tests {
             let expected =
                 format!("Example = {quote}\nprint x\nexec y\nraise z, Sample\n{quote}\nprint(x)\n");
             assert_eq!(normalize_python_compat_source(&source), expected);
+        }
+    }
+
+    #[test]
+    fn normalizes_python2_prefix_before_multiline_string() {
+        for quote in ["\"\"\"", "'''"] {
+            for statement in ["print", "exec"] {
+                let literal =
+                    format!("{quote}Sample\nprint Example\nexec Sample\n# Example\n{quote}");
+                let source = format!("{statement} {literal}\n");
+                let expected = format!("{statement}({literal})\n");
+                let normalized = normalize_python_compat_source(&source);
+                assert_eq!(normalized, expected);
+                ast::Suite::parse(&normalized, "<test>").expect("normalized python");
+            }
+        }
+    }
+
+    #[test]
+    fn normalizes_python2_statements_after_multiline_string() {
+        for quote in ["\"\"\"", "'''"] {
+            let source = format!(
+                "Example = {quote}Sample\nprint Sample\n{quote}; print Example; exec Sample # Example\n"
+            );
+            let expected = format!(
+                "Example = {quote}Sample\nprint Sample\n{quote}; print(Example); exec(Sample)# Example\n"
+            );
+            let normalized = normalize_python_compat_source(&source);
+            assert_eq!(normalized, expected);
+            ast::Suite::parse(&normalized, "<test>").expect("normalized python");
+        }
+    }
+
+    #[test]
+    fn resets_unterminated_single_quote_before_python2_statements() {
+        for quote in ["\"", "'"] {
+            let source = format!("{quote}Sample\nprint Example\nprint Sample\n");
+            let expected = format!("{quote}Sample\nprint(Example)\nprint(Sample)\n");
+            let normalized = normalize_python_compat_source(&source);
+            assert_eq!(normalized, expected);
+            assert!(ast::Suite::parse(&normalized, "<test>").is_err());
+        }
+        for newline in ["\n", "\r\n"] {
+            let source =
+                format!("Example = 'Sample\\{newline}print Sample'{newline}print Example\n");
+            let expected =
+                format!("Example = 'Sample\\{newline}print Sample'{newline}print(Example)\n");
+            assert_eq!(normalize_python_compat_source(&source), expected);
+        }
+    }
+
+    #[test]
+    fn preserves_continued_string_before_multiline_literal() {
+        for quote in ["'", "\""] {
+            for statement in ["print", "exec"] {
+                let source = format!(
+                    "Example = {quote}Sample\\\n{statement} Sample{quote} + \"\"\"Sample\nSample\"\"\"\n"
+                );
+                ast::Suite::parse(&source, "<test>").expect("original python");
+                assert_eq!(normalize_python_compat_source(&source), source);
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_print_and_exec_names_before_assignment_or_binary_operator() {
+        for name in ["print", "exec"] {
+            for operator in [
+                "=", "+=", "-=", "*=", "/=", "//=", "%=", "**=", "@=", "&=", "|=", "^=", "<<=",
+                ">>=", "+", "-", "*", "/", "//", "%", "**", "@", "&", "|", "^", "<<", ">>", "<",
+                ">", "<=", ">=", "==", "!=", "and", "or", "in", "is", "not in", "is not",
+            ] {
+                for literal in ["'Sample'", "\"\"\"Sample\nSample\"\"\""] {
+                    for spacing in [" ", "  "] {
+                        let source = format!("{name}{spacing}{operator} {literal}\n");
+                        ast::Suite::parse(&source, "<test>").expect("original python");
+                        assert_eq!(normalize_python_compat_source(&source), source);
+                    }
+                }
+            }
+            for operand in ["not 'in'", "'in'", "inside", "island"] {
+                assert_eq!(
+                    normalize_python_compat_source(&format!("{name} {operand}\n")),
+                    format!("{name}({operand})\n")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalizes_semicolon_statements_with_the_same_literal_rules() {
+        for literal in ["'Sample; Example'", "\"\"\"Sample; Example\nSample\"\"\""] {
+            let source = format!("print {literal}; exec Sample\n");
+            let expected = format!("print({literal}); exec(Sample)\n");
+            let normalized = normalize_python_compat_source(&source);
+            assert_eq!(normalized, expected);
+            ast::Suite::parse(&normalized, "<test>").expect("normalized python");
         }
     }
 
