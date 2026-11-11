@@ -522,3 +522,31 @@ fn over_budget_binary_sniffs_once_without_reading_body() {
         assert_eq!((s.opens, s.sniffs, s.calls), (1, 1, 0));
     });
 }
+
+#[test]
+fn unstable_reads_do_not_create_cache_snapshots() {
+    use crate::scene::ObservedSceneSnapshot;
+    let dir = tempfile::tempdir().unwrap();
+    for (name, bytes) in [
+        ("Example.ma", EXAMPLE.to_vec()),
+        ("Example.mb", b"FOR4\0\0\0\x04Maya".to_vec()),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let len = bytes.len() as u64;
+        let time = SystemTime::UNIX_EPOCH;
+        for after in [
+            Some((len + 1, Some(time))),
+            Some((len, Some(time + std::time::Duration::from_secs(1)))),
+            Some((len, None)),
+            None,
+        ] {
+            let _reset = supply(vec![bytes.clone()], vec![Some((len, Some(time))), after]);
+            let options = LoadOptions::default();
+            let observation = Loader::new(options.clone())
+                .observe_analysis_path(&path)
+                .unwrap();
+            assert!(ObservedSceneSnapshot::from_observation(&observation, &options).is_err());
+        }
+    }
+}

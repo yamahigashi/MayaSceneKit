@@ -94,6 +94,16 @@ fn script_history_bodies_keep_independent_allowlist_decisions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Example.ma");
         std::fs::write(&path, &scene).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let file_state = maya_scene_kit_observe::scene::persistent_cache::ObserveFileState {
+            path: path.clone(),
+            size: metadata.len(),
+            modified_unix_nanos: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos()),
+        };
         let observation = Loader::new(LoadOptions::default())
             .observe_analysis_bytes(
                 &path,
@@ -122,10 +132,11 @@ fn script_history_bodies_keep_independent_allowlist_decisions() {
         let plan = build_script_audit_plan(vec![], 64).unwrap();
         let baseline =
             audit_observation(&observation, &plan, AuditOptions::strict_default()).unwrap();
-        let snapshot = AuditedSceneSnapshot::new(
+        let snapshot = AuditedSceneSnapshot::with_file_state(
             baseline.clone(),
             AuditOptions::strict_default(),
             fingerprint_audit_plan(&plan),
+            file_state.clone().into(),
         )
         .unwrap();
         let cache = AuditCacheStore::new(dir.path().join("audit-cache"));
@@ -135,8 +146,12 @@ fn script_history_bodies_keep_independent_allowlist_decisions() {
             serde_json::to_value(&cached.report.surfaces).unwrap(),
             serde_json::to_value(&baseline.surfaces).unwrap()
         );
-        let observed =
-            ObservedSceneSnapshot::from_observation(&observation, &LoadOptions::default()).unwrap();
+        let observed = ObservedSceneSnapshot::with_file_state(
+            &observation,
+            &LoadOptions::default(),
+            file_state,
+        )
+        .unwrap();
         let cache = ObserveCacheStore::new(dir.path().join("observe-cache"));
         cache.save(&observed).unwrap();
         let cached = cache.load_by_identity(&observed.identity).unwrap().unwrap();

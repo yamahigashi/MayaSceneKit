@@ -15,7 +15,7 @@ use crate::{
     scene::{AuditOptions, AuditReport},
 };
 
-const AUDIT_CACHE_SCHEMA_VERSION: u32 = 26;
+const AUDIT_CACHE_SCHEMA_VERSION: u32 = 27;
 const DB_FILE: &str = "cache.sqlite3";
 const AUDIT_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const AUDIT_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -111,13 +111,37 @@ impl AuditCacheIdentity {
     }
 }
 
+impl From<maya_scene_kit_observe::scene::persistent_cache::ObserveFileState> for AuditFileState {
+    fn from(state: maya_scene_kit_observe::scene::persistent_cache::ObserveFileState) -> Self {
+        Self {
+            path: state.path,
+            size: state.size,
+            modified_unix_nanos: state.modified_unix_nanos,
+        }
+    }
+}
+
 impl AuditedSceneSnapshot {
     pub fn new(
         report: AuditReport,
         options: AuditOptions,
         plan_fingerprint: impl Into<String>,
     ) -> io::Result<Self> {
-        let file_state = file_state_for_path(&report.scene_path)?;
+        let file_state = report.file_state().cloned().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "audit report has no stable file state",
+            )
+        })?;
+        Self::with_file_state(report, options, plan_fingerprint, file_state.into())
+    }
+
+    pub fn with_file_state(
+        report: AuditReport,
+        options: AuditOptions,
+        plan_fingerprint: impl Into<String>,
+        file_state: AuditFileState,
+    ) -> io::Result<Self> {
         let identity = AuditCacheIdentity::new(
             report.digests.scene_sha256.clone(),
             options,

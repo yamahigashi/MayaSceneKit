@@ -1933,17 +1933,15 @@ pub(super) fn analyze_row_with_options(
     plan: &ScriptAuditPlan,
 ) -> Result<RowJobResult, String> {
     let started_at = Instant::now();
-    let audit_file_state = GuiFileState::read(path).ok();
     match Loader::new(load_options.clone()).observe_analysis_path(path) {
         Ok(observation) => {
-            let mut result = analyze_observation_result(
+            let result = analyze_observation_result(
                 &observation,
                 audit_mode,
                 load_options,
                 started_at.elapsed(),
                 plan,
             )?;
-            result.audit_file_state = audit_file_state;
             Ok(RowJobResult::Analyze(Box::new(result)))
         }
         Err(
@@ -1954,12 +1952,21 @@ pub(super) fn analyze_row_with_options(
             let options = audit_options_from_preference(audit_mode);
             let audit_report = audit_script_nodes_with_options(path, plan, load_options, options)
                 .map_err(|err| err.to_string())?;
-            let audit_snapshot = AuditedSceneSnapshot::new(
-                audit_report.clone(),
-                options,
-                fingerprint_audit_plan(plan),
-            )
-            .map_err(|err| err.to_string())?;
+            let audit_file_state = audit_report.file_state().map(|state| GuiFileState {
+                size: state.size,
+                modified_unix_nanos: state.modified_unix_nanos,
+            });
+            let audit_snapshot = audit_report
+                .file_state()
+                .map(|_| {
+                    AuditedSceneSnapshot::new(
+                        audit_report.clone(),
+                        options,
+                        fingerprint_audit_plan(plan),
+                    )
+                })
+                .transpose()
+                .map_err(|err| err.to_string())?;
             Ok(RowJobResult::Analyze(Box::new(AnalyzeRowResult {
                 audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state,
@@ -1967,7 +1974,7 @@ pub(super) fn analyze_row_with_options(
                 paths_report: None,
                 dump_report: None,
                 observe_snapshot: None,
-                audit_snapshot: Some(audit_snapshot),
+                audit_snapshot,
                 audit_mode,
                 elapsed: started_at.elapsed(),
             })))
@@ -2013,14 +2020,11 @@ pub(super) fn analyze_row_bytes_with_options(
             Ok(AnalyzeRowResult {
                 audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state: None,
-                audit_report: audit_report.clone(),
+                audit_report,
                 paths_report: None,
                 dump_report: None,
                 observe_snapshot: None,
-                audit_snapshot: Some(
-                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(plan))
-                        .map_err(|err| err.to_string())?,
-                ),
+                audit_snapshot: None,
                 audit_mode,
                 elapsed: started_at.elapsed(),
             })
@@ -2039,14 +2043,11 @@ pub(super) fn analyze_row_bytes_with_options(
             Ok(AnalyzeRowResult {
                 audit_plan_fingerprint: fingerprint_audit_plan(plan),
                 audit_file_state: None,
-                audit_report: audit_report.clone(),
+                audit_report,
                 paths_report: None,
                 dump_report: None,
                 observe_snapshot: None,
-                audit_snapshot: Some(
-                    AuditedSceneSnapshot::new(audit_report, options, fingerprint_audit_plan(plan))
-                        .map_err(|err| err.to_string())?,
-                ),
+                audit_snapshot: None,
                 audit_mode,
                 elapsed: started_at.elapsed(),
             })
@@ -2088,8 +2089,6 @@ fn analyze_observation_result(
     elapsed: Duration,
     plan: &ScriptAuditPlan,
 ) -> Result<AnalyzeRowResult, String> {
-    let observe_snapshot = ObservedSceneSnapshot::from_observation(observation, load_options)
-        .map_err(|err| err.to_string())?;
     let dump_report = observation
         .scene_dump_report()
         .map_err(|err| err.to_string())?;
@@ -2099,18 +2098,31 @@ fn analyze_observation_result(
     let options = audit_options_from_preference(audit_mode);
     let audit_report =
         audit_observation(observation, plan, options).map_err(|err| err.to_string())?;
-    let audit_snapshot =
-        AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(plan))
-            .map_err(|err| err.to_string())?;
+    let file_state = audit_report.file_state().cloned();
+    let audit_file_state = file_state.as_ref().map(|state| GuiFileState {
+        size: state.size,
+        modified_unix_nanos: state.modified_unix_nanos,
+    });
+    let observe_snapshot = file_state
+        .map(|state| ObservedSceneSnapshot::with_file_state(observation, load_options, state))
+        .transpose()
+        .map_err(|err| err.to_string())?;
+    let audit_snapshot = audit_report
+        .file_state()
+        .map(|_| {
+            AuditedSceneSnapshot::new(audit_report.clone(), options, fingerprint_audit_plan(plan))
+        })
+        .transpose()
+        .map_err(|err| err.to_string())?;
 
     Ok(AnalyzeRowResult {
         audit_plan_fingerprint: fingerprint_audit_plan(plan),
-        audit_file_state: None,
+        audit_file_state,
         audit_report,
         paths_report: Some(paths_report),
         dump_report: Some(dump_report),
-        observe_snapshot: Some(observe_snapshot),
-        audit_snapshot: Some(audit_snapshot),
+        observe_snapshot,
+        audit_snapshot,
         audit_mode,
         elapsed,
     })
@@ -2597,4 +2609,60 @@ pub(super) fn action_button(
                 cx.notify();
             });
         })
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use std::{fs, time::Duration};
+
+    use maya_scene_kit_audit::scene::AuditAllowlist;
+    use maya_scene_kit_observe::scene::{LoadOptions, Loader, SceneFormat, ValidationState};
+
+    use super::{analyze_observation_result, analyze_row_bytes_with_options, gui_audit_plan};
+    use crate::gui::AuditModePreference;
+
+    #[test]
+    fn snapshot_construction_after_load_does_not_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        fs::write(&path, b"//Maya ASCII 2026 scene\nrequires maya \"2026\";\n").unwrap();
+        let options = LoadOptions::default();
+        let observation = Loader::new(options.clone())
+            .observe_analysis_path(&path)
+            .unwrap();
+        let plan = gui_audit_plan(AuditAllowlist::default()).unwrap();
+        fs::remove_file(&path).unwrap();
+        let result = analyze_observation_result(
+            &observation,
+            AuditModePreference::StrictDefault,
+            &options,
+            Duration::ZERO,
+            &plan,
+        )
+        .unwrap();
+        assert!(result.audit_file_state.is_some());
+        assert!(result.observe_snapshot.is_some());
+        assert!(result.audit_snapshot.is_some());
+    }
+
+    #[test]
+    fn bytes_analysis_has_no_snapshots_to_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Example.ma");
+        let bytes = b"//Maya ASCII 2026 scene\nrequires maya \"2026\";\n".to_vec();
+        fs::write(&path, &bytes).unwrap();
+        let result = analyze_row_bytes_with_options(
+            &path,
+            SceneFormat::Ma,
+            ValidationState::Validated,
+            bytes,
+            AuditModePreference::StrictDefault,
+            &LoadOptions::default(),
+            &gui_audit_plan(AuditAllowlist::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(result.audit_file_state.is_none());
+        assert!(result.observe_snapshot.is_none());
+        assert!(result.audit_snapshot.is_none());
+    }
 }

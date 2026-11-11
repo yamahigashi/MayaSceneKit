@@ -480,6 +480,10 @@ impl ExecutionObservationBundle {
         Self { observation }
     }
 
+    pub fn file_state(&self) -> Option<crate::scene::persistent_cache::ObserveFileState> {
+        self.observation.file_state()
+    }
+
     pub fn scene_path(&self) -> &Path {
         self.observation.scene_path()
     }
@@ -715,6 +719,18 @@ impl ObservationBundle {
             ObservationData::Ma { data } => &data.snapshot,
             ObservationData::Mb { session } => &session.snapshot,
         }
+    }
+
+    pub fn file_state(&self) -> Option<crate::scene::persistent_cache::ObserveFileState> {
+        let state = self.source_snapshot().identity.stable_file_state()?;
+        Some(crate::scene::persistent_cache::ObserveFileState {
+            path: self.scene_path.clone(),
+            size: state.len,
+            modified_unix_nanos: state
+                .modified
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos()),
+        })
     }
 
     pub fn scene_path(&self) -> &Path {

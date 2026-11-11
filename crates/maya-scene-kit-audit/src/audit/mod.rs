@@ -46,6 +46,7 @@ pub fn build_parse_budget_blocked_audit_report(
 ) -> AuditReport {
     let blocked_on_uncertainty = true;
     AuditReport {
+        file_state: None,
         scene_path: scene_path.into(),
         scene_format,
         profile: options.profile,
@@ -101,6 +102,9 @@ fn audit_execution_observation_with_digests(
 }
 
 trait AuditObservationSource {
+    fn file_state(
+        &self,
+    ) -> Option<maya_scene_kit_observe::scene::persistent_cache::ObserveFileState>;
     fn scene_path(&self) -> &Path;
     fn scene_format(&self) -> SceneFormat;
     fn validation_state(&self) -> ValidationState;
@@ -113,6 +117,12 @@ trait AuditObservationSource {
 }
 
 impl AuditObservationSource for ObservationBundle {
+    fn file_state(
+        &self,
+    ) -> Option<maya_scene_kit_observe::scene::persistent_cache::ObserveFileState> {
+        self.file_state()
+    }
+
     fn scene_path(&self) -> &Path {
         self.scene_path()
     }
@@ -139,6 +149,12 @@ impl AuditObservationSource for ObservationBundle {
 }
 
 impl AuditObservationSource for ExecutionObservationBundle {
+    fn file_state(
+        &self,
+    ) -> Option<maya_scene_kit_observe::scene::persistent_cache::ObserveFileState> {
+        self.file_state()
+    }
+
     fn scene_path(&self) -> &Path {
         self.scene_path()
     }
@@ -227,7 +243,7 @@ fn audit_observation_source_with_digests(
         }
         Err(err) => return Err(err),
     };
-    Ok(evaluate_catalog(
+    let mut report = evaluate_catalog(
         catalog,
         scene_path,
         scene_format,
@@ -235,7 +251,11 @@ fn audit_observation_source_with_digests(
         plan,
         options,
         include_digests,
-    ))
+    );
+    if !report.is_parse_budget_blocked() {
+        report.file_state = observation.file_state();
+    }
+    Ok(report)
 }
 
 fn evaluate_catalog(
@@ -415,6 +435,7 @@ fn evaluate_catalog(
         }
     };
     AuditReport {
+        file_state: None,
         scene_path,
         scene_format,
         profile: options.profile,

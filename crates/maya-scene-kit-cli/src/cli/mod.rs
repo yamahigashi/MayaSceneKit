@@ -338,27 +338,27 @@ mod tests {
             evidence: vec![],
             preview_override: None,
         };
-        let report = crate::scene::AuditReport {
-            scene_path: PathBuf::from("a.ma"),
-            scene_format: SceneFormat::Ma,
-            profile: crate::scene::AuditProfile::StrictDefault,
-            validation_state: crate::scene::ValidationState::Validated,
-            effective_rules: vec![],
-            surface_count: 1,
-            coverage_state: crate::scene::ExecutionCoverageState::Complete,
-            coverage_issues: vec![],
-            blocked_on_uncertainty: false,
-            disposition: crate::scene::AuditDisposition::DenyMalicious,
-            unit_summaries: vec![],
-            dependency_facts: vec![],
-            unknown_semantics: vec![],
-            digests: crate::scene::SceneDigestSet {
+        let report = serde_json::from_value::<crate::scene::AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("a.ma"),
+            "scene_format": SceneFormat::Ma,
+            "profile": crate::scene::AuditProfile::StrictDefault,
+            "validation_state": crate::scene::ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 1,
+            "coverage_state": crate::scene::ExecutionCoverageState::Complete,
+            "coverage_issues": [],
+            "blocked_on_uncertainty": false,
+            "disposition": crate::scene::AuditDisposition::DenyMalicious,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": crate::scene::SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: vec![],
-            surfaces: vec![crate::scene::AuditSurface {
+            "notices": [],
+            "surfaces": vec![crate::scene::AuditSurface {
                 origin: crate::scene::ExecutionOrigin {
                     lang: crate::scene::ExecutionLanguage::Mel,
                     trigger: crate::scene::ExecutionTrigger::FileOpen,
@@ -375,9 +375,10 @@ mod tests {
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
             }],
-            review_signals: vec![],
-            findings: vec![hit.clone()],
-        };
+            "review_signals": [],
+            "findings": vec![hit.clone()],
+        }))
+        .expect("synthetic audit report");
         assert_eq!(
             render_audit_hit_text(&report, &hit),
             "- finding path=a.ma severity=medium sink=mel_python finding_id=mel_python node=script1 attr=.b chunk=-:-@- msg=\"MEL -> python(...) fixed-literal bridge is not auto-allowed\""
@@ -401,27 +402,27 @@ mod tests {
             evidence: vec![],
             preview_override: None,
         };
-        let report = crate::scene::AuditReport {
-            scene_path: PathBuf::from("a.mb"),
-            scene_format: SceneFormat::Mb,
-            profile: crate::scene::AuditProfile::StrictDefault,
-            validation_state: crate::scene::ValidationState::Validated,
-            effective_rules: vec![],
-            surface_count: 1,
-            coverage_state: crate::scene::ExecutionCoverageState::Incomplete,
-            coverage_issues: vec![],
-            blocked_on_uncertainty: true,
-            disposition: crate::scene::AuditDisposition::DenyUncertain,
-            unit_summaries: vec![],
-            dependency_facts: vec![],
-            unknown_semantics: vec![],
-            digests: crate::scene::SceneDigestSet {
+        let report = serde_json::from_value::<crate::scene::AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("a.mb"),
+            "scene_format": SceneFormat::Mb,
+            "profile": crate::scene::AuditProfile::StrictDefault,
+            "validation_state": crate::scene::ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 1,
+            "coverage_state": crate::scene::ExecutionCoverageState::Incomplete,
+            "coverage_issues": [],
+            "blocked_on_uncertainty": true,
+            "disposition": crate::scene::AuditDisposition::DenyUncertain,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": crate::scene::SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: vec![],
-            surfaces: vec![crate::scene::AuditSurface {
+            "notices": [],
+            "surfaces": vec![crate::scene::AuditSurface {
                 origin: crate::scene::ExecutionOrigin {
                     lang: crate::scene::ExecutionLanguage::Unknown,
                     trigger: crate::scene::ExecutionTrigger::FileOpen,
@@ -445,9 +446,10 @@ mod tests {
                 preview: "Source".to_string(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
             }],
-            review_signals: vec![],
-            findings: vec![hit.clone()],
-        };
+            "review_signals": [],
+            "findings": vec![hit.clone()],
+        }))
+        .expect("synthetic audit report");
 
         let rendered = render_audit_hit_text(&report, &hit);
         assert!(rendered.contains("chunk=FRDI:FRDI@1960"));
@@ -480,27 +482,27 @@ mod tests {
             ],
             preview_override: None,
         };
-        let report = crate::scene::AuditReport {
-            scene_path: PathBuf::from("a.ma"),
-            scene_format: SceneFormat::Ma,
-            profile: crate::scene::AuditProfile::StrictDefault,
-            validation_state: crate::scene::ValidationState::Validated,
-            effective_rules: vec![],
-            surface_count: 1,
-            coverage_state: crate::scene::ExecutionCoverageState::Complete,
-            coverage_issues: vec![],
-            blocked_on_uncertainty: false,
-            disposition: crate::scene::AuditDisposition::DenyMalicious,
-            unit_summaries: vec![],
-            dependency_facts: vec![],
-            unknown_semantics: vec![],
-            digests: crate::scene::SceneDigestSet {
+        let report = serde_json::from_value::<crate::scene::AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("a.ma"),
+            "scene_format": SceneFormat::Ma,
+            "profile": crate::scene::AuditProfile::StrictDefault,
+            "validation_state": crate::scene::ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 1,
+            "coverage_state": crate::scene::ExecutionCoverageState::Complete,
+            "coverage_issues": [],
+            "blocked_on_uncertainty": false,
+            "disposition": crate::scene::AuditDisposition::DenyMalicious,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": crate::scene::SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: vec![],
-            surfaces: vec![crate::scene::AuditSurface {
+            "notices": [],
+            "surfaces": vec![crate::scene::AuditSurface {
                 origin: crate::scene::ExecutionOrigin {
                     lang: crate::scene::ExecutionLanguage::Mel,
                     trigger: crate::scene::ExecutionTrigger::FileOpen,
@@ -517,9 +519,10 @@ mod tests {
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
             }],
-            review_signals: vec![],
-            findings: vec![hit.clone()],
-        };
+            "review_signals": [],
+            "findings": vec![hit.clone()],
+        }))
+        .expect("synthetic audit report");
 
         assert_eq!(
             render_grouped_audit_hit_text("a.ma", &report, &hit, 2),
@@ -587,27 +590,27 @@ mod tests {
             }],
             preview_override: None,
         };
-        let report = crate::scene::AuditReport {
-            scene_path: PathBuf::from("a.ma"),
-            scene_format: SceneFormat::Ma,
-            profile: crate::scene::AuditProfile::StrictDefault,
-            validation_state: crate::scene::ValidationState::Validated,
-            effective_rules: vec![],
-            surface_count: 1,
-            coverage_state: crate::scene::ExecutionCoverageState::Complete,
-            coverage_issues: vec![],
-            blocked_on_uncertainty: false,
-            disposition: crate::scene::AuditDisposition::DenyMalicious,
-            unit_summaries: vec![],
-            dependency_facts: vec![],
-            unknown_semantics: vec![],
-            digests: crate::scene::SceneDigestSet {
+        let report = serde_json::from_value::<crate::scene::AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("a.ma"),
+            "scene_format": SceneFormat::Ma,
+            "profile": crate::scene::AuditProfile::StrictDefault,
+            "validation_state": crate::scene::ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 1,
+            "coverage_state": crate::scene::ExecutionCoverageState::Complete,
+            "coverage_issues": [],
+            "blocked_on_uncertainty": false,
+            "disposition": crate::scene::AuditDisposition::DenyMalicious,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": crate::scene::SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: vec![],
-            surfaces: vec![crate::scene::AuditSurface {
+            "notices": [],
+            "surfaces": vec![crate::scene::AuditSurface {
                 origin: crate::scene::ExecutionOrigin {
                     lang: crate::scene::ExecutionLanguage::Mel,
                     trigger: crate::scene::ExecutionTrigger::FileOpen,
@@ -624,9 +627,10 @@ mod tests {
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
             }],
-            review_signals: vec![],
-            findings: vec![hit.clone(), hit],
-        };
+            "review_signals": [],
+            "findings": vec![hit.clone(), hit],
+        }))
+        .expect("synthetic audit report");
 
         assert_eq!(group_audit_hit_indexes(&report), vec![(0, 2)]);
     }
@@ -655,27 +659,27 @@ mod tests {
             ],
             preview_override: None,
         };
-        let report = crate::scene::AuditReport {
-            scene_path: PathBuf::from("a.ma"),
-            scene_format: SceneFormat::Ma,
-            profile: crate::scene::AuditProfile::StrictDefault,
-            validation_state: crate::scene::ValidationState::Validated,
-            effective_rules: vec![],
-            surface_count: 1,
-            coverage_state: crate::scene::ExecutionCoverageState::Complete,
-            coverage_issues: vec![],
-            blocked_on_uncertainty: false,
-            disposition: crate::scene::AuditDisposition::Review,
-            unit_summaries: vec![],
-            dependency_facts: vec![],
-            unknown_semantics: vec![],
-            digests: crate::scene::SceneDigestSet {
+        let report = serde_json::from_value::<crate::scene::AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("a.ma"),
+            "scene_format": SceneFormat::Ma,
+            "profile": crate::scene::AuditProfile::StrictDefault,
+            "validation_state": crate::scene::ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 1,
+            "coverage_state": crate::scene::ExecutionCoverageState::Complete,
+            "coverage_issues": [],
+            "blocked_on_uncertainty": false,
+            "disposition": crate::scene::AuditDisposition::Review,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": crate::scene::SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: vec![],
-            surfaces: vec![crate::scene::AuditSurface {
+            "notices": [],
+            "surfaces": vec![crate::scene::AuditSurface {
                 origin: crate::scene::ExecutionOrigin {
                     lang: crate::scene::ExecutionLanguage::Mel,
                     trigger: crate::scene::ExecutionTrigger::FileOpen,
@@ -692,9 +696,10 @@ mod tests {
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
             }],
-            review_signals: vec![review.clone(), review.clone()],
-            findings: vec![],
-        };
+            "review_signals": vec![review.clone(), review.clone()],
+            "findings": [],
+        }))
+        .expect("synthetic audit report");
 
         assert_eq!(group_review_signal_indexes(&report), vec![(0, 2)]);
         assert_eq!(
@@ -732,27 +737,27 @@ mod tests {
             ],
             preview_override: None,
         };
-        let report = crate::scene::AuditReport {
-            scene_path: PathBuf::from("a.ma"),
-            scene_format: SceneFormat::Ma,
-            profile: crate::scene::AuditProfile::StrictDefault,
-            validation_state: crate::scene::ValidationState::Validated,
-            effective_rules: vec![],
-            surface_count: 1,
-            coverage_state: crate::scene::ExecutionCoverageState::Complete,
-            coverage_issues: vec![],
-            blocked_on_uncertainty: true,
-            disposition: crate::scene::AuditDisposition::Review,
-            unit_summaries: vec![],
-            dependency_facts: vec![],
-            unknown_semantics: vec![],
-            digests: crate::scene::SceneDigestSet {
+        let report = serde_json::from_value::<crate::scene::AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("a.ma"),
+            "scene_format": SceneFormat::Ma,
+            "profile": crate::scene::AuditProfile::StrictDefault,
+            "validation_state": crate::scene::ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 1,
+            "coverage_state": crate::scene::ExecutionCoverageState::Complete,
+            "coverage_issues": [],
+            "blocked_on_uncertainty": true,
+            "disposition": crate::scene::AuditDisposition::Review,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": crate::scene::SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: vec![],
-            surfaces: vec![crate::scene::AuditSurface {
+            "notices": [],
+            "surfaces": vec![crate::scene::AuditSurface {
                 origin: crate::scene::ExecutionOrigin {
                     lang: crate::scene::ExecutionLanguage::Mel,
                     trigger: crate::scene::ExecutionTrigger::FileOpen,
@@ -769,9 +774,10 @@ mod tests {
                 preview: String::new(),
                 derivation: crate::scene::AuditSurfaceDerivation::Observed,
             }],
-            review_signals: vec![review.clone(), review.clone()],
-            findings: vec![],
-        };
+            "review_signals": vec![review.clone(), review.clone()],
+            "findings": [],
+        }))
+        .expect("synthetic audit report");
 
         assert_eq!(group_review_signal_indexes(&report), vec![(0, 2)]);
         assert_eq!(

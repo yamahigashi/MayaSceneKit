@@ -569,6 +569,9 @@ impl AuditSurfaceDerivation {
 /// Aggregate report returned by script auditing operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditReport {
+    #[serde(skip)]
+    pub(crate) file_state:
+        Option<maya_scene_kit_observe::scene::persistent_cache::ObserveFileState>,
     /// Source scene path, or an empty path for standalone source text.
     pub scene_path: PathBuf,
     /// Detected scene format, or Unknown when the input is standalone source text.
@@ -694,6 +697,12 @@ pub enum AuditTraversalIssueKind {
 }
 
 impl AuditReport {
+    pub fn file_state(
+        &self,
+    ) -> Option<&maya_scene_kit_observe::scene::persistent_cache::ObserveFileState> {
+        self.file_state.as_ref()
+    }
+
     /// Returns the number of findings in the report.
     pub fn finding_count(&self) -> usize {
         self.findings.len()

@@ -625,30 +625,31 @@ mod tests {
             origin: Some(origin(node_name)),
             preview: String::new(),
         };
-        let report = AuditReport {
-            scene_path: PathBuf::from("example.ma"),
-            scene_format: SceneFormat::Ma,
-            profile: AuditProfile::StrictDefault,
-            validation_state: ValidationState::Validated,
-            effective_rules: Vec::new(),
-            surface_count: 2,
-            coverage_state: ExecutionCoverageState::Incomplete,
-            coverage_issues: vec![issue("ExampleExpressionA"), issue("ExampleExpressionB")],
-            blocked_on_uncertainty: true,
-            disposition: AuditDisposition::Review,
-            unit_summaries: Vec::new(),
-            dependency_facts: Vec::new(),
-            unknown_semantics: Vec::new(),
-            digests: SceneDigestSet {
+        let report = serde_json::from_value::<AuditReport>(serde_json::json!({
+            "scene_path": PathBuf::from("example.ma"),
+            "scene_format": SceneFormat::Ma,
+            "profile": AuditProfile::StrictDefault,
+            "validation_state": ValidationState::Validated,
+            "effective_rules": [],
+            "surface_count": 2,
+            "coverage_state": ExecutionCoverageState::Incomplete,
+            "coverage_issues": vec![issue("ExampleExpressionA"), issue("ExampleExpressionB")],
+            "blocked_on_uncertainty": true,
+            "disposition": AuditDisposition::Review,
+            "unit_summaries": [],
+            "dependency_facts": [],
+            "unknown_semantics": [],
+            "digests": SceneDigestSet {
                 scene_sha256: String::new(),
                 schema_bundle_sha256: None,
                 policy_bundle_sha256: None,
             },
-            notices: Vec::new(),
-            surfaces: Vec::new(),
-            review_signals: Vec::new(),
-            findings: Vec::new(),
-        };
+            "notices": [],
+            "surfaces": [],
+            "review_signals": [],
+            "findings": [],
+        }))
+        .expect("synthetic audit report");
 
         let groups = grouped_coverage_issues(&report);
 

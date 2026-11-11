@@ -58,13 +58,20 @@ impl SourceIdentity {
         }
     }
 
-    pub(crate) fn stability(&self) -> ReadStability {
+    pub(crate) fn stable_file_state(&self) -> Option<&FileState> {
         match &self.file_state {
-            SourceFileState::Absent => ReadStability::Absent,
             SourceFileState::Read {
                 before: Some(before),
                 after: Some(after),
-            } if before == after => ReadStability::Stable,
+            } if before == after => Some(before),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn stability(&self) -> ReadStability {
+        match &self.file_state {
+            SourceFileState::Absent => ReadStability::Absent,
+            _ if self.stable_file_state().is_some() => ReadStability::Stable,
             SourceFileState::Read { .. } => ReadStability::Unstable,
         }
     }

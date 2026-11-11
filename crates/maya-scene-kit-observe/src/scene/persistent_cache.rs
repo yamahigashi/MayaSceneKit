@@ -16,7 +16,7 @@ use crate::scene::{
     paths::{PathKind, ScenePathsReport},
 };
 
-const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 21;
+const OBSERVE_CACHE_SCHEMA_VERSION: u32 = 22;
 const DB_FILE: &str = "cache.sqlite3";
 const OBSERVE_CACHE_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const OBSERVE_CACHE_TOUCH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -112,8 +112,20 @@ impl ObservedSceneSnapshot {
         observation: &ObservationBundle,
         load_options: &LoadOptions,
     ) -> Result<Self, SceneToolError> {
-        let file_state =
-            file_state_for_path(observation.scene_path()).map_err(SceneToolError::Io)?;
+        let file_state = observation.file_state().ok_or_else(|| {
+            SceneToolError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "observation has no stable file state",
+            ))
+        })?;
+        Self::with_file_state(observation, load_options, file_state)
+    }
+
+    pub fn with_file_state(
+        observation: &ObservationBundle,
+        load_options: &LoadOptions,
+        file_state: ObserveFileState,
+    ) -> Result<Self, SceneToolError> {
         let digests = observation.scene_digests(0)?;
         let paths_report = observation.scene_paths_report(PathKind::All)?;
         let dump_report = observation.scene_dump_report()?;
