@@ -1366,15 +1366,7 @@ impl GuiShell {
                 for index in selected {
                     let row_id = shell.rows[index].id;
                     let options = shell.scene_materialize_options(OperationMode::Forensic);
-                    let analysis_source = shell.rows[index]
-                        .paths_report
-                        .as_ref()
-                        .and_then(|report| report.source.clone());
-                    let row = &shell.rows[index];
-                    let has_analysis = row.paths_report.is_some()
-                        || row.audit_report.is_some()
-                        || row.dump_report.is_some()
-                        || row.analyzed_audit_mode.is_some();
+                    let analysis_source = GuiAnalysisSource::for_row(&shell.rows[index]);
                     let reanalysis_required = shell.i18n().text("banner.edit_requires_reanalysis");
                     shell.spawn_row_job(
                         row_id,
@@ -1384,11 +1376,16 @@ impl GuiShell {
                         window,
                         cx,
                         move |path| {
+                            let before = GuiFileState::read(&path).ok();
                             let staged = stage_maya_ascii_with_options(&path, &options)
                                 .map_err(|err| err.to_string())?;
-                            if staged.report.scene_format == SceneFormat::Ma && has_analysis {
+                            if staged.report.scene_format == SceneFormat::Ma {
+                                let after = GuiFileState::read(&path).ok();
+                                let acquired_file_state = before.filter(|_| before == after);
                                 let source = source_fingerprint(&staged.artifact.bytes);
-                                if analysis_source.as_ref() != Some(&source) {
+                                if !analysis_source
+                                    .matches_acquisition(&source, acquired_file_state)
+                                {
                                     return Err(reanalysis_required);
                                 }
                             }

@@ -1519,6 +1519,7 @@ impl GuiShell {
             .analyzed_audit_mode
             .unwrap_or(self.state.audit_mode);
         let base_report = self.rows[row_index].paths_report.clone();
+        let analysis_source = GuiAnalysisSource::for_row(&self.rows[row_index]);
         let path_overrides = self.rows[row_index].staged.overrides().clone();
         let clean_source = self.rows[row_index].clean_source_for_targets(&clean_targets);
         let row = &mut self.rows[row_index];
@@ -1578,11 +1579,24 @@ impl GuiShell {
                         .map_err(|err| {
                             super::mutation::edit_error_message(&err, &reanalysis_required)
                         })?;
+                let acquired_source = observation
+                    .source_fingerprint()
+                    .map_err(|err| err.to_string())?;
                 let base_report = match &base_report {
                     _ if named_targets_only
                         && path_overrides.is_empty()
                         && path_owner_delete_targets.is_empty() =>
                     {
+                        let acquired_file_state =
+                            observation.file_state().map(|state| GuiFileState {
+                                size: state.size,
+                                modified_unix_nanos: state.modified_unix_nanos,
+                            });
+                        if !analysis_source
+                            .matches_acquisition(&acquired_source, acquired_file_state)
+                        {
+                            return Err(stale("analysis does not match the original scene bytes"));
+                        }
                         observation
                             .scene_paths_report(PathKind::All)
                             .map_err(|err| err.to_string())?
@@ -1593,9 +1607,6 @@ impl GuiShell {
                         .map_err(|err| err.to_string())?,
                     None => return Err(stale("missing original path report for scene edits")),
                 };
-                let acquired_source = observation
-                    .source_fingerprint()
-                    .map_err(|err| err.to_string())?;
                 if named_targets_only && !clean_targets.is_empty() {
                     clean_source = Some(acquired_source.clone());
                 }

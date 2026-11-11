@@ -1968,6 +1968,7 @@ fn ascii_staging_requires_comparable_existing_analysis(cx: &mut TestAppContext) 
                 mutation_row(1, &path)
             };
             row.selected = true;
+            row.audit_file_state = None;
             if analysis == 0 {
                 row.paths_report.as_mut().unwrap().source = None;
             } else if analysis == 1 {
@@ -1987,4 +1988,222 @@ fn ascii_staging_requires_comparable_existing_analysis(cx: &mut TestAppContext) 
             }
         });
     }
+}
+
+fn assert_named_clean_analysis_guard(cx: &mut TestAppContext, paths_analysis: bool) {
+    for analyzed in [false, true] {
+        for changed in [false, true] {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join("Example.ma");
+            write_mutation_scene(&path);
+            let original = fs::read_to_string(&path).unwrap();
+            let (shell, visual_cx) = open_test_shell(cx);
+            shell.update_in(visual_cx, |shell, _, _| {
+                shell.state = test_state(directory.path(), "");
+                shell.state.workspace_auto_analyze = false;
+                shell.state.backup_location = BackupLocationPreference::SameDirectory;
+                let mut row = if analyzed {
+                    mutation_row(1, &path)
+                } else {
+                    test_row(1, &path)
+                };
+                row.selected = true;
+                if !paths_analysis {
+                    row.paths_report = None;
+                }
+                shell.replace_rows(vec![row]);
+            });
+            let disk = if changed {
+                original.replace("asset/example/file.tx", "asset/sample/file.tx")
+            } else {
+                original.clone()
+            };
+            if changed {
+                fs::write(&path, &disk).unwrap();
+            }
+            let previous = shell.read_with(visual_cx, |shell, _| shell.rows[0].staged.clone());
+            shell.update_in(visual_cx, |shell, window, cx| {
+                shell.stage_scene_edits_for_row(
+                    0,
+                    BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                        node_name: "ExampleScript".into(),
+                    }]),
+                    BTreeSet::new(),
+                    ResultTab::Audit,
+                    None,
+                    false,
+                    window,
+                    cx,
+                );
+            });
+            visual_cx.run_until_parked();
+            let refused = analyzed && changed;
+            shell.update_in(visual_cx, |shell, window, cx| {
+                if refused {
+                    assert!(shell.rows[0].staged.same_as(&previous));
+                    assert!(
+                        mutation_banner(shell)
+                            .contains(&shell.i18n().text("banner.edit_requires_reanalysis"))
+                    );
+                } else {
+                    let artifact = shell.rows[0].staged.artifact().as_ref().unwrap();
+                    let expected = disk.split("createNode script").next().unwrap().as_bytes();
+                    assert_eq!(artifact.bytes.as_slice(), expected);
+                }
+                shell.run_save_selected(window, cx);
+            });
+            visual_cx.run_until_parked();
+            let expected = if refused {
+                disk.as_bytes()
+            } else {
+                disk.split("createNode script").next().unwrap().as_bytes()
+            };
+            assert_eq!(fs::read(&path).unwrap(), expected);
+        }
+    }
+}
+
+#[gpui::test]
+fn named_clean_preserves_paths_analysis_and_unanalyzed_behavior(cx: &mut TestAppContext) {
+    assert_named_clean_analysis_guard(cx, true);
+}
+
+#[gpui::test]
+fn named_clean_preserves_audit_analysis_and_unanalyzed_behavior(cx: &mut TestAppContext) {
+    assert_named_clean_analysis_guard(cx, false);
+}
+
+fn assert_audit_only_staging(cx: &mut TestAppContext, saved: bool, ascii: bool) {
+    for refuse in [true, false] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("Example.ma");
+        write_mutation_scene(&path);
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state = test_state(directory.path(), "");
+            shell.state.workspace_auto_analyze = false;
+            let RowJobResult::Analyze(result) =
+                analyze_row(&path, AuditModePreference::StrictDefault).unwrap()
+            else {
+                panic!("analysis result");
+            };
+            let mut row = test_row(1, &path);
+            row.selected = true;
+            shell.replace_rows(vec![row]);
+            if saved {
+                let bytes = fs::read(&path).unwrap();
+                let analyzed = analyze_row_bytes_with_options(
+                    &path,
+                    SceneFormat::Ma,
+                    ValidationState::Validated,
+                    bytes,
+                    AuditModePreference::StrictDefault,
+                    &shell.scene_load_options(),
+                    &shell.audit_plan,
+                )
+                .unwrap();
+                let mut report = analyzed.audit_report;
+                assert!(report.file_state().is_none());
+                report.digests.scene_sha256.clear();
+                shell.rows[0].busy = Some((RowOperation::Save, 99));
+                shell.apply_job_result(
+                    (1, 99),
+                    RowOperation::Save,
+                    RowJobResult::Save {
+                        promotion: SavePromotion::SceneEdits(StagedReports {
+                            audit_report: Some(report),
+                            audit_mode: Some(AuditModePreference::StrictDefault),
+                            audit_plan_fingerprint: Some(shell.audit_plan_fingerprint.clone()),
+                            ..Default::default()
+                        }),
+                        observation_error: Some("Example observation failure".into()),
+                        saved_paths_report: None,
+                        replace_changes: None,
+                        replace_preview: None,
+                        output_path: path.clone(),
+                        audit_file_state: GuiFileState::read(&path).ok(),
+                    },
+                    None,
+                    window,
+                    cx,
+                );
+                if refuse {
+                    shell.rows[0].audit_file_state = None;
+                }
+            } else {
+                let snapshot = result.audit_snapshot.unwrap();
+                let mut snapshot: AuditedSceneSnapshot =
+                    serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+                assert!(snapshot.report.file_state().is_none());
+                snapshot.report.digests.scene_sha256.clear();
+                let fingerprint = shell.audit_plan_fingerprint.clone();
+                shell.apply_cache_restore_updates(
+                    vec![super::super::cache_restore::CacheHydrationUpdate {
+                        row_id: 1,
+                        observe_snapshot: None,
+                        observe_access: None,
+                        audit_snapshot: Some(snapshot),
+                        audit_access: None,
+                    }],
+                    &fingerprint,
+                    window,
+                    cx,
+                );
+                if refuse {
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.extend_from_slice(b"\n// Example external edit\n");
+                    fs::write(&path, bytes).unwrap();
+                }
+            }
+            assert!(shell.rows[0].audit_report.is_some());
+            assert!(shell.rows[0].paths_report.is_none());
+            if ascii {
+                shell.run_to_ascii(window, cx);
+            } else {
+                shell.stage_scene_edits_for_row(
+                    0,
+                    BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                        node_name: "ExampleScript".into(),
+                    }]),
+                    BTreeSet::new(),
+                    ResultTab::Audit,
+                    None,
+                    false,
+                    window,
+                    cx,
+                );
+            }
+        });
+        visual_cx.run_until_parked();
+        shell.read_with(visual_cx, |shell, _| {
+            if refuse {
+                assert!(matches!(shell.rows[0].staged, Staged::None));
+                assert!(
+                    mutation_banner(shell)
+                        .contains(&shell.i18n().text("banner.edit_requires_reanalysis"))
+                );
+            } else {
+                assert!(
+                    shell.rows[0].staged.artifact().is_some(),
+                    "{}",
+                    mutation_banner(shell)
+                );
+            }
+        });
+    }
+}
+
+#[gpui::test]
+fn audit_only_cached_clean_uses_recorded_file_state(cx: &mut TestAppContext) {
+    assert_audit_only_staging(cx, false, false);
+}
+
+#[gpui::test]
+fn audit_only_promoted_clean_requires_recorded_file_state(cx: &mut TestAppContext) {
+    assert_audit_only_staging(cx, true, false);
+}
+
+#[gpui::test]
+fn audit_only_cached_ascii_uses_recorded_file_state(cx: &mut TestAppContext) {
+    assert_audit_only_staging(cx, false, true);
 }

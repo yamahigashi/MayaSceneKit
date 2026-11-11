@@ -726,6 +726,49 @@ struct AuditDetailCodeTarget {
     derived: bool,
 }
 
+enum GuiAnalysisSource {
+    Unanalyzed,
+    Content(maya_scene_kit_observe::scene::paths::SceneSourceFingerprint),
+    Metadata(GuiFileState),
+    Unavailable,
+}
+
+impl GuiAnalysisSource {
+    fn for_row(row: &SceneRow) -> Self {
+        if let Some(source) = row
+            .paths_report
+            .as_ref()
+            .and_then(|report| report.source.as_ref())
+            .filter(|source| !source.sha256.is_empty())
+        {
+            Self::Content(source.clone())
+        } else if let Some(state) = row.audit_file_state {
+            Self::Metadata(state)
+        } else if row.paths_report.is_some()
+            || row.audit_report.is_some()
+            || row.dump_report.is_some()
+            || row.analyzed_audit_mode.is_some()
+        {
+            Self::Unavailable
+        } else {
+            Self::Unanalyzed
+        }
+    }
+
+    fn matches_acquisition(
+        &self,
+        source: &maya_scene_kit_observe::scene::paths::SceneSourceFingerprint,
+        file_state: Option<GuiFileState>,
+    ) -> bool {
+        match self {
+            Self::Unanalyzed => true,
+            Self::Content(expected) => expected == source,
+            Self::Metadata(expected) => Some(*expected) == file_state,
+            Self::Unavailable => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GuiFileState {
     size: u64,
