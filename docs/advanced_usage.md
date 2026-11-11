@@ -104,6 +104,19 @@ For a pre-open gate, treat only `allow` and `allow_with_notice` as passing.
 - `validation_state` is `invalid`, `unsupported`, or `copied_unvalidated`
 - an analysis budget was exceeded
 
+### Loading plugins or sourcing scripts from a scene is denied
+
+A scene-embedded script that calls MEL `loadPlugin` or `source`, or Python
+`maya.cmds.loadPlugin`, is reported as `deny_malicious`, even when the plugin or
+script is a stock Maya one. This is deliberate. A scene file is data; it should not decide
+which code runs in the session that opens it. Loading tools and plugins belongs
+to the pipeline: `Maya.env`, `userSetup`, module files, or a launcher that
+prepares the environment before the scene is opened. Embedding that setup in a
+scene skips those mechanisms and gives every copy of the file the power to run
+code, so the audit treats it the same way as other dynamic code loading. If a
+scene needs a plugin, declare it with `requires` and let the pipeline provide
+it.
+
 ### Audit profiles
 
 Two profiles exist:

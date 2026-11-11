@@ -33,6 +33,12 @@
   （サードパーティレンダラの設定ノードやカスタムプラグインノードなど）が持つ
   コードは、`--node-info` でプロファイルを与えない限り監査されません。ゲートの
   詳細は [Audit Model](docs/advanced_usage.md#audit-model) を参照してください。
+- シーン内のスクリプトがプラグインを読み込む、またはスクリプトを source する
+  （`loadPlugin`、`source`）場合は、Maya 標準のプラグインであっても意図的に
+  deny にします。環境の準備はシーンファイルではなくパイプライン（`Maya.env`、
+  `userSetup`、モジュール、ランチャー）の役割です。詳細は
+  [Loading plugins or sourcing scripts from a scene is denied](docs/advanced_usage.md#loading-plugins-or-sourcing-scripts-from-a-scene-is-denied)
+  を参照してください。
 
 関連ドキュメント:
 

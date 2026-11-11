@@ -32,6 +32,10 @@ It currently ships three practical entry points:
   type — a third-party renderer settings node or a custom plugin node — is not
   audited unless you supply its profile via `--node-info`. See the
   [Audit Model](docs/advanced_usage.md#audit-model) for the full gate semantics.
+- By design, a scene script that loads plugins or sources scripts (`loadPlugin`,
+  `source`) is denied, even for stock Maya plugins: environment setup belongs to
+  the pipeline, not to scene files. See
+  [Loading plugins or sourcing scripts from a scene is denied](docs/advanced_usage.md#loading-plugins-or-sourcing-scripts-from-a-scene-is-denied).
 
 Related docs:
 
