@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 pub(crate) fn inspect_report(report: &MbInspectReport) -> Value {
     json!({
-        "scene_path": report.scene_path,
+        "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "root": inspect_node(&report.root),
     })
@@ -23,7 +23,7 @@ pub(crate) fn inspect_report(report: &MbInspectReport) -> Value {
 
 pub(crate) fn scene_paths_report(report: &ScenePathsReport) -> Value {
     json!({
-        "scene_path": report.scene_path,
+        "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "validation_state": report.validation_state,
         "count": report.count(),
@@ -33,7 +33,7 @@ pub(crate) fn scene_paths_report(report: &ScenePathsReport) -> Value {
 
 pub(crate) fn script_entries_report(report: &ScriptNodeEntriesReport) -> Value {
     json!({
-        "scene_path": report.scene_path,
+        "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "validation_state": report.validation_state,
         "count": report.entries.len(),
@@ -48,7 +48,7 @@ pub(crate) fn script_entries_report(report: &ScriptNodeEntriesReport) -> Value {
 
 pub(crate) fn audit_report(report: &AuditReport) -> Value {
     json!({
-        "scene_path": report.scene_path,
+        "scene_path": report.scene_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "profile": report.profile.as_str(),
         "validation_state": report.validation_state,
@@ -111,7 +111,7 @@ pub(crate) fn audit_graph_report(report: &AuditGraphReport) -> Value {
         .collect::<Vec<_>>();
 
     json!({
-        "scene_path": report.roots.first().map(|root| root.path.clone()),
+        "scene_path": report.roots.first().map(|root| root.path.to_string_lossy()),
         "profile": root_report.map(|scene_report| scene_report.profile.as_str()),
         "validation_state": root_report.map(|scene_report| &scene_report.validation_state),
         "coverage_state": root_report.map(|scene_report| scene_report.coverage_state.as_str()),
@@ -130,9 +130,29 @@ pub(crate) fn audit_graph_report(report: &AuditGraphReport) -> Value {
         "notices": notices,
         "review_signals": review_signals,
         "findings": findings,
-        "roots": &report.roots,
-        "edges": &report.edges,
-        "traversal_issues": &report.traversal_issues,
+        "roots": report.roots.iter().map(|root| json!({
+            "path": root.path.to_string_lossy(),
+            "identity": root.identity,
+            "report_index": root.report_index,
+            "issue_index": root.issue_index,
+        })).collect::<Vec<_>>(),
+        "edges": report.edges.iter().map(|edge| json!({
+            "source_identity": edge.source_identity,
+            "source_path": edge.source_path.to_string_lossy(),
+            "raw_target": edge.raw_target,
+            "resolved_path": edge.resolved_path.as_ref().map(|path| path.to_string_lossy()),
+            "resolution_status": edge.resolution_status,
+            "target_identity": edge.target_identity,
+            "target_report_index": edge.target_report_index,
+            "issue_index": edge.issue_index,
+        })).collect::<Vec<_>>(),
+        "traversal_issues": report.traversal_issues.iter().map(|issue| json!({
+            "kind": issue.kind,
+            "scene_path": issue.scene_path.as_ref().map(|path| path.to_string_lossy()),
+            "source_path": issue.source_path.as_ref().map(|path| path.to_string_lossy()),
+            "raw_target": issue.raw_target,
+            "message": issue.message,
+        })).collect::<Vec<_>>(),
         "reports": report.reports.iter().map(audit_report).collect::<Vec<_>>(),
         "root_report": root_report.map(audit_report),
     })
@@ -140,7 +160,7 @@ pub(crate) fn audit_graph_report(report: &AuditGraphReport) -> Value {
 
 pub(crate) fn script_node_clean_preview(preview: &ScriptNodeCleanPreview) -> Value {
     json!({
-        "input_path": preview.input_path,
+        "input_path": preview.input_path.to_string_lossy(),
         "scene_format": preview.scene_format,
         "operation_mode": preview.operation_mode,
         "validation_state": preview.validation_state,
@@ -151,8 +171,8 @@ pub(crate) fn script_node_clean_preview(preview: &ScriptNodeCleanPreview) -> Val
 
 pub(crate) fn script_node_clean_result(result: &ScriptNodeCleanResult) -> Value {
     json!({
-        "input_path": result.input_path,
-        "output_path": result.output_path,
+        "input_path": result.input_path.to_string_lossy(),
+        "output_path": result.output_path.to_string_lossy(),
         "scene_format": result.scene_format,
         "operation_mode": result.operation_mode,
         "validation_state": result.validation_state,
@@ -163,7 +183,7 @@ pub(crate) fn script_node_clean_result(result: &ScriptNodeCleanResult) -> Value 
 
 pub(crate) fn path_replace_preview(preview: &PathReplacePreview) -> Value {
     json!({
-        "input_path": preview.input_path,
+        "input_path": preview.input_path.to_string_lossy(),
         "scene_format": preview.scene_format,
         "operation_mode": preview.operation_mode,
         "validation_state": preview.validation_state,
@@ -175,8 +195,8 @@ pub(crate) fn path_replace_preview(preview: &PathReplacePreview) -> Value {
 
 pub(crate) fn path_replace_result(result: &PathReplaceResult) -> Value {
     json!({
-        "input_path": result.input_path,
-        "output_path": result.output_path,
+        "input_path": result.input_path.to_string_lossy(),
+        "output_path": result.output_path.to_string_lossy(),
         "scene_format": result.scene_format,
         "operation_mode": result.operation_mode,
         "validation_state": result.validation_state,
@@ -187,7 +207,7 @@ pub(crate) fn path_replace_result(result: &PathReplaceResult) -> Value {
 
 pub(crate) fn maya_ascii_conversion_report(report: &MayaAsciiConversionReport) -> Value {
     json!({
-        "output_path": report.output_path,
+        "output_path": report.output_path.to_string_lossy(),
         "scene_format": report.scene_format,
         "operation_mode": report.operation_mode,
         "validation_state": report.validation_state,
@@ -405,5 +425,73 @@ mod path_replace_tests {
         assert_eq!(value["skipped"]["payload_rejected"], 0);
         assert!(value["skipped"]["non_canonical_escape"].is_null());
         assert!(value["skipped"]["unterminated_tail_from"].is_null());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod graph_path_tests {
+    use super::*;
+
+    fn graph() -> AuditGraphReport {
+        serde_json::from_value(json!({
+            "roots": [{"path": "asset/example/Example.ma", "identity": "Example", "report_index": null, "issue_index": 0}],
+            "reports": [],
+            "edges": [{"source_identity": "Example", "source_path": "asset/example/Example.ma", "raw_target": "Sample.ma", "resolved_path": "asset/example/Sample.ma", "resolution_status": "Missing", "target_identity": null, "target_report_index": null, "issue_index": 0}],
+            "traversal_issues": [{"kind": "missing_reference", "scene_path": "asset/example/Sample.ma", "source_path": "asset/example/Example.ma", "raw_target": "Sample.ma", "message": "Example missing reference"}],
+            "disposition": "allow"
+        })).unwrap()
+    }
+
+    #[test]
+    fn graph_paths_render_lossily_and_preserve_utf8_json() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+        let report = graph();
+        let expected = json!({
+            "scene_path": "asset/example/Example.ma",
+            "profile": null, "validation_state": null, "coverage_state": null,
+            "coverage_issues": [], "blocked_on_uncertainty": true, "disposition": "allow",
+            "root_count": 1, "scene_count": 0, "edge_count": 1, "traversal_issue_count": 1,
+            "surface_count": 0, "finding_count": 0, "allowed_finding_count": 0,
+            "review_signal_count": 0, "notice_count": 0, "notices": [],
+            "review_signals": [], "findings": [], "roots": report.roots,
+            "edges": report.edges, "traversal_issues": report.traversal_issues,
+            "reports": [], "root_report": null
+        });
+        assert_eq!(
+            audit_graph_report(&report).to_string(),
+            expected.to_string()
+        );
+
+        let invalid = PathBuf::from(OsString::from_vec(b"asset/example/\xff.ma".to_vec()));
+        let pointers = [
+            "/roots/0/path",
+            "/edges/0/source_path",
+            "/edges/0/resolved_path",
+            "/traversal_issues/0/scene_path",
+            "/traversal_issues/0/source_path",
+        ];
+        let mut panics = Vec::new();
+        for (index, pointer) in pointers.iter().enumerate() {
+            let mut report = graph();
+            match index {
+                0 => report.roots[0].path = invalid.clone(),
+                1 => report.edges[0].source_path = invalid.clone(),
+                2 => report.edges[0].resolved_path = Some(invalid.clone()),
+                3 => report.traversal_issues[0].scene_path = Some(invalid.clone()),
+                4 => report.traversal_issues[0].source_path = Some(invalid.clone()),
+                _ => unreachable!(),
+            }
+            match std::panic::catch_unwind(|| audit_graph_report(&report)) {
+                Ok(value) => {
+                    assert_eq!(value.pointer(pointer).unwrap(), "asset/example/�.ma");
+                    if index == 0 {
+                        assert_eq!(value["scene_path"], "asset/example/�.ma");
+                    }
+                }
+                Err(_) => panics.push(*pointer),
+            }
+        }
+        assert!(panics.is_empty(), "path rendering panicked: {panics:?}");
     }
 }
