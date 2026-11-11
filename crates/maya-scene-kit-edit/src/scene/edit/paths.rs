@@ -1,15 +1,27 @@
+use maya_scene_kit_observe::scene::ReadStability;
 use sha2::{Digest, Sha256};
 
 use super::{application::Applied, *};
 use crate::scene::edit::materialize::unsupported_scene_format;
 
 pub(super) fn read_report_source(report: &ScenePathsReport) -> Result<Vec<u8>, SceneToolError> {
+    read_report_source_with(report, || {
+        super::source::read_source_bytes(&report.scene_path)
+    })
+}
+
+fn read_report_source_with(
+    report: &ScenePathsReport,
+    read: impl FnMut() -> Result<(Vec<u8>, ReadStability), SceneToolError>,
+) -> Result<Vec<u8>, SceneToolError> {
     let source = report
         .source
         .as_ref()
         .filter(|source| !source.sha256.is_empty())
-        .ok_or_else(|| SceneToolError::Message("paths report has no source fingerprint".into()))?;
-    let bytes = fs::read(&report.scene_path)?;
+        .ok_or_else(|| SceneToolError::SourceChanged {
+            path: report.scene_path.clone(),
+        })?;
+    let bytes = super::source::read_stable(&report.scene_path, read)?;
     if source.byte_len != bytes.len() || source.sha256 != format!("{:x}", Sha256::digest(&bytes)) {
         return Err(SceneToolError::SourceChanged {
             path: report.scene_path.clone(),
@@ -196,4 +208,29 @@ pub fn collect_raw_chunks(path: impl AsRef<Path>) -> Result<Vec<RawChunkDump>, S
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod report_source_tests {
+    use super::*;
+
+    #[test]
+    fn report_source_rejects_repeated_unstable_acquisition() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Example.ma");
+        let bytes = b"//Maya ASCII 2026 scene\n";
+        fs::write(&path, bytes).unwrap();
+        let report =
+            collect_scene_paths_with_options(&path, PathKind::All, &LoadOptions::default())
+                .unwrap();
+        let mut calls = 0;
+        let result = read_report_source_with(&report, || {
+            calls += 1;
+            Ok((bytes.to_vec(), ReadStability::Unstable))
+        });
+        assert!(
+            matches!(result, Err(SceneToolError::SourceUnstable { path: changed }) if changed == path)
+        );
+        assert_eq!(calls, 2);
+    }
 }

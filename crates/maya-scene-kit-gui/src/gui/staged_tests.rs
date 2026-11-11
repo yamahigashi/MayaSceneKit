@@ -1665,6 +1665,43 @@ fn unstable_source_rejection_preserves_staged_state(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn missing_report_fingerprint_requires_reanalysis_preserving_staged_state(cx: &mut TestAppContext) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.settings_save_disabled_path = Some(directory.path().join("settings.json"));
+        shell.replace_rows(vec![mutation_row(1, &path)]);
+        shell
+            .apply_path_override_updates(
+                vec![(0, BTreeMap::from([(0, "asset/sample/file.tx".into())]))],
+                window,
+                cx,
+            )
+            .unwrap();
+    });
+    visual_cx.run_until_parked();
+    shell.update_in(visual_cx, |shell, _, cx| {
+        let previous = shell.rows[0].staged.clone();
+        let mut report = shell.rows[0].paths_report.clone().unwrap();
+        report.source = None;
+        let error = maya_scene_kit_edit::scene::PatchPlanner::new(
+            maya_scene_kit_edit::scene::MaterializeOptions::default()
+                .with_operation_mode(OperationMode::Forensic),
+        )
+        .preview_replace_scene_path_candidates_in_report(&report, &[])
+        .unwrap_err();
+        assert!(shell.reject_changed_report_source(1, &error, cx));
+        assert!(matches!(shell.rows[0].status, FileStatus::Error(_)));
+        assert!(
+            mutation_banner(shell).contains(&shell.i18n().text("banner.edit_requires_reanalysis"))
+        );
+        assert!(shell.rows[0].staged.same_as(&previous));
+    });
+}
+
+#[gpui::test]
 fn save_conversion_preserves_source_reports(cx: &mut TestAppContext) {
     let directory = tempdir().unwrap();
     let path = directory.path().join("Example.mb");

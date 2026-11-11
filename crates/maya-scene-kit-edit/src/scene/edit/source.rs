@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fs::File, io::Read, path::Path};
 
 use maya_scene_kit_observe::scene::{
     LoadOptions, Loader, ObservationBundle, ReadStability, SceneToolError,
@@ -15,6 +15,25 @@ pub fn read_scene_edit_source(
         let stability = source.0.source_read_stability();
         Ok((source, stability))
     })
+}
+
+pub(super) fn read_source_bytes(path: &Path) -> Result<(Vec<u8>, ReadStability), SceneToolError> {
+    let mut file = File::open(path)?;
+    let file_state = |file: &File| {
+        file.metadata()
+            .ok()
+            .map(|metadata| (metadata.len(), metadata.modified().ok()))
+    };
+    let before = file_state(&file);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let after = file_state(&file);
+    let stability = if before.is_some() && before == after {
+        ReadStability::Stable
+    } else {
+        ReadStability::Unstable
+    };
+    Ok((bytes, stability))
 }
 
 pub(super) fn read_stable<T>(

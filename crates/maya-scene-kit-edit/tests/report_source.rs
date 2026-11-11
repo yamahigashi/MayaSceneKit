@@ -80,17 +80,10 @@ fn check(entry: usize, same_length: bool, missing_source: bool, binary: bool) {
             .map(|_| ()),
         _ => unreachable!(),
     };
-    if missing_source {
-        assert!(
-            matches!(result, Err(SceneToolError::Message(ref message)) if message == "paths report has no source fingerprint"),
-            "{result:?}"
-        );
-    } else {
-        assert!(
-            matches!(result, Err(SceneToolError::SourceChanged { path: ref changed }) if changed == &path),
-            "{result:?}"
-        );
-    }
+    assert!(
+        matches!(result, Err(SceneToolError::SourceChanged { path: ref changed }) if changed == &path),
+        "{result:?}"
+    );
 }
 
 #[test]
