@@ -2,6 +2,11 @@
 // best-effort extraction. Canonical inspection APIs should prefer MA AST owners.
 use std::collections::HashSet;
 
+use maya_mel::parser::{
+    LightItem, LightParseOptions, LightSourceView, ParseBudgets,
+    scan_light_bytes_with_options_and_sink,
+};
+
 pub use crate::ma::raw_dump::RawMaScriptEntry;
 use crate::ma::{
     lexer::{
@@ -31,7 +36,7 @@ pub fn remove_raw_script_nodes_from_ma_by_name(
     target_names: &[String],
 ) -> (Vec<u8>, Vec<String>) {
     let lines = split_lines_keepends(data);
-    let mut blocks = find_script_blocks_in_ma(&lines);
+    let mut blocks = find_script_blocks_in_ma(data, &lines);
     if !target_names.is_empty() {
         let targets = target_names
             .iter()
@@ -78,20 +83,32 @@ pub fn collect_script_node_ranges_from_ma(
     for line in &lines {
         offsets.push(offsets.last().unwrap() + line.len());
     }
-    find_script_blocks_in_ma(&lines)
+    find_script_blocks_in_ma(data, &lines)
         .into_iter()
         .filter(|(_, _, name)| target_names.is_empty() || target_names.contains(name))
         .map(|(start, end, name)| (offsets[start]..offsets[end], name))
         .collect()
 }
 
-fn find_script_blocks_in_ma(lines: &[&[u8]]) -> Vec<(usize, usize, String)> {
+fn find_script_blocks_in_ma(data: &[u8], lines: &[&[u8]]) -> Vec<(usize, usize, String)> {
+    let encoding = scan_light_bytes_with_options_and_sink(
+        data,
+        LightParseOptions {
+            budgets: ParseBudgets {
+                max_bytes: data.len(),
+                ..ParseBudgets::default()
+            },
+            ..LightParseOptions::default()
+        },
+        &mut |_: LightSourceView<'_>, _: LightItem| {},
+    )
+    .source_encoding;
     let mut blocks = Vec::new();
     let mut i = 0usize;
     while i < lines.len() {
         let line = &lines[i];
         if is_top_level_command(line) && is_create_script_command(line) {
-            let name = extract_script_node_name_from_create(line, i);
+            let name = extract_script_node_name_from_create(line, i, encoding);
             let mut j = i + 1;
             while j < lines.len() {
                 if is_top_level_command(lines[j]) {

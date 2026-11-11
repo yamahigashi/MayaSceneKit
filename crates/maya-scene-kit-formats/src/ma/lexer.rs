@@ -1,3 +1,7 @@
+use maya_mel::{
+    parser::{LightSourceView, SourceEncoding},
+    syntax::{TextRange, TextSize},
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -54,15 +58,27 @@ pub(crate) fn is_top_level_command(line: &[u8]) -> bool {
     !stripped.starts_with(b"//")
 }
 
-pub(crate) fn extract_script_node_name_from_create(line: &[u8], default_idx: usize) -> String {
-    if let Some(name) = parse_create_node_name(line) {
+pub(crate) fn extract_script_node_name_from_create(
+    line: &[u8],
+    default_idx: usize,
+    encoding: SourceEncoding,
+) -> String {
+    if let Some(name) = parse_create_node_name(line, encoding) {
         return name;
     }
     format!("<scriptNode@line{}>", default_idx + 1)
 }
 
-fn parse_create_node_name(line: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(line).ok()?;
+fn parse_create_node_name(line: &[u8], encoding: SourceEncoding) -> Option<String> {
+    let decoded = LightSourceView::Bytes {
+        bytes: line,
+        encoding,
+    }
+    .decode_slice(TextRange::new(
+        TextSize::from(0),
+        TextSize::from(u32::try_from(line.len()).ok()?),
+    ));
+    let text = decoded.text.as_ref();
     let bytes = text.as_bytes();
     let mut cursor = 0usize;
 
@@ -263,6 +279,8 @@ pub(crate) fn is_create_script_command(line: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use maya_mel::parser::SourceEncoding;
+
     use super::{extract_script_node_name_from_create, split_lines_keepends};
 
     fn parse_ma_borrowed_quoted_literal(text: &str, start: usize) -> (Option<&str>, usize) {
@@ -284,14 +302,17 @@ mod tests {
     #[test]
     fn create_node_name_parser_extracts_named_node() {
         let line = br#"createNode script -n "scriptNode1" -p "root";"#;
-        assert_eq!(extract_script_node_name_from_create(line, 0), "scriptNode1");
+        assert_eq!(
+            extract_script_node_name_from_create(line, 0, SourceEncoding::Utf8),
+            "scriptNode1"
+        );
     }
 
     #[test]
     fn create_node_name_parser_handles_escaped_quotes() {
         let line = b"createNode script -n \"script\\\"Node1\";";
         assert_eq!(
-            extract_script_node_name_from_create(line, 0),
+            extract_script_node_name_from_create(line, 0, SourceEncoding::Utf8),
             "script\\\"Node1"
         );
     }
@@ -300,7 +321,7 @@ mod tests {
     fn create_node_name_parser_falls_back_when_missing_name() {
         let line = br#"createNode script -s;"#;
         assert_eq!(
-            extract_script_node_name_from_create(line, 41),
+            extract_script_node_name_from_create(line, 41, SourceEncoding::Utf8),
             "<scriptNode@line42>"
         );
     }

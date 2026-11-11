@@ -192,14 +192,15 @@ fn ascii_clean_records(
     targets: &[ExecutionCleanTarget],
 ) -> Result<Vec<SceneEditChange>, SceneToolError> {
     let mut records = Vec::new();
+    let mut script_ranges = None;
     for target in targets {
         let ranges = match target {
-            ExecutionCleanTarget::ScriptNode { node_name } => {
-                scripts::collect_script_node_ranges_from_ma(bytes, std::slice::from_ref(node_name))
-                    .into_iter()
-                    .map(|(range, _)| range)
-                    .collect::<Vec<_>>()
-            }
+            ExecutionCleanTarget::ScriptNode { node_name } => script_ranges
+                .get_or_insert_with(|| scripts::collect_script_node_ranges_from_ma(bytes, &[]))
+                .iter()
+                .filter(|(_, name)| name == node_name)
+                .map(|(range, _)| range.clone())
+                .collect::<Vec<_>>(),
             ExecutionCleanTarget::PluginRequire { rendered } => {
                 requires::collect_plugin_require_ranges_from_ma(
                     bytes,
