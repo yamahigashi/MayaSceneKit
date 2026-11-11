@@ -518,6 +518,14 @@ fn replacement_targets_for_mb(
 ) -> HashMap<TargetKey, String> {
     let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
     let physical_entries = extract_raw_scene_path_records_from_mb_parts(data, root).value;
+    replacement_targets_from_entries(&entries, &physical_entries, replacements)
+}
+
+fn replacement_targets_from_entries(
+    entries: &[crate::mb::paths::MbScenePathEntry],
+    physical_entries: &[crate::mb::paths::MbScenePathEntry],
+    replacements: &[(usize, String)],
+) -> HashMap<TargetKey, String> {
     let mut out = HashMap::new();
 
     for (index, after_value) in replacements {
@@ -526,7 +534,7 @@ fn replacement_targets_for_mb(
         };
         if entry.node_type == "reference" {
             let mut matched_physical_record = false;
-            for physical_entry in &physical_entries {
+            for physical_entry in physical_entries {
                 if physical_entry.node_type != "reference"
                     || physical_entry.value != entry.value
                     || !same_reference_identity(entry, physical_entry)
@@ -562,13 +570,18 @@ pub fn collect_mb_path_candidates(
 ) -> Result<Vec<MbPathCandidatePlan>, super::MbPlanError> {
     super::require_complete_mb_sections(data, root)?;
     let entries = extract_raw_scene_paths_from_mb_parts(data, root).value;
+    let physical_entries = extract_raw_scene_path_records_from_mb_parts(data, root).value;
     let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for &entry_index in indices {
         let entry = entries
             .get(entry_index)
             .ok_or(super::MbPlanError::MissingEntry { entry_index })?;
-        let targets = replacement_targets_for_mb(data, root, &[(entry_index, entry.value.clone())]);
+        let targets = replacement_targets_from_entries(
+            &entries,
+            &physical_entries,
+            &[(entry_index, entry.value.clone())],
+        );
         if targets.is_empty() {
             return Err(super::MbPlanError::MissingEntry { entry_index });
         }
