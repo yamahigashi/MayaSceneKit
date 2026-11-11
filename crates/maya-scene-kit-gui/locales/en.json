@@ -144,6 +144,7 @@
   "file_status.processing.save": "Saving",
   "file_status.processing.to_ascii": "Converting",
   "file_status.saved": "Saved",
+  "file_status.saved_observation_failed": "Saved, but re-read failed: {message}",
   "filter.all": "All",
   "filter.audited": "Analyzed",
   "filter.dirty": "Dirty",

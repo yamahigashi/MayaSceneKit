@@ -464,7 +464,7 @@ fn save_survives_path_observation_failure(cx: &mut TestAppContext) {
     });
     visual_cx.run_until_parked();
     shell.read_with(visual_cx, |shell, _| {
-        assert!(matches!(shell.rows[0].status, FileStatus::Saved));
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message.contains("re-read failed")));
         assert!(shell.rows[0].paths_report.is_none());
         assert!(shell.rows[0].analyzed_audit_mode.is_none());
         assert!(
@@ -1773,7 +1773,7 @@ fn replace_then_delete_owner_save_promotes_composed_reports(cx: &mut TestAppCont
                     saved_paths_report: shell.rows[0].staged.reports().paths_report.clone(),
                     replace_changes: None,
                     replace_preview: None,
-                    audit_file_state: None,
+                    audit_file_state: GuiFileState::read(&scene).ok(),
                     output_path: scene.clone(),
                 },
                 None,

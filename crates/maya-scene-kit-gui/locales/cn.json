@@ -144,6 +144,7 @@
   "file_status.processing.save": "正在保存",
   "file_status.processing.to_ascii": "正在转换",
   "file_status.saved": "已保存",
+  "file_status.saved_observation_failed": "已保存，但重新读取失败：{message}",
   "filter.all": "全部",
   "filter.audited": "已分析",
   "filter.dirty": "未保存",

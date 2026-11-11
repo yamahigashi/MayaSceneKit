@@ -1660,3 +1660,116 @@ fn unstable_source_rejection_preserves_staged_state(cx: &mut TestAppContext) {
         assert!(shell.rows[0].staged.same_as(&previous));
     });
 }
+
+#[gpui::test]
+fn save_conversion_preserves_source_reports(cx: &mut TestAppContext) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.mb");
+    fs::write(&path, binary_scene("asset/example/file.tx", true, false)).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        let mut row = mutation_row(1, &path);
+        row.selected = false;
+        row.staged = Staged::ToAscii {
+            report: None,
+            artifact: None,
+        };
+        let paths = serde_json::to_value(&row.paths_report).unwrap();
+        let audit = serde_json::to_value(&row.audit_report).unwrap();
+        let state = row.audit_file_state;
+        let mode = row.analyzed_audit_mode;
+        shell.replace_rows(vec![row]);
+        shell.deliver_job_result_for_test(
+            1,
+            RowOperation::Save,
+            RowJobResult::Save {
+                promotion: SavePromotion::Unanalyzed,
+                observation_error: None,
+                saved_paths_report: None,
+                replace_changes: None,
+                replace_preview: None,
+                output_path: path.with_extension("ma"),
+                audit_file_state: None,
+            },
+            None,
+            window,
+            cx,
+        );
+        let row = &shell.rows[0];
+        assert_eq!(serde_json::to_value(&row.paths_report).unwrap(), paths);
+        assert_eq!(serde_json::to_value(&row.audit_report).unwrap(), audit);
+        assert_eq!(row.audit_file_state, state);
+        assert_eq!(row.analyzed_audit_mode, mode);
+        assert!(matches!(row.staged, Staged::None));
+        assert!(matches!(row.status, FileStatus::Saved));
+    });
+}
+
+#[gpui::test]
+fn save_changed_file_does_not_promote_audit(cx: &mut TestAppContext) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let written_state = GuiFileState::read(&path).unwrap();
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        let mut row = mutation_row(1, &path);
+        row.selected = false;
+        let reports = StagedReports {
+            audit_report: row.audit_report.take(),
+            audit_mode: Some(AuditModePreference::StrictDefault),
+            audit_plan_fingerprint: Some(shell.audit_plan_fingerprint.clone()),
+            ..Default::default()
+        };
+        let paths = row.paths_report.clone();
+        shell.replace_rows(vec![row]);
+        fs::write(&path, "// Example changed scene\n").unwrap();
+        assert_ne!(Some(written_state), GuiFileState::read(&path).ok());
+        shell.rows[0].busy = Some((RowOperation::Save, 99));
+        shell.apply_job_result(
+            (1, 99),
+            RowOperation::Save,
+            RowJobResult::Save {
+                promotion: SavePromotion::SceneEdits(reports),
+                observation_error: None,
+                saved_paths_report: paths,
+                replace_changes: None,
+                replace_preview: None,
+                output_path: path.clone(),
+                audit_file_state: Some(written_state),
+            },
+            None,
+            window,
+            cx,
+        );
+        assert!(shell.rows[0].audit_report.is_none());
+        assert!(shell.rows[0].analyzed_audit_mode.is_none());
+    });
+}
+
+#[gpui::test]
+fn save_observation_failure_displays_error(cx: &mut TestAppContext) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        let mut row = mutation_row(1, &path);
+        row.selected = false;
+        shell.replace_rows(vec![row]);
+        shell.deliver_job_result_for_test(1, RowOperation::Save, RowJobResult::Save {
+            promotion: SavePromotion::Unanalyzed,
+            observation_error: Some("Example observation failure".into()), saved_paths_report: None,
+            replace_changes: None, replace_preview: None,
+            output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
+        }, None, window, cx);
+        assert!(matches!(&shell.rows[0].status, FileStatus::Error(message) if message.contains("Example observation failure") && message.contains("Saved")));
+        assert!(shell.rows[0].status_label(&shell.i18n()).contains("Example observation failure"));
+        shell.rows[0].selected = true;
+        assert!(super::super::selected_row_error_lines(shell)[0].contains("Example observation failure"));
+        assert!(shell.rows[0].analyzed_audit_mode.is_none());
+    });
+}

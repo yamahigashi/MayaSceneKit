@@ -8,12 +8,34 @@ pub(super) fn result_content(
     div()
         .size_full()
         .min_w_0()
+        .flex()
+        .flex_col()
+        .children(
+            selected_row_error_lines(shell)
+                .into_iter()
+                .map(|message| div().text_sm().text_color(rgb(0x9b2c2c)).child(message)),
+        )
         .child(match shell.state.active_tab {
             ResultTab::Overview => result_overview(shell, i18n).into_any_element(),
             ResultTab::Audit => result_audit(shell, i18n, view).into_any_element(),
             ResultTab::Paths => result_paths(shell, i18n).into_any_element(),
             ResultTab::Log => result_log(shell, i18n).into_any_element(),
         })
+}
+
+pub(super) fn selected_row_error_lines(shell: &GuiShell) -> Vec<String> {
+    shell
+        .rows
+        .iter()
+        .filter(|row| row.selected)
+        .filter_map(|row| {
+            if let FileStatus::Error(message) = &row.status {
+                Some(format!("{}: {message}", row.name))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub(super) fn render_audit_filter_bar(

@@ -144,6 +144,7 @@
   "file_status.processing.save": "保存中",
   "file_status.processing.to_ascii": "変換中",
   "file_status.saved": "保存済み",
+  "file_status.saved_observation_failed": "保存は成功しましたが、再読み取りに失敗しました: {message}",
   "filter.all": "すべて",
   "filter.audited": "解析済み",
   "filter.dirty": "変更あり",

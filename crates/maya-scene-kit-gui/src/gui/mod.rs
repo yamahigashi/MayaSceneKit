@@ -1705,6 +1705,7 @@ fn ascii_report_same(
 
 #[allow(clippy::large_enum_variant)]
 enum SavePromotion {
+    ToAscii,
     Unanalyzed,
     SceneEdits(StagedReports),
 }
@@ -1715,6 +1716,7 @@ impl SceneRow {
             Staged::SceneEdits { staged_reports, .. } => {
                 SavePromotion::SceneEdits(staged_reports.as_ref().clone())
             }
+            Staged::ToAscii { .. } => SavePromotion::ToAscii,
             _ => SavePromotion::Unanalyzed,
         }
     }

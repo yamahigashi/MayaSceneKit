@@ -947,9 +947,13 @@ impl GuiShell {
                 shell.rows[index].replace_changes = replace_changes;
                 shell.rows[index].applied_replace_preview = replace_preview;
                 shell.prune_edit_history_for_row_ids(&[row_id]);
+                let is_ascii = matches!(promotion, SavePromotion::ToAscii);
+                let saved_file_is_current = audit_file_state.is_some()
+                    && audit_file_state == GuiFileState::read(&output_path).ok();
                 match promotion {
+                    SavePromotion::ToAscii => {}
                     SavePromotion::SceneEdits(reports) => {
-                        if reports.audit_plan_fingerprint.as_deref() == Some(shell.audit_plan_fingerprint.as_str()) {
+                        if saved_file_is_current && reports.audit_plan_fingerprint.as_deref() == Some(shell.audit_plan_fingerprint.as_str()) {
                             if let Some(report) = reports.audit_report {
                                 shell.rows[index].set_audit_report(Some(report), audit_file_state);
                                 shell.rows[index].audit_plan_fingerprint = reports.audit_plan_fingerprint;
@@ -960,12 +964,19 @@ impl GuiShell {
                     }
                     SavePromotion::Unanalyzed => shell.rows[index].mark_analysis_stale(),
                 }
-                if saved_paths_report.is_none() { shell.rows[index].mark_analysis_stale(); }
-                shell.rows[index].paths_report = saved_paths_report;
+                if !is_ascii {
+                    if saved_paths_report.is_none() || !saved_file_is_current { shell.rows[index].mark_analysis_stale(); }
+                    shell.rows[index].paths_report = saved_paths_report;
+                }
                 shell.rows[index].staged = Staged::None;
                 shell.rows[index].replace_artifact_generation = None;
                 shell.rows[index].sync_findings_count();
-                shell.rows[index].status = FileStatus::Saved;
+                shell.rows[index].status = observation_error.as_ref().map_or(FileStatus::Saved, |error| {
+                    FileStatus::Error(shell.i18n().format(
+                        "file_status.saved_observation_failed",
+                        &[("message", error.clone())],
+                    ))
+                });
                 shell.refresh_row_path_resolution_state(index);
                 shell.record_job(
                     operation_key(operation),
@@ -1537,6 +1548,7 @@ impl GuiShell {
                         &artifact, &path, backup_location,
                         source.as_ref().filter(|_| !is_ascii).map(|source| (source, source_changed.as_str())),
                     ).map_err(|err| err.to_string())?;
+                    let audit_file_state = GuiFileState::read(&path).ok();
                     let saved_paths = if is_ascii {
                         Ok(None)
                     } else if let Some(mut report) = staged_paths_report {
@@ -1561,7 +1573,7 @@ impl GuiShell {
                         saved_paths_report,
                         replace_changes,
                         replace_preview,
-                        audit_file_state: GuiFileState::read(&path).ok(),
+                        audit_file_state,
                         output_path: path,
                     })
                 },
