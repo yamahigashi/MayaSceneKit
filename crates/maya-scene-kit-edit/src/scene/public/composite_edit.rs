@@ -50,6 +50,7 @@ pub enum SceneEditIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SceneEditLocator {
+    Unresolved,
     MaRange {
         start: usize,
         end: usize,

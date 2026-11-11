@@ -480,19 +480,7 @@ pub fn preview_remove_script_nodes_by_name_with_options(
     node_names: &[String],
     options: &MaterializeOptions,
 ) -> Result<ScriptNodeCleanPreview, SceneToolError> {
-    let targets = node_names
-        .iter()
-        .cloned()
-        .map(|node_name| ExecutionCleanTarget::ScriptNode { node_name })
-        .collect::<Vec<_>>();
-    let preview = preview_clean_execution_targets_with_options(input_path, &targets, options)?;
-    Ok(ScriptNodeCleanPreview {
-        input_path: preview.input_path,
-        scene_format: preview.scene_format,
-        operation_mode: preview.operation_mode,
-        validation_state: preview.validation_state,
-        removed_nodes: preview.removed_script_nodes,
-    })
+    PatchPlanner::new(options.clone()).preview_remove_script_nodes_by_name(input_path, node_names)
 }
 
 pub fn preview_remove_script_nodes_by_name(
@@ -527,22 +515,7 @@ pub fn stage_remove_script_nodes_by_name_with_options(
     node_names: &[String],
     options: &MaterializeOptions,
 ) -> Result<ScriptNodeCleanStageResult, SceneToolError> {
-    let targets = node_names
-        .iter()
-        .cloned()
-        .map(|node_name| ExecutionCleanTarget::ScriptNode { node_name })
-        .collect::<Vec<_>>();
-    let staged = stage_clean_execution_targets_with_options(input_path, &targets, options)?;
-    Ok(ScriptNodeCleanStageResult {
-        preview: ScriptNodeCleanPreview {
-            input_path: staged.preview.input_path,
-            scene_format: staged.preview.scene_format,
-            operation_mode: staged.preview.operation_mode,
-            validation_state: staged.preview.validation_state,
-            removed_nodes: staged.preview.removed_script_nodes,
-        },
-        artifact: staged.artifact,
-    })
+    PatchPlanner::new(options.clone()).stage_remove_script_nodes_by_name(input_path, node_names)
 }
 
 pub fn stage_remove_script_nodes_by_name(
@@ -573,20 +546,11 @@ pub fn remove_script_nodes_by_name_with_options(
     node_names: &[String],
     options: &MaterializeOptions,
 ) -> Result<ScriptNodeCleanResult, SceneToolError> {
-    let targets = node_names
-        .iter()
-        .cloned()
-        .map(|node_name| ExecutionCleanTarget::ScriptNode { node_name })
-        .collect::<Vec<_>>();
-    let result = clean_execution_targets_with_options(input_path, output_path, &targets, options)?;
-    Ok(ScriptNodeCleanResult {
-        input_path: result.input_path,
-        output_path: result.output_path,
-        scene_format: result.scene_format,
-        operation_mode: result.operation_mode,
-        validation_state: result.validation_state,
-        removed_nodes: result.removed_script_nodes,
-    })
+    PatchPlanner::new(options.clone()).remove_script_nodes_by_name(
+        input_path,
+        output_path,
+        node_names,
+    )
 }
 
 pub fn remove_script_nodes_by_name(

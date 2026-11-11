@@ -25,6 +25,7 @@ impl PathOwnerDeletePreview {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathOwnerDeleteStageResult {
+    pub changes: super::SceneEditChanges,
     pub preview: PathOwnerDeletePreview,
     pub artifact: StagedSceneArtifact,
 }

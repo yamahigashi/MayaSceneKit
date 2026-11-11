@@ -5,6 +5,7 @@ use super::{OperationMode, SceneFormat, ValidationState, staging::StagedSceneArt
 /// Result of removing script nodes from a scene.
 #[derive(Debug, Clone)]
 pub struct ScriptNodeCleanResult {
+    pub changes: super::SceneEditChanges,
     /// Original scene path.
     pub input_path: PathBuf,
     /// Output scene path.
@@ -51,6 +52,7 @@ impl ScriptNodeCleanPreview {
 /// Non-destructive staged cleanup result owned by the edit layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptNodeCleanStageResult {
+    pub changes: super::SceneEditChanges,
     /// Preview data for the cleanup operation.
     pub preview: ScriptNodeCleanPreview,
     /// Staged output bytes that can be saved later.

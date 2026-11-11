@@ -30,13 +30,12 @@ impl PatchPlanner {
         rules: &[PathReplaceRule],
     ) -> Result<PathReplaceStageResult, SceneToolError> {
         let report = self.collect_scene_paths_report(input_path.as_ref())?;
-        let compiled = super::replace_rules::CompiledPreviewReplaceRules::compile(rules)?;
-        let applied = self.materialize_replaced_scene_bytes(&input_path, rules)?;
+        let applied = self.apply_path_rules_in_path(&input_path, rules)?;
         let preview = super::preview::matched_path_preview(
-            self.path_candidate_preview_from_application(&report, &compiled, Some(&applied)),
+            self.path_candidate_preview_from_application(&report, &applied),
         );
         Ok(PathReplaceStageResult {
-            changes: applied.changes,
+            changes: applied.changes.summary,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(
@@ -69,11 +68,10 @@ impl PatchPlanner {
         overrides: &[PathReplaceOverride],
     ) -> Result<PathReplaceStageResult, SceneToolError> {
         let targets = super::replace_rules::resolve_targeted_overrides(report, overrides)?;
-        let applied =
-            self.materialize_replaced_scene_bytes_from_overrides_in_report(report, overrides)?;
-        let preview = self.path_override_preview_from_application(report, &targets, Some(&applied));
+        let applied = self.apply_path_overrides_in_report(report, &targets)?;
+        let preview = self.path_override_preview_from_application(report, &targets, &applied);
         Ok(PathReplaceStageResult {
-            changes: applied.changes,
+            changes: applied.changes.summary,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(
@@ -102,6 +100,7 @@ impl PatchPlanner {
         }
         write_bytes_atomic(dst, &staged.artifact.bytes)?;
         Ok(ScriptNodeCleanResult {
+            changes: staged.changes,
             input_path: staged.preview.input_path.clone(),
             output_path: dst.to_path_buf(),
             scene_format: staged.preview.scene_format,
@@ -124,6 +123,7 @@ impl PatchPlanner {
         }
         write_bytes_atomic(dst, &staged.artifact.bytes)?;
         Ok(ScriptNodeCleanResult {
+            changes: staged.changes,
             input_path: staged.preview.input_path.clone(),
             output_path: dst.to_path_buf(),
             scene_format: staged.preview.scene_format,
@@ -137,9 +137,13 @@ impl PatchPlanner {
         &self,
         input_path: impl AsRef<Path>,
     ) -> Result<ScriptNodeCleanStageResult, SceneToolError> {
-        let preview = self.preview_remove_script_nodes(&input_path)?;
-        let bytes = self.materialize_clean_scene_bytes(&input_path)?;
+        let src = input_path.as_ref();
+        let (format, applied) = self.apply_script_clean_in_path(src)?;
+        let preview = self.script_preview_from_application(src, format, &applied);
+        let bytes = applied.bytes;
+        let changes = applied.changes.scene;
         Ok(ScriptNodeCleanStageResult {
+            changes,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(
@@ -161,10 +165,18 @@ impl PatchPlanner {
         input_path: impl AsRef<Path>,
         node_names: &[String],
     ) -> Result<ScriptNodeCleanStageResult, SceneToolError> {
-        let preview = self.preview_remove_script_nodes_by_name(&input_path, node_names)?;
-        let normalized = super::clean::normalize_clean_target_names(node_names)?;
-        let bytes = self.materialize_clean_scene_bytes_by_name(&input_path, &normalized)?;
+        let src = input_path.as_ref();
+        let targets = node_names
+            .iter()
+            .cloned()
+            .map(|node_name| ExecutionCleanTarget::ScriptNode { node_name })
+            .collect::<Vec<_>>();
+        let (format, applied) = self.apply_execution_clean_in_path(src, &targets)?;
+        let preview = self.script_preview_from_application(src, format, &applied);
+        let bytes = applied.bytes;
+        let changes = applied.changes.scene;
         Ok(ScriptNodeCleanStageResult {
+            changes,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(
@@ -194,6 +206,7 @@ impl PatchPlanner {
         }
         write_bytes_atomic(dst, &staged.artifact.bytes)?;
         Ok(ExecutionCleanResult {
+            changes: staged.changes,
             input_path: staged.preview.input_path.clone(),
             output_path: dst.to_path_buf(),
             scene_format: staged.preview.scene_format,
@@ -210,10 +223,13 @@ impl PatchPlanner {
         input_path: impl AsRef<Path>,
         targets: &[ExecutionCleanTarget],
     ) -> Result<ExecutionCleanStageResult, SceneToolError> {
-        let preview = self.preview_clean_execution_targets(&input_path, targets)?;
-        let bytes =
-            self.materialize_execution_clean_scene_bytes(&input_path, &preview.cleaned_targets)?;
+        let src = input_path.as_ref();
+        let (format, applied) = self.apply_execution_clean_in_path(src, targets)?;
+        let preview = self.clean_preview_from_application(src, format, &applied);
+        let bytes = applied.bytes;
+        let changes = applied.changes.scene;
         Ok(ExecutionCleanStageResult {
+            changes,
             artifact: StagedSceneArtifact {
                 input_path: preview.input_path.clone(),
                 suggested_output_path: super::replace_rules::suggested_path_output(

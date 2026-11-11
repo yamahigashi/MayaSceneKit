@@ -71,12 +71,14 @@ impl ExecutionCleanPreview {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionCleanStageResult {
+    pub changes: super::SceneEditChanges,
     pub preview: ExecutionCleanPreview,
     pub artifact: StagedSceneArtifact,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionCleanResult {
+    pub changes: super::SceneEditChanges,
     pub input_path: PathBuf,
     pub output_path: PathBuf,
     pub scene_format: SceneFormat,

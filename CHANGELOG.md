@@ -33,6 +33,12 @@ All notable changes to this project will be documented in this file.
   unterminated_tail_from retain their values, and the three new fields are null.
   CLI skip lines append the three MB reason counters.
 
+- Clean and owner deletion previews and staged outputs now use the same application
+  result. cleaned_targets includes only targets that performed a change; targets
+  consumed by preceding deletions are covered. removed_count follows the actual
+  removal list. A named clean or owner request missing from the original input
+  now fails even if other requested targets exist, and produces no artifact.
+
 - MEL audit now emits mel_system, mel_popen, mel_file_open, mel_file_write,
   mel_evalecho, mel_callpython, mel_source, mel_loadplugin, and mel_sysfile
   finding codes in JSON for dangerous command and function calls. Read-only

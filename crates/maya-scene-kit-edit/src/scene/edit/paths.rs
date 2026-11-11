@@ -1,29 +1,97 @@
-use super::*;
+use super::{application::Applied, *};
 use crate::scene::edit::materialize::unsupported_scene_format;
 
-pub(super) struct AppliedPathReplacement {
-    pub bytes: Vec<u8>,
-    pub changes: crate::scene::PathReplaceChanges,
+pub(super) struct PathApplicationChanges {
+    pub summary: crate::scene::PathReplaceChanges,
     pub paths: Vec<rewrite::MaPathReplaceChange>,
     pub mb_paths: Vec<crate::mb::rewrite::MbPathChange>,
+}
+
+pub(super) type AppliedPathReplacement = Applied<PathApplicationChanges>;
+
+enum PathPlan<'a> {
+    Rules(&'a [PathReplaceRule]),
+    Overrides(&'a [(usize, String)]),
 }
 
 impl From<rewrite::MaPathReplaceResult> for AppliedPathReplacement {
     fn from(result: rewrite::MaPathReplaceResult) -> Self {
         Self {
             bytes: result.bytes,
-            changes: crate::scene::PathReplaceChanges {
-                replacement_count: result.replacement_count,
-                skipped: Some(Box::new(result.skipped)),
+            changes: PathApplicationChanges {
+                summary: crate::scene::PathReplaceChanges {
+                    replacement_count: result.replacement_count,
+                    skipped: Some(Box::new(result.skipped)),
+                },
+                paths: result.paths,
+                mb_paths: Vec::new(),
             },
-            paths: result.paths,
-            mb_paths: Vec::new(),
         }
     }
 }
 
 pub(super) fn ma_replace_error(error: rewrite::MaPathReplaceError) -> SceneToolError {
     SceneToolError::Message(error.to_string())
+}
+
+fn apply_paths(
+    bytes: Vec<u8>,
+    input_path: &Path,
+    format: SceneFormat,
+    plan: PathPlan<'_>,
+) -> Result<AppliedPathReplacement, SceneToolError> {
+    if let PathPlan::Rules(rules) = &plan {
+        super::replace_rules::validate_replace_rules(rules)?;
+    }
+    if format == SceneFormat::Ma {
+        return match plan {
+            PathPlan::Rules(rules) => rewrite::replace_raw_scene_paths_in_ma(
+                &bytes,
+                &super::replace_rules::ma_replace_rules(rules),
+            ),
+            PathPlan::Overrides(overrides) => {
+                rewrite::replace_raw_scene_paths_in_ma_by_index(&bytes, overrides)
+            }
+        }
+        .map(Into::into)
+        .map_err(ma_replace_error);
+    }
+    if format == SceneFormat::Mb {
+        let mb = crate::mb::parse_bytes(bytes)?;
+        let (bytes, changes) = match plan {
+            PathPlan::Rules(rules) => {
+                let rules = super::replace_rules::ma_replace_rules(rules)
+                    .into_iter()
+                    .map(|rule| MbPathReplaceRule {
+                        from: rule.from,
+                        to: rule.to,
+                        mode: rule.mode,
+                    })
+                    .collect::<Vec<_>>();
+                crate::mb::replace_scene_paths_in_mb(mb.data(), mb.root(), &rules)
+            }
+            PathPlan::Overrides(overrides) => {
+                crate::mb::rewrite::replace_scene_paths_in_mb_by_index(
+                    mb.data(),
+                    mb.root(),
+                    overrides,
+                )
+            }
+        }
+        .map_err(super::clean::mb_rewrite_error)?;
+        return Ok(Applied {
+            bytes,
+            changes: PathApplicationChanges {
+                summary: crate::scene::PathReplaceChanges {
+                    replacement_count: changes.replacement_count,
+                    skipped: Some(Box::new(changes.skipped)),
+                },
+                paths: Vec::new(),
+                mb_paths: changes.paths,
+            },
+        });
+    }
+    Err(unsupported_scene_format(input_path, format))
 }
 
 impl PatchPlanner {
@@ -35,101 +103,35 @@ impl PatchPlanner {
         collect_scene_paths_with_options(src, PathKind::All, self.options.load_options())
     }
 
-    pub(super) fn materialize_replaced_scene_bytes(
+    pub(super) fn apply_path_rules_in_path(
         &self,
         input_path: impl AsRef<Path>,
         rules: &[PathReplaceRule],
     ) -> Result<AppliedPathReplacement, SceneToolError> {
         self.options.reject_if_not_forensic()?;
         let src = input_path.as_ref();
-        let scene_format = ops::detect_scene_format(src)?;
-
-        if scene_format == SceneFormat::Ma {
-            let original = fs::read(src)?;
-            let ma_rules = super::replace_rules::ma_replace_rules(rules);
-            return rewrite::replace_raw_scene_paths_in_ma(&original, &ma_rules)
-                .map(Into::into)
-                .map_err(ma_replace_error);
-        }
-
-        if scene_format == SceneFormat::Mb {
-            let mb = parse_file(src)?;
-            let mb_rules = rules
-                .iter()
-                .map(|rule| MbPathReplaceRule {
-                    from: rule.from.clone(),
-                    to: rule.to.clone(),
-                    mode: match rule.mode {
-                        PathReplaceMode::Literal => {
-                            maya_scene_kit_formats::ma::types::PathReplaceMode::Literal
-                        }
-                        PathReplaceMode::Regex => {
-                            maya_scene_kit_formats::ma::types::PathReplaceMode::Regex
-                        }
-                    },
-                })
-                .collect::<Vec<_>>();
-            let (rewritten, replacement_count) =
-                crate::mb::replace_scene_paths_in_mb(mb.data(), mb.root(), &mb_rules)
-                    .map_err(super::clean::mb_rewrite_error)?;
-            return Ok(AppliedPathReplacement {
-                bytes: rewritten,
-                changes: crate::scene::PathReplaceChanges {
-                    replacement_count: replacement_count.replacement_count,
-                    skipped: Some(Box::new(replacement_count.skipped)),
-                },
-                paths: Vec::new(),
-                mb_paths: replacement_count.paths,
-            });
-        }
-
-        Err(unsupported_scene_format(src, scene_format))
+        let format = ops::detect_scene_format(src)?;
+        let bytes = fs::read(src)?;
+        apply_paths(bytes, src, format, PathPlan::Rules(rules))
     }
 
-    pub(super) fn materialize_replaced_scene_bytes_from_overrides_in_report(
+    pub(super) fn apply_path_overrides_in_report(
         &self,
         report: &ScenePathsReport,
-        overrides: &[PathReplaceOverride],
+        targets: &[super::replace_rules::ResolvedPathOverride],
     ) -> Result<AppliedPathReplacement, SceneToolError> {
         self.options.reject_if_not_forensic()?;
-        let src = report.scene_path.as_path();
-        let targets = super::replace_rules::resolve_targeted_overrides(report, overrides)?;
-        let indexed_replacements = targets
+        let overrides = targets
             .iter()
             .map(|target| (target.entry_index, target.after_value.clone()))
             .collect::<Vec<_>>();
-
-        if report.scene_format == SceneFormat::Ma {
-            let original = fs::read(src)?;
-            return rewrite::replace_raw_scene_paths_in_ma_by_index(
-                &original,
-                &indexed_replacements,
-            )
-            .map(Into::into)
-            .map_err(ma_replace_error);
-        }
-
-        if report.scene_format == SceneFormat::Mb {
-            let mb = parse_file(src)?;
-            let (rewritten, replacement_count) =
-                crate::mb::rewrite::replace_scene_paths_in_mb_by_index(
-                    mb.data(),
-                    mb.root(),
-                    &indexed_replacements,
-                )
-                .map_err(super::clean::mb_rewrite_error)?;
-            return Ok(AppliedPathReplacement {
-                bytes: rewritten,
-                changes: crate::scene::PathReplaceChanges {
-                    replacement_count: replacement_count.replacement_count,
-                    skipped: Some(Box::new(replacement_count.skipped)),
-                },
-                paths: Vec::new(),
-                mb_paths: replacement_count.paths,
-            });
-        }
-
-        Err(unsupported_scene_format(src, report.scene_format))
+        let bytes = fs::read(&report.scene_path)?;
+        apply_paths(
+            bytes,
+            &report.scene_path,
+            report.scene_format,
+            PathPlan::Overrides(&overrides),
+        )
     }
 }
 
