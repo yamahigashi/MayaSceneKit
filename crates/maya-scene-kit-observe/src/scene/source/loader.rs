@@ -738,6 +738,13 @@ impl ObservationBundle {
                         ValidationState::Partial
                     }
                 });
+                let validation_state = if validation_state == ValidationState::Validated
+                    && data.snapshot.identity.stability() == snapshot::ReadStability::Unstable
+                {
+                    ValidationState::Partial
+                } else {
+                    validation_state
+                };
                 Ok(Self {
                     source_len,
                     scene_path: path.to_path_buf(),
@@ -779,7 +786,11 @@ impl ObservationBundle {
                     },
                 };
                 let validation_state = if validation_state == ValidationState::Validated
-                    && !matches!(session.completeness, crate::mb::MbCompleteness::Complete)
+                    && (!matches!(session.completeness, crate::mb::MbCompleteness::Complete)
+                        || (input.intent == SceneReadIntent::Semantic
+                            && (session.section_state() == crate::mb::MbSectionScanState::Stopped
+                                || session.snapshot.identity.stability()
+                                    == snapshot::ReadStability::Unstable)))
                 {
                     ValidationState::Partial
                 } else {

@@ -550,3 +550,96 @@ fn unstable_reads_do_not_create_cache_snapshots() {
         }
     }
 }
+
+#[test]
+fn semantic_stopped_section_scan_is_partial() {
+    use crate::scene::{ObservedSceneSnapshot, ValidationState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.mb");
+    let mut bytes =
+        b"FOR4\0\0\0\x2cMayaFOR4\0\0\0\x20HEADFOR8\0\0\0\x14TESTDATA\0\0\0\x01X".to_vec();
+    bytes.extend_from_slice(&[0; 7]);
+    std::fs::write(&path, bytes).unwrap();
+    let options = LoadOptions::default();
+    let observation = Loader::new(options.clone()).observe_path(&path).unwrap();
+    assert_eq!(observation.validation_state(), ValidationState::Partial);
+    let catalog = observation.observed_execution_catalog(96).unwrap();
+    assert!(catalog.coverage_issues.iter().any(|issue| issue.origin.is_none()
+        && matches!(&issue.detail, ExecutionCoverageIssueDetail::UnexplainedRawMbPayload { reason }
+            if reason == "MB section scan stopped")));
+    let snapshot = ObservedSceneSnapshot::from_observation(&observation, &options).unwrap();
+    assert_eq!(
+        snapshot.paths_report.validation_state,
+        ValidationState::Partial
+    );
+}
+
+#[test]
+fn unstable_ma_reads_are_partial_for_every_intent() {
+    use crate::scene::ValidationState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.ma");
+    std::fs::write(&path, EXAMPLE).unwrap();
+    for intent in 0..4 {
+        let len = EXAMPLE.len() as u64;
+        let _reset = supply(
+            vec![EXAMPLE.to_vec()],
+            vec![Some((len, None)), Some((len + 1, None))],
+        );
+        let loader = Loader::new(LoadOptions::default());
+        let observation = match intent {
+            0 => loader.observe_path(&path),
+            1 => loader.observe_analysis_path(&path),
+            2 => loader.observe_paths_path(&path),
+            _ => loader.observe_path_without_retained_ma_bytes(&path),
+        }
+        .unwrap();
+        assert_eq!(observation.validation_state(), ValidationState::Partial);
+        if intent >= 2 {
+            continue;
+        }
+        assert!(
+            observation
+                .observed_execution_catalog(96)
+                .unwrap()
+                .coverage_issues
+                .iter()
+                .any(|issue| issue.origin.is_none()
+                    && matches!(&issue.detail,
+                ExecutionCoverageIssueDetail::TopLevelDiagnostics { diagnostic }
+                    if diagnostic == "scene file changed while it was being read"))
+        );
+    }
+}
+
+#[test]
+fn unstable_semantic_mb_read_is_partial() {
+    use crate::scene::ValidationState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Example.mb");
+    let bytes = b"FOR4\0\0\0\x04Maya";
+    std::fs::write(&path, bytes).unwrap();
+    let len = bytes.len() as u64;
+    let _reset = supply(
+        vec![bytes.to_vec()],
+        vec![Some((len, None)), Some((len + 1, None))],
+    );
+    let observation = Loader::new(LoadOptions::default())
+        .observe_path(&path)
+        .unwrap();
+    assert_eq!(observation.validation_state(), ValidationState::Partial);
+    assert!(
+        observation
+            .observed_execution_catalog(96)
+            .unwrap()
+            .coverage_issues
+            .iter()
+            .any(|issue| issue.origin.is_none()
+                && matches!(&issue.detail,
+            ExecutionCoverageIssueDetail::TopLevelDiagnostics { diagnostic }
+                if diagnostic == "scene file changed while it was being read"))
+    );
+}
