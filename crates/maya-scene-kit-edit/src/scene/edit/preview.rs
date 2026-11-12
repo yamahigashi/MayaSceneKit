@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use super::*;
+use crate::scene::PathReplaceSkipReason;
 
 impl PatchPlanner {
     pub fn preview_replace_scene_paths(
@@ -42,12 +45,14 @@ impl PatchPlanner {
             .iter()
             .enumerate()
             .map(|(entry_index, entry)| {
-                let (after_value, replacement_count) = if report.scene_format == SceneFormat::Mb {
-                    mb_preview_change(applied, entry_index, &entry.value)
-                } else {
-                    changes.take(entry)
-                };
+                let (after_value, replacement_count, skipped) =
+                    if report.scene_format == SceneFormat::Mb {
+                        mb_preview_change(applied, entry_index, &entry.value)
+                    } else {
+                        changes.take(entry)
+                    };
                 PathReplaceCandidateItem {
+                    skipped,
                     entry_index,
                     node_type: entry.node_type.clone(),
                     node_name: entry.node_name.clone(),
@@ -104,13 +109,14 @@ impl PatchPlanner {
         let items: Vec<_> = targets
             .iter()
             .map(|target| {
-                let (after_value, replacement_count) = if report.scene_format == SceneFormat::Mb {
-                    mb_preview_change(applied, target.entry_index, &target.entry.value)
-                } else {
-                    changes.take(&target.entry)
-                };
+                let (after_value, replacement_count, skipped) =
+                    if report.scene_format == SceneFormat::Mb {
+                        mb_preview_change(applied, target.entry_index, &target.entry.value)
+                    } else {
+                        changes.take(&target.entry)
+                    };
                 PathReplacePreviewItem {
-                    skipped: Default::default(),
+                    skipped,
                     entry_index: target.entry_index,
                     node_type: target.entry.node_type.clone(),
                     node_name: target.entry.node_name.clone(),
@@ -170,13 +176,18 @@ impl PatchPlanner {
     }
 }
 
-pub(super) fn matched_path_preview(preview: PathReplaceCandidatePreview) -> PathReplacePreview {
+pub(super) fn matched_path_preview(mut preview: PathReplaceCandidatePreview) -> PathReplacePreview {
+    preview.items.retain(|item| item.replacement_count > 0);
+    staged_path_preview(preview)
+}
+
+pub(super) fn staged_path_preview(preview: PathReplaceCandidatePreview) -> PathReplacePreview {
     let items = preview
         .items
         .into_iter()
-        .filter(|item| item.replacement_count > 0)
+        .filter(|item| item.replacement_count > 0 || !item.skipped.is_empty())
         .map(|item| PathReplacePreviewItem {
-            skipped: Default::default(),
+            skipped: item.skipped,
             entry_index: item.entry_index,
             node_type: item.node_type,
             node_name: item.node_name,
@@ -229,7 +240,7 @@ impl<'a> MaPreviewChanges<'a> {
     fn take(
         &mut self,
         entry: &'a maya_scene_kit_observe::scene::paths::ScenePathEntry,
-    ) -> (String, usize) {
+    ) -> (String, usize, BTreeMap<PathReplaceSkipReason, usize>) {
         self.entries
             .get_mut(&(
                 entry.node_type.as_str(),
@@ -239,8 +250,25 @@ impl<'a> MaPreviewChanges<'a> {
             ))
             .and_then(std::collections::VecDeque::pop_front)
             .map_or_else(
-                || (entry.value.clone(), 0),
-                |change| (change.after_value.clone(), change.replacement_count),
+                || (entry.value.clone(), 0, Default::default()),
+                |change| {
+                    let mut skipped = BTreeMap::new();
+                    for range in change
+                        .skipped_ranges
+                        .iter()
+                        .filter(|range| range.replacement_requested)
+                    {
+                        for (reason, count) in super::application::path_skip_counts(&range.skipped)
+                        {
+                            *skipped.entry(reason).or_default() += count;
+                        }
+                    }
+                    (
+                        change.after_value.clone(),
+                        change.replacement_count,
+                        skipped,
+                    )
+                },
             )
     }
 }
@@ -249,18 +277,32 @@ fn mb_preview_change(
     applied: &super::paths::AppliedPathReplacement,
     entry_index: usize,
     before: &str,
-) -> (String, usize) {
+) -> (String, usize, BTreeMap<PathReplaceSkipReason, usize>) {
     let mut after = before.to_owned();
     let mut count = 0;
+    let mut skipped = BTreeMap::new();
     for change in &applied.changes.mb_paths {
-        if change.entry_index == Some(entry_index)
-            && change.status == crate::mb::rewrite::MbPathStatus::Applied
-        {
-            count += 1;
-            if let Some(value) = &change.after_value {
-                after.clone_from(value);
+        if change.entry_index != Some(entry_index) || !change.replacement_requested {
+            continue;
+        }
+        use crate::mb::rewrite::MbPathStatus;
+        let reason = match change.status {
+            MbPathStatus::Applied => {
+                count += 1;
+                if let Some(value) = &change.after_value {
+                    after.clone_from(value);
+                }
+                None
             }
+            MbPathStatus::Unchanged => None,
+            MbPathStatus::Undecodable => Some(PathReplaceSkipReason::NonUtf8),
+            MbPathStatus::PayloadRejected => Some(PathReplaceSkipReason::PayloadRejected),
+            MbPathStatus::UnmatchedLocator => Some(PathReplaceSkipReason::UnmatchedLocator),
+            MbPathStatus::DuplicateRequest => Some(PathReplaceSkipReason::DuplicateRequest),
+        };
+        if let Some(reason) = reason {
+            *skipped.entry(reason).or_default() += 1;
         }
     }
-    (after, count)
+    (after, count, skipped)
 }

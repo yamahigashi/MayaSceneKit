@@ -31,7 +31,7 @@ impl PatchPlanner {
     ) -> Result<PathReplaceStageResult, SceneToolError> {
         let report = self.collect_scene_paths_report(input_path.as_ref())?;
         let applied = self.apply_path_rules_in_path(&input_path, rules)?;
-        let preview = super::preview::matched_path_preview(
+        let preview = super::preview::staged_path_preview(
             self.path_candidate_preview_from_application(&report, &applied),
         );
         Ok(PathReplaceStageResult {

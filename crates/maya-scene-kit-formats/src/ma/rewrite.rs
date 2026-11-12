@@ -27,6 +27,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct MaPathReplaceChange {
+    pub skipped_ranges: Vec<MaPathRangeSkip>,
     pub entry: Option<ScenePathEntry>,
     pub before_value: String,
     pub after_value: String,
@@ -692,14 +693,11 @@ fn replace_ascii_path_bytes(
     Some(result)
 }
 
+#[derive(Debug, Clone)]
 pub struct MaPathRangeSkip {
+    pub replacement_requested: bool,
     pub range: Range<usize>,
     pub skipped: PathReplaceSkips,
-}
-
-struct MaPathCandidateApplication {
-    change: MaPathReplaceChange,
-    skipped_ranges: Vec<MaPathRangeSkip>,
 }
 
 fn apply_path_candidate(
@@ -710,7 +708,7 @@ fn apply_path_candidate(
     override_value: Option<&str>,
     skipped: &mut PathReplaceSkips,
     edits: &mut Vec<MaByteEdit>,
-) -> MaPathCandidateApplication {
+) -> MaPathReplaceChange {
     let decoded: Vec<_> = candidate
         .ranges
         .iter()
@@ -865,18 +863,17 @@ fn apply_path_candidate(
         skipped.crosses_concat_boundary += range_skipped.crosses_concat_boundary;
         if range_skipped.total() > 0 {
             skipped_ranges.push(MaPathRangeSkip {
+                replacement_requested: local_match[i] || crossed[i],
                 range: candidate.ranges[i].clone(),
                 skipped: range_skipped,
             });
         }
     }
-    MaPathCandidateApplication {
-        change: MaPathReplaceChange {
-            entry: candidate.entry,
-            before_value: original.concat(),
-            after_value: values.concat(),
-            replacement_count: count,
-        },
+    MaPathReplaceChange {
+        entry: candidate.entry,
+        before_value: original.concat(),
+        after_value: values.concat(),
+        replacement_count: count,
         skipped_ranges,
     }
 }
@@ -970,8 +967,8 @@ fn replace_raw_scene_paths_in_ma_with_rules(
             &mut result.skipped,
             &mut edits,
         );
-        result.replacement_count += applied.change.replacement_count;
-        result.paths.push(applied.change);
+        result.replacement_count += applied.replacement_count;
+        result.paths.push(applied);
     }
     result.bytes = apply_path_value_edits(data, edits);
     Ok(result)

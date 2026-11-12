@@ -1119,12 +1119,18 @@ impl GuiShell {
                     && audit_file_state == GuiFileState::read(&output_path).ok();
                 match promotion {
                     SavePromotion::ToAscii => {}
-                    SavePromotion::SceneEdits(reports) => {
-                        if saved_file_is_current && reports.audit_plan_fingerprint.as_deref() == Some(shell.audit_plan_fingerprint.as_str()) {
-                            if let Some(report) = reports.audit_report {
-                                shell.rows[index].set_audit_report(Some(report), audit_file_state);
-                                shell.rows[index].audit_plan_fingerprint = reports.audit_plan_fingerprint;
-                            }
+                    SavePromotion::Unanalyzed => {
+                        shell.rows[index].mark_analysis_stale();
+                        if !saved_file_is_current {
+                            shell.rows[index].set_audit_report(None, None);
+                            shell.rows[index].audit_plan_fingerprint = None;
+                        }
+                    }
+                    SavePromotion::Reports(reports) => {
+                        if saved_file_is_current && reports.audit_plan_fingerprint.as_deref() == Some(shell.audit_plan_fingerprint.as_str())
+                            && let Some(report) = reports.audit_report {
+                            shell.rows[index].set_audit_report(Some(report), audit_file_state);
+                            shell.rows[index].audit_plan_fingerprint = reports.audit_plan_fingerprint;
                             if let Some(mode) = reports.audit_mode { shell.rows[index].analyzed_audit_mode = Some(mode); }
                         } else {
                             shell.rows[index].set_audit_report(None, None);
@@ -1134,13 +1140,10 @@ impl GuiShell {
                         }
                         if let Some(report) = reports.dump_report.filter(|_| saved_file_is_current) { shell.rows[index].dump_report = Some(report); }
                     }
-                    SavePromotion::Unanalyzed => shell.rows[index].mark_analysis_stale(),
                 }
                 if !is_ascii {
                     if !saved_file_is_current {
                         shell.rows[index].dump_report = None;
-                        shell.rows[index].set_audit_report(None, None);
-                        shell.rows[index].audit_plan_fingerprint = None;
                     }
                     if saved_paths_report.is_none() || !saved_file_is_current { shell.rows[index].mark_analysis_stale(); }
                     shell.rows[index].paths_report = saved_paths_report.filter(|_| saved_file_is_current);

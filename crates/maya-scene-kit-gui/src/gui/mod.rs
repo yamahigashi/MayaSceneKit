@@ -1789,17 +1789,17 @@ fn ascii_report_same(
 enum SavePromotion {
     ToAscii,
     Unanalyzed,
-    SceneEdits(StagedReports),
+    Reports(StagedReports),
 }
 
 impl SceneRow {
     fn save_promotion(&self) -> SavePromotion {
         match &self.staged {
-            Staged::SceneEdits { staged_reports, .. } => {
-                SavePromotion::SceneEdits(staged_reports.as_ref().clone())
-            }
             Staged::ToAscii { .. } => SavePromotion::ToAscii,
-            _ => SavePromotion::Unanalyzed,
+            Staged::None => SavePromotion::Unanalyzed,
+            Staged::Replace { .. } | Staged::SceneEdits { .. } => {
+                SavePromotion::Reports(self.staged.reports().clone())
+            }
         }
     }
 }

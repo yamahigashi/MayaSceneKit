@@ -33,6 +33,7 @@ pub enum MbPathStatus {
 
 #[derive(Debug, Clone)]
 pub struct MbPathChange {
+    pub replacement_requested: bool,
     pub locator: Option<MbPayloadLocator>,
     pub entry_index: Option<usize>,
     pub before_value: Option<String>,
@@ -164,6 +165,7 @@ pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
     for (index, _) in replacements {
         if !seen.insert(index) {
             changes.push(MbPathChange {
+                replacement_requested: true,
                 locator: None,
                 entry_index: Some(*index),
                 before_value: None,
@@ -181,6 +183,7 @@ pub fn replace_scene_paths_in_mb_by_index_cow<'a>(
             })
         }) {
             changes.push(MbPathChange {
+                replacement_requested: true,
                 locator: None,
                 entry_index: Some(*index),
                 before_value: None,
@@ -279,6 +282,7 @@ fn replace_mb_paths<'a>(
                 })
             }) {
                 changes.push(MbPathChange {
+                    replacement_requested: true,
                     locator: Some(MbPayloadLocator {
                         form: key.origin.to_ascii_uppercase(),
                         node_offset: key.outer_offset,
@@ -400,6 +404,7 @@ fn rewrite_path_child(
             Replacement::Rules(_) => None,
         };
         let mut change = MbPathChange {
+            replacement_requested: target.is_some(),
             locator: Some(locator),
             entry_index: None,
             before_value: None,
@@ -449,6 +454,7 @@ fn rewrite_path_child(
             changes.push(change);
             continue;
         }
+        change.replacement_requested = true;
         let mut rewritten = raw.to_vec();
         rewritten.splice(range, after.bytes());
         if !parsed.can_encode_payload(index, rewritten.len()) || !accept(index, rewritten.len()) {

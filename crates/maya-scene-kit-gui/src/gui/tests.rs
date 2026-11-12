@@ -15993,7 +15993,7 @@ fn context_replace_composition_case(
 #[path = "staged_tests.rs"]
 mod staged_tests;
 
-fn assert_mixed_preview_skip_reasons(with_report: bool) {
+fn assert_mixed_preview_skip_reasons(with_report: bool, composed: bool) {
     use maya_scene_kit_edit::scene::{
         CompositeSceneEditsPreview, PathReplaceRule, PathReplaceSkipReason, SceneEditChange,
         SceneEditChanges, SceneEditIntent, SceneEditLocator, SceneEditPlan, SceneEditStatus,
@@ -16089,6 +16089,7 @@ fn assert_mixed_preview_skip_reasons(with_report: bool) {
         }
     })
     .collect();
+    let replace_preview = replacement.preview.clone();
     let staged = CompositeSceneEditsStageResult {
         changes: SceneEditChanges {
             records,
@@ -16107,7 +16108,11 @@ fn assert_mixed_preview_skip_reasons(with_report: bool) {
         },
         artifact: replacement.artifact,
     };
-    let preview = super::path::composed_replace_preview(&plan, &staged);
+    let preview = if composed {
+        super::path::composed_replace_preview(&plan, &staged)
+    } else {
+        replace_preview
+    };
     assert_eq!(preview.matched_count, 2);
     assert_eq!(preview.applied_count, 2);
     assert_eq!(preview.items[0].replacement_count, 1);
@@ -16170,10 +16175,16 @@ fn assert_mixed_preview_skip_reasons(with_report: bool) {
 
 #[test]
 fn composed_preview_mixed_entry_shows_skip_reasons() {
-    assert_mixed_preview_skip_reasons(false);
+    assert_mixed_preview_skip_reasons(false, true);
 }
 
 #[test]
 fn report_preview_mixed_entry_shows_skip_reasons() {
-    assert_mixed_preview_skip_reasons(true);
+    assert_mixed_preview_skip_reasons(true, true);
+}
+
+#[test]
+fn replace_only_preview_mixed_entry_shows_skip_reasons() {
+    assert_mixed_preview_skip_reasons(false, false);
+    assert_mixed_preview_skip_reasons(true, false);
 }

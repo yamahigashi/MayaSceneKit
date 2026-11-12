@@ -110,6 +110,8 @@ pub struct PathReplaceCandidateItem {
     pub after_value: String,
     /// Number of replacements that would be applied to this value.
     pub replacement_count: usize,
+    /// Counts of skipped literals or payloads, grouped by reason.
+    pub skipped: BTreeMap<PathReplaceSkipReason, usize>,
 }
 
 /// Non-destructive preview of a path rewrite operation.

@@ -1786,7 +1786,7 @@ fn save_changed_file_does_not_promote_reports(cx: &mut TestAppContext) {
             (1, 99),
             RowOperation::Save,
             RowJobResult::Save {
-                promotion: SavePromotion::SceneEdits(reports),
+                promotion: SavePromotion::Reports(reports),
                 observation_error: None,
                 saved_paths_report: paths,
                 replace_changes: None,
@@ -2122,7 +2122,7 @@ fn assert_audit_only_staging(cx: &mut TestAppContext, saved: bool, ascii: bool) 
                     (1, 99),
                     RowOperation::Save,
                     RowJobResult::Save {
-                        promotion: SavePromotion::SceneEdits(StagedReports {
+                        promotion: SavePromotion::Reports(StagedReports {
                             audit_report: Some(report),
                             audit_mode: Some(AuditModePreference::StrictDefault),
                             audit_plan_fingerprint: Some(shell.audit_plan_fingerprint.clone()),
@@ -2280,8 +2280,10 @@ fn saved_mismatched_audit_discards_previous_findings(cx: &mut TestAppContext) {
                     row.selected = selected;
                     let mut dump = row.dump_report.clone().unwrap();
                     dump.script_entries.clear();
+                    let mut staged_audit = row.audit_report.clone().unwrap();
+                    staged_audit.findings.clear();
                     let reports = StagedReports {
-                        audit_report: row.audit_report.clone(),
+                        audit_report: Some(staged_audit.clone()),
                         dump_report: Some(dump.clone()),
                         audit_mode: Some(AuditModePreference::StrictDefault),
                         audit_plan_fingerprint: Some(if matching {
@@ -2298,7 +2300,7 @@ fn saved_mismatched_audit_discards_previous_findings(cx: &mut TestAppContext) {
                         (1, 99),
                         RowOperation::Save,
                         RowJobResult::Save {
-                            promotion: SavePromotion::SceneEdits(reports),
+                            promotion: SavePromotion::Reports(reports),
                             observation_error: None,
                             saved_paths_report: paths,
                             replace_changes: None,
@@ -2318,7 +2320,10 @@ fn saved_mismatched_audit_discards_previous_findings(cx: &mut TestAppContext) {
                     );
                     if matching {
                         let control = row.audit_report.as_ref();
-                        assert!(control.is_some());
+                        assert_eq!(
+                            serde_json::to_value(control).unwrap(),
+                            serde_json::to_value(Some(staged_audit)).unwrap()
+                        );
                     } else {
                         assert!(row.audit_report.is_none());
                         assert!(row.analyzed_audit_mode.is_none());
@@ -2389,4 +2394,171 @@ fn python_coverage_budget_displays_limit_and_surface(cx: &mut TestAppContext) {
             assert!(detail.contains("ExamplePython"), "{detail}");
         });
     }
+}
+
+#[gpui::test]
+fn replace_save_pending_audit_discards_previous_findings(cx: &mut TestAppContext) {
+    for pending in [false, true] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("Example.ma");
+        write_mutation_scene(&path);
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state = test_state(directory.path(), "");
+            shell.state.workspace_auto_analyze = false;
+            let mut row = mutation_row(1, &path);
+            row.selected = false;
+            assert!(row.audit_report.is_some());
+            row.staged = Staged::Replace {
+                source: row
+                    .paths_report
+                    .as_ref()
+                    .and_then(|report| report.source.clone()),
+                overrides: BTreeMap::from([(0, "asset/sample/file.tx".into())]),
+                preview: None,
+                artifact: None,
+            };
+            if pending {
+                row.staged = Staged::SceneEdits {
+                    clean: Default::default(),
+                    owner_delete: Default::default(),
+                    overrides: row.staged.overrides().clone(),
+                    artifact: None,
+                    staged_reports: Box::new(StagedReports {
+                        audit_plan_fingerprint: Some(shell.audit_plan_fingerprint.clone()),
+                        ..Default::default()
+                    }),
+                };
+                row.staged_audit_recheck = Some(super::super::StagedAuditRecheck {
+                    report_generation: 0,
+                    plan_fingerprint: shell.audit_plan_fingerprint.clone(),
+                    status: super::super::StagedAuditRecheckStatus::Pending,
+                });
+            }
+            let promotion = row.save_promotion();
+            let paths = row.paths_report.clone();
+            shell.replace_rows(vec![row]);
+            shell.rows[0].busy = Some((RowOperation::Save, 99));
+            shell.apply_job_result(
+                (1, 99),
+                RowOperation::Save,
+                RowJobResult::Save {
+                    promotion,
+                    observation_error: None,
+                    saved_paths_report: paths,
+                    replace_changes: None,
+                    replace_preview: None,
+                    output_path: path.clone(),
+                    audit_file_state: GuiFileState::read(&path).ok(),
+                },
+                None,
+                window,
+                cx,
+            );
+            let row = &shell.rows[0];
+            assert!(row.audit_report.is_none());
+            assert!(row.audit_plan_fingerprint.is_none());
+            assert!(row.analyzed_audit_mode.is_none());
+            assert!(row.display_audit_report().is_none());
+            assert!(
+                super::super::helpers::build_single_file_table_row(
+                    row,
+                    &shell.state,
+                    &shell.i18n()
+                )
+                .findings
+                .is_empty()
+            );
+        });
+    }
+}
+
+fn assert_source_reports_after_save(cx: &mut TestAppContext, conversion: bool) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join(if conversion {
+        "Example.mb"
+    } else {
+        "Example.ma"
+    });
+    if conversion {
+        fs::write(&path, binary_scene("asset/example/file.tx", true, false)).unwrap();
+    } else {
+        write_mutation_scene(&path);
+    }
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, window, cx| {
+        shell.state = test_state(directory.path(), "");
+        shell.state.workspace_auto_analyze = false;
+        let mut row = mutation_row(1, &path);
+        row.selected = false;
+        row.staged = if conversion {
+            Staged::ToAscii {
+                report: None,
+                artifact: None,
+                destination_source: None,
+            }
+        } else {
+            Staged::None
+        };
+        assert!(row.audit_report.is_some());
+        assert!(row.dump_report.is_some());
+        assert!(row.paths_report.is_some());
+        let paths = row.paths_report.clone();
+        let expected_paths = serde_json::to_value(&paths).unwrap();
+        let audit = serde_json::to_value(&row.audit_report).unwrap();
+        let dump = serde_json::to_value(&row.dump_report).unwrap();
+        let file_state = row.audit_file_state;
+        let fingerprint = row.audit_plan_fingerprint.clone();
+        let mode = row.analyzed_audit_mode;
+        let promotion = row.save_promotion();
+        shell.replace_rows(vec![row]);
+        shell.rows[0].busy = Some((RowOperation::Save, 99));
+        shell.apply_job_result(
+            (1, 99),
+            RowOperation::Save,
+            RowJobResult::Save {
+                promotion,
+                observation_error: None,
+                saved_paths_report: if conversion { None } else { paths },
+                replace_changes: None,
+                replace_preview: None,
+                output_path: if conversion {
+                    path.with_extension("ma")
+                } else {
+                    path.clone()
+                },
+                audit_file_state: if conversion {
+                    None
+                } else {
+                    GuiFileState::read(&path).ok()
+                },
+            },
+            None,
+            window,
+            cx,
+        );
+        let row = &shell.rows[0];
+        assert_eq!(serde_json::to_value(&row.audit_report).unwrap(), audit);
+        assert_eq!(serde_json::to_value(&row.dump_report).unwrap(), dump);
+        assert_eq!(
+            serde_json::to_value(&row.paths_report).unwrap(),
+            expected_paths
+        );
+        assert_eq!(row.audit_file_state, file_state);
+        assert_eq!(row.audit_plan_fingerprint, fingerprint);
+        assert_eq!(
+            row.analyzed_audit_mode,
+            if conversion { mode } else { None }
+        );
+    });
+}
+
+#[gpui::test]
+fn save_without_staged_edits_keeps_previous_reports(cx: &mut TestAppContext) {
+    assert_source_reports_after_save(cx, false);
+}
+
+#[gpui::test]
+fn ascii_save_keeps_source_reports_control(cx: &mut TestAppContext) {
+    assert_source_reports_after_save(cx, true);
 }

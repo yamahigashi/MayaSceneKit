@@ -20,8 +20,27 @@ fn preview_stage_and_save_report_actual_literal_changes_and_skips() {
     let saved = replace_scene_paths(&input, &output, &rules).unwrap();
     assert_eq!(preview.matched_count, 1);
     assert_eq!(preview.items.len(), 1);
+    assert_eq!(stage.preview.items.len(), 3);
     assert_eq!(preview.items[0].replacement_count, 1);
-    assert_eq!(stage.preview, preview);
+    let control = &preview.items[0];
+    assert!(control.skipped.is_empty());
+    assert_eq!(stage.preview.items[1].replacement_count, 0);
+    assert_eq!(stage.preview.items[2].replacement_count, 0);
+    assert_eq!(
+        stage.preview.items[1]
+            .skipped
+            .get(&maya_scene_kit_edit::scene::PathReplaceSkipReason::NonUtf8),
+        Some(&1)
+    );
+    assert_eq!(
+        stage.preview.items[2]
+            .skipped
+            .get(&maya_scene_kit_edit::scene::PathReplaceSkipReason::NonCanonicalEscape),
+        Some(&1)
+    );
+    assert_eq!(stage.preview.matched_count, preview.matched_count);
+    assert_eq!(stage.preview.applied_count, preview.applied_count);
+    assert_eq!(stage.preview.items[0], preview.items[0]);
     assert_eq!(stage.changes.replacement_count, 1);
     let skipped = stage.changes.skipped.as_ref().unwrap();
     assert_eq!(skipped.non_utf8, 1);
@@ -149,4 +168,131 @@ fn duplicate_overrides_are_rejected_for_ascii_and_binary() {
         accepted.is_empty(),
         "duplicate requests accepted: {accepted:?}"
     );
+}
+
+#[test]
+fn replace_stage_preserves_mixed_literal_skip_reasons() {
+    use maya_scene_kit_edit::scene::PathReplaceSkipReason;
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    std::fs::write(&input, b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" (\"asset/example/\" + \"asset\\d/file.tx\");\n").unwrap();
+    let stage = stage_replace_scene_paths(
+        &input,
+        &[PathReplaceRule {
+            from: "asset".into(),
+            to: "Sample".into(),
+            mode: PathReplaceMode::Literal,
+        }],
+    )
+    .unwrap();
+    assert_eq!(stage.preview.matched_count, 1);
+    assert_eq!(stage.preview.applied_count, 1);
+    assert_eq!(stage.preview.items.len(), 1);
+    assert_eq!(stage.preview.items[0].replacement_count, 1);
+    assert_eq!(
+        stage.preview.items[0]
+            .skipped
+            .get(&PathReplaceSkipReason::NonCanonicalEscape),
+        Some(&1)
+    );
+}
+
+#[test]
+fn replace_stage_preserves_all_skipped_entries() {
+    use maya_scene_kit_edit::scene::PathReplaceSkipReason;
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    let bytes = b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" (\"asset/example/\" + \"file.tx\");\n";
+    std::fs::write(&input, bytes).unwrap();
+    let stage = stage_replace_scene_paths_with_overrides(
+        &input,
+        &[PathReplaceOverride {
+            entry_index: 0,
+            before_value: "asset/example/file.tx".into(),
+            after_value: "asset/Sample/file.tx".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(stage.artifact.bytes, bytes);
+    assert_eq!(stage.preview.matched_count, 0);
+    assert_eq!(stage.preview.applied_count, 0);
+    assert_eq!(stage.preview.items.len(), 1);
+    assert_eq!(
+        stage.preview.items[0]
+            .skipped
+            .get(&PathReplaceSkipReason::CrossesConcatBoundary),
+        Some(&2)
+    );
+}
+
+#[test]
+fn replace_stage_preserves_all_skipped_rule_entries() {
+    use maya_scene_kit_edit::scene::PathReplaceSkipReason;
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    let bytes = b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" \"asset\\d/file.tx\";\n";
+    std::fs::write(&input, bytes).unwrap();
+    let stage = stage_replace_scene_paths(
+        &input,
+        &[PathReplaceRule {
+            from: "asset".into(),
+            to: "Sample".into(),
+            mode: PathReplaceMode::Literal,
+        }],
+    )
+    .unwrap();
+    assert_eq!(stage.artifact.bytes, bytes);
+    assert_eq!(stage.preview.matched_count, 0);
+    assert_eq!(stage.preview.applied_count, 0);
+    assert_eq!(stage.preview.items.len(), 1);
+    assert_eq!(
+        stage.preview.items[0]
+            .skipped
+            .get(&PathReplaceSkipReason::NonCanonicalEscape),
+        Some(&1)
+    );
+}
+
+#[test]
+fn unmatched_undecodable_literals_do_not_add_staged_skip_items() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    let bytes = b"//Maya ASCII 2026 scene\n//Codeset: 932\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/\x81?file.tx\";\n";
+    std::fs::write(&input, bytes).unwrap();
+    let rules = [PathReplaceRule {
+        from: "Sample".into(),
+        to: "TestAsset".into(),
+        mode: PathReplaceMode::Literal,
+    }];
+    let stage = stage_replace_scene_paths(&input, &rules).unwrap();
+    assert_eq!(stage.artifact.bytes, bytes);
+    assert_eq!(stage.changes.skipped.as_ref().unwrap().non_utf8, 1);
+    assert!(stage.preview.items.is_empty());
+
+    let bytes = b"//Maya ASCII 2026 scene\n//Codeset: 932\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" (\"asset/Sample/\" + \"example/\x81?file.tx\");\n";
+    std::fs::write(&input, bytes).unwrap();
+    let stage = stage_replace_scene_paths(&input, &rules).unwrap();
+    assert_eq!(stage.changes.skipped.as_ref().unwrap().non_utf8, 1);
+    assert_eq!(stage.preview.items.len(), 1);
+    assert_eq!(stage.preview.items[0].replacement_count, 1);
+    assert!(stage.preview.items[0].skipped.is_empty());
+}
+
+#[test]
+fn public_rule_preview_keeps_applied_item_set() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("Example.ma");
+    std::fs::write(&input, b"//Maya ASCII 2026 scene\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" \"asset\\d/file.tx\";\n").unwrap();
+    let rules = [PathReplaceRule {
+        from: "asset".into(),
+        to: "Sample".into(),
+        mode: PathReplaceMode::Literal,
+    }];
+    let preview = preview_replace_scene_paths(&input, &rules).unwrap();
+    assert_eq!(preview.matched_count, 0);
+    assert_eq!(preview.applied_count, 0);
+    assert!(preview.items.is_empty());
+    let stage = stage_replace_scene_paths(&input, &rules).unwrap();
+    assert_eq!(stage.preview.items.len(), 1);
+    assert!(!stage.preview.items[0].skipped.is_empty());
 }
