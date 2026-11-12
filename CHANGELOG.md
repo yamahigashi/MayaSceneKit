@@ -4,83 +4,204 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
+## [v0.4.0] - 2026-11-12
 
-- MB path replacement preserves one enclosing quote pair on RTFT values and
-  treats bytes after the first value NUL as an opaque tail. Multiple quote pairs
-  and one-sided quotes are retained; only one complete outer pair is a frame.
-  This fixes quote removal, lossy tail conversion, and duplicated internal-NUL
-  tails. Overrides without enclosing quotes replace the framed value's interior.
-- Non-UTF-8 MB path values are preserved and reported as undecodable, including
-  explicit overrides. Payload size rejection skips only that record. Section,
-  child, and root encoding failures return errors without output. An entirely
-  rejected child retains its original span, including padding. Composite edits
-  with no effective changes return NoEffectiveEdits with their skipped records.
-- replacement_count, replaced_count, and items[].replacement_count count changed
-  MA literals or MB payload records, not rule hits. One reference entry backed
-  by FREF and FRDI can contribute two changes. Preview applied_count exposes the
-  total, including records without a report entry; matched_count counts affected
-  report entries. GUI summaries show both when they differ. For example, one
-  reference entry can have matched_count=1 and applied_count=2.
-- PathReplaceSkips replaces MaPathReplaceSkips. Python skipped now contains an
-  object for MB as well as MA. Existing MA fields remain; payload_rejected,
-  unmatched_locator, and duplicate_request are added. Inapplicable fields are
-  null. With no skips, the old MB JSON was {"skipped":null}; it is now
-  {"skipped":{"non_utf8":0,"non_canonical_escape":null,"unrepresentable":null,
-  "crosses_concat_boundary":null,"unterminated_tail":null,
-  "unterminated_tail_from":null,"payload_rejected":0,"unmatched_locator":0,
-  "duplicate_request":0}}. For MA, the existing five reason counters and
-  unterminated_tail_from retain their values, and the three new fields are null.
-  CLI skip lines append the three MB reason counters.
+This release expands script audit coverage, makes path replacement and cleaning
+preserve more original scene data, and keeps GUI previews, staged audits, and
+saved files consistent. It includes the changes from the unreleased v0.3.1.
 
-- Clean and owner deletion previews and staged outputs now use the same application
-  result. cleaned_targets includes only targets that performed a change; targets
-  consumed by preceding deletions are covered. removed_count follows the actual
-  removal list. A named clean or owner request missing from the original input
-  now fails even if other requested targets exist, and produces no artifact.
+### Migration notes
 
-- MEL audit now emits mel_system, mel_popen, mel_file_open, mel_file_write,
-  mel_evalecho, mel_callpython, mel_source, mel_loadplugin, and mel_sysfile
-  finding codes in JSON for dangerous command and function calls. Read-only
-  fopen modes and query-only sysFile calls are excluded. Existing allowlist
-  entries for other finding codes do not cover these new codes.
-
+- Stricter audits can change verdicts from allow to review or deny on unchanged
+  scenes. Audit now reports aliases of maya.mel.eval, connectAttr commands with
+  unresolvable plugs, Maya Binary connections into unmapped execution-capable
+  attributes, and budget-truncated code-like text. Scene scripts that call
+  loadPlugin or source are denied by design.
+- Persistent caches rebuild automatically: observe cache schema is 34 and audit
+  cache schema is 38. Cache identities now include the loaded schema and
+  node-info contents; audit caches also account for load options.
+- CLI paths text adds a validation_state: line, and standalone and collection
+  JSON add validation_state. Python paths JSON already included validation_state
+  in v0.3.0. CLI and Python paths JSON add diagnostics only when the source
+  changes during reading. Do not treat partial results as complete coverage.
 - Breaking: audit now returns exit code 20 for an unreadable scene passed alone
   or in a directory, including runs where every scene fails to load. JSON mode
-  emits the graph traversal issues and summary; text mode uses the same exit
-  classification. Previously, runs where every scene failed returned 1.
-  Configuration errors, including invalid node-info overlays or schema
-  configuration, retain exit code 1 and an error message on stderr.
+  emits graph traversal issues and a summary. Configuration errors, including
+  invalid node-info overlays or schema configuration, retain exit code 1.
+- Directory traversal no longer silently skips symbolic links. Audit reports
+  unfollowed links as traversal issues, changing an otherwise successful run to
+  review (exit 20); deny takes precedence. Dump, paths, and replace warn for each
+  link and exit with code 2 if no scenes remain. Audit text and JSON expose
+  outside_input_tree.
+- Python error categories add source_changed, source_unstable, and
+  python_parse_budget_exceeded.
+- Python path replacement result JSON adds skipped, which was absent in v0.3.0.
+  MA fields are non_utf8, non_canonical_escape, unrepresentable,
+  crosses_concat_boundary, unterminated_tail, and unterminated_tail_from.
+  MB fields are non_utf8, payload_rejected, unmatched_locator, and
+  duplicate_request. Inapplicable fields are null. For MB with no skips,
+  non_utf8 and the three MB counters are zero; MA-only fields are null.
+  CLI skip lines also include the three MB reason counters. Rust PathReplaceSkips
+  is a new type.
+- Preview JSON adds applied_count. matched_count counts changed report entries;
+  applied_count counts all changes, including records without a report entry.
+  replacement_count, replaced_count, and items[].replacement_count count changed
+  MA literals or MB payload records, not rule hits. One reference backed by FREF
+  and FRDI can contribute two changes. GUI summaries show both counts when they
+  differ.
+- In MA files declaring an unsupported codeset, replacement skips introduced
+  non-ASCII text. ASCII replacements still work and preserve untouched bytes.
+- Rust MB callers must handle non-exhaustive MbChildren, MbTruncationReason,
+  MbCompleteness, MbWalkResult, and MbSectionScanState. Successful parsing can
+  retain an incomplete tree: use file or chunk completeness() to check the
+  whole subtree. children_complete() now returns true for leaves and describes
+  only direct children. Depth-limited NotExpanded groups count as DepthLimit;
+  not_expanded_groups() reports their count separately.
+- Rust walk_group_chunks_with_layout returns MbWalkResult rather than a vector.
+  ParsedSection::into_chunks is replaced by into_parts; inspect state() or the
+  returned MbSectionScanState. Formats scan_raw_script_nodes_in_mb,
+  extract_raw_script_entries_from_mb, extract_raw_scene_paths_from_mb,
+  collect_rtft_owner_traces_from_mb, and
+  locate_raw_script_node_forms_in_mb_by_name return MbSectionScan with value
+  and state. HeadMetadata gains section_state. The name readers
+  extract_mb_script_node_name_with_layout and
+  extract_mb_form_node_name_with_layout take MbParseBudget and return
+  MbSectionScan<Option<String>>.
+- Rust MB rewrite and removal functions now return Result with MbRewriteError,
+  including remove_plugin_requires_from_mb,
+  remove_root_forms_and_plugin_requires_from_mb,
+  remove_root_forms_from_mb_by_locator, remove_raw_script_nodes_from_mb, and
+  remove_raw_script_nodes_from_mb_by_name. Path replacement functions return
+  MbPathChanges alongside bytes. Formats exposes MbRootFormsAndRequiresRemoval,
+  MbRootFormRemoval, and require_complete_mb_tree. MbInspectReport gains a
+  public completeness field excluded from serialization.
+- Rust replace_raw_scene_paths_in_ma and
+  replace_raw_scene_paths_in_ma_by_index return
+  Result<MaPathReplaceResult, MaPathReplaceError>. RawMaScriptEntry replaces its
+  body, script_type, and source_type fields with assignments and corresponding
+  accessor methods, preserving assignment history.
+- Rust stage_scene_edits_in_report_with_bytes and its _with_options variant
+  are replaced by stage_scene_edit_plan and stage_scene_edit_plan_with_options,
+  taking SceneEditPlan. PatchPlanner uses stage_scene_edit_plan too.
+  stage_scene_edits and stage_scene_edits_with_options take clean_source and
+  return SceneEditError; handle NoEffectiveEdits and its skipped records.
+  SceneEditChanges records applied, skipped, covered, and superseded edits.
+  ScenePathsReport gains source, kind, and diagnostics; report-based edits
+  validate SceneSourceFingerprint before applying changes.
+- Rust ObserveCacheStore::new and AuditCacheStore::new now take LoadOptions;
+  observe cache lookup methods no longer take load options per call.
+  ObserveCacheIdentity::new gains schema_bundle_sha256; AuditCacheIdentity::new
+  gains schema_bundle_sha256 and load_options_fingerprint.
+  AuditedSceneSnapshot::new takes LoadOptions and returns io::Result<Option<Self>>;
+  ObservedSceneSnapshot::from_observation also returns an optional snapshot.
+  Both snapshot types offer with_file_state for load-time state.
+- Rust ObservedExecutionSurface gains python_parse_budget_limit, and
+  ObservedExecutionCatalog gains python_max_body_bytes. ExecutionOrigin gains
+  overwritten, assignment_index, overwritten_by_connection,
+  connection_source_plug, connection_source_range, and connection_range.
+- Rust write_output_bytes_atomic returns WriteOutcome with dir_sync_error so
+  callers can distinguish a completed replacement from a directory sync issue.
+  The CLI library main entrypoint now takes Vec<OsString> instead of Vec<String>.
 
-- MbChildren, MbTruncationReason, and MbCompleteness are now non-exhaustive.
-  MbInspectReport adds a public completeness field (excluded from serialization).
-  Inspect text starts with a completeness= line, including --at-offset output.
-  Formats exposes MbRootFormsAndRequiresRemoval and MbRootFormRemoval type aliases
-  and require_complete_mb_tree. Rewrites now refuse scenes exceeding the default
-  parse budget of 100 000 children per group or 1 000 000 chunks.
+### Added
 
-- Maya Binary chunk parsing now exposes MbChildren, MbTruncationReason, and
-  MbCompleteness through maya-mb and the formats MB module. A malformed child
-  preserves its successfully parsed siblings and the original error. Successful
-  parsing can still return an incomplete tree; use file or chunk completeness()
-  to check the whole retained subtree. Depth-limited NotExpanded groups count
-  as DepthLimit truncation; not_expanded_groups() reports their count separately.
-- children_complete() now returns true for leaves. It describes only the direct
-  child sequence; use completeness() to detect truncation in descendants.
-- MB rewrite and removal functions now return Result and reject incomplete
-  subtrees, including depth-limited trees and requests with no matching targets.
-  Edit operations report these refusals without materializing output.
-- Accept omitted padding for the final child whose payload ends exactly at its
-  parent boundary. Inspect now shows previously hidden children in that case and
-  prints a completeness summary. Observe and audit cache schemas advance to 6.
-
-## [v0.3.1] - 2026-11-10
+- Audit follows script bodies connected into execution attributes in MA and MB
+  scenes, including short and long attribute names, and reports overwritten
+  script-node assignments and connection provenance.
+- MEL audit now emits mel_system, mel_popen, mel_file_open, mel_file_write,
+  mel_evalecho, mel_callpython, mel_source, mel_loadplugin, and mel_sysfile
+  finding codes for dangerous command and function calls. Read-only fopen modes
+  and query-only sysFile calls are excluded. Existing allowlist entries for
+  other finding codes do not cover these new codes.
+- Inspect text starts with a completeness= line, including --at-offset output.
+  Audit reports truncated MB trees and stopped section scans as coverage issues.
+- The GUI replacement preview shows per-entry skip reasons, including partially
+  replaced and fully skipped matched entries.
 
 ### Changed
 
 - The GUI paths table "Delete owner nodes" context action now applies to every
   selected path entry when the right-clicked entry is part of the selection.
   Right-clicking an entry outside the selection still affects only that entry.
+- Clean and owner deletion previews and staged outputs now use the same
+  application result. cleaned_targets includes only targets that performed a
+  change; targets consumed by preceding deletions are covered. removed_count
+  follows the actual removal list. A named clean or owner request missing from
+  the original input now fails even if other requested targets exist, and
+  produces no artifact.
+- MB rewrites refuse incomplete subtrees, depth-limited trees, and stopped
+  section scans, even when no targets match. Default parse limits are 100 000
+  children per group and 1 000 000 chunks. Encoding failures produce no output.
+- Report-based edits retry unstable reads once, reject changed source files,
+  and require re-analysis when a report has no source fingerprint. GUI staging
+  and Save reject source changes since analysis or staging.
+- Release tags vX.Y.Z-rc.N publish pre-releases with release-candidate Python
+  wheels. The Python package version now comes from Cargo.
+
+### Fixed
+
+- MA path replacement edits literal byte ranges without reserializing commands,
+  preserves unrelated bytes, and reports skipped literals. Replacement text
+  uses the declared codeset even in ASCII-only input. Owner deletion also
+  preserves untouched non-UTF-8 bytes.
+- MB path replacement preserves one enclosing quote pair on RTFT values and
+  treats bytes after the first value NUL as an opaque tail. Multiple quote pairs
+  and one-sided quotes are retained; only one complete outer pair is a frame.
+  Overrides without enclosing quotes replace the framed value's interior.
+  FRDI replacements preserve surrounding whitespace and count unchanged parts
+  as unchanged.
+- Non-UTF-8 MB path values are preserved and reported as undecodable, including
+  explicit overrides. Payload size rejection skips only that record. An
+  entirely rejected child retains its original span, including padding.
+- Combined path replacement, clean, and owner deletion apply to original bytes.
+  Deletion covers a path candidate only when its range lies inside a deleted
+  range. Named clean handles non-script owners, quoted node types, flags before
+  node types, and encoded node names; each block is removed once. Clean honours
+  --max-bytes and --node-info.
+- MA parsing tracks blocks by command semantics instead of indentation, resolves
+  absolute plugs and attribute aliases, and reports malformed createNode,
+  unknown top-level statements, and unmapped execution attributes. File command
+  callbacks accept both -c and -command. ASCII conversion escapes scene-derived
+  values; non-ASCII addAttr names no longer break prefix stripping.
+- MB parsing accepts omitted padding for a final child ending at its parent
+  boundary and retains parsed siblings when another child is malformed.
+  Section scans accept all chunk tags and respect the parse-time budget.
+- Python audit visits all AST positions and resolves lexical scopes, wildcard
+  imports, loop bindings, and unresolved calls more accurately. Python 2
+  normalization preserves string contents and print/exec used as names. MEL
+  analysis examines every sink argument and nested literal eval bodies.
+- Python analysis reports excessive nesting, oversized bodies, and thread
+  creation failures as coverage gaps instead of panicking. Other surfaces
+  remain eligible for analysis when one body exceeds its budget.
+- Cache snapshots use the file state and digests of the bytes actually read.
+  Budget-blocked reports retain load-time state when available; in-memory
+  reports without that state do not produce cache snapshots.
+- GUI staged edits survive replacement, clean, conversion, and undo. File counts
+  and the audit table use the staged report; plan changes trigger background
+  re-audits. Pending audits no longer appear as zero findings, and Save drops
+  stale pre-save audits. Blocked rows show the Python parse limit and surface.
+- GUI Save checks conversion destinations, keeps source reports after conversion,
+  and preserves successful saves even if re-analysis fails. Re-read failures
+  remain visible and eligible for auto-analysis. Workspace changes and row
+  mutations are blocked during conflicting jobs, and late job results cannot
+  overwrite newer work.
+- GUI settings recovery preserves unreadable settings and unavailable workspace
+  roots, keeps the recovery banner until dismissed, and reuses identical backups
+  instead of creating a new one on each start.
+- CLI directory traversal reports symlinks. CLI arguments, CLI and Python graph
+  paths, and audit snippets handle non-UTF-8 paths or multibyte text without
+  panics; closed stdout no longer causes a panic. Bare output filenames resolve
+  against the current directory, and a completed replacement is not reported
+  as failed because of a later directory sync error.
+
+### Performance
+
+- Clean reuses bytes loaded for script-owner analysis instead of performing a
+  full execution observation.
+- MB path overrides extract path entries once per batch, reducing repeated work
+  when replacing many paths.
+- MB connection scans compute chunk-tree completeness once per scan rather than
+  once per connection.
 
 ## [v0.3.0] - 2026-11-09
 
