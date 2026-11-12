@@ -276,7 +276,7 @@ impl GuiShell {
                         snapshot.report.finding_count() - snapshot.report.allowed_finding_count();
                     let parse_budget_blocked = snapshot.report.is_parse_budget_blocked();
                     let blocked_message = parse_budget_status_message(&snapshot.report);
-                    row.findings = findings;
+                    row.findings = Some(findings);
                     row.set_audit_report(
                         Some(snapshot.report),
                         Some(GuiFileState {

@@ -1386,7 +1386,7 @@ pub(super) fn compute_visible_row_indices_for(
                     || matches_search_tokens(searchable_text_for_row(row, state), &tokens))
         })
         .map(|(ix, row)| {
-            let mut key = (String::new(), false, 0usize, 0u64, (false, None), None);
+            let mut key = (String::new(), false, None, 0u64, (false, None), None);
             if matches!(sort.direction, ColumnSort::Default) {
                 key.0 = workspace_relative_display_path(&row.path, state);
             } else {
@@ -1397,8 +1397,8 @@ pub(super) fn compute_visible_row_indices_for(
                     FileSortKey::Findings => key.2 = row.effective_findings_count(),
                     FileSortKey::Missing => {
                         (key.1, key.2) = missing_path_count_for_row(row)
-                            .map(|count| (false, count))
-                            .unwrap_or((true, 0));
+                            .map(|count| (false, Some(count)))
+                            .unwrap_or((true, None));
                     }
                     FileSortKey::Size => key.3 = row.size,
                     FileSortKey::Modified => key.4 = modified_sort_key(row.modified),
@@ -1411,6 +1411,14 @@ pub(super) fn compute_visible_row_indices_for(
         })
         .collect::<Vec<_>>();
     visible_rows.sort_by(|(_, left), (_, right)| {
+        if matches!(sort.key, FileSortKey::Findings)
+            && !matches!(sort.direction, ColumnSort::Default)
+        {
+            let unknown_order = left.2.is_none().cmp(&right.2.is_none());
+            if !unknown_order.is_eq() {
+                return unknown_order;
+            }
+        }
         let ordering = left.cmp(right);
         if matches!(sort.direction, ColumnSort::Descending) {
             ordering.reverse()
@@ -1422,7 +1430,7 @@ pub(super) fn compute_visible_row_indices_for(
 }
 
 fn file_list_filters_match(row: &SceneRow, state: &PersistedState) -> bool {
-    let findings_match = row.effective_findings_count() > 0;
+    let findings_match = row.effective_findings_count().is_none_or(|count| count > 0);
     let missing_match = missing_path_count_for_row(row).is_some_and(|count| count > 0);
     let no_workspace_match = row.scene_workspace_root.is_none();
     let dirty_match = row.dirty();
@@ -1497,16 +1505,10 @@ pub(super) fn build_single_file_table_row(
         name: workspace_relative_display_path(&row.path, state),
         has_scene_workspace: row.scene_workspace_root.is_some(),
         status: row.status_label(i18n),
-        findings: if row.display_audit_report().is_none()
-            && (row.staged.reports().audit_report.is_some()
-                || matches!(
-                    row.status,
-                    FileStatus::Saved | FileStatus::SavedWithWarning(_)
-                )) {
-            String::new()
-        } else {
-            row.effective_findings_count().to_string()
-        },
+        findings: row
+            .effective_findings_count()
+            .map(|count| count.to_string())
+            .unwrap_or_default(),
         missing: missing_path_count_for_row(row)
             .map(|count| count.to_string())
             .unwrap_or_default(),
@@ -1724,6 +1726,15 @@ pub(super) fn compare_rows_for_sort(
     state: &PersistedState,
     sort: FileTableSort,
 ) -> std::cmp::Ordering {
+    if matches!(sort.key, FileSortKey::Findings) {
+        let unknown_order = left
+            .effective_findings_count()
+            .is_none()
+            .cmp(&right.effective_findings_count().is_none());
+        if !unknown_order.is_eq() {
+            return unknown_order;
+        }
+    }
     let locale_i18n = I18n::new(state.locale.resolve());
     let ordering = match sort.key {
         FileSortKey::Name => workspace_relative_display_path(&left.path, state)

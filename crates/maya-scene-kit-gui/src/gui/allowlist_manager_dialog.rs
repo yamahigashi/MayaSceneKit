@@ -1516,7 +1516,7 @@ mod tests {
                     source: AllowlistSource::User
                 })
             );
-            assert_eq!(row.effective_findings_count(), 0);
+            assert_eq!(row.effective_findings_count(), Some(0));
             assert_eq!(report.disposition, AuditDisposition::Review);
             shell.replace_rows(vec![row]);
             shell.refresh_file_table(cx);
@@ -1533,7 +1533,7 @@ mod tests {
                     if report.allowed_finding_count() == 0 {
                         assert_eq!(report.finding_count(), 1);
                         assert_eq!(report.findings[0].allowed_by, None);
-                        assert_eq!(row.effective_findings_count(), 1);
+                        assert_eq!(row.effective_findings_count(), Some(1));
                         assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
                         *observed.borrow_mut() = true;
                     }
@@ -1572,7 +1572,7 @@ mod tests {
             assert_eq!(report.finding_count(), 1);
             assert_eq!(report.allowed_finding_count(), 0);
             assert_eq!(report.findings[0].allowed_by, None);
-            assert_eq!(row.effective_findings_count(), 1);
+            assert_eq!(row.effective_findings_count(), Some(1));
             assert_eq!(report.disposition, AuditDisposition::DenyMalicious);
         });
         for (locale, prefix) in [

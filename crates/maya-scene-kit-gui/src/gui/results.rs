@@ -204,16 +204,16 @@ pub(super) fn render_paths_filter_bar(
         )
 }
 
+pub(super) fn overview_findings_counts(rows: &[SceneRow]) -> impl Iterator<Item = usize> + '_ {
+    rows.iter().filter_map(SceneRow::effective_findings_count)
+}
+
 pub(super) fn result_overview(shell: &GuiShell, i18n: &I18n) -> AnyElement {
     if shell.rows.is_empty() {
         return body_text(i18n.text("empty.overview")).into_any_element();
     }
     let dirty = shell.rows.iter().filter(|row| row.dirty()).count();
-    let findings = shell
-        .rows
-        .iter()
-        .map(SceneRow::effective_findings_count)
-        .sum::<usize>();
+    let findings = overview_findings_counts(&shell.rows).sum::<usize>();
     div()
         .flex()
         .gap_3()

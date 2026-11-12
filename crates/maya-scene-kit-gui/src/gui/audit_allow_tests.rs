@@ -887,7 +887,7 @@ fn audit_allow_add_flow_reloads_and_reaudits(cx: &mut TestAppContext) {
                 source: AllowlistSource::User
             })
         );
-        assert_eq!(row.effective_findings_count(), 0);
+        assert_eq!(row.effective_findings_count(), Some(0));
         assert_eq!(report.disposition, AuditDisposition::Review);
     });
     for (locale, expected) in [

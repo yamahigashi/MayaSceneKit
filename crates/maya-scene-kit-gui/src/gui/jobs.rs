@@ -988,7 +988,7 @@ impl GuiShell {
                 } else {
                     FileStatus::Audited
                 };
-                shell.rows[index].findings = findings;
+                shell.rows[index].findings = Some(findings);
                 shell.rows[index].set_audit_report(Some(audit_report), audit_file_state);
                 shell.rows[index].audit_plan_fingerprint = Some(audit_plan_fingerprint.clone());
                 shell.rows[index].paths_report = paths_report;
@@ -1037,8 +1037,8 @@ impl GuiShell {
                 shell.rows[index].replace_changes = replace_changes;
                 let cleaned = staged.preview.cleaned_targets.len();
                 let deleted = staged.preview.deleted_path_owner_targets.len();
-                shell.rows[index].findings = staged_audit_report.finding_count()
-                    - staged_audit_report.allowed_finding_count();
+                shell.rows[index].findings = Some(staged_audit_report.finding_count()
+                    - staged_audit_report.allowed_finding_count());
                 let current_plan = audit_plan_fingerprint == shell.audit_plan_fingerprint;
                 if !current_plan { shell.rows[index].mark_analysis_stale(); }
                 shell.rows[index].staged = Staged::SceneEdits {
@@ -1135,7 +1135,7 @@ impl GuiShell {
                         } else {
                             shell.rows[index].set_audit_report(None, None);
                             shell.rows[index].audit_plan_fingerprint = None;
-                            shell.rows[index].findings = 0;
+                            shell.rows[index].findings = None;
                             shell.rows[index].mark_analysis_stale();
                         }
                         if let Some(report) = reports.dump_report.filter(|_| saved_file_is_current) { shell.rows[index].dump_report = Some(report); }
@@ -1150,13 +1150,13 @@ impl GuiShell {
                 }
                 shell.rows[index].staged = Staged::None;
                 shell.rows[index].replace_artifact_generation = None;
-                shell.rows[index].sync_findings_count();
                 shell.rows[index].status = observation_error.as_ref().map_or(FileStatus::Saved, |error| {
                     FileStatus::SavedWithWarning(shell.i18n().format(
                         "file_status.saved_observation_failed",
                         &[("message", error.clone())],
                     ))
                 });
+                shell.rows[index].sync_findings_count();
                 shell.refresh_row_path_resolution_state(index);
                 shell.record_job(
                     operation_key(operation),

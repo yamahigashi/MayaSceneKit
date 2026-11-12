@@ -927,7 +927,7 @@ fn hydrate_cached_analysis_batch_restores_reports_from_disk_cache() {
         row.refresh_path_resolution_cache();
     }
     if let Some(snapshot) = update.audit_snapshot {
-        row.findings = snapshot.report.findings.len();
+        row.findings = Some(snapshot.report.findings.len());
         row.set_audit_report(
             Some(snapshot.report),
             Some(GuiFileState {
@@ -1506,7 +1506,7 @@ fn reconcile_workspace_rows_reuses_existing_row_state_for_retained_paths() {
 
     let mut retained = test_row(7, &keep);
     retained.selected = true;
-    retained.findings = 3;
+    retained.findings = Some(3);
     let mut next_row_id = 20;
     let rows = reconcile_workspace_rows(
         vec![retained],
@@ -1517,7 +1517,7 @@ fn reconcile_workspace_rows_reuses_existing_row_state_for_retained_paths() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].id, 7);
     assert!(rows[0].selected);
-    assert_eq!(rows[0].findings, 3);
+    assert_eq!(rows[0].findings, Some(3));
     assert_eq!(rows[1].path, add);
     assert_eq!(rows[1].id, 20);
     assert_eq!(next_row_id, 21);
@@ -2095,7 +2095,7 @@ fn scene_edit_clean_undo_restores_findings_count_and_findings_filter(cx: &mut Te
             row.set_audit_report(Some(result.audit_report), result.audit_file_state);
             row.dump_report = result.dump_report;
             row.paths_report = result.paths_report;
-            row.findings = original_findings;
+            row.findings = Some(original_findings);
             shell.rows = vec![row];
             shell.refresh_file_table(cx);
 
@@ -2118,8 +2118,8 @@ fn scene_edit_clean_undo_restores_findings_count_and_findings_filter(cx: &mut Te
 
     visual_cx.update(|_, app| {
         let shell = shell.read(app);
-        assert_eq!(shell.rows[0].findings, 0);
-        assert_eq!(shell.rows[0].effective_findings_count(), 0);
+        assert_eq!(shell.rows[0].findings, Some(0));
+        assert_eq!(shell.rows[0].effective_findings_count(), Some(0));
     });
 
     visual_cx.update(|window, app| {
@@ -2132,16 +2132,19 @@ fn scene_edit_clean_undo_restores_findings_count_and_findings_filter(cx: &mut Te
                 .len();
 
             shell.run_menu_undo(cx);
-            assert_eq!(shell.rows[0].findings, original_findings);
-            assert_eq!(shell.rows[0].effective_findings_count(), original_findings);
+            assert_eq!(shell.rows[0].findings, Some(original_findings));
+            assert_eq!(
+                shell.rows[0].effective_findings_count(),
+                Some(original_findings)
+            );
 
             shell.state.file_list_findings_only = true;
             shell.refresh_file_table(cx);
             assert_eq!(shell.visible_rows, vec![0]);
 
             shell.run_menu_redo(cx);
-            assert_eq!(shell.rows[0].findings, 0);
-            assert_eq!(shell.rows[0].effective_findings_count(), 0);
+            assert_eq!(shell.rows[0].findings, Some(0));
+            assert_eq!(shell.rows[0].effective_findings_count(), Some(0));
 
             shell.refresh_file_table(cx);
             assert!(shell.visible_rows.is_empty());
@@ -2670,7 +2673,7 @@ fn build_file_table_rows_prefers_report_findings_when_cached_count_is_stale() {
     let findings = result.audit_report.findings.len();
     row.set_audit_report(Some(result.audit_report), result.audit_file_state);
     row.dump_report = result.dump_report;
-    row.findings = 0;
+    row.findings = Some(0);
 
     let state = PersistedState {
         file_list_findings_only: true,
@@ -2911,7 +2914,7 @@ fn compute_visible_rows_filters_to_findings_only() {
     fs::write(&hide, "bb").expect("write hide");
 
     let mut keep_row = test_row(1, &keep);
-    keep_row.findings = 2;
+    keep_row.findings = Some(2);
     let hide_row = test_row(2, &hide);
 
     let mut state = test_state(dir.path(), "");
@@ -3043,12 +3046,12 @@ fn compute_visible_rows_combines_findings_missing_filters_with_or_logic() {
     .expect("write no_findings");
 
     let mut keep_row = test_row(1, &keep);
-    keep_row.findings = 2;
+    keep_row.findings = Some(2);
     keep_row.paths_report = Some(collect_scene_paths(&keep, PathKind::All).expect("paths"));
     keep_row.refresh_path_resolution_cache();
 
     let mut no_missing_row = test_row(2, &no_missing);
-    no_missing_row.findings = 1;
+    no_missing_row.findings = Some(1);
     no_missing_row.paths_report =
         Some(collect_scene_paths(&no_missing, PathKind::All).expect("paths"));
     no_missing_row.refresh_path_resolution_cache();
@@ -3098,7 +3101,7 @@ fn compute_visible_rows_combines_no_workspace_with_other_filters_using_or_logic(
     }
 
     let mut findings_row = test_row(1, &findings);
-    findings_row.findings = 1;
+    findings_row.findings = Some(1);
     let no_workspace_row = test_row(2, &no_workspace);
     let hidden_row = test_row(3, &hidden);
 
@@ -3161,7 +3164,7 @@ fn compute_visible_rows_combines_dirty_with_findings_missing_filters_using_or_lo
     };
     test_overrides(&mut dirty_row.staged).insert(0, "textures/dirty.tx".to_string());
     let mut findings_row = test_row(2, &findings);
-    findings_row.findings = 1;
+    findings_row.findings = Some(1);
     let mut missing_row = test_row(3, &missing);
     missing_row.paths_report = Some(collect_scene_paths(&missing, PathKind::All).expect("paths"));
     missing_row.refresh_path_resolution_cache();
@@ -3212,7 +3215,7 @@ fn compute_visible_rows_combines_or_filters_with_search() {
     .expect("write other");
 
     let mut keep_row = test_row(1, &keep);
-    keep_row.findings = 1;
+    keep_row.findings = Some(1);
     keep_row.paths_report = Some(collect_scene_paths(&keep, PathKind::All).expect("paths"));
     keep_row.refresh_path_resolution_cache();
 
@@ -12083,7 +12086,7 @@ mod allowlist_tests {
                 .iter()
                 .filter(|item| item.allowed.is_none())
                 .count(),
-            row.effective_findings_count()
+            row.effective_findings_count().unwrap()
         );
     }
 
@@ -12176,7 +12179,10 @@ mod allowlist_tests {
                 visual_cx.run_until_parked();
                 shell.update_in(visual_cx, |shell, _, _| {
                     assert_audit_matches_count(shell, 1);
-                    assert_eq!(shell.rows[0].effective_findings_count(), expected_count);
+                    assert_eq!(
+                        shell.rows[0].effective_findings_count(),
+                        Some(expected_count)
+                    );
                     assert_eq!(
                         shell.rows[0]
                             .display_audit_report()
@@ -12245,7 +12251,17 @@ mod allowlist_tests {
                 );
                 shell.rows[0].set_audit_report(None, None);
                 shell.refresh_file_table(cx);
-                assert_audit_matches_count(shell, 0);
+                assert!(
+                    build_audit_result_rows(
+                        &shell.rows,
+                        &[0],
+                        &shell.audit_allowlist,
+                        &shell.i18n()
+                    )
+                    .iter()
+                    .all(|item| item.key.item_kind != AuditResultItemKind::Finding)
+                );
+                assert_eq!(shell.rows[0].effective_findings_count(), None);
             }
             if undo {
                 shell.run_menu_undo(cx);
@@ -12356,7 +12372,7 @@ mod allowlist_tests {
             shell.reload_allowlists(window, cx);
             assert!(shell.rows[0].current_staged_audit_report().is_none());
             assert_audit_matches_count(shell, 2);
-            assert_eq!(shell.rows[0].effective_findings_count(), 2);
+            assert_eq!(shell.rows[0].effective_findings_count(), Some(2));
             assert!(
                 selected_audit_notice_lines(shell, &[0])
                     .iter()
@@ -12368,7 +12384,7 @@ mod allowlist_tests {
             assert!(shell.rows[0].busy.is_none());
             assert!(shell.rows[0].current_staged_audit_report().is_some());
             assert_audit_matches_count(shell, 1);
-            assert_eq!(shell.rows[0].effective_findings_count(), 0);
+            assert_eq!(shell.rows[0].effective_findings_count(), Some(0));
         });
     }
 
@@ -12416,7 +12432,7 @@ mod allowlist_tests {
             assert_eq!(shell.next_row_job_id, next_job + 1);
             assert!(shell.rows[0].current_staged_audit_report().is_some());
             assert_audit_matches_count(shell, 1);
-            assert_eq!(shell.rows[0].effective_findings_count(), 0);
+            assert_eq!(shell.rows[0].effective_findings_count(), Some(0));
         });
     }
 
@@ -12429,12 +12445,12 @@ mod allowlist_tests {
             prepare_staged_audit_row(shell, &path, window, cx);
             assert!(shell.rows[0].current_staged_audit_report().is_some());
             assert_audit_matches_count(shell, 1);
-            assert_eq!(shell.rows[0].effective_findings_count(), 1);
+            assert_eq!(shell.rows[0].effective_findings_count(), Some(1));
             assert_eq!(
                 shell.undo_stack.last().unwrap().transitions[0]
                     .after
                     .findings,
-                1
+                Some(1)
             );
         });
     }
@@ -12513,8 +12529,8 @@ mod allowlist_tests {
                     window,
                     cx,
                 );
-                assert_eq!(shell.rows[0].findings, 0);
-                assert_eq!(shell.rows[0].effective_findings_count(), 0);
+                assert_eq!(shell.rows[0].findings, Some(0));
+                assert_eq!(shell.rows[0].effective_findings_count(), Some(0));
                 assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
             }
             shell.deliver_job_result_for_test(
@@ -12525,7 +12541,7 @@ mod allowlist_tests {
                 window,
                 cx,
             );
-            assert_eq!(shell.rows[0].findings, 1);
+            assert_eq!(shell.rows[0].findings, Some(1));
         });
     }
 

@@ -541,7 +541,7 @@ struct SceneRowEditState {
     audit_report: Option<AuditReport>,
     audit_file_state: Option<GuiFileState>,
     status: FileStatus,
-    findings: usize,
+    findings: Option<usize>,
     replace_changes: Option<PathReplaceChanges>,
     audit_plan_fingerprint: Option<String>,
     replace_artifact_generation: Option<u64>,
@@ -865,7 +865,7 @@ struct SceneRow {
     selected: bool,
     status: FileStatus,
     busy: Option<(RowOperation, u64)>,
-    findings: usize,
+    findings: Option<usize>,
     scene_workspace_root: Option<PathBuf>,
     audit_report: Option<AuditReport>,
     audit_file_state: Option<GuiFileState>,
@@ -1372,7 +1372,7 @@ impl SceneRow {
             selected: false,
             status: FileStatus::Idle,
             busy: None,
-            findings: 0,
+            findings: Some(0),
             scene_workspace_root: None,
             audit_report: None,
             audit_file_state: None,
@@ -1553,16 +1553,19 @@ impl SceneRow {
         !matches!(self.staged, Staged::None)
     }
 
-    fn effective_findings_count(&self) -> usize {
-        self.display_audit_report()
-            .map(|report| report.finding_count() - report.allowed_finding_count())
-            .unwrap_or_else(|| {
-                if self.staged.reports().audit_report.is_some() {
-                    0
-                } else {
-                    self.findings
-                }
-            })
+    fn effective_findings_count(&self) -> Option<usize> {
+        if let Some(report) = self.display_audit_report() {
+            Some(report.finding_count() - report.allowed_finding_count())
+        } else if self.staged.reports().audit_report.is_some()
+            || matches!(
+                self.status,
+                FileStatus::Saved | FileStatus::SavedWithWarning(_)
+            )
+        {
+            None
+        } else {
+            self.findings
+        }
     }
 
     fn sync_findings_count(&mut self) {

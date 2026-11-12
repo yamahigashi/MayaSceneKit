@@ -2229,7 +2229,7 @@ fn stale_staged_findings_display_unknown(cx: &mut TestAppContext) {
     shell.update_in(visual_cx, |shell, _, _| {
         let mut row = mutation_row(1, &path);
         let report = row.audit_report.take().unwrap();
-        row.findings = 3;
+        row.findings = Some(3);
         row.staged = Staged::SceneEdits {
             clean: Default::default(),
             owner_delete: Default::default(),
@@ -2330,6 +2330,23 @@ fn saved_mismatched_audit_discards_previous_findings(cx: &mut TestAppContext) {
                         assert!(
                             super::super::helpers::build_single_file_table_row(
                                 row,
+                                &shell.state,
+                                &shell.i18n()
+                            )
+                            .findings
+                            .is_empty()
+                        );
+                        shell
+                            .apply_path_override_updates(
+                                vec![(0, BTreeMap::from([(0, "asset/example/file.tx".into())]))],
+                                window,
+                                cx,
+                            )
+                            .unwrap();
+                        assert!(matches!(shell.rows[0].status, FileStatus::Dirty));
+                        assert!(
+                            super::super::helpers::build_single_file_table_row(
+                                &shell.rows[0],
                                 &shell.state,
                                 &shell.i18n()
                             )
@@ -2561,4 +2578,62 @@ fn save_without_staged_edits_keeps_previous_reports(cx: &mut TestAppContext) {
 #[gpui::test]
 fn ascii_save_keeps_source_reports_control(cx: &mut TestAppContext) {
     assert_source_reports_after_save(cx, true);
+}
+
+#[test]
+fn unknown_findings_excluded_from_overview() {
+    let mut row = SceneRow::new_unloaded_row(1);
+    row.status = FileStatus::Saved;
+    let rows = vec![row];
+    assert_eq!(
+        super::super::results::overview_findings_counts(&rows).collect::<Vec<_>>(),
+        Vec::<usize>::new()
+    );
+}
+
+#[test]
+fn unknown_findings_remain_visible() {
+    let mut row = SceneRow::new_unloaded_row(1);
+    row.status = FileStatus::Saved;
+    let state = PersistedState {
+        file_list_findings_only: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        super::super::helpers::compute_visible_row_indices_for(
+            &[row],
+            &state,
+            FileTableSort {
+                key: FileSortKey::Name,
+                direction: ColumnSort::Default
+            }
+        ),
+        vec![0]
+    );
+}
+
+#[test]
+fn unknown_findings_sort_last_in_both_directions() {
+    let mut unknown = SceneRow::new_unloaded_row(1);
+    unknown.status = FileStatus::Saved;
+    let zero = SceneRow::new_unloaded_row(2);
+    let mut positive = SceneRow::new_unloaded_row(3);
+    positive.findings = Some(2);
+    let rows = vec![unknown, zero, positive];
+    for (direction, expected) in [
+        (ColumnSort::Ascending, vec![1, 2, 0]),
+        (ColumnSort::Descending, vec![2, 1, 0]),
+    ] {
+        assert_eq!(
+            super::super::helpers::compute_visible_row_indices_for(
+                &rows,
+                &PersistedState::default(),
+                FileTableSort {
+                    key: FileSortKey::Findings,
+                    direction
+                }
+            ),
+            expected
+        );
+    }
 }
