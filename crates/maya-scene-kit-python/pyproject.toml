@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "maya-scene-kit"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Experimental Python bindings for maya-scene-kit."
 requires-python = ">=3.7"
 license = "MIT"

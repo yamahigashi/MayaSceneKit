@@ -3,13 +3,44 @@ name: Build & Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
+  check_version:
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check that the tag matches the workspace version
+        id: version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.(0|[1-9][0-9]*))?$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must be vX.Y.Z or vX.Y.Z-rc.N"
+            exit 1
+          fi
+          base="${tag%%-*}"
+          workspace_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          if [[ "$base" != "$workspace_version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the workspace version $workspace_version"
+            exit 1
+          fi
+          if [[ "$tag" == "$base" ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build_linux:
+    needs: check_version
     runs-on: ubuntu-latest
 
     steps:
@@ -64,6 +95,7 @@ jobs:
           path: release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz
 
   build_windows:
+    needs: check_version
     runs-on: windows-latest
 
     steps:
@@ -97,6 +129,7 @@ jobs:
           path: release/maya-scene-kit-${{ github.ref_name }}-windows.zip
 
   build_python:
+    needs: check_version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -124,6 +157,21 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Use the release candidate version for the wheel
+        if: needs.check_version.outputs.prerelease == 'true'
+        shell: bash
+        run: |
+          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          import pathlib, re, sys
+          path = pathlib.Path("Cargo.toml")
+          text = path.read_text(encoding="utf-8")
+          head, sep, rest = text.partition("[workspace.package]")
+          rest, count = re.subn(r'(?m)^version = "[^"]*"', f'version = "{sys.argv[1]}"', rest, count=1)
+          if not sep or count != 1:
+              sys.exit("workspace.package version not found")
+          path.write_text(head + sep + rest, encoding="utf-8")
+          PY
+
       - name: Build Python wheel
         run: uv run --with maturin maturin build --release --features extension-module --manifest-path crates/maya-scene-kit-python/Cargo.toml
 
@@ -135,6 +183,7 @@ jobs:
 
   release:
     needs:
+      - check_version
       - build_linux
       - build_windows
       - build_python
@@ -181,7 +230,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.check_version.outputs.prerelease == 'true' }}
           files: |
             maya-scene-kit-${{ github.ref_name }}-linux.tar.gz
             maya-scene-kit-${{ github.ref_name }}-windows.zip
