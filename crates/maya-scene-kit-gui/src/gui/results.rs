@@ -407,6 +407,11 @@ pub(super) fn selected_audit_notice_lines(shell: &GuiShell, selected: &[usize]) 
                                 .notices
                                 .iter()
                                 .map(move |notice| (row, notice.message.clone()))
+                                .chain(
+                                    python_budget_coverage_messages(report)
+                                        .into_iter()
+                                        .map(move |message| (row, message)),
+                                )
                         }),
                 )
         })

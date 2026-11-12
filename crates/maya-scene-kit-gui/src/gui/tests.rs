@@ -13040,11 +13040,9 @@ mod allowlist_tests {
                 window,
                 cx,
             );
-            assert_eq!(shell.rows[1].audit_generation, audit_generation);
-            assert_eq!(
-                shell.rows[1].audit_plan_fingerprint.as_deref(),
-                Some(old_fingerprint.as_str())
-            );
+            assert_eq!(shell.rows[1].audit_generation, audit_generation + 1);
+            assert!(shell.rows[1].audit_report.is_none());
+            assert!(shell.rows[1].audit_plan_fingerprint.is_none());
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
             assert!(shell.rows[1].staged.artifact().is_none());
             assert!(

@@ -2219,3 +2219,174 @@ fn audit_only_promoted_clean_requires_recorded_file_state(cx: &mut TestAppContex
 fn audit_only_cached_ascii_uses_recorded_file_state(cx: &mut TestAppContext) {
     assert_audit_only_staging(cx, false, true);
 }
+
+#[gpui::test]
+fn stale_staged_findings_display_unknown(cx: &mut TestAppContext) {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("Example.ma");
+    write_mutation_scene(&path);
+    let (shell, visual_cx) = open_test_shell(cx);
+    shell.update_in(visual_cx, |shell, _, _| {
+        let mut row = mutation_row(1, &path);
+        let report = row.audit_report.take().unwrap();
+        row.findings = 3;
+        row.staged = Staged::SceneEdits {
+            clean: Default::default(),
+            owner_delete: Default::default(),
+            overrides: Default::default(),
+            artifact: None,
+            staged_reports: Box::new(StagedReports {
+                audit_report: Some(report.clone()),
+                audit_plan_fingerprint: Some("ExamplePlan".into()),
+                ..Default::default()
+            }),
+        };
+        row.display_audit_plan_fingerprint = Some("SamplePlan".into());
+        row.sync_findings_count();
+        let table =
+            super::super::helpers::build_single_file_table_row(&row, &shell.state, &shell.i18n());
+        assert!(table.findings.is_empty());
+        row.audit_report = Some(report.clone());
+        let control =
+            super::super::helpers::build_single_file_table_row(&row, &shell.state, &shell.i18n());
+        assert_eq!(
+            control.findings,
+            (report.finding_count() - report.allowed_finding_count()).to_string()
+        );
+        row.audit_report = None;
+        row.display_audit_plan_fingerprint = Some("ExamplePlan".into());
+        let control =
+            super::super::helpers::build_single_file_table_row(&row, &shell.state, &shell.i18n());
+        assert_eq!(
+            control.findings,
+            (report.finding_count() - report.allowed_finding_count()).to_string()
+        );
+    });
+}
+
+#[gpui::test]
+fn saved_mismatched_audit_discards_previous_findings(cx: &mut TestAppContext) {
+    for selected in [false, true] {
+        for automatic in [false, true] {
+            for matching in [false, true] {
+                let directory = tempdir().unwrap();
+                let path = directory.path().join("Example.ma");
+                write_mutation_scene(&path);
+                let (shell, visual_cx) = open_test_shell(cx);
+                shell.update_in(visual_cx, |shell, window, cx| {
+                    shell.state = test_state(directory.path(), "");
+                    shell.state.workspace_auto_analyze = automatic;
+                    let mut row = mutation_row(1, &path);
+                    row.selected = selected;
+                    let mut dump = row.dump_report.clone().unwrap();
+                    dump.script_entries.clear();
+                    let reports = StagedReports {
+                        audit_report: row.audit_report.clone(),
+                        dump_report: Some(dump.clone()),
+                        audit_mode: Some(AuditModePreference::StrictDefault),
+                        audit_plan_fingerprint: Some(if matching {
+                            shell.audit_plan_fingerprint.clone()
+                        } else {
+                            "ExampleOldPlan".into()
+                        }),
+                        ..Default::default()
+                    };
+                    let paths = row.paths_report.clone();
+                    shell.replace_rows(vec![row]);
+                    shell.rows[0].busy = Some((RowOperation::Save, 99));
+                    shell.apply_job_result(
+                        (1, 99),
+                        RowOperation::Save,
+                        RowJobResult::Save {
+                            promotion: SavePromotion::SceneEdits(reports),
+                            observation_error: None,
+                            saved_paths_report: paths,
+                            replace_changes: None,
+                            replace_preview: None,
+                            output_path: path.clone(),
+                            audit_file_state: GuiFileState::read(&path).ok(),
+                        },
+                        None,
+                        window,
+                        cx,
+                    );
+                    let row = &shell.rows[0];
+                    assert!(matches!(row.status, FileStatus::Saved));
+                    assert_eq!(
+                        serde_json::to_value(&row.dump_report).unwrap(),
+                        serde_json::to_value(Some(dump)).unwrap()
+                    );
+                    if matching {
+                        let control = row.audit_report.as_ref();
+                        assert!(control.is_some());
+                    } else {
+                        assert!(row.audit_report.is_none());
+                        assert!(row.analyzed_audit_mode.is_none());
+                        assert!(
+                            super::super::helpers::build_single_file_table_row(
+                                row,
+                                &shell.state,
+                                &shell.i18n()
+                            )
+                            .findings
+                            .is_empty()
+                        );
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn python_coverage_budget_displays_limit_and_surface(cx: &mut TestAppContext) {
+    for cached in [false, true] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("Example.ma");
+        let body = "not ".repeat(
+            maya_scene_kit_observe::scene::MelParseBudget::DEFAULT_MAX_PYTHON_NESTING_DEPTH + 1,
+        );
+        fs::write(&path, format!("//Maya ASCII 2026 scene\nrequires maya \"2026\";\ncreateNode script -n \"ExamplePython\";\nsetAttr \".st\" 1;\nsetAttr \".stp\" 1;\nsetAttr \".b\" -type \"string\" \"{body}1\";\n")).unwrap();
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            let RowJobResult::Analyze(result) =
+                analyze_row(&path, AuditModePreference::StrictDefault).unwrap()
+            else {
+                panic!("analysis result")
+            };
+            assert!(result.audit_report.notices.is_empty());
+            assert_eq!(result.audit_report.coverage_issues.len(), 1);
+            shell.replace_rows(vec![test_row(1, &path)]);
+            if cached {
+                let fingerprint = shell.audit_plan_fingerprint.clone();
+                shell.apply_cache_restore_updates(
+                    vec![super::super::cache_restore::CacheHydrationUpdate {
+                        row_id: 1,
+                        observe_snapshot: result.observe_snapshot,
+                        observe_access: None,
+                        audit_snapshot: result.audit_snapshot,
+                        audit_access: None,
+                    }],
+                    &fingerprint,
+                    window,
+                    cx,
+                );
+            } else {
+                shell.deliver_job_result_for_test(
+                    1,
+                    RowOperation::Analyze,
+                    RowJobResult::Analyze(result),
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            let status = shell.rows[0].status_label(&shell.i18n());
+            assert!(status.contains("python_max_nesting_depth"), "{status}");
+            assert!(status.contains("ExamplePython"), "{status}");
+            let detail = selected_audit_notice_lines(shell, &[0]).join("\n");
+            assert!(detail.contains("python_max_nesting_depth"), "{detail}");
+            assert!(detail.contains("ExamplePython"), "{detail}");
+        });
+    }
+}

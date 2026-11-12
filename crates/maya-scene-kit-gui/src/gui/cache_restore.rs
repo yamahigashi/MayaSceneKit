@@ -275,12 +275,7 @@ impl GuiShell {
                     let findings =
                         snapshot.report.finding_count() - snapshot.report.allowed_finding_count();
                     let parse_budget_blocked = snapshot.report.is_parse_budget_blocked();
-                    let blocked_message = snapshot
-                        .report
-                        .notices
-                        .first()
-                        .map(|notice| notice.message.clone())
-                        .unwrap_or_else(|| "parse budget exceeded".to_string());
+                    let blocked_message = parse_budget_status_message(&snapshot.report);
                     row.findings = findings;
                     row.set_audit_report(
                         Some(snapshot.report),

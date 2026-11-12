@@ -984,13 +984,7 @@ impl GuiShell {
                     .as_ref()
                     .map_or(0, |report| report.script_entries.len());
                 let row_status = if audit_report.is_parse_budget_blocked() {
-                    FileStatus::Error(
-                        audit_report
-                            .notices
-                            .first()
-                            .map(|notice| notice.message.clone())
-                            .unwrap_or_else(|| "parse budget exceeded".to_string()),
-                    )
+                    FileStatus::Error(parse_budget_status_message(&audit_report))
                 } else {
                     FileStatus::Audited
                 };
@@ -1132,7 +1126,12 @@ impl GuiShell {
                                 shell.rows[index].audit_plan_fingerprint = reports.audit_plan_fingerprint;
                             }
                             if let Some(mode) = reports.audit_mode { shell.rows[index].analyzed_audit_mode = Some(mode); }
-                        } else { shell.rows[index].mark_analysis_stale(); }
+                        } else {
+                            shell.rows[index].set_audit_report(None, None);
+                            shell.rows[index].audit_plan_fingerprint = None;
+                            shell.rows[index].findings = 0;
+                            shell.rows[index].mark_analysis_stale();
+                        }
                         if let Some(report) = reports.dump_report.filter(|_| saved_file_is_current) { shell.rows[index].dump_report = Some(report); }
                     }
                     SavePromotion::Unanalyzed => shell.rows[index].mark_analysis_stale(),

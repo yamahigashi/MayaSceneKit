@@ -416,6 +416,38 @@ fn audit_provenance_lines(origin: &ExecutionOrigin, source_line: Option<usize>) 
     lines
 }
 
+pub(super) fn python_budget_coverage_messages(report: &AuditReport) -> Vec<String> {
+    use maya_scene_kit_observe::scene::evidence::{
+        ExecutionCoverageIssueDetail, ExecutionCoverageIssueKind,
+    };
+    report
+        .coverage_issues
+        .iter()
+        .filter(|issue| issue.kind == ExecutionCoverageIssueKind::PythonParseBudgetExceeded)
+        .filter_map(|issue| {
+            let ExecutionCoverageIssueDetail::SurfaceDiagnostics { diagnostic } = &issue.detail
+            else {
+                return None;
+            };
+            let mut parts = vec![diagnostic.clone()];
+            if let Some(origin) = &issue.origin {
+                parts.extend(audit_provenance_lines(origin, None));
+            }
+            Some(parts.join("; "))
+        })
+        .collect()
+}
+
+pub(super) fn parse_budget_status_message(report: &AuditReport) -> String {
+    report
+        .notices
+        .iter()
+        .map(|notice| notice.message.clone())
+        .chain(python_budget_coverage_messages(report))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub(super) fn build_audit_table_model(
     rows: &[AuditResultRow],
     selected_keys: &BTreeSet<AuditResultRowKey>,
@@ -1465,7 +1497,16 @@ pub(super) fn build_single_file_table_row(
         name: workspace_relative_display_path(&row.path, state),
         has_scene_workspace: row.scene_workspace_root.is_some(),
         status: row.status_label(i18n),
-        findings: row.effective_findings_count().to_string(),
+        findings: if row.display_audit_report().is_none()
+            && (row.staged.reports().audit_report.is_some()
+                || matches!(
+                    row.status,
+                    FileStatus::Saved | FileStatus::SavedWithWarning(_)
+                )) {
+            String::new()
+        } else {
+            row.effective_findings_count().to_string()
+        },
         missing: missing_path_count_for_row(row)
             .map(|count| count.to_string())
             .unwrap_or_default(),
