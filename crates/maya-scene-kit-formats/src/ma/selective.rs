@@ -947,7 +947,7 @@ impl SelectiveScanSink {
             return;
         }
         if !positional[0].contains('.') {
-            self.push_context_diagnostic(command.span, "cannot determine connectAttr destination");
+            self.push_context_diagnostic(command.span, "cannot determine connectAttr source");
             return;
         }
         let Some(dst) = self.connection_plug(source, &positional[1]) else {

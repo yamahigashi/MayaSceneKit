@@ -440,9 +440,8 @@ fn path_candidates(
     commands: &[PathCommand],
     encoding: SourceEncoding,
 ) -> Vec<PathCandidate> {
-    let ascii_only_replacements = header_path_codesets(data).next().is_some()
-        && header_path_encoding(data).is_none()
-        && data.is_ascii();
+    let ascii_only_replacements =
+        header_path_codesets(data).next().is_some() && header_path_encoding(data).is_none();
     let mut candidates = Vec::new();
     let mut active: Option<ActiveScenePathBlock> = None;
     for command in commands {
@@ -671,6 +670,28 @@ fn escaped_path_bytes(value: &str, encoding: SourceEncoding) -> Option<Vec<u8>> 
     encode_path(&escape_ma_string(value), encoding)
 }
 
+fn replace_ascii_path_bytes(
+    value: &str,
+    bytes: &[u8],
+    replacements: &[(Range<usize>, String)],
+    encoding: SourceEncoding,
+) -> Option<Vec<u8>> {
+    if encode_path(&escape_ma_string(value), encoding).as_deref() != Some(bytes) {
+        return None;
+    }
+    let mut result = bytes.to_vec();
+    for (range, replacement) in replacements.iter().rev() {
+        if !replacement.is_ascii() {
+            return None;
+        }
+        let start = encode_path(&escape_ma_string(&value[..range.start]), encoding)?.len();
+        let end = encode_path(&escape_ma_string(&value[..range.end]), encoding)?.len();
+        let replacement = encode_path(&escape_ma_string(replacement), encoding)?;
+        result.splice(start..end, replacement);
+    }
+    Some(result)
+}
+
 pub struct MaPathRangeSkip {
     pub range: Range<usize>,
     pub skipped: PathReplaceSkips,
@@ -700,6 +721,13 @@ fn apply_path_candidate(
         .map(|(raw, _)| unescape_ma_string_literal(raw))
         .collect();
     let mut values = original.clone();
+    let mut ascii_replacement_bytes = candidate.ascii_only_replacements.then(|| {
+        candidate
+            .ranges
+            .iter()
+            .map(|range| Some(data[range.clone()].to_vec()))
+            .collect::<Vec<_>>()
+    });
     let mut reasons = vec![0u8; values.len()];
     let mut crossed = vec![false; values.len()];
     let mut local_match = vec![false; values.len()];
@@ -730,6 +758,12 @@ fn apply_path_candidate(
     if let Some(value) = override_value {
         if values.len() == 1 {
             if value != values[0] {
+                if let Some(bytes) = &mut ascii_replacement_bytes {
+                    bytes[0] = value
+                        .is_ascii()
+                        .then(|| escaped_path_bytes(value, encoding))
+                        .flatten();
+                }
                 accept(0, value.to_string(), &mut values);
             }
         } else if value != values.concat() {
@@ -774,10 +808,15 @@ fn apply_path_candidate(
                     continue;
                 }
                 let mut next = values[i].clone();
-                for (range, replacement) in matches.into_iter().rev() {
-                    next.replace_range(range, &replacement);
+                for (range, replacement) in matches.iter().rev() {
+                    next.replace_range(range.clone(), replacement);
                 }
                 if next != values[i] {
+                    if let Some(bytes) = &mut ascii_replacement_bytes {
+                        bytes[i] = bytes[i].as_deref().and_then(|raw| {
+                            replace_ascii_path_bytes(&values[i], raw, &matches, encoding)
+                        });
+                    }
                     accept(i, next, &mut values);
                 }
             }
@@ -799,10 +838,11 @@ fn apply_path_candidate(
             ..Default::default()
         };
         if values[i] != original[i] {
-            if let Some(bytes) = (!candidate.ascii_only_replacements || values[i].is_ascii())
-                .then(|| escaped_path_bytes(&values[i], encoding))
-                .flatten()
-            {
+            let bytes = match &mut ascii_replacement_bytes {
+                Some(bytes) => bytes[i].take(),
+                None => escaped_path_bytes(&values[i], encoding),
+            };
+            if let Some(bytes) = bytes {
                 let (raw, _) = decode_path(&bytes, encoding);
                 values[i] = unescape_ma_string_literal(&raw);
                 if bytes != data[candidate.ranges[i].clone()] {
@@ -1770,6 +1810,62 @@ setAttr ".ftn" -type "string" ("asset\d/" + "example/file.tx");
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn unsupported_codeset_ascii_replacement_preserves_non_ascii_path_bytes() {
+        let input = "//Codeset: 1252\nfile -r \"asset/例/example/file.ma\";\n".as_bytes();
+        let result = replace_raw_scene_paths_in_ma(
+            input,
+            &[PathReplaceRule {
+                from: "example".into(),
+                to: "Sample".into(),
+                mode: PathReplaceMode::Literal,
+            }],
+        )
+        .unwrap();
+        assert_eq!(result.replacement_count, 1);
+        assert_eq!(result.skipped.total(), 0);
+        let replacement_start = input
+            .windows(b"example".len())
+            .position(|bytes| bytes == b"example")
+            .unwrap();
+        assert_eq!(
+            &result.bytes[..replacement_start],
+            &input[..replacement_start]
+        );
+        assert_eq!(
+            &result.bytes[replacement_start + b"Sample".len()..],
+            &input[replacement_start + b"example".len()..]
+        );
+        assert_eq!(
+            result.bytes,
+            "//Codeset: 1252\nfile -r \"asset/例/Sample/file.ma\";\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn unsupported_codeset_non_ascii_body_skips_non_ascii_replacement() {
+        for comment in [b"// \xe9\n".as_slice(), "// é\n".as_bytes()] {
+            let input = [
+                b"//Codeset: 1252\n".as_slice(),
+                comment,
+                b"file -r \"asset/example/file.ma\";\n",
+            ]
+            .concat();
+            let result = replace_raw_scene_paths_in_ma(
+                &input,
+                &[PathReplaceRule {
+                    from: "example".into(),
+                    to: "例".into(),
+                    mode: PathReplaceMode::Literal,
+                }],
+            )
+            .unwrap();
+            assert_eq!(result.skipped.unrepresentable, 1);
+            assert_eq!(result.replacement_count, 0);
+            assert_eq!(result.bytes, input);
+        }
     }
 
     #[test]

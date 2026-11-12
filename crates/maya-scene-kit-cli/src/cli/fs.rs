@@ -66,6 +66,10 @@ pub(super) fn render_scene_paths_text(
     load_options: &LoadOptions,
 ) -> Result<String, CliOutputError> {
     let report = collect_scene_paths_with_options(input, kind, load_options)?;
+    Ok(render_paths_report_text(report, kind))
+}
+
+fn render_paths_report_text(report: crate::scene::ScenePathsReport, kind: PathKind) -> String {
     let kind_label = scene_path_kind_label(kind);
     let mut out = format!(
         "# maya-scene-kit Scene Paths\nsource: {}\nformat: {}\nkind: {}\ncount: {}\n",
@@ -74,6 +78,11 @@ pub(super) fn render_scene_paths_text(
         kind_label,
         report.entries.len()
     );
+
+    out.push_str(&format!("validation_state: {}\n", report.validation_state));
+    for diagnostic in &report.diagnostics {
+        out.push_str(&format!("diagnostic: {diagnostic}\n"));
+    }
 
     for e in report.entries {
         let value = e
@@ -124,7 +133,7 @@ pub(super) fn render_scene_paths_text(
             out.push_str(&format!("  meta: {}\n", bits.join(" ")));
         }
     }
-    Ok(out)
+    out
 }
 
 pub(super) fn render_scene_paths_json(
@@ -164,6 +173,7 @@ pub(super) fn render_scene_paths_json(
     if !report.diagnostics.is_empty() {
         doc["diagnostics"] = json!(report.diagnostics);
     }
+    doc["validation_state"] = json!(report.validation_state);
     serde_json::to_string_pretty(&doc)
         .map(|s| format!("{s}\n"))
         .map_err(|e| CliOutputError::JsonRender(format!("failed to render json: {e}")))
@@ -207,6 +217,7 @@ pub(super) fn render_scene_paths_collection_json(
         if !report.diagnostics.is_empty() {
             item["diagnostics"] = json!(report.diagnostics);
         }
+        item["validation_state"] = json!(report.validation_state);
         items.push(item);
     }
     let doc = json!({
@@ -381,4 +392,53 @@ fn is_directory_reparse_point(metadata: &fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn is_directory_reparse_point(_: &fs::Metadata) -> bool {
     false
+}
+
+#[cfg(test)]
+mod paths_report_tests {
+    use super::*;
+
+    #[test]
+    fn paths_text_exposes_validation_and_every_diagnostic() {
+        let report = crate::scene::ScenePathsReport {
+            source: None,
+            kind: Some(PathKind::All),
+            scene_path: "Example.ma".into(),
+            scene_format: crate::scene::SceneFormat::Ma,
+            validation_state: crate::scene::ValidationState::Partial,
+            diagnostics: vec![
+                "scene file changed while it was being read".into(),
+                "Example diagnostic".into(),
+            ],
+            entries: vec![],
+        };
+        let text = render_paths_report_text(report, PathKind::All);
+        assert!(text.contains("validation_state: partial\n"), "{text}");
+        assert!(text.contains("scene file changed while it was being read"));
+        assert!(text.contains("Example diagnostic"));
+    }
+
+    #[test]
+    fn paths_json_exposes_validation_for_single_and_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Example.ma");
+        std::fs::write(&input, "//Maya ASCII 2026 scene\nrequires maya \"2026\";\n").unwrap();
+        let options = LoadOptions::default();
+        let single: serde_json::Value = serde_json::from_str(
+            &render_scene_paths_json(&input, PathKind::All, &options).unwrap(),
+        )
+        .unwrap();
+        let collection: serde_json::Value = serde_json::from_str(
+            &render_scene_paths_collection_json(
+                std::slice::from_ref(&input),
+                PathKind::All,
+                dir.path(),
+                &options,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(single["validation_state"], "validated");
+        assert_eq!(collection["files"][0]["validation_state"], "validated");
+    }
 }

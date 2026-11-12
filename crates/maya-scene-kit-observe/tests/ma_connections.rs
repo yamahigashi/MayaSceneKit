@@ -427,3 +427,26 @@ fn unmapped_execution_connection_is_reported_but_ordinary_connections_are_silent
     assert!(ordinary.coverage_issues.is_empty());
     assert!(ordinary.surfaces.is_empty());
 }
+
+#[test]
+fn connection_without_source_attribute_reports_source_diagnostic() {
+    let result = catalog(
+        "createNode transform -n Example; createNode transform -n Sample; connectAttr Example Sample.tx;",
+    );
+    let diagnostics = format!("{:?}", result.coverage_issues);
+    assert!(
+        diagnostics.contains("cannot determine connectAttr source"),
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("cannot determine connectAttr destination"));
+}
+
+#[test]
+fn connection_without_destination_attribute_control_reports_destination() {
+    let result = catalog(
+        "createNode transform -n Example; createNode transform -n Sample; connectAttr Example.tx Sample;",
+    );
+    let diagnostics = format!("{:?}", result.coverage_issues);
+    assert!(diagnostics.contains("cannot determine connectAttr destination"));
+    assert!(!diagnostics.contains("cannot determine connectAttr source"));
+}

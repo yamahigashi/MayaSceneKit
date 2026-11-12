@@ -198,3 +198,36 @@ mod tests {
         assert_eq!(entries[0].script_type(), Some(2));
     }
 }
+
+#[cfg(test)]
+mod named_clean_tests {
+    #[test]
+    fn named_clean_control_matches_observed_escaped_name() {
+        let input = br#"createNode script -n "Example\"Name";
+    setAttr ".b" -type "string" "system(\"Example\");";
+    setAttr ".st" 1;
+createNode script -n "SampleScript";
+    setAttr ".st" 1;
+"#;
+        let observed = super::scan_raw_script_nodes_in_ma(input);
+        assert_eq!(observed, ["Example\"Name", "SampleScript"]);
+        let (bytes, names) = super::remove_raw_script_nodes_from_ma_by_name(input, &observed[..1]);
+        assert_eq!(names, ["Example\"Name"]);
+        assert_eq!(
+            bytes,
+            b"createNode script -n \"SampleScript\";\n    setAttr \".st\" 1;\n"
+        );
+    }
+
+    #[test]
+    fn full_script_clean_control_removes_escaped_and_plain_names() {
+        let input = br#"createNode script -n "Example\"Name";
+    setAttr ".st" 1;
+createNode script -n "SampleScript";
+    setAttr ".st" 1;
+"#;
+        let (bytes, names) = super::remove_raw_script_nodes_from_ma(input);
+        assert!(bytes.is_empty());
+        assert_eq!(names.len(), 2);
+    }
+}

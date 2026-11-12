@@ -77,3 +77,35 @@ fn clean_removes_script_owner_declared_by_node_info() {
         assert!(String::from_utf8_lossy(&result.stdout).contains("removed=1"));
     }
 }
+
+#[test]
+fn named_script_clean_control_matches_observed_escaped_name() {
+    use maya_scene_kit_edit::scene::{ExecutionCleanTarget, clean_execution_targets};
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("Example.ma");
+    let output = dir.path().join("Sample.ma");
+    std::fs::write(
+        &source,
+        br#"//Maya ASCII 2026 scene
+createNode script -n "Example\"Name";
+    setAttr ".b" -type "string" "system(\"Example\");";
+    setAttr ".st" 1;
+createNode script -n "SampleScript";
+    setAttr ".st" 1;
+"#,
+    )
+    .unwrap();
+    clean_execution_targets(
+        &source,
+        &output,
+        &[ExecutionCleanTarget::ScriptNode {
+            node_name: "Example\"Name".into(),
+        }],
+    )
+    .unwrap();
+    let bytes = std::fs::read(output).unwrap();
+    assert_eq!(
+        bytes,
+        b"//Maya ASCII 2026 scene\ncreateNode script -n \"SampleScript\";\n    setAttr \".st\" 1;\n"
+    );
+}

@@ -9,7 +9,7 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
         (
             "tests/01/skin.mb",
             "788307e01cad3724b88ea7e5c9f800ad8eb00b963f47ad90c7f2b116c2a76dae",
-            "90a6c47a0d7d0c39f6bd611cf434b164ccc2153afc0dbb26616927584296765a",
+            "6813f09148e620fce34303e611852a5b4670cdfc9d377fd14791d1a76eb37cb5",
             "allow_with_notice",
             0,
             1,
@@ -18,7 +18,7 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
         (
             "tests/02/sphere.mb",
             "45b210d0c8e1d5c1e133da6ce2309d13f4c642e3633c078cab381f2ee70243f4",
-            "f294ef47718493c569389d393fc2f65835de79f23ff766297dc4452e1d36d7ce",
+            "067cb28ac4c22e0f7639b7525f66cc6bd501f17643cff8ef87e9c6c315c801da",
             "review",
             0,
             2,
@@ -27,7 +27,7 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
         (
             "tests/fixtures/mb/owner_delete/connected_file_owner_delete.mb",
             "302792c323dbe0cc69343a04233e366583258c73207557a16a46dd6ff073daaf",
-            "d44735d5a0ed059cb9b608e6a97e606f27ea0d52d80d1ba1a1c254d4f94345c9",
+            "d37de92c2fe28f466b9216b77cd5d975b59c9deaa38ec94d7c9ed2f524a4be65",
             "allow_with_notice",
             0,
             2,
@@ -36,7 +36,7 @@ fn complete_mb_fixtures_preserve_paths_and_audit_results() {
         (
             "tests/fixtures/mb/owner_delete/file_owner_delete.mb",
             "7523b311d2c89504b0dc73112a4f84d4fae6c91f36920b5c9a674692f30597ee",
-            "82a5e47cced33c5bd3f1bf0df74d22f1d015f41ee8b77cee7fd6735d46e2f9d9",
+            "707dcf1969e019aacb6f30d630c28e539cac6435e34a9db2c00d6396269d31d4",
             "allow_with_notice",
             0,
             2,
