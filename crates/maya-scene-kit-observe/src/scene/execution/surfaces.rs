@@ -1238,6 +1238,7 @@ fn collect_mb_connections(
     surfaces: &mut Vec<ExecutionSurfaceRecord>,
 ) -> Result<Vec<ExecutionCoverageIssueRecord>, SceneToolError> {
     use std::collections::HashMap;
+    let tree_complete = matches!(mb.completeness(), MbCompleteness::Complete);
     let dispatcher = DecoderDispatcher::new(Arc::clone(registry));
     let type_names =
         crate::scene::schema::node_semantics::load_typeid_typename_map_with_registry(registry)
@@ -1480,7 +1481,7 @@ fn collect_mb_connections(
                     })
                 });
         let source_is_numeric = state == crate::mb::MbSectionScanState::Complete
-            && matches!(mb.completeness(), MbCompleteness::Complete)
+            && tree_complete
             && !source_has_incoming
             && src_plug
                 .zip(source_owner)
@@ -1536,9 +1537,7 @@ fn collect_mb_connections(
             issues.push(issue(origin, "cannot resolve destination attribute"));
             continue;
         }
-        if state == crate::mb::MbSectionScanState::Stopped
-            || !matches!(mb.completeness(), MbCompleteness::Complete)
-        {
+        if state == crate::mb::MbSectionScanState::Stopped || !tree_complete {
             issues.push(issue(
                 origin,
                 "section scan stopped or chunk tree incomplete",

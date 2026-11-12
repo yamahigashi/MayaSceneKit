@@ -148,7 +148,7 @@ fn connected_controls_and_direct_bodies_are_marked() {
 #[test]
 fn normal_connections_and_empty_source_remain_empty() {
     let connections: Vec<_> = (0..10000)
-        .map(|_| connection("ExampleSource.tx", "Sample.tx"))
+        .map(|index| connection(&format!("ExampleSource{index}.tx"), "Sample.tx"))
         .collect();
     let normal = catalog(scene(&[form("CONS", &connections)]));
     assert!(normal.surfaces.is_empty());
