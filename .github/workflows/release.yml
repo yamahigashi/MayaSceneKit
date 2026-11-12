@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       prerelease: ${{ steps.version.outputs.prerelease }}
+      release_notes: ${{ steps.notes.outputs.release_notes }}
 
     steps:
       - name: Checkout source
@@ -38,6 +39,46 @@ jobs:
           else
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Extract release notes
+        id: notes
+        shell: python3 {0}
+        run: |
+          import os
+          import pathlib
+          import secrets
+          import sys
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          base = tag.split("-", 1)[0]
+          heading = f"## [{base}]"
+          try:
+              lines = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          except UnicodeDecodeError:
+              print("::error::CHANGELOG.md is not valid UTF-8")
+              sys.exit(1)
+          matches = [i for i, line in enumerate(lines) if line.startswith(heading)]
+          if len(matches) != 1:
+              print(f"::error::CHANGELOG.md must contain exactly one {heading} heading; found {len(matches)}")
+              sys.exit(1)
+          start = matches[0] + 1
+          end = next((i for i in range(start, len(lines)) if lines[i].startswith("## [")), len(lines))
+          section = lines[start:end]
+          while section and not section[0].strip():
+              section.pop(0)
+          while section and not section[-1].strip():
+              section.pop()
+          if not section:
+              print(f"::error::CHANGELOG.md section {heading} is empty")
+              sys.exit(1)
+          body = "\n".join(section)
+          if tag != base:
+              body = f"Pre-release for {base}. Notes below are the planned {base} changelog.\n\n{body}"
+          delimiter = secrets.token_hex(32)
+          while delimiter in body.splitlines():
+              delimiter = secrets.token_hex(32)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"release_notes<<{delimiter}\n{body}\n{delimiter}\n")
 
   build_linux:
     needs: check_version
@@ -80,13 +121,13 @@ jobs:
       - name: Package Linux binaries
         run: |
           mkdir -p release
-          linux_dir="release/maya-scene-kit-${{ github.ref_name }}-linux"
+          linux_dir="release/maya-scene-kit-${GITHUB_REF_NAME}-linux"
           mkdir -p "$linux_dir"
           cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit "$linux_dir/maya-scene-kit"
           cp target/x86_64-unknown-linux-gnu/release/maya-scene-kit-gui "$linux_dir/maya-scene-kit-gui"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md "$linux_dir/"
           cp dist/allowlist.json "$linux_dir/allowlist.json"
-          tar czf release/maya-scene-kit-${{ github.ref_name }}-linux.tar.gz -C release "maya-scene-kit-${{ github.ref_name }}-linux"
+          tar czf "release/maya-scene-kit-${GITHUB_REF_NAME}-linux.tar.gz" -C release "maya-scene-kit-${GITHUB_REF_NAME}-linux"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -114,13 +155,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          $windowsDir = "release/maya-scene-kit-${{ github.ref_name }}-windows"
+          $windowsDir = "release/maya-scene-kit-${env:GITHUB_REF_NAME}-windows"
           New-Item -ItemType Directory -Force -Path $windowsDir | Out-Null
           Copy-Item target/release/maya-scene-kit.exe "$windowsDir/maya-scene-kit.exe"
           Copy-Item target/release/maya-scene-kit-gui.exe "$windowsDir/maya-scene-kit-gui.exe"
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $windowsDir
           Copy-Item dist/allowlist.json "$windowsDir/allowlist.json"
-          Compress-Archive -Path $windowsDir -DestinationPath "release/maya-scene-kit-${{ github.ref_name }}-windows.zip" -Force
+          Compress-Archive -Path $windowsDir -DestinationPath "release/maya-scene-kit-${env:GITHUB_REF_NAME}-windows.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -213,8 +254,8 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           sha256sum \
-            maya-scene-kit-${{ github.ref_name }}-linux.tar.gz \
-            maya-scene-kit-${{ github.ref_name }}-windows.zip \
+            "maya-scene-kit-${GITHUB_REF_NAME}-linux.tar.gz" \
+            "maya-scene-kit-${GITHUB_REF_NAME}-windows.zip" \
             maya_scene_kit-*.whl \
             > SHA256SUMS.txt
 
@@ -224,11 +265,22 @@ jobs:
           name: maya-scene-kit-sha256-${{ github.ref_name }}
           path: SHA256SUMS.txt
 
+      - name: Write release notes
+        shell: python3 {0}
+        env:
+          RELEASE_NOTES: ${{ needs.check_version.outputs.release_notes }}
+        run: |
+          import os
+          import pathlib
+
+          pathlib.Path("release-notes.md").write_text(os.environ["RELEASE_NOTES"], encoding="utf-8")
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
+          body_path: release-notes.md
           draft: false
           prerelease: ${{ needs.check_version.outputs.prerelease == 'true' }}
           files: |
