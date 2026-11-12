@@ -12061,6 +12061,376 @@ mod allowlist_tests {
         )
     }
 
+    fn assert_audit_matches_count(shell: &GuiShell, expected: usize) {
+        let row = &shell.rows[0];
+        let table =
+            build_audit_result_rows(&shell.rows, &[0], &shell.audit_allowlist, &shell.i18n());
+        let findings = table
+            .iter()
+            .filter(|item| item.key.item_kind == AuditResultItemKind::Finding)
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), expected);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|item| item.allowed.is_none())
+                .count(),
+            row.effective_findings_count()
+        );
+    }
+
+    fn check_staged_audit_display(cx: &mut TestAppContext, undo: bool, reload: bool, detail: bool) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        fs::write(
+            &path,
+            format!(
+                "{SCENE}{}",
+                SCENE.replace("ExampleScriptNode", "SampleScriptNode")
+            ),
+        )
+        .unwrap();
+        let list_path = dir.path().join("allowlist.json");
+        let allowlist = AuditAllowlist::default();
+        let plan = gui_audit_plan(allowlist.clone()).unwrap();
+        let (shell, visual_cx) = open_test_shell(cx);
+        let mut dialog_snapshot = None;
+        shell.update_in(visual_cx, |shell, window, cx| {
+            shell.state.analysis_cache_enabled = false;
+            shell.state.workspace_auto_analyze = false;
+            shell.audit_allowlist = allowlist;
+            shell.audit_plan = Arc::new(plan);
+            shell.audit_plan_fingerprint = fingerprint_audit_plan(&shell.audit_plan);
+            shell.app_allowlist_path = Some(list_path.clone());
+            shell.user_allowlist_path = detail.then(|| dir.path().join("ExampleAllowlist.json"));
+            let mut row = current_row(1, &path, &shell.audit_plan);
+            row.selected = true;
+            shell.replace_rows(vec![row]);
+            assert_audit_matches_count(shell, 2);
+            if detail {
+                shell.refresh_audit_table(cx);
+                let key = shell
+                    .audit_rows
+                    .iter()
+                    .flat_map(|row| &row.row_keys)
+                    .find(|key| {
+                        key.item_kind == AuditResultItemKind::Finding && key.item_index == 0
+                    })
+                    .unwrap()
+                    .clone();
+                shell.open_audit_detail_dialog(key, window, cx);
+            }
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, window, cx| {
+            if detail {
+                assert!(matches!(
+                    shell.audit_detail_dialog.as_ref().unwrap().code,
+                    AuditDetailCodeState::Loaded { .. }
+                ));
+                shell.open_audit_allow_form(window, cx);
+                assert!(
+                    shell
+                        .audit_detail_dialog
+                        .as_ref()
+                        .unwrap()
+                        .allow_form
+                        .is_some()
+                );
+                dialog_snapshot = shell.audit_detail_dialog.clone();
+            }
+            let sequence = shell.begin_edit_transaction(&[0]).unwrap();
+            shell.stage_scene_edits_for_row(
+                0,
+                BTreeSet::from([ExecutionCleanTarget::ScriptNode {
+                    node_name: "ExampleScriptNode".into(),
+                }]),
+                BTreeSet::new(),
+                ResultTab::Audit,
+                Some(sequence),
+                false,
+                window,
+                cx,
+            );
+        });
+        visual_cx.run_until_parked();
+        if reload {
+            for (document, expected_count) in [
+                (list_json("Example reason"), 0),
+                ("{\"version\":1,\"entries\":[]}".to_string(), 1),
+            ] {
+                shell.update_in(visual_cx, |shell, window, cx| {
+                    fs::write(&list_path, document).unwrap();
+                    shell.reload_allowlists(window, cx);
+                    assert!(shell.rows[0].current_staged_audit_report().is_none());
+                    assert_audit_matches_count(shell, 2);
+                });
+                visual_cx.run_until_parked();
+                shell.update_in(visual_cx, |shell, _, _| {
+                    assert_audit_matches_count(shell, 1);
+                    assert_eq!(shell.rows[0].effective_findings_count(), expected_count);
+                    assert_eq!(
+                        shell.rows[0]
+                            .display_audit_report()
+                            .unwrap()
+                            .allowed_finding_count(),
+                        1 - expected_count
+                    );
+                    assert_eq!(
+                        shell.rows[0]
+                            .staged
+                            .reports()
+                            .audit_plan_fingerprint
+                            .as_deref(),
+                        Some(shell.audit_plan_fingerprint.as_str())
+                    );
+                });
+            }
+        }
+        shell.update_in(visual_cx, |shell, window, cx| {
+            assert!(shell.rows[0].staged.reports().audit_report.is_some());
+            if detail {
+                assert!(
+                    shell.audit_detail_dialog.is_none(),
+                    "report switch must close the original dialog even when index zero still exists"
+                );
+                shell.audit_detail_dialog = dialog_snapshot.take();
+                assert_eq!(
+                    shell.audit_detail_allow_disabled_reason(),
+                    Some("audit_allow.unavailable")
+                );
+                shell.open_audit_allow_form(window, cx);
+                shell.submit_audit_allow_form(window, cx);
+                assert!(matches!(
+                    shell
+                        .audit_detail_dialog
+                        .as_ref()
+                        .unwrap()
+                        .allow_form
+                        .as_ref()
+                        .unwrap()
+                        .error,
+                    Some(super::super::AllowAddError::Rejected {
+                        reason_key: "audit_allow.unavailable"
+                    })
+                ));
+                assert!(!dir.path().join("ExampleAllowlist.json").exists());
+                shell.audit_detail_dialog.as_mut().unwrap().key.item_index = usize::MAX;
+                shell.open_audit_allow_form(window, cx);
+                shell.submit_audit_allow_form(window, cx);
+                assert!(!shell.audit_allow_in_flight);
+                shell.clear_audit_detail_dialog_state(cx);
+            }
+            assert_audit_matches_count(shell, 1);
+            let notices = super::super::results::selected_audit_notice_lines(shell, &[0]);
+            assert!(notices.iter().any(|line| line.contains("staged")));
+            if reload {
+                test_scene_state(&mut shell.rows[0].staged).4.source_bytes = None;
+                *test_artifact(&mut shell.rows[0].staged) = None;
+                fs::write(&list_path, list_json("Example reason")).unwrap();
+                shell.reload_allowlists(window, cx);
+                assert_audit_matches_count(shell, 2);
+                assert!(
+                    super::super::results::selected_audit_notice_lines(shell, &[0])
+                        .iter()
+                        .any(|line| line.contains("reanalysis"))
+                );
+                shell.rows[0].set_audit_report(None, None);
+                shell.refresh_file_table(cx);
+                assert_audit_matches_count(shell, 0);
+            }
+            if undo {
+                shell.run_menu_undo(cx);
+                assert_audit_matches_count(shell, 2);
+                assert!(
+                    !super::super::results::selected_audit_notice_lines(shell, &[0])
+                        .iter()
+                        .any(|line| line.contains("staged"))
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn staged_audit_display_after_clean(cx: &mut TestAppContext) {
+        check_staged_audit_display(cx, false, false, false);
+    }
+
+    #[gpui::test]
+    fn staged_audit_display_after_undo(cx: &mut TestAppContext) {
+        check_staged_audit_display(cx, true, false, false);
+    }
+
+    #[gpui::test]
+    fn staged_audit_display_after_allowlist_change(cx: &mut TestAppContext) {
+        check_staged_audit_display(cx, false, true, false);
+    }
+
+    #[gpui::test]
+    fn staged_audit_display_closes_dialog_for_replaced_report(cx: &mut TestAppContext) {
+        check_staged_audit_display(cx, false, false, true);
+    }
+
+    fn prepare_staged_audit_row(
+        shell: &mut GuiShell,
+        path: &Path,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<GuiShell>,
+    ) {
+        fs::write(
+            path,
+            format!(
+                "{SCENE}{}",
+                SCENE.replace("ExampleScriptNode", "SampleScriptNode")
+            ),
+        )
+        .unwrap();
+        shell.state.analysis_cache_enabled = false;
+        shell.state.workspace_auto_analyze = false;
+        shell.audit_allowlist = AuditAllowlist::default();
+        shell.audit_plan = Arc::new(gui_audit_plan(AuditAllowlist::default()).unwrap());
+        shell.audit_plan_fingerprint = fingerprint_audit_plan(&shell.audit_plan);
+        let mut row = current_row(1, path, &shell.audit_plan);
+        row.selected = true;
+        let source = row.paths_report.as_ref().unwrap().source.clone().unwrap();
+        let staged = maya_scene_kit_edit::scene::stage_scene_edits_with_options(
+            path,
+            Some(&source),
+            &[ExecutionCleanTarget::ScriptNode {
+                node_name: "ExampleScriptNode".into(),
+            }],
+            &[],
+            &maya_scene_kit_edit::scene::MaterializeOptions::default()
+                .with_operation_mode(OperationMode::Forensic),
+        )
+        .unwrap();
+        let bytes = staged.artifact.bytes.clone();
+        let analyzed = analyze_row_bytes_with_options(
+            path,
+            staged.preview.scene_format,
+            staged.preview.validation_state,
+            bytes.clone(),
+            AuditModePreference::StrictDefault,
+            &LoadOptions::default(),
+            &shell.audit_plan,
+        )
+        .unwrap();
+        assert_eq!(analyzed.audit_report.finding_count(), 1);
+        let result = RowJobResult::SceneEdits {
+            source: source.clone(),
+            clean_source: Some(source),
+            replace_changes: None,
+            replace_preview: None,
+            staged,
+            audit_mode: analyzed.audit_mode,
+            staged_audit_report: analyzed.audit_report,
+            audit_plan_fingerprint: analyzed.audit_plan_fingerprint,
+            staged_paths_report: analyzed.paths_report.unwrap(),
+            staged_dump_report: analyzed.dump_report.unwrap(),
+            staged_source_bytes: bytes,
+        };
+        shell.replace_rows(vec![row]);
+        let sequence = shell.begin_edit_transaction(&[0]);
+        shell.deliver_job_result_for_test(1, RowOperation::Clean, result, sequence, window, cx);
+    }
+
+    #[gpui::test]
+    fn staged_audit_recheck_applies_after_background_job(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        let list = dir.path().join("ExampleAllowlist.json");
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            prepare_staged_audit_row(shell, &path, window, cx);
+            shell.app_allowlist_path = Some(list.clone());
+            shell.user_allowlist_path = None;
+            fs::write(&list, list_json("Example reason")).unwrap();
+            shell.reload_allowlists(window, cx);
+            assert!(shell.rows[0].current_staged_audit_report().is_none());
+            assert_audit_matches_count(shell, 2);
+            assert_eq!(shell.rows[0].effective_findings_count(), 2);
+            assert!(
+                selected_audit_notice_lines(shell, &[0])
+                    .iter()
+                    .any(|line| line.contains("reanalysis"))
+            );
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, _, _| {
+            assert!(shell.rows[0].busy.is_none());
+            assert!(shell.rows[0].current_staged_audit_report().is_some());
+            assert_audit_matches_count(shell, 1);
+            assert_eq!(shell.rows[0].effective_findings_count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn staged_audit_recheck_failure_is_not_retried_by_refresh(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        let list = dir.path().join("ExampleAllowlist.json");
+        let (shell, visual_cx) = open_test_shell(cx);
+        let bytes = shell.update_in(visual_cx, |shell, window, cx| {
+            prepare_staged_audit_row(shell, &path, window, cx);
+            let bytes = test_scene_state(&mut shell.rows[0].staged)
+                .4
+                .source_bytes
+                .take()
+                .unwrap();
+            *test_artifact(&mut shell.rows[0].staged) = None;
+            shell.app_allowlist_path = Some(list.clone());
+            shell.user_allowlist_path = None;
+            fs::write(&list, list_json("Example reason")).unwrap();
+            shell.reload_allowlists(window, cx);
+            bytes
+        });
+        visual_cx.run_until_parked();
+        let next_job = shell.update_in(visual_cx, |shell, _, cx| {
+            assert!(shell.rows[0].current_staged_audit_report().is_none());
+            test_scene_state(&mut shell.rows[0].staged).4.source_bytes = Some(bytes);
+            let next_job = shell.next_row_job_id;
+            for _ in 0..3 {
+                shell.refresh_file_table(cx);
+            }
+            assert!(shell.rows[0].current_staged_audit_report().is_none());
+            assert_audit_matches_count(shell, 2);
+            next_job
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, _, cx| {
+            assert_eq!(shell.next_row_job_id, next_job);
+            assert!(shell.rows[0].current_staged_audit_report().is_none());
+            shell.retry_selected_staged_audits(cx);
+            assert!(shell.rows[0].current_staged_audit_report().is_none());
+        });
+        visual_cx.run_until_parked();
+        shell.update_in(visual_cx, |shell, _, _| {
+            assert_eq!(shell.next_row_job_id, next_job + 1);
+            assert!(shell.rows[0].current_staged_audit_report().is_some());
+            assert_audit_matches_count(shell, 1);
+            assert_eq!(shell.rows[0].effective_findings_count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn newly_staged_audit_is_current_before_history_capture(cx: &mut TestAppContext) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("TestScene.ma");
+        let (shell, visual_cx) = open_test_shell(cx);
+        shell.update_in(visual_cx, |shell, window, cx| {
+            prepare_staged_audit_row(shell, &path, window, cx);
+            assert!(shell.rows[0].current_staged_audit_report().is_some());
+            assert_audit_matches_count(shell, 1);
+            assert_eq!(shell.rows[0].effective_findings_count(), 1);
+            assert_eq!(
+                shell.undo_stack.last().unwrap().transitions[0]
+                    .after
+                    .findings,
+                1
+            );
+        });
+    }
+
     #[gpui::test]
     fn allowed_analysis_preserves_disposition_and_counts_only_threats(cx: &mut TestAppContext) {
         let dir = tempdir().unwrap();
@@ -12551,7 +12921,11 @@ mod allowlist_tests {
             shell.state.workspace_auto_analyze = false;
             shell.state.analysis_cache_enabled = false;
             shell.app_allowlist_path = Some(list_path.clone());
-            shell.replace_rows(vec![current_row(1, &path, &empty_plan), dirty, test_row(3, &path)]);
+            shell.replace_rows(vec![
+                current_row(1, &path, &empty_plan),
+                dirty,
+                test_row(3, &path),
+            ]);
             fs::write(&list_path, list_json("Example reason")).unwrap();
             shell.workspace_scan_state.in_flight = true;
             let generation = shell.cache_restore_generation;
@@ -12566,9 +12940,19 @@ mod allowlist_tests {
             assert_eq!(shell.rows[1].staged.reports().source_bytes, saved_bytes);
             assert_eq!(shell.rows[1].staged.clean().targets, saved_targets);
             assert_eq!(shell.rows[1].staged.overrides(), &saved_overrides);
-            assert!(matches!(shell.status_message, Some(BannerMessage::AllowlistsReloaded { count: 1, stale_rows: 2 })));
-            let banner = render_banner_message(&shell.i18n(), shell.status_message.as_ref().unwrap());
-            assert_eq!(banner, "Reloaded allowlists: 1 entries 2 file(s) need re-audit; files with unsaved edits update after saving");
+            assert!(matches!(
+                shell.status_message,
+                Some(BannerMessage::AllowlistsReloaded {
+                    count: 1,
+                    stale_rows: 2
+                })
+            ));
+            let banner =
+                render_banner_message(&shell.i18n(), shell.status_message.as_ref().unwrap());
+            assert_eq!(
+                banner,
+                "Reloaded allowlists: 1 entries 2 file(s) need re-audit"
+            );
             shell.workspace_scan_state.in_flight = false;
             shell.rows[0] = current_row(1, &path, &shell.audit_plan);
             shell.rows[0].selected = true;
@@ -12577,47 +12961,114 @@ mod allowlist_tests {
             shell.reload_allowlists(window, cx);
             assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
             assert_eq!(shell.audit_plan_fingerprint, fingerprint);
-            assert!(matches!(shell.status_message, Some(BannerMessage::AllowlistsReloaded { count: 1, stale_rows: 0 })));
+            assert!(matches!(
+                shell.status_message,
+                Some(BannerMessage::AllowlistsReloaded {
+                    count: 1,
+                    stale_rows: 0
+                })
+            ));
             fs::write(&list_path, list_json("Sample reason")).unwrap();
             shell.reload_allowlists(window, cx);
             assert_eq!(shell.audit_plan_fingerprint, fingerprint);
             assert!(shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
-            let finding = shell.audit_rows.iter().find(|row| row.key.item_kind == AuditResultItemKind::Finding).unwrap();
-            assert_eq!(finding.detail_fields[0].raw, "Sample reason (Distributed (app))");
+            let finding = shell
+                .audit_rows
+                .iter()
+                .find(|row| row.key.item_kind == AuditResultItemKind::Finding)
+                .unwrap();
+            assert_eq!(
+                finding.detail_fields[0].raw,
+                "Sample reason (Distributed (app))"
+            );
             shell.rows[0].selected = false;
             shell.file_table_viewport_range = 0..0;
-            shell.deliver_job_result_for_test(1, RowOperation::Analyze, RowJobResult::Analyze(old_analyze), None, window, cx);
+            shell.deliver_job_result_for_test(
+                1,
+                RowOperation::Analyze,
+                RowJobResult::Analyze(old_analyze),
+                None,
+                window,
+                cx,
+            );
             assert!(shell.rows[0].audit_report.is_some());
             assert!(!shell.rows[0].analysis_current_for(AuditModePreference::StrictDefault));
             shell.deliver_job_result_for_test(2, RowOperation::Clean, old_staged, None, window, cx);
             assert!(shell.rows[1].staged.artifact().is_some());
-            assert_eq!(shell.rows[1].staged.reports().audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
+            assert_eq!(
+                shell.rows[1]
+                    .staged
+                    .reports()
+                    .audit_plan_fingerprint
+                    .as_deref(),
+                Some(old_fingerprint.as_str())
+            );
             assert_eq!(shell.rows[1].staged.reports().audit_mode, None);
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
             let edit_state = shell.rows[1].edit_state();
             assert!(shell.rows[1].apply_edit_state(&edit_state).is_ok());
-            assert_eq!(shell.rows[1].staged.reports().audit_plan_fingerprint.as_deref(), Some(old_fingerprint.as_str()));
+            assert_eq!(
+                shell.rows[1]
+                    .staged
+                    .reports()
+                    .audit_plan_fingerprint
+                    .as_deref(),
+                Some(old_fingerprint.as_str())
+            );
             let audit_generation = shell.rows[1].audit_generation;
-            shell.deliver_job_result_for_test(2, RowOperation::Save, RowJobResult::Save { promotion: SavePromotion::Unanalyzed, observation_error: None, saved_paths_report: None, replace_changes: None, replace_preview: None,
-                output_path: path.clone(), audit_file_state: GuiFileState::read(&path).ok(),
-            }, None, window, cx);
+            shell.deliver_job_result_for_test(
+                2,
+                RowOperation::Save,
+                RowJobResult::Save {
+                    promotion: SavePromotion::Unanalyzed,
+                    observation_error: None,
+                    saved_paths_report: None,
+                    replace_changes: None,
+                    replace_preview: None,
+                    output_path: path.clone(),
+                    audit_file_state: GuiFileState::read(&path).ok(),
+                },
+                None,
+                window,
+                cx,
+            );
             assert_eq!(shell.rows[1].audit_generation, audit_generation);
+            assert_eq!(
+                shell.rows[1].audit_plan_fingerprint.as_deref(),
+                Some(old_fingerprint.as_str())
+            );
             assert!(!shell.rows[1].analysis_current_for(AuditModePreference::StrictDefault));
             assert!(shell.rows[1].staged.artifact().is_none());
-            assert!(shell.rows[1].staged.reports().audit_plan_fingerprint.is_none());
+            assert!(
+                shell.rows[1]
+                    .staged
+                    .reports()
+                    .audit_plan_fingerprint
+                    .is_none()
+            );
             let generation = shell.rows[2].audit_generation;
-            shell.apply_cache_restore_updates(vec![super::super::cache_restore::CacheHydrationUpdate {
-                row_id: 3, observe_snapshot: None, observe_access: None,
-                audit_snapshot: Some(old_snapshot), audit_access: None,
-            }], &old_fingerprint, window, cx);
+            shell.apply_cache_restore_updates(
+                vec![super::super::cache_restore::CacheHydrationUpdate {
+                    row_id: 3,
+                    observe_snapshot: None,
+                    observe_access: None,
+                    audit_snapshot: Some(old_snapshot),
+                    audit_access: None,
+                }],
+                &old_fingerprint,
+                window,
+                cx,
+            );
             assert_eq!(shell.rows[2].audit_generation, generation);
             assert!(shell.rows[2].audit_report.is_none());
             // Reload starts a new cache-restore generation, so the in-flight batch with a cache hit is dropped.
             let cached = analyze(&path, &shell.audit_plan);
             AuditCacheStore::new(&shell.audit_cache_root, &LoadOptions::default())
-                .save(&cached.audit_snapshot.unwrap()).unwrap();
+                .save(&cached.audit_snapshot.unwrap())
+                .unwrap();
             ObserveCacheStore::new(&shell.observe_cache_root, &LoadOptions::default())
-                .save(&cached.observe_snapshot.unwrap()).unwrap();
+                .save(&cached.observe_snapshot.unwrap())
+                .unwrap();
             shell.state.analysis_cache_enabled = true;
             shell.start_progressive_cache_restore(window, cx);
             let generation = shell.cache_restore_generation;
@@ -13835,7 +14286,13 @@ fn row_mutation_audit_snapshot_cannot_restart_clean(cx: &mut TestAppContext) {
         let snapshot = shell
             .audit_rows
             .iter()
-            .find(|row| row.clean_target.is_some())
+            .find(|row| {
+                row.clean_target.is_some()
+                    && row
+                        .row_keys
+                        .iter()
+                        .all(|key| key.item_kind == AuditResultItemKind::Finding)
+            })
             .expect("cleanable audit row")
             .clone();
         shell.run_audit_table_clean(vec![snapshot.clone()], window, cx);
@@ -13867,8 +14324,12 @@ fn row_mutation_audit_snapshot_cannot_restart_clean(cx: &mut TestAppContext) {
         assert!(shell.status_message.is_none());
     });
     visual_cx.run_until_parked();
-    shell.update_in(visual_cx, |shell, _, _| {
+    shell.update_in(visual_cx, |shell, _, cx| {
         assert!(shell.rows[0].busy.is_none());
+        shell
+            .audit_severity_filter
+            .insert(AuditSeverityFilter::Info);
+        shell.refresh_audit_table(cx);
         assert!(
             shell
                 .audit_rows
@@ -15302,6 +15763,12 @@ fn scene_edit_cancellation_preserves_and_saves_replace(cx: &mut TestAppContext) 
     });
     visual_cx.run_until_parked();
     shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+        assert!(shell.rows[0].current_staged_audit_report().is_some());
+        shell
+            .audit_severity_filter
+            .insert(AuditSeverityFilter::Info);
+        shell.refresh_audit_table(cx);
         let audit = shell
             .audit_rows
             .iter()

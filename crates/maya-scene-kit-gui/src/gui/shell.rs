@@ -344,6 +344,8 @@ impl GuiShell {
         ];
 
         let mut shell = Self {
+            window_handle: window.window_handle(),
+            staged_audit_dispatch_pending: false,
             audit_allowlist: loaded.allowlist,
             allowlist_load_errors: loaded.errors,
             allowlist_manager: None,

@@ -1,4 +1,6 @@
 {
+  "label.audit_staged_needs_reanalysis": "保存前の編集内容は再解析が必要です。解析済みの結果を表示しています。",
+  "label.audit_staged_findings": "検出結果は保存前の編集内容を反映しています。",
   "banner.save_source_changed": "ディスク上のファイルが変更されたか、編集元を確認できません。保存する前に再解析してください。",
   "banner.edit_requires_reanalysis": "この編集を適用するには再解析が必要です。",
   "log.settings_save_skipped": "設定の復旧に失敗し、このセッションでは保存が無効なため、設定の保存をスキップしました。",
@@ -320,7 +322,7 @@
   "label.audit_detail.allow_hash": "許可ハッシュ",
   "audit_value.allowlist_source.app": "管理者配布 (app)",
   "audit_value.allowlist_source.user": "ユーザー (user)",
-  "banner.allowlists_stale_rows": "{count} 件のファイルは再監査が必要です（未保存の編集があるファイルは保存後に更新されます）",
+  "banner.allowlists_stale_rows": "{count} ファイルの再監査が必要です",
   "banner.selected_files_need_reaudit": "選択したファイルは再監査が必要です。再監査の後に脅威を除去できます",
   "action.allow_threat": "この脅威を許可…",
   "audit_allow.unavailable": "この検出は利用できません。",

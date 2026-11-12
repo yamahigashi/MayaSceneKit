@@ -13,8 +13,22 @@ pub(super) struct OwnerEdits {
     pub(super) preview: Option<PathOwnerDeletePreview>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StagedAuditRecheckStatus {
+    Pending,
+    Running,
+    Failed,
+}
+
+pub(super) struct StagedAuditRecheck {
+    pub(super) report_generation: u64,
+    pub(super) plan_fingerprint: String,
+    pub(super) status: StagedAuditRecheckStatus,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct StagedReports {
+    pub(super) audit_generation: u64,
     pub(super) source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,
     pub(super) audit_mode: Option<AuditModePreference>,
     pub(super) audit_report: Option<AuditReport>,
@@ -92,6 +106,7 @@ impl Staged {
 
     pub(super) fn reports(&self) -> &StagedReports {
         static EMPTY: StagedReports = StagedReports {
+            audit_generation: 0,
             source: None,
             audit_mode: None,
             audit_report: None,

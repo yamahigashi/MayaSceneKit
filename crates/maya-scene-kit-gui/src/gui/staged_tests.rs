@@ -654,6 +654,12 @@ fn cancellation_regeneration_failure_keeps_replace_and_rejects_old_result(cx: &m
             if delete_owner {
                 shell.undo_context_path_targets(vec![(1, 0)], window, cx);
             } else {
+                assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+                assert!(shell.rows[0].current_staged_audit_report().is_some());
+                shell
+                    .audit_severity_filter
+                    .insert(AuditSeverityFilter::Info);
+                shell.refresh_audit_table(cx);
                 let audit = shell
                     .audit_rows
                     .iter()
@@ -896,6 +902,12 @@ fn redo_cancellation_regenerates_replace_preview(cx: &mut TestAppContext) {
     });
     visual_cx.run_until_parked();
     shell.update_in(visual_cx, |shell, window, cx| {
+        assert!(matches!(shell.rows[0].staged, Staged::SceneEdits { .. }));
+        assert!(shell.rows[0].current_staged_audit_report().is_some());
+        shell
+            .audit_severity_filter
+            .insert(AuditSeverityFilter::Info);
+        shell.refresh_audit_table(cx);
         let audit = shell
             .audit_rows
             .iter()

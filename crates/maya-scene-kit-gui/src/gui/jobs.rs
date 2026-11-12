@@ -17,6 +17,134 @@ fn saved_job_summary(
 }
 
 impl GuiShell {
+    pub(super) fn active_audit_job_count(&self) -> usize {
+        self.auto_analyze_queue.in_flight_len()
+            + self
+                .rows
+                .iter()
+                .filter(|row| matches!(row.busy, Some((RowOperation::ReauditStaged, _))))
+                .count()
+    }
+
+    fn pending_staged_audit_index(&self) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            !row.is_processing()
+                && row.staged.reports().audit_report.is_some()
+                && row.staged_audit_recheck.as_ref().is_some_and(|request| {
+                    request.status == StagedAuditRecheckStatus::Pending
+                        && request.plan_fingerprint == self.audit_plan_fingerprint
+                        && request.report_generation == row.staged.reports().audit_generation
+                })
+        })
+    }
+
+    pub(super) fn schedule_staged_audit_jobs(&mut self, cx: &mut Context<Self>) {
+        if self.staged_audit_dispatch_pending
+            || self.pending_staged_audit_index().is_none()
+            || self.active_audit_job_count() >= self.state.auto_analyze_parallelism_limit()
+        {
+            return;
+        }
+        self.staged_audit_dispatch_pending = true;
+        let view = cx.entity();
+        let window_handle = self.window_handle;
+        cx.defer(move |cx| {
+            let _ = window_handle.update(cx, |_, window, cx| {
+                view.update(cx, |shell, cx| {
+                    shell.staged_audit_dispatch_pending = false;
+                    shell.dispatch_staged_audit_jobs(window, cx);
+                });
+            });
+        });
+    }
+
+    fn dispatch_staged_audit_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_audit_refresh_batch(cx, |shell, cx| {
+            while shell.active_audit_job_count() < shell.state.auto_analyze_parallelism_limit() {
+                let Some(index) = shell.pending_staged_audit_index() else {
+                    break;
+                };
+                let row = &mut shell.rows[index];
+                let request = row
+                    .staged_audit_recheck
+                    .as_mut()
+                    .expect("pending staged audit");
+                request.status = StagedAuditRecheckStatus::Running;
+                let report_generation = request.report_generation;
+                let plan_fingerprint = request.plan_fingerprint.clone();
+                let report = row
+                    .staged
+                    .reports()
+                    .audit_report
+                    .as_ref()
+                    .expect("staged report");
+                let scene_format = report.scene_format;
+                let validation_state = report.validation_state;
+                let bytes = row
+                    .staged
+                    .reports()
+                    .source_bytes
+                    .as_ref()
+                    .or_else(|| {
+                        row.staged
+                            .artifact()
+                            .as_ref()
+                            .map(|artifact| &artifact.bytes)
+                    })
+                    .cloned();
+                let row_id = row.id;
+                let plan = Arc::clone(&shell.audit_plan);
+                let options = shell.scene_load_options();
+                let mode = shell.state.audit_mode;
+                shell.spawn_row_job(
+                    row_id,
+                    RowOperation::ReauditStaged,
+                    None,
+                    None,
+                    window,
+                    cx,
+                    move |path| {
+                        let result = bytes
+                            .ok_or_else(|| "Staged scene bytes are unavailable.".to_string())
+                            .and_then(|bytes| {
+                                analyze_row_bytes_with_options(
+                                    &path,
+                                    scene_format,
+                                    validation_state,
+                                    bytes,
+                                    mode,
+                                    &options,
+                                    &plan,
+                                )
+                            })
+                            .map(Box::new);
+                        Ok(RowJobResult::ReauditStaged {
+                            report_generation,
+                            plan_fingerprint,
+                            result,
+                        })
+                    },
+                );
+            }
+        });
+    }
+
+    pub(super) fn retry_selected_staged_audits(&mut self, cx: &mut Context<Self>) {
+        for row in &mut self.rows {
+            if row.selected
+                && !row.is_processing()
+                && row
+                    .staged_audit_recheck
+                    .as_ref()
+                    .is_some_and(|request| request.status == StagedAuditRecheckStatus::Failed)
+            {
+                row.staged_audit_recheck = None;
+            }
+        }
+        self.refresh_file_table(cx);
+        cx.notify();
+    }
+
     pub(super) fn rebuild_row_id_index(&mut self) {
         self.row_id_to_index = self
             .rows
@@ -28,6 +156,9 @@ impl GuiShell {
 
     pub(super) fn replace_rows(&mut self, rows: Vec<SceneRow>) {
         self.rows = rows;
+        for row in &mut self.rows {
+            row.display_audit_plan_fingerprint = Some(self.audit_plan_fingerprint.clone());
+        }
         self.rebuild_row_id_index();
     }
 
@@ -251,6 +382,8 @@ impl GuiShell {
             } else {
                 &transition.before
             };
+            self.rows[row_index].display_audit_plan_fingerprint =
+                Some(self.audit_plan_fingerprint.clone());
             if let Err(blocked) = self.rows[row_index].apply_edit_state(state) {
                 self.status_message = Some(blocked.into_banner());
                 cx.notify();
@@ -769,7 +902,46 @@ impl GuiShell {
         };
 
         shell.rows[index].restage_rollback = None;
+        shell.rows[index].display_audit_plan_fingerprint = Some(shell.audit_plan_fingerprint.clone());
         match result {
+            RowJobResult::ReauditStaged { report_generation, plan_fingerprint, result } => {
+                let row = &mut shell.rows[index];
+                let current = plan_fingerprint == shell.audit_plan_fingerprint
+                    && report_generation == row.staged.reports().audit_generation
+                    && row.staged_audit_recheck.as_ref().is_some_and(|request| {
+                        request.plan_fingerprint == plan_fingerprint
+                            && request.report_generation == report_generation
+                            && request.status == StagedAuditRecheckStatus::Running
+                    });
+                if current {
+                    let result = result.and_then(|analyzed| {
+                        if analyzed.audit_plan_fingerprint == plan_fingerprint {
+                            Ok(analyzed)
+                        } else {
+                            Err("Staged audit result does not match the requested plan.".to_string())
+                        }
+                    });
+                    match result {
+                        Ok(analyzed) => {
+                            if let Staged::SceneEdits { staged_reports, .. } = &mut row.staged {
+                                staged_reports.audit_generation = job.1;
+                                staged_reports.audit_report = Some(analyzed.audit_report);
+                                staged_reports.audit_plan_fingerprint = Some(analyzed.audit_plan_fingerprint);
+                                staged_reports.audit_mode = Some(analyzed.audit_mode);
+                            }
+                            row.staged_audit_recheck = None;
+                            row.sync_findings_count();
+                        }
+                        Err(error) => {
+                            if let Some(request) = row.staged_audit_recheck.as_mut() {
+                                request.status = StagedAuditRecheckStatus::Failed;
+                            }
+                            let path = row.path.clone();
+                            shell.record_auto_analyze_job(path, error, true);
+                        }
+                    }
+                }
+            }
             RowJobResult::Analyze(result) => {
                 if shell.rows[index].has_staged_edits() {
                     if let Some(sequence) = edit_sequence {
@@ -898,6 +1070,7 @@ impl GuiShell {
                         }),
                     },
                     staged_reports: Box::new(StagedReports {
+                        audit_generation: job.1,
                         source: Some(source),
                         audit_mode: current_plan.then_some(audit_mode), audit_report: Some(staged_audit_report),
                         audit_plan_fingerprint: Some(audit_plan_fingerprint), paths_report: Some(staged_paths_report),
@@ -1008,7 +1181,11 @@ impl GuiShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(operation, RowOperation::Analyze) {
+        if matches!(operation, RowOperation::ReauditStaged) {
+            self.refresh_file_table(cx);
+            self.dispatch_auto_analyze_jobs(window, cx);
+            cx.notify();
+        } else if matches!(operation, RowOperation::Analyze) {
             self.refresh_audit_table(cx);
             self.queue_auto_analyze_completion_refresh(row_id, window, cx);
             self.schedule_persist_flush(window, cx, false);

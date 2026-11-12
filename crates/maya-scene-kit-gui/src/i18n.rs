@@ -143,9 +143,9 @@ mod tests {
             (
                 "banner.allowlists_stale_rows",
                 [
-                    "{count} file(s) need re-audit; files with unsaved edits update after saving",
-                    "{count} 件のファイルは再監査が必要です（未保存の編集があるファイルは保存後に更新されます）",
-                    "{count} 个文件需要重新审核（有未保存编辑的文件将在保存后更新）",
+                    "{count} file(s) need re-audit",
+                    "{count} ファイルの再監査が必要です",
+                    "{count} 个文件需要重新审计",
                 ],
             ),
         ];

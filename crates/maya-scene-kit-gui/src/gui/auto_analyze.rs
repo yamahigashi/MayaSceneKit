@@ -422,9 +422,7 @@ impl GuiShell {
         self.with_audit_refresh_batch(cx, |shell, cx| {
             let audit_mode = shell.state.audit_mode;
             let allow_low_priority = !shell.cache_restore_active();
-            while shell.auto_analyze_queue.in_flight_len()
-                < shell.state.auto_analyze_parallelism_limit()
-            {
+            while shell.active_audit_job_count() < shell.state.auto_analyze_parallelism_limit() {
                 let Some(row_id) = shell.auto_analyze_queue.pop_next(allow_low_priority) else {
                     break;
                 };

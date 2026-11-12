@@ -1,4 +1,6 @@
 {
+  "label.audit_staged_needs_reanalysis": "暂存的编辑需要重新分析；当前显示已有的分析报告。",
+  "label.audit_staged_findings": "检测结果显示暂存的编辑状态。",
   "banner.save_source_changed": "磁盘上的文件已更改，或无法验证暂存编辑的源文件。保存前必须重新分析。",
   "banner.edit_requires_reanalysis": "应用这些编辑前需要重新分析。",
   "log.settings_save_skipped": "设置恢复失败，本次会话已禁用保存，已跳过设置保存。",
@@ -320,7 +322,7 @@
   "label.audit_detail.allow_hash": "允许哈希",
   "audit_value.allowlist_source.app": "管理员分发 (app)",
   "audit_value.allowlist_source.user": "用户 (user)",
-  "banner.allowlists_stale_rows": "{count} 个文件需要重新审核（有未保存编辑的文件将在保存后更新）",
+  "banner.allowlists_stale_rows": "{count} 个文件需要重新审计",
   "banner.selected_files_need_reaudit": "所选文件需要重新审核，之后才能移除威胁",
   "action.allow_threat": "允许此威胁…",
   "audit_allow.unavailable": "此检测项不可用。",

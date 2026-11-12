@@ -747,11 +747,39 @@ impl GuiShell {
         result
     }
 
+    fn refresh_staged_audit_reports(&mut self, cx: &mut Context<Self>) {
+        for row in &mut self.rows {
+            row.display_audit_plan_fingerprint = Some(self.audit_plan_fingerprint.clone());
+            if let Staged::SceneEdits { staged_reports, .. } = &mut row.staged
+                && staged_reports.audit_report.is_some()
+                && staged_reports.audit_plan_fingerprint.as_deref()
+                    != Some(self.audit_plan_fingerprint.as_str())
+            {
+                if row.staged_audit_recheck.as_ref().is_none_or(|request| {
+                    request.plan_fingerprint != self.audit_plan_fingerprint
+                        || request.report_generation != staged_reports.audit_generation
+                }) {
+                    staged_reports.audit_mode = None;
+                    row.staged_audit_recheck = Some(StagedAuditRecheck {
+                        report_generation: staged_reports.audit_generation,
+                        plan_fingerprint: self.audit_plan_fingerprint.clone(),
+                        status: StagedAuditRecheckStatus::Pending,
+                    });
+                }
+            } else {
+                row.staged_audit_recheck = None;
+            }
+            row.sync_findings_count();
+        }
+        self.schedule_staged_audit_jobs(cx);
+    }
+
     pub(super) fn refresh_audit_table(&mut self, cx: &mut Context<Self>) {
         if self.audit_refresh_batch_depth != 0 {
             self.audit_refresh_pending = true;
             return;
         }
+        self.refresh_staged_audit_reports(cx);
         #[cfg(test)]
         {
             self.audit_refresh_count += 1;
@@ -781,11 +809,10 @@ impl GuiShell {
         }
         self.audit_rows = audit_model.rows;
 
-        if self
-            .audit_detail_dialog
-            .as_ref()
-            .is_some_and(|dialog| !self.audit_rows.iter().any(|row| row.key == dialog.key))
-        {
+        if self.audit_detail_dialog.as_ref().is_some_and(|dialog| {
+            !self.audit_detail_report_is_current(dialog)
+                || !self.audit_rows.iter().any(|row| row.key == dialog.key)
+        }) {
             self.audit_detail_dialog = None;
         }
 
@@ -801,6 +828,7 @@ impl GuiShell {
     }
 
     pub(super) fn refresh_file_table(&mut self, cx: &mut Context<Self>) {
+        self.refresh_staged_audit_reports(cx);
         self.auto_analyze_refresh_state.membership_dirty = false;
         self.refresh_visible_rows();
         self.refresh_file_table_from_current_visible_rows(cx);

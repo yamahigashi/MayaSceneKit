@@ -202,6 +202,8 @@ enum StartupBannerImportance {
 }
 
 struct GuiShell {
+    window_handle: AnyWindowHandle,
+    staged_audit_dispatch_pending: bool,
     audit_allowlist: AuditAllowlist,
     audit_plan: Arc<ScriptAuditPlan>,
     audit_plan_fingerprint: String,
@@ -663,6 +665,12 @@ struct AuditTableModel {
     rows: Vec<AuditTableRow>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuditReportIdentity {
+    Analysis(u64),
+    Staged(u64),
+}
+
 #[derive(Clone, Debug)]
 struct AuditDetailDialogState {
     key: AuditResultRowKey,
@@ -673,6 +681,7 @@ struct AuditDetailDialogState {
     code: AuditDetailCodeState,
     code_target: Option<AuditDetailCodeTarget>,
     code_generation: u64,
+    report_identity: Option<AuditReportIdentity>,
     allow_form: Option<AllowFormState>,
 }
 
@@ -861,6 +870,8 @@ struct SceneRow {
     audit_report: Option<AuditReport>,
     audit_file_state: Option<GuiFileState>,
     audit_generation: u64,
+    display_audit_plan_fingerprint: Option<String>,
+    staged_audit_recheck: Option<StagedAuditRecheck>,
     paths_report: Option<ScenePathsReport>,
     dump_report: Option<SceneDumpReport>,
     analyzed_audit_mode: Option<AuditModePreference>,
@@ -1108,6 +1119,7 @@ struct AuditTableSort {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RowOperation {
     Analyze,
+    ReauditStaged,
     Clean,
     DeleteOwnerNodes,
     Replace,
@@ -1364,6 +1376,8 @@ impl SceneRow {
             audit_report: None,
             audit_file_state: None,
             audit_generation: 0,
+            display_audit_plan_fingerprint: None,
+            staged_audit_recheck: None,
             paths_report: None,
             dump_report: None,
             analyzed_audit_mode: None,
@@ -1539,25 +1553,44 @@ impl SceneRow {
     }
 
     fn effective_findings_count(&self) -> usize {
-        self.staged
-            .reports()
-            .audit_report
-            .as_ref()
+        self.display_audit_report()
             .map(|report| report.finding_count() - report.allowed_finding_count())
-            .or_else(|| {
-                self.audit_report
-                    .as_ref()
-                    .map(|report| report.finding_count() - report.allowed_finding_count())
+            .unwrap_or_else(|| {
+                if self.staged.reports().audit_report.is_some() {
+                    0
+                } else {
+                    self.findings
+                }
             })
-            .unwrap_or(self.findings)
     }
 
     fn sync_findings_count(&mut self) {
         self.findings = self.effective_findings_count();
     }
 
+    fn current_staged_audit_report(&self) -> Option<&AuditReport> {
+        let reports = self.staged.reports();
+        self.display_audit_plan_fingerprint
+            .as_ref()
+            .filter(|current| reports.audit_plan_fingerprint.as_ref() == Some(*current))
+            .and(reports.audit_report.as_ref())
+    }
+
     fn display_audit_report(&self) -> Option<&AuditReport> {
-        self.audit_report.as_ref()
+        self.current_staged_audit_report()
+            .or(self.audit_report.as_ref())
+    }
+
+    fn display_audit_report_identity(&self) -> Option<AuditReportIdentity> {
+        if self.current_staged_audit_report().is_some() {
+            Some(AuditReportIdentity::Staged(
+                self.staged.reports().audit_generation,
+            ))
+        } else {
+            self.audit_report
+                .as_ref()
+                .map(|_| AuditReportIdentity::Analysis(self.audit_generation))
+        }
     }
 
     fn display_paths_report(&self) -> Option<&ScenePathsReport> {
@@ -1772,6 +1805,11 @@ impl SceneRow {
 
 enum RowJobResult {
     Analyze(Box<AnalyzeRowResult>),
+    ReauditStaged {
+        report_generation: u64,
+        plan_fingerprint: String,
+        result: Result<Box<AnalyzeRowResult>, String>,
+    },
     SceneEdits {
         source: maya_scene_kit_observe::scene::paths::SceneSourceFingerprint,
         clean_source: Option<maya_scene_kit_observe::scene::paths::SceneSourceFingerprint>,

@@ -491,12 +491,19 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
                 Some("audit_allow.code_required")
             );
         }
-        shell.audit_detail_dialog.as_mut().unwrap().code = loaded;
+        shell.audit_detail_dialog.as_mut().unwrap().code = loaded.clone();
+        let reopen = |shell: &mut GuiShell, window: &mut Window, cx: &mut Context<GuiShell>| {
+            shell.clear_audit_detail_dialog_state(cx);
+            window.close_dialog(cx);
+            shell.open_audit_detail_dialog(key.clone(), window, cx);
+            shell.audit_detail_dialog.as_mut().unwrap().code = loaded.clone();
+        };
         shell.rows[0].audit_report.as_mut().unwrap().findings[key.item_index].allowed_by =
             Some(AuditAllowRef {
                 hash: HASH.parse().unwrap(),
                 source: AllowlistSource::User,
             });
+        reopen(shell, window, cx);
         assert_eq!(
             shell.audit_detail_allow_disabled_reason(),
             Some("audit_allow.already_allowed")
@@ -512,6 +519,7 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
             AuditFindingCode::CustomRuleMatch,
         ] {
             shell.rows[0].audit_report.as_mut().unwrap().findings[key.item_index].code = code;
+            reopen(shell, window, cx);
             assert_eq!(
                 shell.audit_detail_allow_disabled_reason(),
                 Some("audit_allow.never_allowed")
@@ -519,6 +527,7 @@ fn audit_allow_enablement_and_catalog_texts(cx: &mut TestAppContext) {
         }
         shell.rows[0].audit_report.as_mut().unwrap().findings[key.item_index].code =
             AuditFindingCode::MelExec;
+        reopen(shell, window, cx);
         shell.rows[0].busy = Some((RowOperation::Analyze, 0));
         assert_eq!(
             shell.audit_detail_allow_disabled_reason(),

@@ -235,14 +235,38 @@ pub(super) fn result_overview(shell: &GuiShell, i18n: &I18n) -> AnyElement {
         .into_any_element()
 }
 
-pub(super) fn result_audit(shell: &GuiShell, i18n: &I18n, _view: Entity<GuiShell>) -> AnyElement {
+pub(super) fn result_audit(shell: &GuiShell, i18n: &I18n, view: Entity<GuiShell>) -> AnyElement {
     let selected = shell.selected_indices();
     if selected.is_empty() {
         return body_text(i18n.text("empty.audit.none")).into_any_element();
     }
     let notice_lines = selected_audit_notice_lines(shell, &selected);
-    let notice_panel =
-        (!notice_lines.is_empty()).then(|| render_audit_notice_panel(i18n, notice_lines));
+    let can_retry = selected
+        .iter()
+        .filter_map(|&index| shell.rows.get(index))
+        .any(|row| {
+            !row.is_processing()
+                && row
+                    .staged_audit_recheck
+                    .as_ref()
+                    .is_some_and(|request| request.status == StagedAuditRecheckStatus::Failed)
+        });
+    let notice_panel = (!notice_lines.is_empty()).then(|| {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(render_audit_notice_panel(i18n, notice_lines))
+            .when(can_retry, |this| {
+                this.child(action_button(
+                    "audit-staged-retry",
+                    i18n.text("action.audit"),
+                    true,
+                    |shell, _, cx| shell.retry_selected_staged_audits(cx),
+                    view,
+                ))
+            })
+    });
     if !shell.audit_rows.is_empty() {
         return div()
             .size_full()
@@ -365,15 +389,32 @@ pub(super) fn selected_audit_notice_lines(shell: &GuiShell, selected: &[usize]) 
         .iter()
         .filter_map(|&index| shell.rows.get(index))
         .flat_map(|row| {
-            row.display_audit_report()
+            let staged_notice = row.staged.reports().audit_report.as_ref().map(|_| {
+                let key = if row.current_staged_audit_report().is_some() {
+                    "label.audit_staged_findings"
+                } else {
+                    "label.audit_staged_needs_reanalysis"
+                };
+                (row, shell.i18n().text(key))
+            });
+            staged_notice
                 .into_iter()
-                .flat_map(move |report| report.notices.iter().map(move |notice| (row, notice)))
+                .chain(
+                    row.display_audit_report()
+                        .into_iter()
+                        .flat_map(move |report| {
+                            report
+                                .notices
+                                .iter()
+                                .map(move |notice| (row, notice.message.clone()))
+                        }),
+                )
         })
-        .map(|(row, notice)| {
+        .map(|(row, message)| {
             if multiple {
-                format!("{}: {}", row.name, notice.message)
+                format!("{}: {message}", row.name)
             } else {
-                notice.message.clone()
+                message
             }
         })
         .collect()

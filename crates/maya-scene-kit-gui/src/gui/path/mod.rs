@@ -1523,6 +1523,7 @@ impl GuiShell {
         let path_overrides = self.rows[row_index].staged.overrides().clone();
         let clean_source = self.rows[row_index].clean_source_for_targets(&clean_targets);
         let row = &mut self.rows[row_index];
+        row.display_audit_plan_fingerprint = Some(self.audit_plan_fingerprint.clone());
         row.remember_restage();
         row.staged = Staged::SceneEdits {
             clean: CleanEdits {

@@ -394,6 +394,38 @@ fn render_allow_add_error(error: &AllowAddError, i18n: &I18n) -> String {
 }
 
 impl GuiShell {
+    pub(super) fn audit_detail_report_is_current(&self, state: &AuditDetailDialogState) -> bool {
+        if state.key.item_kind != AuditResultItemKind::Finding {
+            return true;
+        }
+        self.index_of_row_id(state.key.row_id)
+            .and_then(|index| self.rows.get(index))
+            .is_some_and(|row| {
+                row.audit_generation == state.code_generation
+                    && state.report_identity.is_some()
+                    && row.display_audit_report_identity() == state.report_identity
+                    && row
+                        .display_audit_report()
+                        .is_some_and(|report| report.findings.get(state.key.item_index).is_some())
+            })
+    }
+
+    fn audit_detail_finding(
+        &self,
+        state: &AuditDetailDialogState,
+    ) -> Option<&maya_scene_kit_audit::scene::AuditFinding> {
+        if state.key.item_kind != AuditResultItemKind::Finding
+            || !self.audit_detail_report_is_current(state)
+        {
+            return None;
+        }
+        self.rows
+            .get(self.index_of_row_id(state.key.row_id)?)?
+            .display_audit_report()?
+            .findings
+            .get(state.key.item_index)
+    }
+
     pub(super) fn audit_detail_allow_disabled_reason(&self) -> Option<&'static str> {
         let Some(state) = self
             .audit_detail_dialog
@@ -408,10 +440,7 @@ impl GuiShell {
         else {
             return Some("audit_allow.unavailable");
         };
-        let Some(finding) = row
-            .display_audit_report()
-            .and_then(|report| report.findings.get(state.key.item_index))
-        else {
+        let Some(finding) = self.audit_detail_finding(state) else {
             return Some("audit_allow.unavailable");
         };
         let Some(detail) = resolve_audit_detail_view_model(&self.audit_rows, &state.key) else {
@@ -460,11 +489,10 @@ impl GuiShell {
             return;
         }
         let state = self.audit_detail_dialog.as_ref().unwrap();
-        let row = &self.rows[self.index_of_row_id(state.key.row_id).unwrap()];
-        let code = row.display_audit_report().unwrap().findings[state.key.item_index]
-            .code
-            .as_str()
-            .to_string();
+        let Some(finding) = self.audit_detail_finding(state) else {
+            return;
+        };
+        let code = finding.code.as_str().to_string();
         let reason_input = cx.new(|cx| InputState::new(window, cx));
         reason_input.update(cx, |input, cx| input.focus(window, cx));
         self.audit_detail_dialog.as_mut().unwrap().allow_form = Some(AllowFormState {
@@ -503,7 +531,15 @@ impl GuiShell {
         let AuditDetailCodeState::Loaded { allow, .. } = &state.code else {
             return;
         };
-        let row = &self.rows[self.index_of_row_id(state.key.row_id).unwrap()];
+        let Some(finding) = self.audit_detail_finding(state) else {
+            return;
+        };
+        let Some(row) = self
+            .index_of_row_id(state.key.row_id)
+            .and_then(|index| self.rows.get(index))
+        else {
+            return;
+        };
         let key = state.key.clone();
         let request = AllowAddRequest {
             scene_path: row.path.clone(),
@@ -514,10 +550,7 @@ impl GuiShell {
             plan: Arc::clone(&self.audit_plan),
             allowlist: self.audit_allowlist.clone(),
             target: state.code_target.clone().unwrap(),
-            target_code: row.display_audit_report().unwrap().findings[key.item_index]
-                .code
-                .as_str()
-                .to_string(),
+            target_code: finding.code.as_str().to_string(),
             entry: build_user_allowlist_entry(
                 allow.hash,
                 AllowlistEntryDraft {
@@ -633,6 +666,7 @@ impl GuiShell {
             .index_of_row_id(key.row_id)
             .and_then(|index| self.rows.get(index));
         let code_generation = row.map_or(0, |row| row.audit_generation);
+        let report_identity = row.and_then(SceneRow::display_audit_report_identity);
         let load = row
             .zip(code_target.clone())
             .filter(|_| {
@@ -669,6 +703,7 @@ impl GuiShell {
             code,
             code_target,
             code_generation,
+            report_identity,
             allow_form: None,
         });
 
@@ -733,14 +768,16 @@ impl GuiShell {
     }
 
     fn audit_detail_code_identity_is_current(&self, state: &AuditDetailDialogState) -> bool {
-        state.code_target.is_some()
+        self.audit_detail_report_is_current(state)
+            && state.code_target.is_some()
             && self.resolve_audit_detail_code_target(&state.key) == state.code_target
     }
 
     pub(super) fn audit_detail_code_copy_enabled(&self) -> bool {
         self.audit_detail_dialog.as_ref().is_some_and(|state| {
-            (matches!(state.code, AuditDetailCodeState::Loaded { .. })
-                || state.key.item_kind == AuditResultItemKind::DumpScriptNode)
+            self.audit_detail_report_is_current(state)
+                && (matches!(state.code, AuditDetailCodeState::Loaded { .. })
+                    || state.key.item_kind == AuditResultItemKind::DumpScriptNode)
                 && !state.code_text.is_empty()
                 && state.code_text.as_ref() != "-"
         })
@@ -864,7 +901,10 @@ fn build_audit_detail_dialog(
             move |_, _, _, cx| {
                 let shell = view.read(cx);
                 let i18n = shell.i18n();
-                let detail_state = shell.audit_detail_dialog.as_ref();
+                let detail_state = shell
+                    .audit_detail_dialog
+                    .as_ref()
+                    .filter(|state| shell.audit_detail_report_is_current(state));
                 let detail = detail_state.as_ref().and_then(|state| {
                     resolve_audit_detail_view_model(&shell.audit_rows, &state.key)
                 });
@@ -1266,16 +1306,11 @@ struct AllowCodeChoices {
 impl RenderOnce for AllowCodeChoices {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let shell = self.view.read(cx);
-        let own_code = shell.audit_detail_dialog.as_ref().and_then(|state| {
-            let row = &shell.rows[shell.index_of_row_id(state.key.row_id)?];
-            Some(
-                row.display_audit_report()?
-                    .findings
-                    .get(state.key.item_index)?
-                    .code
-                    .as_str(),
-            )
-        });
+        let own_code = shell
+            .audit_detail_dialog
+            .as_ref()
+            .and_then(|state| shell.audit_detail_finding(state))
+            .map(|finding| finding.code.as_str());
         div()
             .flex()
             .flex_col()

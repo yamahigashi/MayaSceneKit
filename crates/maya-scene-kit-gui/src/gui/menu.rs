@@ -37,20 +37,25 @@ impl GuiShell {
         self.allowlist_load_errors = loaded.errors;
         self.audit_plan = plan;
         self.audit_plan_fingerprint = fingerprint;
-        let mut stale_rows = 0;
         if changed {
             for row in &mut self.rows {
                 if row.audit_report.is_some() || row.staged.reports().audit_report.is_some() {
                     row.mark_analysis_stale();
-                    // This derived-information update is outside the scene mutation gate.
-                    if let Staged::SceneEdits { staged_reports, .. } = &mut row.staged {
-                        staged_reports.audit_mode = None;
-                    }
-                    stale_rows += 1;
                 }
             }
         }
-        self.refresh_audit_table(cx);
+        self.refresh_file_table(cx);
+        let stale_rows = if changed {
+            self.rows
+                .iter()
+                .filter(|row| {
+                    (row.audit_report.is_some() || row.staged.reports().audit_report.is_some())
+                        && row.current_staged_audit_report().is_none()
+                })
+                .count()
+        } else {
+            0
+        };
         if changed && !self.workspace_scan_active() {
             self.start_progressive_cache_restore(window, cx);
             self.schedule_selected_auto_analysis(window, cx);

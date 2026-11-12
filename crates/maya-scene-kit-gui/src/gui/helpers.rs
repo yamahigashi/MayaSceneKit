@@ -2194,7 +2194,7 @@ pub(super) fn audit_options_from_preference(audit_mode: AuditModePreference) -> 
 
 pub(super) fn operation_key(operation: RowOperation) -> &'static str {
     match operation {
-        RowOperation::Analyze => "analyze",
+        RowOperation::Analyze | RowOperation::ReauditStaged => "analyze",
         RowOperation::Clean => "clean",
         RowOperation::DeleteOwnerNodes => "delete-owner-nodes",
         RowOperation::Replace => "replace",
@@ -2205,7 +2205,9 @@ pub(super) fn operation_key(operation: RowOperation) -> &'static str {
 
 pub(super) fn operation_label(i18n: &I18n, operation: RowOperation) -> String {
     match operation {
-        RowOperation::Analyze => i18n.text("file_status.processing.analyze"),
+        RowOperation::Analyze | RowOperation::ReauditStaged => {
+            i18n.text("file_status.processing.analyze")
+        }
         RowOperation::Clean => i18n.text("file_status.processing.clean"),
         RowOperation::DeleteOwnerNodes => i18n.text("file_status.processing.delete_owner_nodes"),
         RowOperation::Replace => i18n.text("file_status.processing.replace"),

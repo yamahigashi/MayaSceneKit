@@ -1,4 +1,6 @@
 {
+  "label.audit_staged_needs_reanalysis": "Staged edits need reanalysis; showing the analysis report.",
+  "label.audit_staged_findings": "Findings show the staged state.",
   "banner.save_source_changed": "The file changed on disk or its staged source cannot be verified. It must be re-analysed before saving.",
   "banner.edit_requires_reanalysis": "Re-analysis is required before applying these edits.",
   "log.settings_save_skipped": "Settings save skipped: saving is disabled for this session because settings recovery failed.",
@@ -320,7 +322,7 @@
   "label.audit_detail.allow_hash": "Allow hash",
   "audit_value.allowlist_source.app": "Distributed (app)",
   "audit_value.allowlist_source.user": "User (user)",
-  "banner.allowlists_stale_rows": "{count} file(s) need re-audit; files with unsaved edits update after saving",
+  "banner.allowlists_stale_rows": "{count} file(s) need re-audit",
   "banner.selected_files_need_reaudit": "The selected files need re-audit before their threats can be removed",
   "action.allow_threat": "Allow this threat…",
   "audit_allow.unavailable": "This finding is unavailable.",
