@@ -110,6 +110,7 @@ impl PatchPlanner {
                     changes.take(&target.entry)
                 };
                 PathReplacePreviewItem {
+                    skipped: Default::default(),
                     entry_index: target.entry_index,
                     node_type: target.entry.node_type.clone(),
                     node_name: target.entry.node_name.clone(),
@@ -175,6 +176,7 @@ pub(super) fn matched_path_preview(preview: PathReplaceCandidatePreview) -> Path
         .into_iter()
         .filter(|item| item.replacement_count > 0)
         .map(|item| PathReplacePreviewItem {
+            skipped: Default::default(),
             entry_index: item.entry_index,
             node_type: item.node_type,
             node_name: item.node_name,

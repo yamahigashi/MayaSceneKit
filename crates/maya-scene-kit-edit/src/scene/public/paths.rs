@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use super::{OperationMode, SceneFormat, ValidationState, staging::StagedSceneArtifact};
 
@@ -59,6 +59,19 @@ pub struct PathReplaceResult {
     pub skipped: Option<Box<maya_scene_kit_formats::PathReplaceSkips>>,
 }
 
+/// Reason a path literal or payload could not be replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PathReplaceSkipReason {
+    NonUtf8,
+    NonCanonicalEscape,
+    Unrepresentable,
+    CrossesConcatBoundary,
+    UnterminatedTail,
+    PayloadRejected,
+    UnmatchedLocator,
+    DuplicateRequest,
+}
+
 /// One planned path replacement preview row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathReplacePreviewItem {
@@ -76,6 +89,8 @@ pub struct PathReplacePreviewItem {
     pub after_value: String,
     /// Number of replacements that would be applied to this value.
     pub replacement_count: usize,
+    /// Counts of skipped literals or payloads, grouped by reason.
+    pub skipped: BTreeMap<PathReplaceSkipReason, usize>,
 }
 
 /// One candidate preview row, including unchanged values.

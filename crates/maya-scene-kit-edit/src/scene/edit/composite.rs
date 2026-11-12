@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     application::{
-        Applied, absorbed, change, cleaned_targets, deleted_owners, form_locator, range_locator,
-        record_locator, summarize,
+        Applied, absorbed, change, cleaned_targets, deleted_owners, form_locator, path_skip_counts,
+        range_locator, record_locator, summarize,
     },
     *,
 };
@@ -588,6 +588,7 @@ fn apply_ascii(
                     SceneEditStatus::Unchanged
                 };
                 record.reason = if let Some(skipped) = skipped {
+                    record.path_skips = path_skip_counts(&skipped.skipped);
                     format!("path encoding or literal boundary: {:?}", skipped.skipped)
                 } else {
                     "value unchanged".into()
@@ -823,11 +824,14 @@ fn apply_binary(
                     let skipped = changes.path_replacements.skipped.get_or_insert_with(|| {
                         Box::new(maya_scene_kit_formats::PathReplaceSkips::binary())
                     });
-                    if status == binary::MbPathStatus::Undecodable {
+                    let reason = if status == binary::MbPathStatus::Undecodable {
                         skipped.non_utf8 += 1;
+                        crate::scene::PathReplaceSkipReason::NonUtf8
                     } else {
                         *skipped.payload_rejected.as_mut().unwrap() += 1;
-                    }
+                        crate::scene::PathReplaceSkipReason::PayloadRejected
+                    };
+                    record.path_skips.insert(reason, 1);
                 }
             }
             changes.records.push(record);

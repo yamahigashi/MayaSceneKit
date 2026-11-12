@@ -2070,7 +2070,7 @@ pub(super) fn replace_skip_summary(changes: Option<&PathReplaceChanges>) -> Opti
     ))
 }
 
-fn composed_replace_preview(
+pub(super) fn composed_replace_preview(
     plan: &SceneEditPlan,
     staged: &CompositeSceneEditsStageResult,
 ) -> PathReplacePreview {
@@ -2087,6 +2087,7 @@ fn composed_replace_preview(
         let item = items
             .entry(replacement.entry_index)
             .or_insert_with(|| PathReplacePreviewItem {
+                skipped: Default::default(),
                 entry_index: replacement.entry_index,
                 node_type: entry.node_type.clone(),
                 node_name: entry.node_name.clone(),
@@ -2096,6 +2097,18 @@ fn composed_replace_preview(
                 replacement_count: 0,
             });
         item.replacement_count += 1;
+    }
+    for record in &staged.changes.records {
+        let SceneEditIntent::Path(replacement) = &record.intent else {
+            continue;
+        };
+        if record.status == SceneEditStatus::Skipped
+            && let Some(item) = items.get_mut(&replacement.entry_index)
+        {
+            for (&reason, &count) in &record.path_skips {
+                *item.skipped.entry(reason).or_default() += count;
+            }
+        }
     }
     PathReplacePreview {
         input_path: staged.preview.input_path.clone(),

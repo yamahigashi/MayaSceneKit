@@ -83,6 +83,7 @@ pub struct SceneEditChange {
     pub after: Vec<u8>,
     pub status: SceneEditStatus,
     pub reason: String,
+    pub path_skips: std::collections::BTreeMap<super::PathReplaceSkipReason, usize>,
     pub superseded_by: Option<SceneEditLocator>,
     pub covered_by: Option<SceneEditLocator>,
 }

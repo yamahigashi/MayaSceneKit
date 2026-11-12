@@ -3259,6 +3259,7 @@ fn visible_selection_range_indices_returns_none_for_invisible_anchor() {
 fn visible_path_selection_targets_only_returns_visible_rows() {
     let rows = vec![
         super::PathTableRow {
+            skip_lines: Vec::new(),
             edit_targets: vec![(1, 0)],
             captured_order: None,
             path_kind: PathTypeFilter::File,
@@ -3276,6 +3277,7 @@ fn visible_path_selection_targets_only_returns_visible_rows() {
             preview_only: false,
         },
         super::PathTableRow {
+            skip_lines: Vec::new(),
             edit_targets: vec![(1, 1)],
             captured_order: None,
             path_kind: PathTypeFilter::File,
@@ -3293,6 +3295,7 @@ fn visible_path_selection_targets_only_returns_visible_rows() {
             preview_only: false,
         },
         super::PathTableRow {
+            skip_lines: Vec::new(),
             edit_targets: vec![(2, 0)],
             captured_order: None,
             path_kind: PathTypeFilter::Reference,
@@ -6787,6 +6790,7 @@ fn build_path_table_model_enables_scene_column_for_multi_source_selection() {
         matched_count: 1,
         applied_count: 1,
         items: vec![PathReplacePreviewItem {
+            skipped: Default::default(),
             entry_index: 0,
             node_type: "file".to_string(),
             node_name: "file1".to_string(),
@@ -6869,6 +6873,7 @@ fn path_overrides_from_replace_preview_uses_after_values_by_entry_index() {
         applied_count: 2,
         items: vec![
             PathReplacePreviewItem {
+                skipped: Default::default(),
                 entry_index: 3,
                 node_type: "file".to_string(),
                 node_name: "file1".to_string(),
@@ -6878,6 +6883,7 @@ fn path_overrides_from_replace_preview_uses_after_values_by_entry_index() {
                 replacement_count: 1,
             },
             PathReplacePreviewItem {
+                skipped: Default::default(),
                 entry_index: 7,
                 node_type: "reference".to_string(),
                 node_name: "ref1".to_string(),
@@ -10383,6 +10389,7 @@ fn build_path_table_model_marks_preview_rows_without_value_style() {
         matched_count: 1,
         applied_count: 1,
         items: vec![PathReplacePreviewItem {
+            skipped: Default::default(),
             entry_index: 0,
             node_type: "file".into(),
             node_name: "file1".into(),
@@ -10445,6 +10452,7 @@ fn build_path_table_model_filters_preview_rows_by_after_value_form() {
         matched_count: 1,
         applied_count: 1,
         items: vec![PathReplacePreviewItem {
+            skipped: Default::default(),
             entry_index: 0,
             node_type: "file".into(),
             node_name: "file1".into(),
@@ -15986,3 +15994,188 @@ fn context_replace_composition_case(
 
 #[path = "staged_tests.rs"]
 mod staged_tests;
+
+fn assert_mixed_preview_skip_reasons(with_report: bool) {
+    use maya_scene_kit_edit::scene::{
+        CompositeSceneEditsPreview, PathReplaceRule, PathReplaceSkipReason, SceneEditChange,
+        SceneEditChanges, SceneEditIntent, SceneEditLocator, SceneEditPlan, SceneEditStatus,
+        stage_replace_scene_paths,
+    };
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("TestScene.ma");
+    let source = concat!(
+        "//Maya ASCII 2026 scene\n",
+        "createNode file -n \"Example\";\n",
+        "setAttr \".ftn\" -type \"string\" (\"asset/\" + \"example/asset\\d.tx\");\n",
+        "createNode file -n \"Sample\";\n",
+        "setAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\n",
+    );
+    fs::write(&input, source).unwrap();
+    let report = collect_scene_paths(&input, PathKind::All).unwrap();
+    assert_eq!(report.entries.len(), 2);
+    let plan = SceneEditPlan {
+        intents: report
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(entry_index, entry)| {
+                SceneEditIntent::Path(PathReplaceOverride {
+                    entry_index,
+                    before_value: entry.value.clone(),
+                    after_value: entry.value.replace("asset", "sample"),
+                })
+            })
+            .collect(),
+        report: report.clone(),
+        clean_source: None,
+    };
+    let replacement = stage_replace_scene_paths(
+        &input,
+        &[PathReplaceRule {
+            from: "asset".into(),
+            to: "sample".into(),
+            mode: PathReplaceMode::Literal,
+        }],
+    )
+    .unwrap();
+    assert_eq!(replacement.changes.replacement_count, 2);
+    let skip_count = replacement
+        .changes
+        .skipped
+        .as_ref()
+        .unwrap()
+        .non_canonical_escape;
+    assert_eq!(skip_count, 1);
+    let records = [
+        (0, "asset/", "sample/", SceneEditStatus::Applied),
+        (
+            0,
+            "example/asset\\d.tx",
+            "example/asset\\d.tx",
+            SceneEditStatus::Skipped,
+        ),
+        (
+            1,
+            "asset/example/file.tx",
+            "sample/example/file.tx",
+            SceneEditStatus::Applied,
+        ),
+    ]
+    .into_iter()
+    .map(|(entry_index, before, after, status)| {
+        let start = source.find(before).unwrap();
+        assert!(
+            replacement
+                .artifact
+                .bytes
+                .windows(after.len())
+                .any(|bytes| bytes == after.as_bytes())
+        );
+        SceneEditChange {
+            intent: plan.intents[entry_index].clone(),
+            locator: SceneEditLocator::MaRange {
+                start,
+                end: start + before.len(),
+            },
+            before: before.as_bytes().to_vec(),
+            after: after.as_bytes().to_vec(),
+            status,
+            reason: String::new(),
+            path_skips: if status == SceneEditStatus::Skipped {
+                BTreeMap::from([(PathReplaceSkipReason::NonCanonicalEscape, skip_count)])
+            } else {
+                BTreeMap::new()
+            },
+            covered_by: None,
+            superseded_by: None,
+        }
+    })
+    .collect();
+    let staged = CompositeSceneEditsStageResult {
+        changes: SceneEditChanges {
+            records,
+            path_replacements: replacement.changes,
+            ..Default::default()
+        },
+        preview: CompositeSceneEditsPreview {
+            input_path: input.clone(),
+            scene_format: replacement.preview.scene_format,
+            operation_mode: replacement.preview.operation_mode,
+            validation_state: replacement.preview.validation_state,
+            cleaned_targets: Vec::new(),
+            removed_script_nodes: Vec::new(),
+            removed_plugin_requires: Vec::new(),
+            deleted_path_owner_targets: Vec::new(),
+        },
+        artifact: replacement.artifact,
+    };
+    let preview = super::path::composed_replace_preview(&plan, &staged);
+    assert_eq!(preview.matched_count, 2);
+    assert_eq!(preview.applied_count, 2);
+    assert_eq!(preview.items[0].replacement_count, 1);
+    assert_eq!(preview.items[1].replacement_count, 1);
+    let mut row = test_row(1, &input);
+    row.paths_report = with_report.then_some(report);
+    row.applied_replace_preview = Some(preview);
+    for (locale, expected) in [
+        (SupportedLocale::English, "Skipped non-canonical escape: 1"),
+        (
+            SupportedLocale::Japanese,
+            "非正規エスケープのためスキップ: 1",
+        ),
+        (SupportedLocale::Chinese, "因非规范转义跳过: 1"),
+    ] {
+        let mut state = test_state(directory.path(), "");
+        state.locale = match locale {
+            SupportedLocale::English => crate::model::LocalePreference::English,
+            SupportedLocale::Japanese => crate::model::LocalePreference::Japanese,
+            SupportedLocale::Chinese => crate::model::LocalePreference::Chinese,
+        };
+        for dedup in [false, true] {
+            let table = build_path_table_model(
+                std::slice::from_ref(&row),
+                &[0],
+                &state,
+                None,
+                &BTreeSet::new(),
+                dedup,
+                "",
+                &default_path_type_filter(),
+                &default_path_form_filter(),
+                &default_path_resolution_filter(),
+                default_path_sort(),
+            );
+            assert_eq!(table.rows.len(), 2);
+            let mixed = table
+                .rows
+                .iter()
+                .find(|row| row.node == "Example [file]")
+                .unwrap();
+            let plain = table
+                .rows
+                .iter()
+                .find(|row| row.node == "Sample [file]")
+                .unwrap();
+            assert!(plain.skip_lines.is_empty());
+            assert_eq!(
+                plain.value,
+                if with_report {
+                    "asset/example/file.tx"
+                } else {
+                    "asset/example/file.tx -> sample/example/file.tx"
+                }
+            );
+            assert_eq!(mixed.skip_lines, [expected]);
+        }
+    }
+}
+
+#[test]
+fn composed_preview_mixed_entry_shows_skip_reasons() {
+    assert_mixed_preview_skip_reasons(false);
+}
+
+#[test]
+fn report_preview_mixed_entry_shows_skip_reasons() {
+    assert_mixed_preview_skip_reasons(true);
+}

@@ -28,6 +28,7 @@ pub(super) fn change(
         after,
         status: SceneEditStatus::Applied,
         reason: "applied to original source".into(),
+        path_skips: BTreeMap::new(),
         covered_by: None,
         superseded_by: None,
     }
@@ -180,7 +181,27 @@ pub(super) fn normalized_away(intent: SceneEditIntent) -> SceneEditChange {
         after: Vec::new(),
         status: SceneEditStatus::Covered,
         reason: "removed by target normalization".into(),
+        path_skips: BTreeMap::new(),
         covered_by: None,
         superseded_by: None,
     }
+}
+
+pub(super) fn path_skip_counts(
+    skips: &maya_scene_kit_formats::PathReplaceSkips,
+) -> BTreeMap<crate::scene::PathReplaceSkipReason, usize> {
+    use crate::scene::PathReplaceSkipReason::*;
+    [
+        (NonUtf8, skips.non_utf8),
+        (NonCanonicalEscape, skips.non_canonical_escape),
+        (Unrepresentable, skips.unrepresentable),
+        (CrossesConcatBoundary, skips.crosses_concat_boundary),
+        (UnterminatedTail, skips.unterminated_tail),
+        (PayloadRejected, skips.payload_rejected.unwrap_or(0)),
+        (UnmatchedLocator, skips.unmatched_locator.unwrap_or(0)),
+        (DuplicateRequest, skips.duplicate_request.unwrap_or(0)),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .collect()
 }

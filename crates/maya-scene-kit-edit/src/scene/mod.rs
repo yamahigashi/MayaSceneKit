@@ -38,7 +38,7 @@ pub(crate) mod public {
         paths::{
             PathReplaceCandidateItem, PathReplaceCandidatePreview, PathReplaceChanges,
             PathReplaceMode, PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem,
-            PathReplaceResult, PathReplaceRule, PathReplaceStageResult,
+            PathReplaceResult, PathReplaceRule, PathReplaceSkipReason, PathReplaceStageResult,
         },
         scripts::{ScriptNodeCleanPreview, ScriptNodeCleanResult, ScriptNodeCleanStageResult},
         staging::StagedSceneArtifact,
@@ -62,11 +62,12 @@ pub use self::{
         OperationMode, PathOwnerDeletePreview, PathOwnerDeleteStageResult, PathOwnerDeleteTarget,
         PathReplaceCandidateItem, PathReplaceCandidatePreview, PathReplaceChanges, PathReplaceMode,
         PathReplaceOverride, PathReplacePreview, PathReplacePreviewItem, PathReplaceResult,
-        PathReplaceRule, PathReplaceStageResult, RawChunkDump, SceneEditChange, SceneEditChanges,
-        SceneEditError, SceneEditIntent, SceneEditLocator, SceneEditPlan, SceneEditStatus,
-        SceneFormat, ScenePathEntryChange, ScenePathOutcome, ScriptNodeCleanPreview,
-        ScriptNodeCleanResult, ScriptNodeCleanStageResult, SemanticProvenance, StagedSceneArtifact,
-        UnknownInventoryEntry, ValidationState, clean_target_for_execution_origin,
+        PathReplaceRule, PathReplaceSkipReason, PathReplaceStageResult, RawChunkDump,
+        SceneEditChange, SceneEditChanges, SceneEditError, SceneEditIntent, SceneEditLocator,
+        SceneEditPlan, SceneEditStatus, SceneFormat, ScenePathEntryChange, ScenePathOutcome,
+        ScriptNodeCleanPreview, ScriptNodeCleanResult, ScriptNodeCleanStageResult,
+        SemanticProvenance, StagedSceneArtifact, UnknownInventoryEntry, ValidationState,
+        clean_target_for_execution_origin,
     },
 };
 

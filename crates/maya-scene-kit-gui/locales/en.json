@@ -1,4 +1,12 @@
 {
+  "path_skip.non_utf8": "Skipped non-UTF-8 data: {count}",
+  "path_skip.non_canonical_escape": "Skipped non-canonical escape: {count}",
+  "path_skip.unrepresentable": "Skipped unrepresentable replacement: {count}",
+  "path_skip.crosses_concat_boundary": "Skipped concatenation boundary: {count}",
+  "path_skip.unterminated_tail": "Skipped unterminated literal: {count}",
+  "path_skip.payload_rejected": "Skipped rejected payload: {count}",
+  "path_skip.unmatched_locator": "Skipped unmatched locator: {count}",
+  "path_skip.duplicate_request": "Skipped duplicate request: {count}",
   "label.audit_staged_needs_reanalysis": "Staged edits need reanalysis; showing the analysis report.",
   "label.audit_staged_findings": "Findings show the staged state.",
   "banner.save_source_changed": "The file changed on disk or its staged source cannot be verified. It must be re-analysed before saving.",

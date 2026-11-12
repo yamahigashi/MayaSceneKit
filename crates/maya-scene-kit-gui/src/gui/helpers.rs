@@ -803,6 +803,7 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                     }
                     let edit_targets = vec![(row.id, entry_index)];
                     path_rows.push(PathTableRow {
+                        skip_lines: Vec::new(),
                         edit_targets: edit_targets.clone(),
                         captured_order: path_order_for_targets(order_snapshot, &edit_targets),
                         path_kind,
@@ -847,6 +848,10 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                     continue;
                 }
                 path_rows.push(PathTableRow {
+                    skip_lines: path_replace_skip_lines(
+                        &item.skipped,
+                        &I18n::new(state.locale.resolve()),
+                    ),
                     edit_targets: Vec::new(),
                     captured_order: None,
                     path_kind,
@@ -893,6 +898,7 @@ pub(super) fn build_path_table_model_with_order_snapshot(
                 continue;
             }
             path_rows.push(PathTableRow {
+                skip_lines: Vec::new(),
                 edit_targets: edit_targets.clone(),
                 captured_order: path_order_for_targets(order_snapshot, &edit_targets),
                 path_kind: group.kind,
@@ -912,6 +918,34 @@ pub(super) fn build_path_table_model_with_order_snapshot(
         }
     }
 
+    let i18n = I18n::new(state.locale.resolve());
+    let skips_by_target = selected
+        .iter()
+        .filter_map(|&index| rows.get(index))
+        .flat_map(|row| {
+            row.replace_preview().iter().flat_map(move |preview| {
+                preview
+                    .items
+                    .iter()
+                    .filter(|item| !item.skipped.is_empty())
+                    .map(move |item| ((row.id, item.entry_index), &item.skipped))
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    for table_row in &mut path_rows {
+        if table_row.preview_only {
+            continue;
+        }
+        let mut skipped = BTreeMap::new();
+        for target in &table_row.edit_targets {
+            if let Some(reasons) = skips_by_target.get(target) {
+                for (&reason, &count) in *reasons {
+                    *skipped.entry(reason).or_default() += count;
+                }
+            }
+        }
+        table_row.skip_lines = path_replace_skip_lines(&skipped, &i18n);
+    }
     sort_path_rows(&mut path_rows, sort);
 
     PathTableModel {
@@ -2659,6 +2693,30 @@ pub(super) fn action_button(
                 cx.notify();
             });
         })
+}
+
+fn path_replace_skip_lines(
+    skipped: &BTreeMap<maya_scene_kit_edit::scene::PathReplaceSkipReason, usize>,
+    i18n: &I18n,
+) -> Vec<String> {
+    use maya_scene_kit_edit::scene::PathReplaceSkipReason::*;
+    skipped
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(reason, count)| {
+            let key = match reason {
+                NonUtf8 => "path_skip.non_utf8",
+                NonCanonicalEscape => "path_skip.non_canonical_escape",
+                Unrepresentable => "path_skip.unrepresentable",
+                CrossesConcatBoundary => "path_skip.crosses_concat_boundary",
+                UnterminatedTail => "path_skip.unterminated_tail",
+                PayloadRejected => "path_skip.payload_rejected",
+                UnmatchedLocator => "path_skip.unmatched_locator",
+                DuplicateRequest => "path_skip.duplicate_request",
+            };
+            i18n.format(key, &[("count", count.to_string())])
+        })
+        .collect()
 }
 
 #[cfg(test)]

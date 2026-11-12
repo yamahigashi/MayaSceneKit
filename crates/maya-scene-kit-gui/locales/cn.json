@@ -1,4 +1,12 @@
 {
+  "path_skip.non_utf8": "因非UTF-8数据跳过: {count}",
+  "path_skip.non_canonical_escape": "因非规范转义跳过: {count}",
+  "path_skip.unrepresentable": "因无法表示替换值跳过: {count}",
+  "path_skip.crosses_concat_boundary": "因跨越字符串拼接边界跳过: {count}",
+  "path_skip.unterminated_tail": "因字符串未终止跳过: {count}",
+  "path_skip.payload_rejected": "因载荷被拒绝跳过: {count}",
+  "path_skip.unmatched_locator": "因未找到目标位置跳过: {count}",
+  "path_skip.duplicate_request": "因重复请求跳过: {count}",
   "label.audit_staged_needs_reanalysis": "暂存的编辑需要重新分析；当前显示已有的分析报告。",
   "label.audit_staged_findings": "检测结果显示暂存的编辑状态。",
   "banner.save_source_changed": "磁盘上的文件已更改，或无法验证暂存编辑的源文件。保存前必须重新分析。",

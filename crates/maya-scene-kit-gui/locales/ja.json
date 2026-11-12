@@ -1,4 +1,12 @@
 {
+  "path_skip.non_utf8": "非UTF-8データのためスキップ: {count}",
+  "path_skip.non_canonical_escape": "非正規エスケープのためスキップ: {count}",
+  "path_skip.unrepresentable": "置換値を表現できないためスキップ: {count}",
+  "path_skip.crosses_concat_boundary": "文字列連結の境界をまたぐためスキップ: {count}",
+  "path_skip.unterminated_tail": "文字列が終端されていないためスキップ: {count}",
+  "path_skip.payload_rejected": "ペイロードが拒否されたためスキップ: {count}",
+  "path_skip.unmatched_locator": "対象位置が見つからないためスキップ: {count}",
+  "path_skip.duplicate_request": "要求が重複しているためスキップ: {count}",
   "label.audit_staged_needs_reanalysis": "保存前の編集内容は再解析が必要です。解析済みの結果を表示しています。",
   "label.audit_staged_findings": "検出結果は保存前の編集内容を反映しています。",
   "banner.save_source_changed": "ディスク上のファイルが変更されたか、編集元を確認できません。保存する前に再解析してください。",

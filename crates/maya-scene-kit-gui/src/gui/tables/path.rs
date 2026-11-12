@@ -231,7 +231,37 @@ impl TableDelegate for PathTableDelegate {
                 path_table_cell(row.scene, None, false).into_any_element()
             }
             ix if ix == self.node_column_ix() => {
-                path_table_cell(row.node, None, false).into_any_element()
+                let cell = path_table_cell(row.node, None, false);
+                if row.skip_lines.is_empty() {
+                    cell.into_any_element()
+                } else {
+                    let tooltip = row.skip_lines.clone();
+                    cell.gap_2()
+                        .child(
+                            div()
+                                .id(("path-skip-reasons", row_ix))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .text_color(rgb(TEXT))
+                                .bg(rgb(WARN_SOFT))
+                                .tooltip(move |window, cx| {
+                                    let lines = tooltip.clone();
+                                    gpui_component::tooltip::Tooltip::element(move |_, _| {
+                                        div().flex().flex_col().children(
+                                            lines
+                                                .iter()
+                                                .cloned()
+                                                .map(|line| div().whitespace_nowrap().child(line)),
+                                        )
+                                    })
+                                    .build(window, cx)
+                                })
+                                .child(row.skip_lines.join("; ")),
+                        )
+                        .into_any_element()
+                }
             }
             ix if ix == self.path_column_ix() => {
                 if row.editing && row.editable {

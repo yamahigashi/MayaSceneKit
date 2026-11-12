@@ -936,6 +936,7 @@ struct FileTableDelegate {
 
 #[derive(Clone)]
 struct PathTableRow {
+    skip_lines: Vec<String>,
     edit_targets: PathEditTargets,
     captured_order: Option<usize>,
     path_kind: PathTypeFilter,
