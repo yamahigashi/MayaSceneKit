@@ -223,7 +223,7 @@ fn binary_length_changes_and_all_intent_orders_save_original_forms() {
 }
 
 #[test]
-fn deleted_owner_supersedes_path_and_coalesces_duplicate_clean() {
+fn owner_deletion_and_duplicate_clean_respect_path_containment() {
     for binary in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(if binary {
@@ -267,24 +267,32 @@ fn deleted_owner_supersedes_path_and_coalesces_duplicate_clean() {
                 clean_source: Some(clean_source.clone()),
             };
             let staged = stage_scene_edit_plan(&plan, &source).unwrap();
-            assert_eq!(staged.changes.path_replacements.replacement_count, 0);
-            assert_eq!(staged.changes.superseded_path_override_count, 1);
+            assert_eq!(
+                staged.changes.path_replacements.replacement_count,
+                usize::from(!binary)
+            );
+            assert_eq!(
+                staged.changes.superseded_path_override_count,
+                usize::from(binary)
+            );
             assert_eq!(staged.changes.physical_deletion_count, 1);
             assert_eq!(staged.preview.cleaned_targets.len(), 1);
             assert_eq!(staged.preview.deleted_path_owner_targets.len(), 1);
-            assert!(
-                staged
-                    .changes
-                    .records
-                    .iter()
-                    .any(|record| record.status == SceneEditStatus::Superseded)
-            );
+            let path_status = if binary {
+                SceneEditStatus::Superseded
+            } else {
+                SceneEditStatus::Applied
+            };
+            assert!(staged.changes.records.iter().any(|record| {
+                matches!(record.intent, SceneEditIntent::Path(_)) && record.status == path_status
+            }));
             let expected = if binary {
                 form(b"Maya", &[])
             } else {
                 String::from_utf8(source.clone())
                     .unwrap()
                     .replace("createNode file -n \"Example\";\n", "")
+                    .replace("asset/example/file.tx", "asset/example/changed.tx")
                     .into_bytes()
             };
             let output = dir
@@ -582,7 +590,7 @@ fn reference_entry_reports_mixed_physical_records_without_double_counting() {
 }
 
 #[test]
-fn deletion_precedes_encoding_checks_and_preserves_non_utf8_survivors() {
+fn surviving_owner_path_checks_encoding_and_preserves_non_utf8_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("TestScene.ma");
     let mut source = b"//Maya ASCII 2026 scene\n//Codeset: 932\ncreateNode file -n \"Example\";\nsetAttr \".ftn\" -type \"string\" \"asset/example/file.tx\";\ncreateNode transform -n \"Sample".to_vec();
@@ -602,8 +610,25 @@ fn deletion_precedes_encoding_checks_and_preserves_non_utf8_survivors() {
         clean_source: Some(clean_source),
     };
     let staged = stage_scene_edit_plan(&plan, &source).unwrap();
-    assert_eq!(staged.changes.path_replacements.skipped.unwrap().total(), 0);
-    assert_eq!(staged.changes.superseded_path_override_count, 1);
+    assert_eq!(
+        staged
+            .changes
+            .path_replacements
+            .skipped
+            .unwrap()
+            .unrepresentable,
+        1
+    );
+    assert_eq!(staged.changes.superseded_path_override_count, 0);
+    assert_eq!(staged.changes.path_replacements.replacement_count, 0);
+    let path_record = staged
+        .changes
+        .records
+        .iter()
+        .find(|record| matches!(record.intent, SceneEditIntent::Path(_)))
+        .unwrap();
+    assert_eq!(path_record.status, SceneEditStatus::Skipped);
+    assert_eq!(path_record.superseded_by, None);
     assert!(staged.artifact.bytes.ends_with(b"Sample\x83\x5c\";\n"));
     assert!(
         staged

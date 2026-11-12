@@ -415,7 +415,7 @@ fn apply_ascii(
             }),
         );
     }
-    let mut owner_locations = BTreeMap::new();
+    let mut owner_locations = BTreeMap::<PathOwnerDeleteTarget, Vec<Range<usize>>>::new();
     for intent in intents {
         match intent {
             SceneEditIntent::Path(_) => {}
@@ -480,7 +480,8 @@ fn apply_ascii(
                 for (range, _) in ranges {
                     owner_locations
                         .entry(owner.clone())
-                        .or_insert_with(|| range_locator(&range));
+                        .or_default()
+                        .push(range.clone());
                     push_ascii(
                         &mut edits,
                         &mut changes,
@@ -516,10 +517,12 @@ fn apply_ascii(
             node_type: entry.node_type.clone(),
             node_name: entry.node_name.clone(),
         };
-        let owner_deletion = owner_locations.get(&owner);
         let mut deletions = Vec::new();
         for range in candidate.ranges() {
-            let mut deletion = owner_deletion.cloned();
+            let owner_deletion = owner_locations
+                .get(&owner)
+                .and_then(|ranges| ranges.iter().find(|deleted| contains(deleted, range)));
+            let mut deletion = owner_deletion.map(range_locator);
             for edit in edits.iter().filter(|_| owner_deletion.is_none()) {
                 if !intersects(&edit.range, range) {
                     continue;
